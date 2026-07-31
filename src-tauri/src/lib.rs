@@ -3840,15 +3840,7 @@ async fn ensure_instruments_cache(
 
 #[tauri::command]
 async fn okx_candles(inst_id: String, bar: String, limit: u16) -> Result<Vec<Candle>, String> {
-    if bar != "1m" {
-        return Err("non-1m candles are derived from local 1m data".to_string());
-    }
-    let path = format!(
-        "/api/v5/market/candles?instId={}&bar={}&limit={}",
-        inst_id,
-        bar,
-        limit.min(300)
-    );
+    let path = okx_recent_candles_path(&inst_id, &bar, limit)?;
     let envelope: OkxEnvelope<Vec<String>> = get_json(&path).await?;
     let mut candles = envelope
         .data
@@ -3857,6 +3849,18 @@ async fn okx_candles(inst_id: String, bar: String, limit: u16) -> Result<Vec<Can
         .collect::<Vec<_>>();
     candles.reverse();
     Ok(candles)
+}
+
+fn okx_recent_candles_path(inst_id: &str, bar: &str, limit: u16) -> Result<String, String> {
+    if bar_ms(bar).is_none() {
+        return Err(format!("unsupported interval: {bar}"));
+    }
+    Ok(format!(
+        "/api/v5/market/candles?instId={}&bar={}&limit={}",
+        url_encode(inst_id),
+        url_encode(bar),
+        limit.clamp(1, 300)
+    ))
 }
 
 #[tauri::command]
@@ -21137,6 +21141,27 @@ mod tests {
         assert!(normalize_market_icon_base("../btc").is_err());
         assert!(normalize_market_icon_base("btc-usdt").is_err());
         assert!(normalize_market_icon_base("").is_err());
+    }
+
+    #[test]
+    fn recent_candle_fallback_supports_all_chart_intervals() {
+        for bar in [
+            "1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D",
+        ] {
+            let path = okx_recent_candles_path("BTC-USDT-SWAP", bar, 300)
+                .unwrap_or_else(|error| panic!("build recent {bar} candle path: {error}"));
+            assert!(path.contains(&format!("bar={bar}")));
+        }
+        let path = okx_recent_candles_path("BTC-USDT-SWAP", "30m", 500)
+            .expect("build recent 30m candle path");
+        assert_eq!(
+            path,
+            "/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=30m&limit=300"
+        );
+        assert!(okx_recent_candles_path("BTC-USDT-SWAP", "2H", 0)
+            .expect("build recent 2H candle path")
+            .ends_with("limit=1"));
+        assert!(okx_recent_candles_path("BTC-USDT-SWAP", "7m", 300).is_err());
     }
 
     #[test]
