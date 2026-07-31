@@ -31,8 +31,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
-          shared-key: windows-x64-release
+          shared-key: windows-x64-tauri-release-v1
           cache-workspace-crates: true
 
       - name: Compile Windows release crates
-        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc -p desic-terminal
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc --features tauri/custom-protocol -p desic-terminal

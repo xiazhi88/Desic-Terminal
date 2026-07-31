@@ -39,7 +39,7 @@ jobs:
           - name: Windows x64
             platform: windows-latest
             rust_targets: x86_64-pc-windows-msvc
-            rust_cache_key: windows-x64-release
+            rust_cache_key: windows-x64-tauri-release-v1
             cache_workspace_crates: true
             args: --target x86_64-pc-windows-msvc --bundles nsis
             sidecar_platform: win32
