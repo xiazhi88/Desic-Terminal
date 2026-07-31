@@ -4379,7 +4379,14 @@ function StartupOrbitalCanvas() {
       activeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
+    const frameDelayMs = 1_000 / 30;
     let raf = 0;
+    let timer = 0;
+    function scheduleNextFrame() {
+      timer = window.setTimeout(() => {
+        raf = window.requestAnimationFrame(draw);
+      }, frameDelayMs);
+    }
     function draw(t: number) {
       const w = activeCanvas.clientWidth;
       const h = activeCanvas.clientHeight;
@@ -4471,15 +4478,16 @@ function StartupOrbitalCanvas() {
       activeCtx.textBaseline = "middle";
       activeCtx.fillText("DT", 0, 2);
       activeCtx.restore();
-      raf = requestAnimationFrame(draw);
+      scheduleNextFrame();
     }
 
     resizeCanvas();
     window.addEventListener("resize", resizeCanvas);
-    raf = requestAnimationFrame(draw);
+    raf = window.requestAnimationFrame(draw);
     return () => {
       window.removeEventListener("resize", resizeCanvas);
-      cancelAnimationFrame(raf);
+      window.clearTimeout(timer);
+      window.cancelAnimationFrame(raf);
     };
   }, []);
 

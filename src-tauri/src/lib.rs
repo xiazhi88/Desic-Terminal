@@ -142,7 +142,8 @@ use desic_storage_config::{
 };
 
 const REST_BASE: &str = "https://www.okx.com";
-const OKX_ICON_BASE: &str = "https://www.okx.com/cdn/oksupport/asset/currency/icon";
+const OKX_ICON_BASE: &str = "https://static.okx.com/cdn/oksupport/asset/currency/icon";
+const MARKET_ICON_DOWNLOAD_CONCURRENCY: usize = 6;
 const MARKET_ASSETS_CACHE_VERSION: u32 = 3;
 const PUBLIC_WS: &str = "wss://ws.okx.com:8443/ws/v5/public";
 const BUSINESS_WS: &str = "wss://ws.okx.com:8443/ws/v5/business";
@@ -3639,7 +3640,8 @@ async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSum
     fs::create_dir_all(&icon_dir).map_err(|err| err.to_string())?;
 
     let client = reqwest_client()?;
-    let semaphore = Arc::new(Semaphore::new(12));
+    // Keep a missing cache from turning startup into a large burst of CDN requests.
+    let semaphore = Arc::new(Semaphore::new(MARKET_ICON_DOWNLOAD_CONCURRENCY));
     let mut tasks = Vec::new();
     let mut instruments = Vec::new();
 
