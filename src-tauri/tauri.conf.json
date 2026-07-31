@@ -65,7 +65,7 @@
   },
   "plugins": {
     "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDRBREJFQ0YyM0Y2Njk5MEEKUldRS21XWS84dXpiU2pFUmhlbndjVDBWV002aW1sRHY3d3JFWDRTcjd1MVlYdTgveUN2Nk03ajUK",
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDY4OTg0MEFENTY3NDcxRTMKUldUamNYUldyVUNZYU9jS2tDRmwzMjZncVZlaEpOeHY0Q3IzUE5IWUcreFlsTmo1ZEM1U1l5VWgK",
       "endpoints": [
         "https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/latest.json"
       ],

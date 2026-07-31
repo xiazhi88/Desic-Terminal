@@ -20,7 +20,7 @@
     <a href="#软件演示">软件演示</a> ·
     <a href="#交易工作站">交易工作站</a> ·
     <a href="#ai-交易助手">AI 交易助手</a> ·
-    <a href="#desic-okx-agent">Agent MCP</a> ·
+    <a href="#支持的-ai-供应商">AI 供应商</a> ·
     <a href="#自动化与多-agent">自动化</a> ·
     <a href="#市场情报">市场情报</a> ·
     <a href="#社区与支持">社区</a> ·
@@ -41,11 +41,18 @@ Desic Terminal 面向需要持续观察、快速决策和严格执行边界的�
 
 ## 安装
 
-推荐直接从 GitHub Releases 获取与操作系统匹配的构建版本：
+推荐直接下载与操作系统匹配的构建版本：
 
-**[下载 Desic Terminal 安装包](https://github.com/xiazhi88/Desic-Terminal/releases)**
+| 平台 | 安装包 |
+| --- | --- |
+| Windows x64 | **[下载 EXE 安装程序](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** |
+| macOS Apple Silicon（M1 及更新芯片） | **[下载 Apple Silicon DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** |
+| macOS Intel | **[下载 Intel DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
 
-Windows x64、macOS Apple Silicon 和 macOS Intel 安装包会统一发布在该页面。当前项目仍处于预发布阶段；尚未出现 Release 时，可以按下方[开发](#开发)说明从源码运行。
+也可以前往 **[GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases)** 查看版本说明和全部附件。
+
+> [!IMPORTANT]
+> 当前安装包尚未使用 Apple Developer ID 或 Windows Authenticode 签名。macOS 首次启动时，请将应用拖入“应用程序”，右键应用选择“打开”；如果仍被拦截，请前往“系统设置 → 隐私与安全性”选择“仍要打开”。Windows 首次安装可能显示 SmartScreen 提示，请确认下载地址属于本仓库后再选择继续运行。
 
 ## 核心能力
 
@@ -104,35 +111,29 @@ AI 助手可以读取实时行情、盘口、K 线、指标、账户、订单、
 
 模型调用会依次经过 Sidecar 工具可见性、Agent runtime policy、Rust 账户与环境绑定、合约参数校验、交易预检、实盘确认、幂等控制和持久化审计。模型无法通过输出文本提升自己的权限。
 
-## 支持的 Agent
+## 支持的 AI 供应商
 
-Desic Terminal 可以通过 Provider API 使用主流模型，也支持本机官方 Codex CLI 与 Claude Code。希望让现有 AI Agent 直接获取 OKX 行情、账户信息或执行交易时，可以使用下方独立的 MCP 项目。
+Desic Terminal 可以通过 Provider API 使用下列模型服务，也支持通过本机官方 Codex CLI 与 Claude Code 委托请求。
 
-<p>
-  <kbd>Codex</kbd>
-  <kbd>Claude Code</kbd>
-  <kbd>Cursor</kbd>
-  <kbd>VS Code / GitHub Copilot</kbd>
-  <kbd>Cline</kbd>
-  <kbd>其他 MCP 客户端</kbd>
-</p>
-
-### Desic OKX Agent
-
-[Desic OKX Agent](https://github.com/xiazhi88/desic-okx-agent) 是面向 AI Agent 的独立本地 OKX Runtime、MCP Server、CLI 和 Skills。要求 Node.js 22.12 或更高版本：
-
-```bash
-npm install --global desic-okx-agent
-desic-okx setup
-```
-
-安装完成后，可以直接向 Agent 提问：
-
-```text
-使用 Desic OKX Agent 读取 BTC-USDT-SWAP 的实时价格、盘口、1 小时 K 线、资金费率和持仓量，给出简洁分析并标注数据时间；如提出交易方案，先完成预检并等待我明确确认，不要直接下单。
-```
-
-公共行情无需配置账户。账户和交易功能请在自己的终端中运行 `desic-okx account add`，不要在聊天中发送 API Key、Secret 或 Passphrase。
+<table>
+  <tr>
+    <td align="center" width="25%"><img src="src/assets/ai-providers/openai.svg" width="40" height="40" alt="OpenAI" /><br /><strong>OpenAI</strong><br /><sub>API / Codex CLI</sub></td>
+    <td align="center" width="25%"><img src="src/assets/ai-providers/anthropic.svg" width="40" height="40" alt="Claude" /><br /><strong>Claude</strong><br /><sub>API / Claude Code</sub></td>
+    <td align="center" width="25%"><img src="src/assets/ai-providers/gemini.svg" width="40" height="40" alt="Gemini" /><br /><strong>Gemini</strong><br /><sub>Google AI</sub></td>
+    <td align="center" width="25%"><img src="src/assets/ai-providers/xai.svg" width="40" height="40" alt="Grok" /><br /><strong>Grok</strong><br /><sub>xAI</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="src/assets/ai-providers/deepseek.svg" width="40" height="40" alt="DeepSeek" /><br /><strong>DeepSeek</strong><br /><sub>深度求索</sub></td>
+    <td align="center"><img src="src/assets/ai-providers/qwen.svg" width="40" height="40" alt="通义千问" /><br /><strong>通义千问</strong><br /><sub>阿里云百炼</sub></td>
+    <td align="center"><img src="src/assets/ai-providers/kimi.svg" width="40" height="40" alt="KIMI" /><br /><strong>KIMI</strong><br /><sub>Moonshot AI</sub></td>
+    <td align="center"><img src="src/assets/ai-providers/doubao.svg" width="40" height="40" alt="豆包" /><br /><strong>豆包</strong><br /><sub>火山方舟</sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="src/assets/ai-providers/minimax.svg" width="40" height="40" alt="MiniMax" /><br /><strong>MiniMax</strong><br /><sub>Anthropic 兼容</sub></td>
+    <td align="center"><img src="src/assets/ai-providers/zhipu.svg" width="40" height="40" alt="GLM（智谱）" /><br /><strong>GLM（智谱）</strong><br /><sub>智谱 AI</sub></td>
+    <td align="center"><img src="public/assets/brand/desic-terminal-icon.png" width="40" height="40" alt="自定义供应商" /><br /><strong>自定义</strong><br /><sub>兼容接口</sub></td>
+  </tr>
+</table>
 
 ## 自动化与多 Agent
 
@@ -237,7 +238,7 @@ docs/                        开发规范与 README 资源
 
 ## 开发
 
-当前项目处于持续开发阶段。仓库已经配置 Windows x64、macOS Apple Silicon 与 macOS Intel 的签名更新产物流水线；正式安装包仍以 GitHub Releases 中实际发布并完成平台验证的版本为准。开发环境需要 Node.js、npm、Rust stable，以及 Tauri 2 对应的平台依赖。
+当前项目处于持续开发阶段。仓库已经配置 Windows x64、macOS Apple Silicon 与 macOS Intel 的安装包和安全更新产物流水线；正式安装包仍以 GitHub Releases 中实际发布并完成平台验证的版本为准。开发环境需要 Node.js、npm、Rust stable，以及 Tauri 2 对应的平台依赖。
 
 ```bash
 npm install
@@ -265,6 +266,25 @@ npm run smoke:config-security
 ## 项目状态
 
 当前聚焦 OKX USDT 线性永续、Windows 与 macOS 桌面端。多交易所、现货、期权和移动端不在现阶段范围内。自动化执行属于高风险能力，应从 `advisor` 和模拟盘开始验证，并根据运行记录、对账与仓位复盘逐步提升权限。
+
+## 相关项目
+
+### Desic OKX Agent
+
+[Desic OKX Agent](https://github.com/xiazhi88/desic-okx-agent) 是独立的本地 OKX MCP 项目，方便 Codex、Claude Code 等 AI Agent 直接获取行情、查询账户或执行交易。它不是 Desic Terminal 的组成部分。要求 Node.js 22.12 或更高版本：
+
+```bash
+npm install --global desic-okx-agent
+desic-okx setup
+```
+
+安装完成后，可以直接向 Agent 提问：
+
+```text
+使用 Desic OKX Agent 读取 BTC-USDT-SWAP 的实时价格、盘口、1 小时 K 线、资金费率和持仓量，给出简洁分析并标注数据时间；如提出交易方案，先完成预检并等待我明确确认，不要直接下单。
+```
+
+公共行情无需配置账户。账户和交易功能请在自己的终端中运行 `desic-okx account add`，不要在聊天中发送 API Key、Secret 或 Passphrase。
 
 ## 社区与支持
 
