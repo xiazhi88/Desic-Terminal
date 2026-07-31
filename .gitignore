@@ -1,0 +1,71 @@
+# Dependencies and build output
+node_modules/
+dist/
+src-tauri/target/
+target-codex-*/
+src-tauri/gen/schemas/
+
+# Local secrets and machine-specific config
+config/*.local.json
+config/*.key
+config/*.key.pub
+config/*.password
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Runtime data, caches, and diagnostics
+cache/
+logs/
+diagnostics/
+outputs/
+output/
+artifacts/
+coverage/
+src-tauri/binaries/
+src-tauri/resources/ai-sidecar/*
+!src-tauri/resources/ai-sidecar/.gitkeep
+*-setup.exe
+*.msi
+*.dmg
+*.app/
+*.db
+*.db3
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite3-shm
+*.sqlite3-wal
+*.log
+*.err.log
+*.out.log
+
+# Local design and development previews
+design-previews/
+design-concepts/
+dev-previews/
+design-qa*.png
+debug-*.png
+tmp-*.png
+
+# Local planning and internal specifications
+docs/completed.md
+docs/pending.md
+docs/okx-perpetual-desktop-spec.md
+
+# Personal editor and machine state
+.cline/
+.claude/
+.codex/
+.vscode/
+.idea/
+Microsoft/
+.DS_Store
+Thumbs.db

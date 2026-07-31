@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Desic Terminal 首次启动指引概念稿</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+        background: #050507;
+        color: #f4f4f6;
+      }
+
+      * { box-sizing: border-box; }
+      html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+      body { position: relative; background: #050507; }
+      button { font: inherit; letter-spacing: 0; }
+
+      .terminal-shot,
+      .chart-fill,
+      .shade,
+      .concept {
+        position: absolute;
+        inset: 0;
+      }
+
+      .terminal-shot {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+      }
+
+      .chart-fill {
+        left: 315px;
+        top: 115px;
+        right: auto;
+        bottom: auto;
+        width: 624px;
+        height: 578px;
+        object-fit: cover;
+        object-position: 54% 50%;
+        opacity: .84;
+        filter: saturate(.88) brightness(.82);
+      }
+
+      .shade { background: rgba(3, 3, 6, .72); }
+      .concept { display: none; }
+
+      .eyebrow {
+        color: #a78bfa;
+        font-size: 12px;
+        font-weight: 700;
+      }
+
+      .muted { color: #9292a1; }
+
+      .ghost,
+      .primary,
+      .quiet {
+        min-height: 36px;
+        border-radius: 7px;
+        padding: 0 15px;
+        cursor: default;
+      }
+
+      .ghost {
+        border: 1px solid #363641;
+        background: #15151b;
+        color: #d2d2db;
+      }
+
+      .primary {
+        border: 1px solid #8b5cf6;
+        background: #7c3aed;
+        color: #fff;
+        box-shadow: 0 0 0 1px rgba(167, 139, 250, .15) inset;
+        font-weight: 700;
+      }
+
+      .quiet {
+        border: 0;
+        background: transparent;
+        color: #aaaab6;
+      }
+
+      .concept-label {
+        position: absolute;
+        left: 88px;
+        bottom: 20px;
+        padding: 6px 9px;
+        border-radius: 5px;
+        background: rgba(9, 9, 13, .88);
+        border: 1px solid #303038;
+        color: #9696a4;
+        font-size: 11px;
+        letter-spacing: 0;
+      }
+
+      /* Concept A: focused contextual tour */
+      .spotlight .shade {
+        clip-path: polygon(
+          0 0, 0 100%, 100% 100%, 100% 0,
+          1172px 0, 1172px 59px, 881px 59px, 881px 4px, 1172px 4px
+        );
+        background: rgba(2, 2, 5, .76);
+      }
+
+      .spotlight-ring {
+        position: absolute;
+        left: 878px;
+        top: 3px;
+        width: 298px;
+        height: 58px;
+        border: 1px solid #a78bfa;
+        border-radius: 8px;
+        box-shadow: 0 0 0 4px rgba(139, 92, 246, .18), 0 0 28px rgba(139, 92, 246, .22);
+      }
+
+      .tour-popover {
+        position: absolute;
+        top: 82px;
+        right: 254px;
+        width: 390px;
+        padding: 20px;
+        border-radius: 8px;
+        border: 1px solid #3d374b;
+        background: #121217;
+        box-shadow: 0 22px 60px rgba(0, 0, 0, .55);
+      }
+
+      .tour-popover::before {
+        content: "";
+        position: absolute;
+        top: -7px;
+        right: 105px;
+        width: 12px;
+        height: 12px;
+        transform: rotate(45deg);
+        background: #121217;
+        border-left: 1px solid #3d374b;
+        border-top: 1px solid #3d374b;
+      }
+
+      .tour-head,
+      .tour-foot,
+      .checklist-head,
+      .checklist-foot,
+      .welcome-actions {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      .tour-head .step {
+        color: #777784;
+        font-size: 12px;
+      }
+
+      .tour-popover h1 {
+        margin: 14px 0 8px;
+        font-size: 22px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .tour-popover p {
+        margin: 0;
+        color: #b5b5c0;
+        font-size: 14px;
+        line-height: 1.7;
+      }
+
+      .safety-note {
+        display: flex;
+        gap: 10px;
+        align-items: flex-start;
+        margin: 16px 0 18px;
+        padding: 11px 12px;
+        background: #0d1714;
+        border: 1px solid #1f493b;
+        border-radius: 6px;
+        color: #b9d9cd;
+        font-size: 12px;
+        line-height: 1.55;
+      }
+
+      .safety-note i {
+        width: 7px;
+        height: 7px;
+        margin-top: 5px;
+        border-radius: 50%;
+        background: #0ecb81;
+        flex: 0 0 auto;
+      }
+
+      .tour-progress {
+        display: flex;
+        gap: 5px;
+      }
+
+      .tour-progress i {
+        width: 20px;
+        height: 3px;
+        border-radius: 3px;
+        background: #34343e;
+      }
+
+      .tour-progress i.active { background: #8b5cf6; }
+
+      /* Concept B: persistent activation checklist */
+      .checklist .shade {
+        background: rgba(3, 3, 6, .32);
+        pointer-events: none;
+      }
+
+      .checklist-panel {
+        position: absolute;
+        left: 86px;
+        top: 104px;
+        width: 350px;
+        border-radius: 8px;
+        overflow: hidden;
+        border: 1px solid #383842;
+        background: #111116;
+        box-shadow: 0 24px 64px rgba(0, 0, 0, .55);
+      }
+
+      .checklist-head {
+        align-items: flex-start;
+        padding: 18px 18px 15px;
+        border-bottom: 1px solid #2b2b33;
+      }
+
+      .checklist-head h1 {
+        margin: 6px 0 5px;
+        font-size: 18px;
+        letter-spacing: 0;
+      }
+
+      .checklist-head p {
+        margin: 0;
+        font-size: 12px;
+        color: #8d8d9a;
+      }
+
+      .exit-link {
+        padding: 4px 0;
+        border: 0;
+        background: transparent;
+        color: #9a9aa6;
+        font-size: 12px;
+      }
+
+      .progress-track {
+        position: relative;
+        height: 3px;
+        background: #24242b;
+      }
+
+      .progress-track::after {
+        content: "";
+        position: absolute;
+        inset: 0 auto 0 0;
+        width: 46%;
+        background: #8b5cf6;
+      }
+
+      .task-list { padding: 7px 0; }
+
+      .task {
+        display: grid;
+        grid-template-columns: 30px 1fr auto;
+        gap: 10px;
+        align-items: center;
+        min-height: 68px;
+        padding: 11px 17px;
+        border-bottom: 1px solid #24242b;
+      }
+
+      .task:last-child { border-bottom: 0; }
+
+      .task.active { background: #181422; }
+
+      .task-index {
+        display: grid;
+        place-items: center;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+        border: 1px solid #454550;
+        color: #91919d;
+        font-size: 11px;
+      }
+
+      .task.done .task-index {
+        border-color: #256d53;
+        background: #10261e;
+        color: #2ddb96;
+      }
+
+      .task.active .task-index {
+        border-color: #8b5cf6;
+        background: #271747;
+        color: #d7c7ff;
+      }
+
+      .task strong,
+      .task small { display: block; }
+      .task strong { font-size: 13px; }
+      .task small { margin-top: 4px; color: #848491; font-size: 11px; }
+      .task .go { color: #bba6ef; font-size: 12px; }
+
+      .checklist-foot {
+        justify-content: flex-start;
+        padding: 13px 17px 15px;
+        background: #0d0d11;
+        color: #898995;
+        font-size: 11px;
+      }
+
+      .checklist-foot b { color: #d1d1da; font-weight: 600; }
+
+      .trade-focus {
+        position: absolute;
+        right: 8px;
+        top: 65px;
+        width: 264px;
+        height: 825px;
+        border-radius: 7px;
+        border: 1px solid rgba(167, 139, 250, .82);
+        box-shadow: 0 0 0 4px rgba(124, 58, 237, .12);
+        pointer-events: none;
+      }
+
+      /* Concept C: short welcome choice */
+      .welcome .shade { background: rgba(2, 2, 5, .78); backdrop-filter: blur(2px); }
+
+      .welcome-dialog {
+        position: absolute;
+        left: 50%;
+        top: 50%;
+        width: 700px;
+        transform: translate(-50%, -50%);
+        border-radius: 8px;
+        border: 1px solid #3b3b45;
+        background: #111116;
+        box-shadow: 0 28px 90px rgba(0, 0, 0, .7);
+        overflow: hidden;
+      }
+
+      .welcome-main {
+        display: grid;
+        grid-template-columns: 1fr 210px;
+        min-height: 326px;
+      }
+
+      .welcome-copy { padding: 34px 34px 28px; }
+
+      .welcome-copy h1 {
+        margin: 12px 0 11px;
+        max-width: 410px;
+        font-size: 27px;
+        line-height: 1.25;
+        letter-spacing: 0;
+      }
+
+      .welcome-copy > p {
+        margin: 0;
+        color: #aaaab5;
+        font-size: 14px;
+        line-height: 1.75;
+      }
+
+      .route-choice {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
+        align-items: center;
+        margin-top: 23px;
+        padding: 13px 14px;
+        border-radius: 7px;
+        border: 1px solid #57417f;
+        background: #1a1425;
+      }
+
+      .route-choice strong,
+      .route-choice small { display: block; }
+      .route-choice strong { font-size: 13px; }
+      .route-choice small { margin-top: 4px; color: #9f94b6; font-size: 11px; }
+      .route-choice span { color: #c5b2f3; font-size: 12px; }
+
+      .welcome-visual {
+        position: relative;
+        border-left: 1px solid #2c2c34;
+        background: #0b0b10;
+        overflow: hidden;
+      }
+
+      .welcome-visual img {
+        position: absolute;
+        left: 50%;
+        top: 54px;
+        width: 92px;
+        height: 92px;
+        transform: translateX(-50%);
+        border-radius: 23px;
+      }
+
+      .visual-line {
+        position: absolute;
+        left: 34px;
+        right: 34px;
+        height: 1px;
+        background: #262630;
+      }
+
+      .visual-line.one { top: 180px; }
+      .visual-line.two { top: 221px; }
+      .visual-line.three { top: 262px; }
+
+      .visual-dot {
+        position: absolute;
+        left: 29px;
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        border: 2px solid #0b0b10;
+        background: #8b5cf6;
+      }
+
+      .visual-dot.one { top: 175px; }
+      .visual-dot.two { top: 216px; background: #0ecb81; }
+      .visual-dot.three { top: 257px; background: #f5a524; }
+
+      .visual-label {
+        position: absolute;
+        left: 50px;
+        color: #8f8f9b;
+        font-size: 11px;
+      }
+
+      .visual-label.one { top: 171px; }
+      .visual-label.two { top: 212px; }
+      .visual-label.three { top: 253px; }
+
+      .welcome-actions {
+        padding: 15px 20px;
+        border-top: 1px solid #2a2a32;
+        background: #0d0d11;
+      }
+
+      .welcome-actions label {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        color: #878793;
+        font-size: 11px;
+      }
+
+      .welcome-actions input { accent-color: #7c3aed; }
+      .welcome-buttons { display: flex; gap: 8px; }
+    </style>
+  </head>
+  <body>
+    <img class="terminal-shot" src="./terminal-base.png" alt="Desic Terminal 交易工作台" />
+    <img class="chart-fill" src="../../docs/assets/chart-workstation.png" alt="BTC 行情图表" />
+
+    <section class="concept spotlight" data-concept="spotlight">
+      <div class="shade"></div>
+      <div class="spotlight-ring"></div>
+      <article class="tour-popover">
+        <div class="tour-head">
+          <span class="eyebrow">开始安全探索</span>
+          <span class="step">1 / 4</span>
+        </div>
+        <h1>先从模拟盘开始</h1>
+        <p>当前是预览模拟盘，订单不会进入实盘。先熟悉行情、图表和下单面板，再连接你自己的 OKX 账号。</p>
+        <div class="safety-note"><i></i><span>切换到实盘前，系统会再次展示风险确认并要求二次确认订单。</span></div>
+        <div class="tour-foot">
+          <button class="quiet">退出指引</button>
+          <div class="tour-progress" aria-label="4 步中的第 1 步"><i class="active"></i><i></i><i></i><i></i></div>
+          <button class="primary">下一步&nbsp; →</button>
+        </div>
+      </article>
+      <span class="concept-label">方案 A · 聚焦式导览</span>
+    </section>
+
+    <section class="concept checklist" data-concept="checklist">
+      <div class="shade"></div>
+      <aside class="checklist-panel">
+        <header class="checklist-head">
+          <div>
+            <span class="eyebrow">首次启动</span>
+            <h1>建立你的交易工作台</h1>
+            <p>完成 2 / 4 · 预计还需 1 分钟</p>
+          </div>
+          <button class="exit-link">退出指引</button>
+        </header>
+        <div class="progress-track"></div>
+        <div class="task-list">
+          <div class="task done">
+            <span class="task-index">✓</span>
+            <div><strong>认识行情工作区</strong><small>自选、K 线与市场深度</small></div>
+          </div>
+          <div class="task active">
+            <span class="task-index">2</span>
+            <div><strong>用模拟盘试下一单</strong><small>体验预检与订单确认</small></div>
+            <span class="go">开始 →</span>
+          </div>
+          <div class="task">
+            <span class="task-index">3</span>
+            <div><strong>连接 OKX 账号</strong><small>可稍后完成 · 默认只读</small></div>
+          </div>
+          <div class="task">
+            <span class="task-index">4</span>
+            <div><strong>让 AI 做一次风险扫描</strong><small>基于当前行情与账户状态</small></div>
+          </div>
+        </div>
+        <footer class="checklist-foot"><span>指引会自动保存进度，可在 <b>帮助</b> 中再次打开</span></footer>
+      </aside>
+      <div class="trade-focus"></div>
+      <span class="concept-label">方案 B · 可暂停任务清单</span>
+    </section>
+
+    <section class="concept welcome" data-concept="welcome">
+      <div class="shade"></div>
+      <article class="welcome-dialog">
+        <div class="welcome-main">
+          <div class="welcome-copy">
+            <span class="eyebrow">欢迎使用 Desic Terminal</span>
+            <h1>先看懂工作台，再决定连接什么</h1>
+            <p>用约 90 秒确认行情、模拟盘和 AI 助手三个关键入口。账号与实盘设置可以稍后完成。</p>
+            <div class="route-choice">
+              <div><strong>快速导览</strong><small>4 个关键步骤 · 不会提交真实订单</small></div>
+              <span>推荐</span>
+            </div>
+          </div>
+          <div class="welcome-visual">
+            <img src="/assets/brand/desic-terminal-icon.png" alt="Desic Terminal" />
+            <span class="visual-line one"></span><span class="visual-dot one"></span><span class="visual-label one">实时行情</span>
+            <span class="visual-line two"></span><span class="visual-dot two"></span><span class="visual-label two">模拟交易</span>
+            <span class="visual-line three"></span><span class="visual-dot three"></span><span class="visual-label three">AI 风险扫描</span>
+          </div>
+        </div>
+        <footer class="welcome-actions">
+          <label><input type="checkbox" /> 不再自动显示</label>
+          <div class="welcome-buttons">
+            <button class="ghost">退出指引</button>
+            <button class="primary">开始快速导览&nbsp; →</button>
+          </div>
+        </footer>
+      </article>
+      <span class="concept-label">方案 C · 一次性欢迎选择</span>
+    </section>
+
+    <script>
+      const concept = new URLSearchParams(location.search).get("concept") || "spotlight";
+      document.querySelector(`[data-concept="${concept}"]`)?.style.setProperty("display", "block");
+    </script>
+  </body>
+</html>

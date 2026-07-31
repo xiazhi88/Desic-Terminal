@@ -1,0 +1,27 @@
+{
+  "code": "0",
+  "msg": "",
+  "dataVersion": "FIXTURE_SMART_V1",
+  "data": [
+      {
+        "id": "SMART_FIXTURE_001",
+        "ccy": "BTC",
+        "longShortRatio": {
+          "longRatio": "0.55",
+          "shortRatio": "0.45",
+          "weightedLongRatio": "0.56",
+          "weightedShortRatio": "0.44"
+        },
+        "notional": {
+          "netNotionalUsdt": "1000",
+          "longNotionalUsdt": "1500",
+          "shortNotionalUsdt": "500",
+          "smartMoneyLongAvgEntry": "50000",
+          "smartMoneyShortAvgEntry": "51000"
+        },
+        "tradersWithPosition": "10",
+        "longTraders": "6",
+        "shortTraders": "4"
+      }
+  ]
+}

@@ -1,0 +1,153 @@
+.chart-workspace-controls {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.18);
+  border-radius: 7px;
+  background: rgba(9, 9, 11, 0.9);
+  color: #a1a1aa;
+  font-size: 11px;
+}
+
+.chart-workspace-controls *,
+.chart-workspace-controls *::before,
+.chart-workspace-controls *::after {
+  box-sizing: border-box;
+}
+
+.chart-workspace-controls__group {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 5px;
+}
+
+.chart-workspace-controls__group + .chart-workspace-controls__group {
+  padding-left: 8px;
+  border-left: 1px solid rgba(148, 163, 184, 0.14);
+}
+
+.chart-workspace-controls__label {
+  flex: 0 0 auto;
+  color: #71717a;
+  font-size: 10px;
+}
+
+.chart-workspace-controls button,
+.chart-workspace-controls select {
+  min-width: 0;
+  height: 27px;
+  border: 1px solid rgba(148, 163, 184, 0.2);
+  border-radius: 5px;
+  background: #111114;
+  color: #d4d4d8;
+  font: inherit;
+}
+
+.chart-workspace-controls button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 0 7px;
+  cursor: pointer;
+  transition: border-color 140ms ease, background 140ms ease, color 140ms ease;
+}
+
+.chart-workspace-controls button:hover:not(:disabled) {
+  border-color: rgba(167, 139, 250, 0.65);
+  background: rgba(139, 92, 246, 0.12);
+  color: #f4f4f5;
+}
+
+.chart-workspace-controls button.is-active,
+.chart-workspace-controls__member.is-active {
+  border-color: rgba(139, 92, 246, 0.72);
+  background: rgba(139, 92, 246, 0.16);
+  color: #ede9fe;
+}
+
+.chart-workspace-controls button:disabled,
+.chart-workspace-controls select:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.chart-workspace-controls button:focus-visible,
+.chart-workspace-controls select:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.72);
+  outline-offset: 1px;
+}
+
+.chart-workspace-controls__segmented,
+.chart-workspace-controls__pane-list,
+.chart-workspace-controls__sync-toggles {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.chart-workspace-controls--vertical {
+  display: block;
+  width: 178px;
+  padding: 4px;
+  border: 0;
+  background: transparent;
+}
+
+.chart-workspace-controls--vertical .chart-workspace-controls__group { display: block; }
+.chart-workspace-controls--vertical .chart-workspace-controls__label { display: none; }
+.chart-workspace-controls--vertical .chart-workspace-controls__segmented { display: grid; gap: 3px; }
+.chart-workspace-controls--vertical .chart-workspace-controls__segmented button { width: 100%; height: 30px; justify-content: flex-start; padding: 0 9px; font-size: 11px; }
+
+.chart-workspace-controls__segmented button,
+.chart-workspace-controls__pane-list button,
+.chart-workspace-controls__sync-toggles button {
+  width: 27px;
+  padding: 0;
+}
+
+.chart-workspace-controls__actions select {
+  width: min(144px, 16vw);
+  padding: 0 7px;
+  outline: none;
+}
+
+.chart-workspace-controls__member {
+  max-width: 115px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chart-workspace-controls__status-dot {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: #52525b;
+}
+
+.chart-workspace-controls__member.is-active .chart-workspace-controls__status-dot {
+  background: #a78bfa;
+  box-shadow: 0 0 0 3px rgba(139, 92, 246, 0.16);
+}
+
+@media (max-width: 1040px) {
+  .chart-workspace-controls {
+    flex-wrap: wrap;
+  }
+
+  .chart-workspace-controls__group + .chart-workspace-controls__group {
+    padding-left: 0;
+    border-left: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chart-workspace-controls button {
+    transition: none;
+  }
+}

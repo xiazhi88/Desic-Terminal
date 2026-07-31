@@ -1,0 +1,61 @@
+[package]
+name = "desic-smoke-tools"
+version = "0.1.0"
+license = "MIT"
+edition = "2021"
+publish = false
+
+[lib]
+name = "desic_smoke_tools"
+path = "src/lib.rs"
+
+[dependencies]
+base64 = "0.22"
+desic-terminal = { path = "../.." }
+futures-util = "0.3"
+hmac = "0.12"
+native-tls = "0.2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "native-tls", "socks"] }
+rusqlite = { version = "0.33", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time", "net"] }
+tokio-native-tls = "0.3"
+tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+
+[[bin]]
+name = "smoke_config_security"
+path = "src/bin/smoke_config_security.rs"
+
+[[bin]]
+name = "smoke_position_episodes_rebuild"
+path = "src/bin/smoke_position_episodes_rebuild.rs"
+
+[[bin]]
+name = "smoke_private_history_audit"
+path = "src/bin/smoke_private_history_audit.rs"
+
+[[bin]]
+name = "smoke_private_history_sync"
+path = "src/bin/smoke_private_history_sync.rs"
+
+[[bin]]
+name = "smoke_private_reconcile"
+path = "src/bin/smoke_private_reconcile.rs"
+
+[[bin]]
+name = "smoke_private_rest"
+path = "src/bin/smoke_private_rest.rs"
+
+[[bin]]
+name = "smoke_private_ws"
+path = "src/bin/smoke_private_ws.rs"
+
+[[bin]]
+name = "smoke_storage_maintenance"
+path = "src/bin/smoke_storage_maintenance.rs"
+
+[[bin]]
+name = "smoke_trade_readiness"
+path = "src/bin/smoke_trade_readiness.rs"

@@ -1,0 +1,21 @@
+{
+  "code": "0",
+  "msg": "",
+  "data": [
+    {
+      "details": [
+      {
+        "id": "NEWS_FIXTURE_001",
+        "title": "Sanitized BTC market update",
+        "summary": "Fixture content only; no live credentials or provider payload retained.",
+        "platformList": ["FIXTURE_SOURCE"],
+        "cTime": "1700000000000",
+        "ccyList": ["BTC"],
+        "ccySentiments": [{"ccy": "BTC", "sentiment": "neutral"}],
+        "importance": "high"
+      }
+      ],
+      "nextCursor": "FIXTURE_CURSOR"
+    }
+  ]
+}
