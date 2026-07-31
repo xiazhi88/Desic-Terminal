@@ -619,9 +619,9 @@ async function syncMarketAssetsViaWeb(): Promise<MarketAssetsSummary | null> {
   const swaps = instruments.data.filter((item) => item.instType === "SWAP");
   const bases = Array.from(new Set(swaps.map((item) => (item.baseCcy || item.instId?.split("-")[0] || "").toLowerCase()).filter(Boolean)));
   const icons: Record<string, string> = {};
-  await runLimited(bases, 12, async (base) => {
+  await runLimited(bases, 6, async (base) => {
     try {
-      const response = await fetch(`https://www.okx.com/cdn/oksupport/asset/currency/icon/${base}.png`);
+      const response = await fetch(`https://static.okx.com/cdn/oksupport/asset/currency/icon/${base}.png`);
       if (!response.ok) return;
       const buffer = await response.arrayBuffer();
       icons[base] = arrayBufferToBase64(buffer);
