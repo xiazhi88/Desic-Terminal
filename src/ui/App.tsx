@@ -5296,10 +5296,10 @@ function ProxySettingsPane({
 }) {
   const { t } = useTranslation(["settings", "common"]);
   const [draft, setDraft] = useState<ProxyConfigUpdate>({
-    enabled: true,
-    proxyType: "HTTP",
-    host: "127.0.0.1",
-    port: 8881,
+    enabled: false,
+    proxyType: "NONE",
+    host: "",
+    port: 0,
     username: "",
     password: ""
   });
@@ -5315,8 +5315,8 @@ function ProxySettingsPane({
         setDraft({
           enabled: config.enabled,
           proxyType: config.enabled ? config.proxyType : "NONE",
-          host: config.host || "127.0.0.1",
-          port: config.port || 8881,
+          host: config.host || "",
+          port: config.port || 0,
           username: config.username || "",
           password: config.authConfigured ? "********" : ""
         });
@@ -5344,8 +5344,8 @@ function ProxySettingsPane({
   const normalizedDraft = useMemo<ProxyConfigUpdate>(() => ({
     enabled: draft.proxyType !== "NONE" && draft.enabled,
     proxyType: draft.proxyType,
-    host: draft.host.trim() || "127.0.0.1",
-    port: Number(draft.port) || 8881,
+    host: draft.host.trim(),
+    port: Number(draft.port) || 0,
     username: draft.username?.trim() || null,
     password: draft.password || null
   }), [draft]);

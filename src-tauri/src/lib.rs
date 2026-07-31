@@ -20,12 +20,6 @@ use std::{
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
-#[cfg(desktop)]
-use tauri::{
-    image::Image,
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-};
 use tauri::{Emitter, Manager};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_dialog::{DialogExt, FilePath};
@@ -59,14 +53,13 @@ use crate::ai_automation::{
     background_finish_run, notification_feishu_config_save, notification_feishu_send,
     notification_feishu_test, notification_settings_summary,
     notify_automation_run_record_persisted, optimization_suggestion_create, review_complete,
-    review_read_skill_version, set_automation_master_enabled, start_ai_automation_worker,
-    AiAutomationRuntime, BackgroundFinishRunInput, BackgroundRunContext, FeishuSendInput,
-    OptimizationSuggestionInput, ReviewCompleteInput, ReviewSkillVersionInput,
+    review_read_skill_version, start_ai_automation_worker, AiAutomationRuntime,
+    BackgroundFinishRunInput, BackgroundRunContext, FeishuSendInput, OptimizationSuggestionInput,
+    ReviewCompleteInput, ReviewSkillVersionInput,
 };
 use crate::app_updater::{
     app_update_apply_source, app_update_check, app_update_prepare, app_update_restart_source,
-    app_update_status,
-    AppUpdateRuntime,
+    app_update_status, AppUpdateRuntime,
 };
 use crate::instrument_operations::{
     okx_active_instrument_operations, okx_execute_cancel_instrument_orders,
@@ -5934,7 +5927,7 @@ fn window_action(app: tauri::AppHandle, action: String) -> Result<bool, String> 
             }
         }
         "close" => {
-            window.close().map_err(|err| err.to_string())?;
+            app.exit(0);
             Ok(false)
         }
         _ => Err("unknown window action".to_string()),
@@ -20781,11 +20774,6 @@ fn sanitize_secret(value: &str, secret: &str) -> String {
     value.replace(secret, "[redacted]")
 }
 
-#[derive(Default)]
-struct DesktopExitState {
-    requested: AtomicBool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChartCsvExportResult {
@@ -20840,98 +20828,6 @@ async fn export_chart_csv(
     .map_err(|error| format!("导出 K 线 CSV 任务失败: {error}"))?
 }
 
-#[cfg(desktop)]
-fn show_primary_window(app: &tauri::AppHandle) {
-    if let Some(splash) = app.get_webview_window("splash") {
-        if splash.is_visible().unwrap_or(false) {
-            let _ = splash.show();
-            let _ = splash.set_focus();
-            return;
-        }
-    }
-
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
-}
-
-#[cfg(desktop)]
-fn setup_desktop_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    const OPEN_MENU_ID: &str = "tray-open-main";
-    const PAUSE_MENU_ID: &str = "tray-pause-ai-automation";
-    const EXIT_MENU_ID: &str = "tray-exit-app";
-
-    let open = MenuItem::with_id(app, OPEN_MENU_ID, "打开主界面", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, PAUSE_MENU_ID, "暂停后台 Agent", true, None::<&str>)?;
-    let exit = MenuItem::with_id(app, EXIT_MENU_ID, "退出程序", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &exit])?;
-
-    let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
-    let tray = TrayIconBuilder::with_id("desic-terminal")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .tooltip("Desic Terminal")
-        .icon(tray_icon)
-        .icon_as_template(cfg!(target_os = "macos"))
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            OPEN_MENU_ID => show_primary_window(app),
-            PAUSE_MENU_ID => {
-                let event = match set_automation_master_enabled(app, false) {
-                    Ok(_) => json!({
-                        "type": "automationPaused",
-                        "message": "后台 Agent 已暂停",
-                        "action": { "tab": "profiles" }
-                    }),
-                    Err(_) => json!({
-                        "type": "automationPauseFailed",
-                        "message": "暂停后台 Agent 失败，请打开应用重试",
-                        "action": { "tab": "profiles" }
-                    }),
-                };
-                let _ = app.emit("ai:automation-event", event);
-            }
-            EXIT_MENU_ID => {
-                app.state::<DesktopExitState>()
-                    .requested
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                show_primary_window(tray.app_handle());
-            }
-        });
-    tray.build(app)?;
-
-    if let Some(main) = app.get_webview_window("main") {
-        let app_handle = app.handle().clone();
-        let window_to_hide = main.clone();
-        main.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let exit_requested = app_handle
-                    .state::<DesktopExitState>()
-                    .requested
-                    .load(Ordering::SeqCst);
-                if !exit_requested && ai_automation::automation_master_enabled(&app_handle) {
-                    api.prevent_close();
-                    let _ = window_to_hide.hide();
-                }
-            }
-        });
-    }
-
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -20942,13 +20838,10 @@ pub fn run() {
         .manage(AiRuntime::default())
         .manage(AiAutomationRuntime::default())
         .manage(IntelligenceRuntime::default())
-        .manage(DesktopExitState::default())
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
             initialize_database_v1(app.handle()).map_err(std::io::Error::other)?;
-            #[cfg(desktop)]
-            setup_desktop_tray(app)?;
             start_trade_execution_recovery(app.handle().clone());
             instrument_operations::start_instrument_operation_recovery(app.handle().clone());
             start_ai_automation_worker(app.handle().clone());

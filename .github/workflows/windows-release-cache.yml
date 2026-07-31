@@ -1,0 +1,38 @@
+name: Warm Windows release cache
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src-tauri/**"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/windows-release-cache.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-release-cache:
+    name: Windows x64 Rust cache
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: windows-x64-release
+          cache-workspace-crates: true
+
+      - name: Compile Windows release crates
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc -p desic-terminal

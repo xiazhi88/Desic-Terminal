@@ -40,7 +40,7 @@ async function main() {
   if (failedState.stageRadius < 14 || failedState.stageShadow === "none") {
     throw new Error(`startup window should render rounded corners and shadow: ${JSON.stringify(failedState)}`);
   }
-  if (!/当前无法连接 OKX/.test(failedState.inlineText)) {
+  if (!/(?:无法连接 OKX|OKX.*不可达)/.test(failedState.inlineText)) {
     throw new Error(`startup failure copy should identify the OKX network issue: ${JSON.stringify(failedState)}`);
   }
   if (failedState.headerProxyButtonText !== "配置代理" || failedState.failureProxyButtonText !== "代理" || failedState.retryButtonText !== "重试") {
@@ -59,7 +59,7 @@ async function main() {
   await page.locator(".startup-proxy-trigger").click();
   await page.waitForSelector(".startup-proxy-modal", { timeout: 5_000 });
   const proxyState = await readProxyState(page);
-  if (proxyState.type !== "HTTP" || proxyState.host !== "127.0.0.1" || proxyState.port !== "8881") {
+  if (proxyState.type !== "不使用代理" || proxyState.host !== "" || proxyState.port !== "0") {
     throw new Error(`startup proxy defaults are wrong: ${JSON.stringify(proxyState)}`);
   }
   if (proxyState.modalOverflowX > 1 || proxyState.modalOverflowY > 1 || !proxyState.withinViewport) {

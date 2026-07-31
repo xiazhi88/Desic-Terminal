@@ -107,7 +107,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 ## 5. OKX 网络与代理
 
-- 默认代理是 `HTTP 127.0.0.1:8881`。
+- 新安装默认直连，不预填或启用本地代理；只有用户明确保存代理配置后才启用代理，升级时不得覆盖既有配置。
 - 所有 OKX REST、public WSS、business WSS、private WSS、AI 请求都要确认是否走配置代理。
 - 带签名的只读 OKX GET 对连接、超时、响应体中断、429、5xx 和上游可重试错误码最多即时尝试 3 次；每次尝试必须重新生成时间戳和签名。写请求不得直接复用该策略，必须先满足幂等键和远端对账要求。
 - OKX 私有 REST 与 Private WebSocket 登录时间戳必须使用 `/api/v5/public/time` 校准得到的共享偏移。HTTP 401 或业务响应出现 `50102` 时，只允许在重新校时、重新签名后重试一次；并发失败必须合并为一次校时，不能把时间戳过期误报为 API Key 认证失败。
@@ -354,9 +354,11 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 ## 14. 桌面更新与发行
 
+- 主窗口关闭按钮必须调用进程级退出，释放本地监听端口和 sidecar；桌面端不创建托盘，也不通过隐藏窗口继续后台运行。
 - 安装包只接受 Tauri Updater 公钥验证通过的稳定 GitHub Release。版本标签、`package.json`、`src-tauri/tauri.conf.json` 和 Cargo crate 版本必须一致，发行前运行 `npm run test:release-version`。
 - 正式发行密钥只能放在 GitHub Actions Secrets 或受控签名环境；私钥、密码、证书和本地生成的签名材料不得提交。Updater 公钥属于验证材料，可以随应用发布。
 - 安装包更新与源码更新都必须先创建成功的加密数据快照。快照覆盖 SQLite、账户、代理、AI、通知、界面、关注列表和自定义 Skill，最多保留三份；备份失败必须中止更新。
 - 用户数据和凭据必须位于应用数据目录或本地敏感配置目录，不得写进安装目录、前端资源或可被升级替换的源码文件。
 - 源码更新只允许干净、未分叉的 `main` 快进到 `origin/main`。存在本地修改、分支不符或历史分叉时只提示原因，不得自动 stash、reset、rebase 或覆盖文件。
 - Release 必须分别验证 Windows x64、macOS Apple Silicon 和 macOS Intel 的安装、升级、自动重启及数据保留。没有实际验证的平台不得宣称更新链路已可用。
+- Windows Release 的 Rust 缓存必须由 `main` 分支预热并使用稳定共享键；标签构建只恢复缓存、不保存标签专属缓存，避免每个版本重复完整编译和上传无复用价值的缓存。

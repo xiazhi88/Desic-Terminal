@@ -2506,12 +2506,6 @@ fn open_automation_database(app: &tauri::AppHandle) -> Result<Connection, String
     open_database(app)
 }
 
-pub(crate) fn automation_master_enabled(app: &tauri::AppHandle) -> bool {
-    open_automation_database(app)
-        .map(|conn| automation_master_enabled_with_conn(&conn))
-        .unwrap_or(false)
-}
-
 pub(crate) fn notify_automation_run_record_persisted(app: &tauri::AppHandle, run_id: &str) {
     let _ = app.emit(
         AUTOMATION_EVENT,
