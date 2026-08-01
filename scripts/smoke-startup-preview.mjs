@@ -43,6 +43,9 @@ async function main() {
   if (!/(?:无法连接 OKX|OKX.*不可达)/.test(failedState.inlineText)) {
     throw new Error(`startup failure copy should identify the OKX network issue: ${JSON.stringify(failedState)}`);
   }
+  if (failedState.percentText !== "0%") {
+    throw new Error(`startup network check should run before local initialization: ${JSON.stringify(failedState)}`);
+  }
   if (failedState.headerProxyButtonText !== "配置代理" || failedState.failureProxyButtonText !== "代理" || failedState.retryButtonText !== "重试") {
     throw new Error(`startup proxy and retry actions are incomplete: ${JSON.stringify(failedState)}`);
   }
@@ -103,6 +106,7 @@ async function readStartupState(page) {
       marketCard: rect(".startup-original .terminal"),
       loading: rect(".startup-original .loading"),
       percent: rect(".startup-original .percent"),
+      percentText: document.querySelector(".startup-original .percent")?.textContent?.trim() || "",
       inlineText: document.querySelector(".startup-check-inline")?.textContent?.trim() || "",
       headerProxyButtonText: headerProxyButton?.textContent?.trim() || "",
       failureProxyButtonText: failureProxyButton?.textContent?.trim() || "",

@@ -563,6 +563,14 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
     setChecks(createInitialChecks(t));
 
     try {
+      updateCheck("rest", { status: "running", detail: t("common:startupRequestingOkxTime") });
+      if (previewFailure === "okx-network") {
+        throw new Error(t("common:startupOkxUnavailable"));
+      }
+      const synced = await syncOkxTime();
+      setTimeState(synced);
+      updateCheck("rest", { status: "passed", detail: t("common:startupOkxRestReady"), latencyMs: synced.rttMs });
+
       updateCheck("config", { status: "running", detail: t("common:startupReadingAccounts") });
       const migration = await migrateSensitiveConfig();
       const localAccounts = await loadAccounts();
@@ -572,14 +580,6 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
           ? t("common:startupAccountsLoaded", { count: localAccounts.length, secured: migration?.aiConfigured ? t("common:startupAiCredentialsSecured") : "" })
           : t("common:startupPublicMarketOnly")
       });
-
-      updateCheck("rest", { status: "running", detail: t("common:startupRequestingOkxTime") });
-      if (previewFailure === "okx-network") {
-        throw new Error(t("common:startupOkxUnavailable"));
-      }
-      const synced = await syncOkxTime();
-      setTimeState(synced);
-      updateCheck("rest", { status: "passed", detail: t("common:startupOkxRestReady"), latencyMs: synced.rttMs });
 
       updateCheck("publicWs", { status: "running", detail: t("common:startupConnectingPublicWs") });
       const wsProbe = await testPublicWsReachability();
@@ -7699,8 +7699,8 @@ function marketBaseFromSymbol(symbol: string, baseCcy?: string | null) {
 function createInitialChecks(t: TFunction): StartupCheck[] {
   const detail = t("common:startupWaitingCheck");
   return [
-    { id: "config", label: t("common:startupLocalConfig"), status: "pending", detail },
     { id: "rest", label: "OKX REST", status: "pending", detail },
+    { id: "config", label: t("common:startupLocalConfig"), status: "pending", detail },
     { id: "publicWs", label: "OKX Public WS", status: "pending", detail },
     { id: "businessWs", label: "OKX Business WS", status: "pending", detail },
     { id: "privateWs", label: "OKX Private WS", status: "pending", detail },
