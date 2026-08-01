@@ -12393,7 +12393,7 @@ async fn ensure_ai_sidecar(
         }
     });
 
-    tauri::async_runtime::spawn(async move {
+    let stdout_reader = tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             let line = line.trim();
@@ -12428,7 +12428,7 @@ async fn ensure_ai_sidecar(
         }
     });
 
-    tauri::async_runtime::spawn(async move {
+    let stderr_reader = tauri::async_runtime::spawn(async move {
         let mut stderr_lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = stderr_lines.next_line().await {
             eprintln!("cline-sidecar: {}", line);
@@ -12443,7 +12443,11 @@ async fn ensure_ai_sidecar(
 
     tauri::async_runtime::spawn(async move {
         let exit_result = child.wait().await;
-        sleep(Duration::from_millis(50)).await;
+        // A fatal sidecar error is emitted on stdout immediately before Node exits.
+        // Drain both pipes before reading shared error state so the version footer on
+        // stderr cannot replace the actionable exception.
+        let _ = stdout_reader.await;
+        let _ = stderr_reader.await;
         let mut sidecar = runtime_for_wait.sidecar.lock().await;
         let is_current = sidecar
             .as_ref()
@@ -12457,8 +12461,18 @@ async fn ensure_ai_sidecar(
         let stderr_detail = stderr_tail_for_wait
             .lock()
             .ok()
-            .and_then(|tail| tail.last().cloned())
-            .filter(|line| !line.trim().is_empty());
+            .and_then(|tail| {
+                let detail = tail
+                    .iter()
+                    .rev()
+                    .take(6)
+                    .rev()
+                    .filter(|line| !line.trim().is_empty())
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                (!detail.is_empty()).then_some(detail)
+            });
         let reported_error = last_sidecar_error_for_wait
             .lock()
             .ok()

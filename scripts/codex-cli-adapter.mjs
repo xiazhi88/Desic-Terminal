@@ -32,11 +32,14 @@ if (args[0] === "exec") {
 }
 
 const javascriptCli = /\\.(?:c|m)?js$/i.test(actualPath);
+const windowsBatchCli = process.platform === "win32" && /\\.(?:cmd|bat)$/i.test(actualPath);
 const command = javascriptCli ? process.execPath : actualPath;
 const commandArgs = javascriptCli ? [actualPath, ...args] : args;
 const child = spawn(command, commandArgs, {
   env: process.env,
   stdio: "inherit",
+  // Windows cannot execute a .cmd/.bat file directly through CreateProcess.
+  shell: windowsBatchCli,
   windowsHide: true
 });
 
