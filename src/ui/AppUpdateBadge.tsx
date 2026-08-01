@@ -97,7 +97,7 @@ export function AppUpdateBadge() {
         className={`rail-logo${state?.available ? " has-update" : ""}`}
         aria-label={state?.available ? t("updateAvailable") : "Desic Terminal"}
         aria-expanded={open}
-        onClick={() => setOpen((current) => !current)}
+        onClick={() => setOpen(true)}
       >
         <img src="/assets/brand/desic-terminal-icon.png" alt="Desic Terminal" />
         {busy ? <Loader2 className="app-update-logo-spinner spin" size={13} /> : null}
@@ -109,9 +109,6 @@ export function AppUpdateBadge() {
               <strong>{t("applicationUpdate")}</strong>
               <span>{statusText}</span>
             </div>
-            <button type="button" onClick={() => void checkNow()} disabled={busy} title={t("checkAgain")}>
-              <RefreshCw size={14} className={state?.status === "checking" ? "spin" : undefined} />
-            </button>
           </header>
           <dl>
             <div><dt>{t("currentVersion")}</dt><dd>{state?.currentVersion ?? "--"}{state?.currentRevision ? ` · ${state.currentRevision}` : ""}</dd></div>
@@ -126,6 +123,10 @@ export function AppUpdateBadge() {
               <small>{percent == null ? statusText : `${statusText} ${percent}%`}</small>
             </div>
           ) : null}
+          <button type="button" className="app-update-check" onClick={() => void checkNow()} disabled={busy}>
+            <RefreshCw size={14} className={state?.status === "checking" ? "spin" : undefined} />
+            {t("checkForUpdates")}
+          </button>
           {state?.available && !state.blockedReason ? (
             <button type="button" className="app-update-install" onClick={() => void applyUpdate()} disabled={busy}>
               <Download size={14} /> {t("updateNow")}

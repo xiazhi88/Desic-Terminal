@@ -1002,6 +1002,7 @@ pub(crate) async fn ai_automation_overview(
 ) -> Result<AiAutomationOverview, String> {
     tokio::task::spawn_blocking(move || {
         let conn = open_automation_database(&app)?;
+        ensure_skill_versions(&app, &conn)?;
         Ok(AiAutomationOverview {
             master_enabled: automation_master_enabled_with_conn(&conn),
             profiles: load_profiles(&conn)?,
@@ -1012,6 +1013,11 @@ pub(crate) async fn ai_automation_overview(
     })
     .await
     .map_err(|err| format!("读取自动化概览任务失败: {err}"))?
+}
+
+pub(crate) fn sync_ai_skill_versions(app: &tauri::AppHandle) -> Result<(), String> {
+    let conn = open_automation_database(app)?;
+    ensure_skill_versions(app, &conn)
 }
 
 fn load_automation_counts(conn: &Connection) -> Result<AiAutomationCounts, String> {
@@ -2504,12 +2510,6 @@ pub(crate) fn ai_skill_version_discard(app: tauri::AppHandle, id: String) -> Res
 
 fn open_automation_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     open_database(app)
-}
-
-pub(crate) fn automation_master_enabled(app: &tauri::AppHandle) -> bool {
-    open_automation_database(app)
-        .map(|conn| automation_master_enabled_with_conn(&conn))
-        .unwrap_or(false)
 }
 
 pub(crate) fn notify_automation_run_record_persisted(app: &tauri::AppHandle, run_id: &str) {

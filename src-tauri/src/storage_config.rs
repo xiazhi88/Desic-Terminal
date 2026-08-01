@@ -384,6 +384,9 @@ pub(crate) fn ai_save_config(
             None => format!("Skill 文件同步失败：{}；已恢复原 AI 配置", sync_error),
         });
     }
+    drop(_config_write_guard);
+    crate::ai_automation::sync_ai_skill_versions(&app)
+        .map_err(|error| format!("AI 配置已保存，但 Skill 版本同步失败：{}", error))?;
     let summary = ai_config_summary_from(config);
     let _ = app.emit("ai:config-updated", summary.clone());
     Ok(summary)

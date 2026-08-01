@@ -500,8 +500,10 @@ button {
 }
 
 .rail {
+  position: relative;
+  z-index: 250;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   border-right: 1px solid var(--line);
   background: #030407;
   display: flex;
@@ -600,17 +602,6 @@ button {
   font-size: 11px;
 }
 
-.app-update-popover header button {
-  width: 30px;
-  height: 30px;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--line);
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted);
-}
-
 .app-update-popover dl {
   margin: 12px 0;
   padding: 9px 0;
@@ -635,6 +626,7 @@ button {
   color: var(--danger) !important;
 }
 
+.app-update-check,
 .app-update-install {
   width: 100%;
   min-height: 34px;
@@ -642,11 +634,21 @@ button {
   align-items: center;
   justify-content: center;
   gap: 7px;
-  border: 1px solid rgba(255, 78, 97, 0.54);
   border-radius: 4px;
+  font-weight: 700;
+}
+
+.app-update-check {
+  border: 1px solid rgba(174, 145, 255, 0.34);
+  background: rgba(149, 92, 255, 0.12);
+  color: #c4a8ff;
+}
+
+.app-update-install {
+  margin-top: 8px;
+  border: 1px solid rgba(255, 78, 97, 0.54);
   background: rgba(255, 78, 97, 0.12);
   color: #ff8292;
-  font-weight: 700;
 }
 
 .app-update-progress {

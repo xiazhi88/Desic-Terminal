@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.0"
+version = "0.1.4"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
@@ -34,7 +34,7 @@ path = "src/main.rs"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["image-png", "protocol-asset", "tray-icon"] }
+tauri = { version = "2", features = ["image-png", "protocol-asset"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"

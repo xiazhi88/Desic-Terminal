@@ -19,14 +19,18 @@ jobs:
           - name: macOS Apple Silicon
             platform: macos-latest
             rust_targets: aarch64-apple-darwin
+            rust_cache_key: macos-arm64-release
+            cache_workspace_crates: false
             args: --target aarch64-apple-darwin --bundles app,dmg
             sidecar_platform: darwin
             sidecar_arch: arm64
             asset_name: Desic-Terminal_macOS-arm64.[ext]
             apple_signing_identity: "-"
           - name: macOS Intel
-            platform: macos-latest
+            platform: macos-15-intel
             rust_targets: x86_64-apple-darwin
+            rust_cache_key: macos-x64-release
+            cache_workspace_crates: false
             args: --target x86_64-apple-darwin --bundles app,dmg
             sidecar_platform: darwin
             sidecar_arch: x64
@@ -35,6 +39,8 @@ jobs:
           - name: Windows x64
             platform: windows-latest
             rust_targets: x86_64-pc-windows-msvc
+            rust_cache_key: windows-x64-tauri-release-v1
+            cache_workspace_crates: true
             args: --target x86_64-pc-windows-msvc --bundles nsis
             sidecar_platform: win32
             sidecar_arch: x64
@@ -43,9 +49,9 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
           node-version: 22
           cache: npm
@@ -57,12 +63,24 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: src-tauri
+          shared-key: ${{ matrix.rust_cache_key }}
+          cache-workspace-crates: ${{ matrix.cache_workspace_crates }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install dependencies
         run: npm ci
 
       - name: Verify release version
         run: npm run test:release-version
+
+      - name: Prepare AI sidecar for runtime verification
+        run: npm run prepare:sidecar
+        env:
+          DESIC_SIDECAR_TARGET_PLATFORM: ${{ matrix.sidecar_platform }}
+          DESIC_SIDECAR_TARGET_ARCH: ${{ matrix.sidecar_arch }}
+
+      - name: Verify packaged AI sidecar runtime
+        run: npm run smoke:ai-packaged-ready
 
       - name: Build and publish desktop artifacts
         uses: tauri-apps/tauri-action@v1

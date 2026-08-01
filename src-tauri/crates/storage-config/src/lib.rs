@@ -15,10 +15,10 @@ pub struct ProxyConfig {
 impl Default for ProxyConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
-            proxy_type: "HTTP".to_string(),
-            host: "127.0.0.1".to_string(),
-            port: 8881,
+            enabled: false,
+            proxy_type: "NONE".to_string(),
+            host: String::new(),
+            port: 0,
             username: None,
             password: None,
         }
@@ -522,6 +522,15 @@ pub struct Permissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn proxy_defaults_to_direct_connection() {
+        let config = ProxyConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.proxy_type, "NONE");
+        assert!(config.host.is_empty());
+        assert_eq!(config.port, 0);
+    }
 
     fn skill_text_fingerprint(skill: &AiSkillDefinition) -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325_u64;

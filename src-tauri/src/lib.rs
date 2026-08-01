@@ -12,19 +12,13 @@ use std::{
     error::Error as StdError,
     fs,
     io::{Cursor, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
         Arc, Mutex, OnceLock,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
-};
-#[cfg(desktop)]
-use tauri::{
-    image::Image,
-    menu::{Menu, MenuItem},
-    tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
 };
 use tauri::{Emitter, Manager};
 use tauri::{WebviewUrl, WebviewWindowBuilder};
@@ -59,14 +53,13 @@ use crate::ai_automation::{
     background_finish_run, notification_feishu_config_save, notification_feishu_send,
     notification_feishu_test, notification_settings_summary,
     notify_automation_run_record_persisted, optimization_suggestion_create, review_complete,
-    review_read_skill_version, set_automation_master_enabled, start_ai_automation_worker,
-    AiAutomationRuntime, BackgroundFinishRunInput, BackgroundRunContext, FeishuSendInput,
-    OptimizationSuggestionInput, ReviewCompleteInput, ReviewSkillVersionInput,
+    review_read_skill_version, start_ai_automation_worker, AiAutomationRuntime,
+    BackgroundFinishRunInput, BackgroundRunContext, FeishuSendInput, OptimizationSuggestionInput,
+    ReviewCompleteInput, ReviewSkillVersionInput,
 };
 use crate::app_updater::{
     app_update_apply_source, app_update_check, app_update_prepare, app_update_restart_source,
-    app_update_status,
-    AppUpdateRuntime,
+    app_update_status, AppUpdateRuntime,
 };
 use crate::instrument_operations::{
     okx_active_instrument_operations, okx_execute_cancel_instrument_orders,
@@ -964,6 +957,14 @@ struct AiSidecarHandle {
 struct AiSidecarCommand {
     payload: serde_json::Value,
     ack: oneshot::Sender<Result<(), String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AiSidecarRuntimePaths {
+    node_binary: PathBuf,
+    entry: PathBuf,
+    launch_dir: PathBuf,
+    work_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -3842,15 +3843,7 @@ async fn ensure_instruments_cache(
 
 #[tauri::command]
 async fn okx_candles(inst_id: String, bar: String, limit: u16) -> Result<Vec<Candle>, String> {
-    if bar != "1m" {
-        return Err("non-1m candles are derived from local 1m data".to_string());
-    }
-    let path = format!(
-        "/api/v5/market/candles?instId={}&bar={}&limit={}",
-        inst_id,
-        bar,
-        limit.min(300)
-    );
+    let path = okx_recent_candles_path(&inst_id, &bar, limit)?;
     let envelope: OkxEnvelope<Vec<String>> = get_json(&path).await?;
     let mut candles = envelope
         .data
@@ -3859,6 +3852,18 @@ async fn okx_candles(inst_id: String, bar: String, limit: u16) -> Result<Vec<Can
         .collect::<Vec<_>>();
     candles.reverse();
     Ok(candles)
+}
+
+fn okx_recent_candles_path(inst_id: &str, bar: &str, limit: u16) -> Result<String, String> {
+    if bar_ms(bar).is_none() {
+        return Err(format!("unsupported interval: {bar}"));
+    }
+    Ok(format!(
+        "/api/v5/market/candles?instId={}&bar={}&limit={}",
+        url_encode(inst_id),
+        url_encode(bar),
+        limit.clamp(1, 300)
+    ))
 }
 
 #[tauri::command]
@@ -5930,7 +5935,7 @@ fn window_action(app: tauri::AppHandle, action: String) -> Result<bool, String> 
             }
         }
         "close" => {
-            window.close().map_err(|err| err.to_string())?;
+            app.exit(0);
             Ok(false)
         }
         _ => Err("unknown window action".to_string()),
@@ -12317,11 +12322,13 @@ async fn ensure_ai_sidecar(
     }
 
     cleanup_legacy_desic_cline_sessions(app)?;
-    let (node_binary, sidecar_path, work_dir) = cline_sidecar_runtime(app)?;
-    let mut command = Command::new(node_binary);
+    let paths = cline_sidecar_runtime(app)?;
+    let mut command = Command::new(paths.node_binary);
     command
-        .arg(sidecar_path)
-        .current_dir(work_dir)
+        .arg("--")
+        .arg(paths.entry)
+        .current_dir(paths.launch_dir)
+        .env("DESIC_SIDECAR_WORK_DIR", paths.work_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -12461,18 +12468,7 @@ async fn ensure_ai_sidecar(
         let stderr_detail = stderr_tail_for_wait
             .lock()
             .ok()
-            .and_then(|tail| {
-                let detail = tail
-                    .iter()
-                    .rev()
-                    .take(6)
-                    .rev()
-                    .filter(|line| !line.trim().is_empty())
-                    .cloned()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                (!detail.is_empty()).then_some(detail)
-            });
+            .and_then(|tail| sidecar_stderr_detail(&tail));
         let reported_error = last_sidecar_error_for_wait
             .lock()
             .ok()
@@ -12482,7 +12478,12 @@ async fn ensure_ai_sidecar(
             Ok(status) => format!("退出状态 {}", status),
             Err(err) => format!("等待进程失败: {}", err),
         };
-        let message = match reported_error.or(stderr_detail) {
+        let detail = reported_error.or(stderr_detail).map(|detail| {
+            load_ai_config(&app_for_wait)
+                .map(|config| sanitize_secret(&detail, &config.api_key))
+                .unwrap_or(detail)
+        });
+        let message = match detail {
             Some(detail) => format!("Cline sidecar 已退出（{}）：{}", exit_detail, detail),
             None => format!(
                 "Cline sidecar 已退出（{}），未收到错误详情或完成事件",
@@ -12612,6 +12613,23 @@ fn fail_ai_sidecar_sessions(runtime: &AiRuntime, message: &str) -> usize {
     notified
 }
 
+fn sidecar_stderr_detail(lines: &[String]) -> Option<String> {
+    let lines = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("node:") || line.starts_with("Error:"))
+        .unwrap_or(0);
+    let detail = lines[start..].join("\n");
+    Some(detail.chars().take(4_000).collect())
+}
+
 #[cfg(test)]
 mod ai_sidecar_disconnect_tests {
     use super::*;
@@ -12649,6 +12667,42 @@ mod ai_sidecar_disconnect_tests {
                 other => panic!("unexpected event: {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn sidecar_stderr_detail_preserves_the_actionable_stack() {
+        let detail = sidecar_stderr_detail(&[
+            "".to_string(),
+            "node:fs:2749".to_string(),
+            "Error: EISDIR: illegal operation on a directory, lstat 'E:'".to_string(),
+            "    at Object.realpathSync (node:fs:2749:25)".to_string(),
+            "Node.js v22.23.1".to_string(),
+        ])
+        .expect("stderr detail");
+
+        assert!(detail.starts_with("node:fs:2749"));
+        assert!(detail.contains("EISDIR"));
+        assert!(detail.contains("realpathSync"));
+    }
+
+    #[test]
+    fn sidecar_runtime_uses_a_relative_entry_for_spaced_install_paths() {
+        let paths = sidecar_runtime_paths(
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar/runtime/node"),
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar/sidecar.mjs"),
+            PathBuf::from("/tmp/Desic Terminal workspace"),
+        )
+        .expect("runtime paths");
+
+        assert_eq!(paths.entry, PathBuf::from("sidecar.mjs"));
+        assert_eq!(
+            paths.launch_dir,
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar")
+        );
+        assert_eq!(
+            paths.work_dir,
+            PathBuf::from("/tmp/Desic Terminal workspace")
+        );
     }
 
     #[test]
@@ -12792,15 +12846,35 @@ fn project_root_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+fn sidecar_runtime_paths(
+    node_binary: PathBuf,
+    sidecar_path: PathBuf,
+    work_dir: PathBuf,
+) -> Result<AiSidecarRuntimePaths, String> {
+    let launch_dir = sidecar_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("Cline sidecar 路径缺少父目录: {}", sidecar_path.display()))?;
+    let entry = sidecar_path
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("Cline sidecar 路径缺少文件名: {}", sidecar_path.display()))?;
+    Ok(AiSidecarRuntimePaths {
+        node_binary,
+        entry,
+        launch_dir,
+        work_dir,
+    })
+}
+
+fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<AiSidecarRuntimePaths, String> {
     if cfg!(debug_assertions) {
-        let sidecar_path = project_root_path()
-            .join("scripts")
-            .join("cline-sidecar.mjs");
+        let sidecar_root = project_root_path().join("scripts");
+        let sidecar_path = sidecar_root.join("cline-sidecar.mjs");
         if !sidecar_path.exists() {
             return Err("未找到 Cline sidecar 脚本 scripts/cline-sidecar.mjs".to_string());
         }
-        return Ok((PathBuf::from("node"), sidecar_path, runtime_work_dir()));
+        return sidecar_runtime_paths(PathBuf::from("node"), sidecar_path, runtime_work_dir());
     }
 
     let resource_dir = app.path().resource_dir().map_err(|err| err.to_string())?;
@@ -12822,7 +12896,7 @@ fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, Pa
             node_binary.display()
         ));
     }
-    Ok((node_binary, sidecar_path, runtime_work_dir()))
+    sidecar_runtime_paths(node_binary, sidecar_path, runtime_work_dir())
 }
 
 fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -> Option<AiEvent> {
@@ -20791,11 +20865,6 @@ fn sanitize_secret(value: &str, secret: &str) -> String {
     value.replace(secret, "[redacted]")
 }
 
-#[derive(Default)]
-struct DesktopExitState {
-    requested: AtomicBool,
-}
-
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ChartCsvExportResult {
@@ -20850,98 +20919,6 @@ async fn export_chart_csv(
     .map_err(|error| format!("导出 K 线 CSV 任务失败: {error}"))?
 }
 
-#[cfg(desktop)]
-fn show_primary_window(app: &tauri::AppHandle) {
-    if let Some(splash) = app.get_webview_window("splash") {
-        if splash.is_visible().unwrap_or(false) {
-            let _ = splash.show();
-            let _ = splash.set_focus();
-            return;
-        }
-    }
-
-    if let Some(main) = app.get_webview_window("main") {
-        let _ = main.show();
-        let _ = main.unminimize();
-        let _ = main.set_focus();
-    }
-}
-
-#[cfg(desktop)]
-fn setup_desktop_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    const OPEN_MENU_ID: &str = "tray-open-main";
-    const PAUSE_MENU_ID: &str = "tray-pause-ai-automation";
-    const EXIT_MENU_ID: &str = "tray-exit-app";
-
-    let open = MenuItem::with_id(app, OPEN_MENU_ID, "打开主界面", true, None::<&str>)?;
-    let pause = MenuItem::with_id(app, PAUSE_MENU_ID, "暂停后台 Agent", true, None::<&str>)?;
-    let exit = MenuItem::with_id(app, EXIT_MENU_ID, "退出程序", true, None::<&str>)?;
-    let menu = Menu::with_items(app, &[&open, &pause, &exit])?;
-
-    let tray_icon = Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
-    let tray = TrayIconBuilder::with_id("desic-terminal")
-        .menu(&menu)
-        .show_menu_on_left_click(false)
-        .tooltip("Desic Terminal")
-        .icon(tray_icon)
-        .icon_as_template(cfg!(target_os = "macos"))
-        .on_menu_event(|app, event| match event.id().as_ref() {
-            OPEN_MENU_ID => show_primary_window(app),
-            PAUSE_MENU_ID => {
-                let event = match set_automation_master_enabled(app, false) {
-                    Ok(_) => json!({
-                        "type": "automationPaused",
-                        "message": "后台 Agent 已暂停",
-                        "action": { "tab": "profiles" }
-                    }),
-                    Err(_) => json!({
-                        "type": "automationPauseFailed",
-                        "message": "暂停后台 Agent 失败，请打开应用重试",
-                        "action": { "tab": "profiles" }
-                    }),
-                };
-                let _ = app.emit("ai:automation-event", event);
-            }
-            EXIT_MENU_ID => {
-                app.state::<DesktopExitState>()
-                    .requested
-                    .store(true, Ordering::SeqCst);
-                app.exit(0);
-            }
-            _ => {}
-        })
-        .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                show_primary_window(tray.app_handle());
-            }
-        });
-    tray.build(app)?;
-
-    if let Some(main) = app.get_webview_window("main") {
-        let app_handle = app.handle().clone();
-        let window_to_hide = main.clone();
-        main.on_window_event(move |event| {
-            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                let exit_requested = app_handle
-                    .state::<DesktopExitState>()
-                    .requested
-                    .load(Ordering::SeqCst);
-                if !exit_requested && ai_automation::automation_master_enabled(&app_handle) {
-                    api.prevent_close();
-                    let _ = window_to_hide.hide();
-                }
-            }
-        });
-    }
-
-    Ok(())
-}
-
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -20952,13 +20929,10 @@ pub fn run() {
         .manage(AiRuntime::default())
         .manage(AiAutomationRuntime::default())
         .manage(IntelligenceRuntime::default())
-        .manage(DesktopExitState::default())
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
             initialize_database_v1(app.handle()).map_err(std::io::Error::other)?;
-            #[cfg(desktop)]
-            setup_desktop_tray(app)?;
             start_trade_execution_recovery(app.handle().clone());
             instrument_operations::start_instrument_operation_recovery(app.handle().clone());
             start_ai_automation_worker(app.handle().clone());
@@ -21153,6 +21127,27 @@ mod tests {
         assert!(normalize_market_icon_base("../btc").is_err());
         assert!(normalize_market_icon_base("btc-usdt").is_err());
         assert!(normalize_market_icon_base("").is_err());
+    }
+
+    #[test]
+    fn recent_candle_fallback_supports_all_chart_intervals() {
+        for bar in [
+            "1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D",
+        ] {
+            let path = okx_recent_candles_path("BTC-USDT-SWAP", bar, 300)
+                .unwrap_or_else(|error| panic!("build recent {bar} candle path: {error}"));
+            assert!(path.contains(&format!("bar={bar}")));
+        }
+        let path = okx_recent_candles_path("BTC-USDT-SWAP", "30m", 500)
+            .expect("build recent 30m candle path");
+        assert_eq!(
+            path,
+            "/api/v5/market/candles?instId=BTC-USDT-SWAP&bar=30m&limit=300"
+        );
+        assert!(okx_recent_candles_path("BTC-USDT-SWAP", "2H", 0)
+            .expect("build recent 2H candle path")
+            .ends_with("limit=1"));
+        assert!(okx_recent_candles_path("BTC-USDT-SWAP", "7m", 300).is_err());
     }
 
     #[test]

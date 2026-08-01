@@ -3148,6 +3148,11 @@ async function ensureCline() {
 }
 
 async function main() {
+  const runtimeWorkDir = process.env.DESIC_SIDECAR_WORK_DIR;
+  if (runtimeWorkDir) {
+    process.chdir(runtimeWorkDir);
+    delete process.env.DESIC_SIDECAR_WORK_DIR;
+  }
   emit({ type: "status", sessionId: "system", status: "ready", message: "sidecar ready" });
   void ensureCline()
     .then(() => emit({ type: "status", sessionId: "system", status: "core-ready", message: "ClineCore ready" }))

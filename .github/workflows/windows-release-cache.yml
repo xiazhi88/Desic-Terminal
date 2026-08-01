@@ -1,0 +1,63 @@
+name: Warm Windows release cache
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "src-tauri/**"
+      - "src/**"
+      - "public/**"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "index.html"
+      - "vite.config.*"
+      - "tsconfig*.json"
+      - ".github/workflows/release.yml"
+      - ".github/workflows/windows-release-cache.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-release-cache-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-release-cache:
+    name: Windows x64 Rust cache
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: windows-x64-tauri-release-v1
+          cache-workspace-crates: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare AI sidecar
+        run: npm run prepare:sidecar
+
+      - name: Verify packaged AI sidecar runtime
+        run: npm run smoke:ai-packaged-ready
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Compile Windows release crates
+        run: cargo build --manifest-path src-tauri/Cargo.toml --release --target x86_64-pc-windows-msvc --features tauri/custom-protocol -p desic-terminal
