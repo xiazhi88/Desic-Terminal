@@ -361,4 +361,4 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 用户数据和凭据必须位于应用数据目录或本地敏感配置目录，不得写进安装目录、前端资源或可被升级替换的源码文件。
 - 源码更新只允许干净、未分叉的 `main` 快进到 `origin/main`。存在本地修改、分支不符或历史分叉时只提示原因，不得自动 stash、reset、rebase 或覆盖文件。
 - Release 必须分别验证 Windows x64、macOS Apple Silicon 和 macOS Intel 的安装、升级、自动重启及数据保留。没有实际验证的平台不得宣称更新链路已可用。
-- Windows Release 的 Rust 缓存必须由 `main` 分支预热并使用稳定共享键，预热命令必须包含正式 Tauri 构建启用的 `tauri/custom-protocol` feature；标签构建只恢复缓存、不保存标签专属缓存，避免每个版本重复完整编译和上传无复用价值的缓存。
+- Windows Release 的 Rust 缓存必须由 `main` 分支预热并使用稳定共享键；预热时先生成正式构建所需的 sidecar 和 `frontendDist`，再使用 `tauri/custom-protocol` feature 编译。标签构建只恢复缓存、不保存标签专属缓存，避免每个版本重复完整编译和上传无复用价值的缓存。
