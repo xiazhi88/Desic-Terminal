@@ -731,6 +731,11 @@ fn ai_cli_candidates(program: &str) -> Vec<PathBuf> {
             candidates.push(bin.join(&executable_name));
         }
     }
+    if cfg!(windows) {
+        if let Some(app_data) = std::env::var_os("APPDATA").map(PathBuf::from) {
+            candidates.push(app_data.join("npm").join(&executable_name));
+        }
+    }
     let home_var = if cfg!(windows) { "USERPROFILE" } else { "HOME" };
     if let Some(home) = std::env::var_os(home_var).map(PathBuf::from) {
         for relative in [
