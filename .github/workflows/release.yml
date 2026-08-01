@@ -27,7 +27,7 @@ jobs:
             asset_name: Desic-Terminal_macOS-arm64.[ext]
             apple_signing_identity: "-"
           - name: macOS Intel
-            platform: macos-latest
+            platform: macos-15-intel
             rust_targets: x86_64-apple-darwin
             rust_cache_key: macos-x64-release
             cache_workspace_crates: false
