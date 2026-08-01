@@ -73,6 +73,15 @@ jobs:
       - name: Verify release version
         run: npm run test:release-version
 
+      - name: Prepare AI sidecar for runtime verification
+        run: npm run prepare:sidecar
+        env:
+          DESIC_SIDECAR_TARGET_PLATFORM: ${{ matrix.sidecar_platform }}
+          DESIC_SIDECAR_TARGET_ARCH: ${{ matrix.sidecar_arch }}
+
+      - name: Verify packaged AI sidecar runtime
+        run: npm run smoke:ai-packaged-ready
+
       - name: Build and publish desktop artifacts
         uses: tauri-apps/tauri-action@v1
         env:

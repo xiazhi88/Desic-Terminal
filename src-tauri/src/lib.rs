@@ -12,7 +12,7 @@ use std::{
     error::Error as StdError,
     fs,
     io::{Cursor, Read, Write},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
@@ -957,6 +957,14 @@ struct AiSidecarHandle {
 struct AiSidecarCommand {
     payload: serde_json::Value,
     ack: oneshot::Sender<Result<(), String>>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct AiSidecarRuntimePaths {
+    node_binary: PathBuf,
+    entry: PathBuf,
+    launch_dir: PathBuf,
+    work_dir: PathBuf,
 }
 
 #[derive(Debug, Serialize)]
@@ -12314,11 +12322,13 @@ async fn ensure_ai_sidecar(
     }
 
     cleanup_legacy_desic_cline_sessions(app)?;
-    let (node_binary, sidecar_path, work_dir) = cline_sidecar_runtime(app)?;
-    let mut command = Command::new(node_binary);
+    let paths = cline_sidecar_runtime(app)?;
+    let mut command = Command::new(paths.node_binary);
     command
-        .arg(sidecar_path)
-        .current_dir(work_dir)
+        .arg("--")
+        .arg(paths.entry)
+        .current_dir(paths.launch_dir)
+        .env("DESIC_SIDECAR_WORK_DIR", paths.work_dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -12454,8 +12464,7 @@ async fn ensure_ai_sidecar(
         let stderr_detail = stderr_tail_for_wait
             .lock()
             .ok()
-            .and_then(|tail| tail.last().cloned())
-            .filter(|line| !line.trim().is_empty());
+            .and_then(|tail| sidecar_stderr_detail(&tail));
         let reported_error = last_sidecar_error_for_wait
             .lock()
             .ok()
@@ -12465,7 +12474,12 @@ async fn ensure_ai_sidecar(
             Ok(status) => format!("退出状态 {}", status),
             Err(err) => format!("等待进程失败: {}", err),
         };
-        let message = match reported_error.or(stderr_detail) {
+        let detail = reported_error.or(stderr_detail).map(|detail| {
+            load_ai_config(&app_for_wait)
+                .map(|config| sanitize_secret(&detail, &config.api_key))
+                .unwrap_or(detail)
+        });
+        let message = match detail {
             Some(detail) => format!("Cline sidecar 已退出（{}）：{}", exit_detail, detail),
             None => format!(
                 "Cline sidecar 已退出（{}），未收到错误详情或完成事件",
@@ -12595,6 +12609,23 @@ fn fail_ai_sidecar_sessions(runtime: &AiRuntime, message: &str) -> usize {
     notified
 }
 
+fn sidecar_stderr_detail(lines: &[String]) -> Option<String> {
+    let lines = lines
+        .iter()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("node:") || line.starts_with("Error:"))
+        .unwrap_or(0);
+    let detail = lines[start..].join("\n");
+    Some(detail.chars().take(4_000).collect())
+}
+
 #[cfg(test)]
 mod ai_sidecar_disconnect_tests {
     use super::*;
@@ -12632,6 +12663,42 @@ mod ai_sidecar_disconnect_tests {
                 other => panic!("unexpected event: {:?}", other),
             }
         }
+    }
+
+    #[test]
+    fn sidecar_stderr_detail_preserves_the_actionable_stack() {
+        let detail = sidecar_stderr_detail(&[
+            "".to_string(),
+            "node:fs:2749".to_string(),
+            "Error: EISDIR: illegal operation on a directory, lstat 'E:'".to_string(),
+            "    at Object.realpathSync (node:fs:2749:25)".to_string(),
+            "Node.js v22.23.1".to_string(),
+        ])
+        .expect("stderr detail");
+
+        assert!(detail.starts_with("node:fs:2749"));
+        assert!(detail.contains("EISDIR"));
+        assert!(detail.contains("realpathSync"));
+    }
+
+    #[test]
+    fn sidecar_runtime_uses_a_relative_entry_for_spaced_install_paths() {
+        let paths = sidecar_runtime_paths(
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar/runtime/node"),
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar/sidecar.mjs"),
+            PathBuf::from("/tmp/Desic Terminal workspace"),
+        )
+        .expect("runtime paths");
+
+        assert_eq!(paths.entry, PathBuf::from("sidecar.mjs"));
+        assert_eq!(
+            paths.launch_dir,
+            PathBuf::from("/Applications/Desic Terminal/ai-sidecar")
+        );
+        assert_eq!(
+            paths.work_dir,
+            PathBuf::from("/tmp/Desic Terminal workspace")
+        );
     }
 
     #[test]
@@ -12775,15 +12842,35 @@ fn project_root_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, PathBuf), String> {
+fn sidecar_runtime_paths(
+    node_binary: PathBuf,
+    sidecar_path: PathBuf,
+    work_dir: PathBuf,
+) -> Result<AiSidecarRuntimePaths, String> {
+    let launch_dir = sidecar_path
+        .parent()
+        .map(Path::to_path_buf)
+        .ok_or_else(|| format!("Cline sidecar 路径缺少父目录: {}", sidecar_path.display()))?;
+    let entry = sidecar_path
+        .file_name()
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("Cline sidecar 路径缺少文件名: {}", sidecar_path.display()))?;
+    Ok(AiSidecarRuntimePaths {
+        node_binary,
+        entry,
+        launch_dir,
+        work_dir,
+    })
+}
+
+fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<AiSidecarRuntimePaths, String> {
     if cfg!(debug_assertions) {
-        let sidecar_path = project_root_path()
-            .join("scripts")
-            .join("cline-sidecar.mjs");
+        let sidecar_root = project_root_path().join("scripts");
+        let sidecar_path = sidecar_root.join("cline-sidecar.mjs");
         if !sidecar_path.exists() {
             return Err("未找到 Cline sidecar 脚本 scripts/cline-sidecar.mjs".to_string());
         }
-        return Ok((PathBuf::from("node"), sidecar_path, runtime_work_dir()));
+        return sidecar_runtime_paths(PathBuf::from("node"), sidecar_path, runtime_work_dir());
     }
 
     let resource_dir = app.path().resource_dir().map_err(|err| err.to_string())?;
@@ -12805,7 +12892,7 @@ fn cline_sidecar_runtime(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf, Pa
             node_binary.display()
         ));
     }
-    Ok((node_binary, sidecar_path, runtime_work_dir()))
+    sidecar_runtime_paths(node_binary, sidecar_path, runtime_work_dir())
 }
 
 fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -> Option<AiEvent> {

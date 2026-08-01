@@ -1,12 +1,17 @@
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { basename, dirname } from "node:path";
 import readline from "node:readline";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 const sidecarPath = fileURLToPath(new URL("./cline-sidecar.mjs", import.meta.url));
-const child = spawn(process.execPath, [sidecarPath], {
-  cwd: root,
-  env: { ...process.env, DESIC_AI_EVENT_DEBUG: "0" },
+const child = spawn(process.execPath, ["--", basename(sidecarPath)], {
+  cwd: dirname(sidecarPath),
+  env: {
+    ...process.env,
+    DESIC_AI_EVENT_DEBUG: "0",
+    DESIC_SIDECAR_WORK_DIR: root
+  },
   stdio: ["pipe", "pipe", "pipe"]
 });
 const events = [];

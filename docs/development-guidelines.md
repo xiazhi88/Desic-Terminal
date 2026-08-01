@@ -31,6 +31,7 @@ node scripts/kill-dev-port.mjs
 - `scripts/kill-dev-port.mjs` 必须保持跨平台：Windows 只清理匹配 workspace/Vite 的进程树，macOS 只清理匹配 workspace/Vite 的监听进程，禁止按端口无条件杀死其它应用。
 - Debug 模式继续使用项目内 `config/cache/logs/diagnostics/.cline`，兼容现有 Windows 开发数据；Release 模式必须使用 Tauri `app_config_dir/app_cache_dir/app_log_dir/app_data_dir`，禁止把 `CARGO_MANIFEST_DIR` 当安装后的可写目录。
 - Release AI sidecar 必须通过 `npm run prepare:sidecar` 生成：Cline SDK 打成单文件，Node 版本固定并校验官方 SHA-256；生成目录 `src-tauri/resources/ai-sidecar` 不提交二进制。修改 sidecar 后至少验证包内运行时能返回 `ready` 和 `core-ready` 且无 error 事件。
+- Windows 安装目录可能包含空格。启动随包 Node 时必须把 `ai-sidecar` 设为进程启动目录并使用相对入口 `sidecar.mjs`，再通过 `DESIC_SIDECAR_WORK_DIR` 切换业务工作目录；禁止直接把带空格的绝对脚本路径作为 Node 入口。Release 构建必须运行 `npm run smoke:ai-packaged-ready`，真实启动随包 Node 并等待 `core-ready`。
 - Windows NSIS 正式产物使用 `npm run tauri:build -- --bundles nsis`。构建后必须同时检查命令退出码、日志中是否出现 `failed to bundle project`、目标 EXE 是否存在及其 SHA-256；不能只依据 Tauri 输出的 `Built application at` 判断成功。
 - Windows 构建机系统盘或 `%TEMP%` 空间不足时，NSIS 可能以 `error creating mmap` 失败。可以把 `TEMP`、`TMP` 与 `CARGO_TARGET_DIR` 指向有足够空间的本地磁盘；这些临时 target、安装包、哈希和签名文件均属于构建产物，不提交到 Git。
 - Debug NSIS 只能用于本地安装验证，不得作为正式 Release。正式对外产物必须使用 Cargo Release、完成 Authenticode 签名，并在干净用户环境验证安装、升级、卸载、WebView2、本地敏感配置及包内 sidecar。

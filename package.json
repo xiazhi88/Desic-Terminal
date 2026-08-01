@@ -53,6 +53,7 @@
     "smoke:trade-readiness": "cargo run --manifest-path src-tauri/Cargo.toml -p desic-smoke-tools --bin smoke_trade_readiness",
     "smoke:ai-stop": "node scripts/smoke-cline-sidecar-stop.mjs",
     "smoke:ai-ready": "node scripts/smoke-cline-sidecar-ready.mjs",
+    "smoke:ai-packaged-ready": "node scripts/smoke-packaged-sidecar-ready.mjs",
     "smoke:ai-restart": "node scripts/smoke-cline-sidecar-restart.mjs",
     "smoke:ai-10rounds": "node scripts/smoke-cline-sidecar-10rounds.mjs",
     "smoke:ai-subagent": "node scripts/smoke-cline-sidecar-subagent.mjs",

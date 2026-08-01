@@ -53,6 +53,9 @@ jobs:
       - name: Prepare AI sidecar
         run: npm run prepare:sidecar
 
+      - name: Verify packaged AI sidecar runtime
+        run: npm run smoke:ai-packaged-ready
+
       - name: Build frontend
         run: npm run build
 
