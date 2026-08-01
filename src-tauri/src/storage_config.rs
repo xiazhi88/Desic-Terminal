@@ -714,7 +714,13 @@ fn ai_cli_candidates(program: &str) -> Vec<PathBuf> {
     } else {
         program.to_string()
     };
-    let mut candidates = vec![PathBuf::from(program)];
+    // A GUI-launched process can have a narrower PATH than an interactive shell.
+    // On Windows, prefer known absolute npm locations before a bare command name.
+    let mut candidates = if cfg!(windows) {
+        Vec::new()
+    } else {
+        vec![PathBuf::from(program)]
+    };
     for env_name in ["NVM_BIN", "VOLTA_HOME"] {
         if let Some(path) = std::env::var_os(env_name).map(PathBuf::from) {
             let bin = if env_name == "VOLTA_HOME" {
@@ -750,6 +756,8 @@ fn ai_cli_candidates(program: &str) -> Vec<PathBuf> {
             PathBuf::from("/opt/homebrew/bin").join(&executable_name),
             PathBuf::from("/usr/local/bin").join(&executable_name),
         ]);
+    } else {
+        candidates.push(PathBuf::from(program));
     }
     let mut unique = Vec::new();
     for candidate in candidates {

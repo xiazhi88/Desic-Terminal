@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { existsSync } from "node:fs";
 import { registerAsyncHandler } from "@cline/llms";
 import { streamText } from "ai";
 import { createCodexExec, createLocalMcpServer } from "ai-sdk-provider-codex-cli";
@@ -89,6 +90,19 @@ export function toCodexMessages(messages = []) {
         : "";
     return content.trim() ? [{ role, content }] : [];
   });
+}
+
+export function resolveWindowsCodexCliPath(cliPath, environment = process.env, pathExists = existsSync) {
+  const configured = String(cliPath || "").trim();
+  if (process.platform !== "win32" || !configured || isAbsolute(configured)) return configured;
+  const filename = /\.(?:cmd|bat|exe|cjs|mjs|js)$/i.test(configured)
+    ? configured
+    : `${configured}.cmd`;
+  const candidates = [
+    environment.APPDATA && join(environment.APPDATA, "npm", filename),
+    environment.USERPROFILE && join(environment.USERPROFILE, "AppData", "Roaming", "npm", filename)
+  ].filter(Boolean);
+  return candidates.find((candidate) => pathExists(candidate)) || configured;
 }
 
 function tokenCount(value) {
@@ -198,7 +212,7 @@ export async function createIsolatedCodexCli(cliPath) {
     await writeFile(wrapperPath, CODEX_WRAPPER_SOURCE, { encoding: "utf8", mode: 0o700 });
     return {
       path: wrapperPath,
-      env: { DESIC_CODEX_CLI_PATH: cliPath },
+      env: { DESIC_CODEX_CLI_PATH: resolveWindowsCodexCliPath(cliPath) },
       cleanup: () => rm(directory, { force: true, recursive: true })
     };
   } catch (error) {

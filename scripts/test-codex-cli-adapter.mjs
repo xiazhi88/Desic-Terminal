@@ -8,10 +8,21 @@ import {
   createCodexBridgeTool,
   mapCodexProviderPart,
   normalizeCodexUsage,
+  resolveWindowsCodexCliPath,
   registerCodexToolBridge,
   registerDesicCodexCliHandler,
   toCodexMessages
 } from "./codex-cli-adapter.mjs";
+
+const windowsNpmCodex = "C:\\Users\\tester\\AppData\\Roaming\\npm\\codex.cmd";
+const resolvedWindowsCodex = resolveWindowsCodexCliPath(
+  "codex",
+  { APPDATA: "C:\\Users\\tester\\AppData\\Roaming" },
+  (candidate) => candidate === windowsNpmCodex
+);
+if (process.platform === "win32") {
+  assert.equal(resolvedWindowsCodex, windowsNpmCodex);
+}
 
 assert.deepEqual(toCodexMessages([
   { role: "user", content: "读取行情" },
