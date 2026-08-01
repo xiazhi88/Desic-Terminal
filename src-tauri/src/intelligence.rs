@@ -547,20 +547,28 @@ fn resolve_intelligence_account(
     Err(first_error.unwrap_or_else(|| "尚未配置可用于市场情报的 OKX 实盘只读账户".to_string()))
 }
 
+fn resolve_collector_account_id(
+    accounts: &[LocalAccount],
+    preferred_id: Option<&str>,
+) -> Option<String> {
+    match preferred_id {
+        Some(account_id) => resolve_intelligence_account(accounts, Some(account_id))
+            .ok()
+            .map(|account| account.id),
+        None => resolve_intelligence_account(accounts, None)
+            .ok()
+            .map(|account| account.id),
+    }
+}
+
 fn reconcile_intelligence_settings(
     app: &tauri::AppHandle,
     conn: &Connection,
 ) -> Result<IntelligenceSettings, String> {
     let mut settings = load_settings(conn)?;
     let accounts = load_accounts_config(app)?.accounts;
-    let resolved = settings
-        .collector_account_id
-        .as_deref()
-        .and_then(|account_id| {
-            resolve_intelligence_account(&accounts, Some(account_id))
-                .ok()
-                .map(|account| account.id)
-        });
+    let resolved =
+        resolve_collector_account_id(&accounts, settings.collector_account_id.as_deref());
     if settings.collector_account_id != resolved {
         settings.collector_account_id = resolved;
         settings = save_settings(conn, settings, now_ms())?;
@@ -4580,6 +4588,24 @@ mod tests {
         assert!(validate_intelligence_account(test_account("demo", true)).is_err());
         assert!(validate_intelligence_account(test_account("live", false)).is_err());
         assert!(validate_intelligence_account(test_account("live", true)).is_ok());
+    }
+
+    #[test]
+    fn collector_automatically_uses_the_first_eligible_live_account() {
+        let mut demo = test_account("demo", true);
+        demo.id = "demo-account".to_string();
+        let mut live = test_account("live", true);
+        live.id = "live-account".to_string();
+        let accounts = vec![demo, live];
+
+        assert_eq!(
+            resolve_collector_account_id(&accounts, None).as_deref(),
+            Some("live-account")
+        );
+        assert_eq!(
+            resolve_collector_account_id(&accounts, Some("demo-account")).as_deref(),
+            None
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import Ajv from "ajv";
+import defaultAiConfig from "../shared/default-ai-config.json" with { type: "json" };
 import {
   cleanupCodexToolBridges,
   registerCodexToolBridge,
@@ -453,14 +454,7 @@ const PERPETUAL_ACCOUNT_RISK_RULE = [
 
 function buildSystemPrompt(config, permissionMode) {
   const basePrompt = String(config.systemPrompt || "").trim() ||
-    [
-      "你是 Desic Terminal 桌面交易终端中的 AI 交易助手。",
-      "使用中文回答，表达简洁、准确、可执行。",
-      "交易相关内容必须区分事实、推断和建议，并提示风险。",
-      "不要声称已经执行未通过工具完成的动作。",
-      "禁止泄露完整 API Key、绕过权限、修改账号/代理/API Key 配置。",
-      "当用户问题缺少关键条件时，先说明缺口，再给出可验证的下一步。"
-    ].join("\n");
+    defaultAiConfig.systemPrompt.join("\n");
   const customRules = String(config.customRules || "").trim();
   const skillDefinitions = Array.isArray(config.skillDefinitions) ? config.skillDefinitions : [];
   const fixedSkill = skillDefinitions.find((item) => String(item?.id || "") === "desic-core-operations");

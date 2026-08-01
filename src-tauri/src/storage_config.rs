@@ -1987,6 +1987,11 @@ fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
     const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
+    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 3] = [
+        ("trading-philosophy", 0x28b8_35c6_2b63_9623),
+        ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
+        ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
+    ];
     let protected_skill_ids = [
         "desic-core-operations",
         "trading-philosophy",
@@ -2015,6 +2020,17 @@ fn merge_ai_skill_definitions(
         {
             // Upgrade only the untouched legacy default. Any user-edited text gets a different
             // fingerprint and remains authoritative for this required, customizable Skill.
+            continue;
+        }
+        if item.builtin
+            && LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .any(|(id, fingerprint)| {
+                    item.id == *id && skill_text_fingerprint(&item) == *fingerprint
+                })
+        {
+            // Replace only an untouched Chinese baseline with the shared English default.
+            // User-edited built-in Skills have a different fingerprint and stay authoritative.
             continue;
         }
         item.name = item.id.clone();
@@ -2398,6 +2414,7 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
     let mut config: AiConfig = serde_json::from_str(&content).map_err(|err| err.to_string())?;
     let original_permission_mode = config.permission_mode.clone();
     let original_reasoning_depth = config.reasoning_depth.clone();
+    let original_system_prompt = config.system_prompt.clone();
     let original_active_model_id = config.active_model_id.clone();
     let original_models = ai_model_metadata_fingerprint(&config.models);
     let original_enabled_skills = serde_json::to_string(&config.enabled_skills).unwrap_or_default();
@@ -2405,6 +2422,8 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
         serde_json::to_string(&config.skill_definitions).unwrap_or_default();
     config.permission_mode = normalize_ai_permission_mode(Some(&config.permission_mode));
     config.reasoning_depth = normalize_ai_reasoning_depth(Some(&config.reasoning_depth));
+    config.system_prompt =
+        desic_storage_config::migrate_default_ai_system_prompt(config.system_prompt);
     config.enabled_skills = normalize_ai_enabled_skills(config.enabled_skills);
     config.skill_definitions = merge_ai_skill_definitions(config.skill_definitions);
     config = normalize_ai_models(config);
@@ -2416,6 +2435,7 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
             != serde_json::to_string(&config.skill_definitions).unwrap_or_default();
     let model_config_changed = config.permission_mode != original_permission_mode
         || config.reasoning_depth != original_reasoning_depth
+        || config.system_prompt != original_system_prompt
         || config.active_model_id != original_active_model_id
         || ai_model_metadata_fingerprint(&config.models) != original_models;
     if model_config_changed || skill_config_changed {

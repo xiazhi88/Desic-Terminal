@@ -119,6 +119,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
   - 是否有 OKX code、HTTP 状态、超时、TLS、DNS、代理认证错误。
 - Windows 配置 ACL 加固只能在敏感配置保存或启动迁移时执行，禁止放在 `load_*_config` 高频读取路径中；`icacls` 正常输出必须重定向，避免网络请求期间反复刷终端。
 - 启动页必须始终保留可见的代理配置入口。启动网络门禁、行情加载或 K 线基线出现连接拒绝、代理隧道、TCP 连接等网络错误时，应同时提供代理配置和重试；其它启动检查失败也必须提供重试，不应进入主 UI 后再大量报错。
+- 安装版启动时必须先通过 Tauri 后端完成 OKX 时间、Public WSS、Business WSS 和 ticker 的原子网络门禁，全部通过前不开始账户、资源、数据库或 K 线初始化。该门禁不得使用 `invokeOptional` 吞掉后端错误后回退 WebView 直连，否则会绕过桌面代理并把真实网络故障拖到后续步骤。
 
 ## 6. 实时数据与 UI 性能
 
@@ -188,6 +189,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - AI 配置保存成功后必须发布只含脱敏摘要的配置变更事件；模型选择器应实时合并新摘要，当前选择仍有效时不得被 active model 强制覆盖。事件载荷不得包含 API Key、OAuth Token 或本地认证文件路径。
 - 持久化配置引用账户、AI 模型等可删除对象的稳定 ID 时，读取摘要和实际执行路径都必须重新校验引用。失效的 AI 模型引用可回退并写回当前模型；失效的账户引用必须清除并暂停相关后台任务，不能静默切换到其它账户。
 - `desic-core-operations`、`trading-philosophy`、`okx-news-intelligence`、`okx-smart-money-analysis` 是全局必需 Skills：界面必须显示为已启用且不可关闭，Rust 保存和读取配置时必须补齐三项显式 Skill；`desic-core-operations` 继续作为不可编辑的隐式固定规范，不写入 `enabledSkills`。`trading-philosophy` 必需但可定制，升级默认内容时只能迁移完全未修改的旧内置版本，必须保留用户自定义内容；其默认理念约束证据、风险和可修正性，不得把具体指标、周期、盈亏比或风险比例固化为普适规则。
+- 默认系统 Prompt 与四个内置 Skill 的基线统一维护在 `shared/default-ai-config.json`，Rust、前端和 Sidecar 不得各自复制一份。默认基线升级只能按旧内容精确匹配或指纹迁移；任何用户编辑过的 Prompt 或 Skill 都必须原样保留。
 - Cline Core 0.0.56 的 `subscribe` 流式文本和 reasoning 增量位于 `agent_event.payload.event`，并以每段一个 `content_start` 事件发送；sidecar 必须同时映射嵌套的 text、reasoning 和 tool 事件，不能只处理顶层 delta 或等待 `content_end`，否则 UI 会停在 running，直到结束后一次性显示。
 - Cline 最终正文只认原生 `AgentDoneEvent.text`（同步 `start()` 结果只作为同结构兜底）。`content_start/content_end` 是当前 iteration 的内容块：可作为不落库的正文预览实时显示；出现 tool call 或 `iteration_end.hadToolCalls=true` 时通过结构化事件清空预览并将该轮文本归入过程区，无工具的最后一轮由 `done.text` 替换预览。禁止通过正文前缀、子串重叠、关键词或重复段落匹配来推断“过程/结果”。
 - AI 工具公开的 `startTime/endTime` 统一使用 13 位 Unix 毫秒时间戳；后端可兼容旧秒级值，但不得对已经是毫秒的值再次乘 1000。UTC 日窗口若上层使用 `[start, end)`，传给闭区间工具前必须将 `end` 减 1 毫秒。
@@ -323,7 +325,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 情报账户只能使用 OKX Global live 读取权限账户。工具参数不得接受 API Key、Secret、Passphrase、CLI profile、OAuth token 或 environment 覆盖。
 - 情报工具始终只读。新闻、情绪、宏观事件和聪明钱只能形成可追溯证据；涉及交易仍必须创建/修订交易机会并执行既有预检、确认、审计和幂等链路。
 - Smart Money 聚合信号只覆盖 USDT/USDS 线性合约，名义价值统一按入场价口径；新增页面、工具或文档不得省略这两个 limitation。
-- 采集任务按查询 scope 互斥并写 `intelligence_sync_state`；后台账户失效时不得静默切换其它账户。经济日历无论从页面、Agent 还是后台触发，都必须共享 5 秒全局门禁。
+- 采集任务按查询 scope 互斥并写 `intelligence_sync_state`。首次启用且 `collectorAccountId` 未设置时，后台应自动选择第一个合格的 OKX Global 实盘只读账户；已经指定的后台账户失效时不得静默切换其它账户。保存合格账户后应在后台触发一次初始同步，不能让用户等待下一轮定时任务。经济日历无论从页面、Agent 还是后台触发，都必须共享 5 秒全局门禁。
 - fixture 只能使用明显脱敏样本，固定 provider 版本和 commit。升级 provider 前必须同时通过 fixture、Rust adapter 测试、AI policy、Playwright 和真实 live 只读 smoke。
 - OKX Trading Data/Rubik 公共接口单页最多 100 条；24 小时 5 分钟数据等长窗口必须显式分页，不能把首个 100 点误报为完整覆盖率。查询本地历史时必须取时间窗内最新数据，再按时间升序交给图表。
 - 本地只持久化 5 分钟和 1 小时衍生品主序列；4 小时和日线由 1 小时数据按 UTC epoch 桶确定性聚合。不要为了显示 Asia/Shanghai 改写存储时间戳。

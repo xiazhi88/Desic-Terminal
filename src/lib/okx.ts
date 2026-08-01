@@ -213,8 +213,11 @@ async function okxFetch<T>(path: string): Promise<T> {
 }
 
 export async function syncOkxTime(): Promise<OkxTimeState> {
-  const viaTauri = await invokeOptional<OkxTimeState>("okx_sync_time");
-  if (viaTauri) return viaTauri;
+  if (isTauriRuntime()) {
+    const viaTauri = await invokeDesktop<OkxTimeState>("okx_sync_time");
+    if (!viaTauri) throw new Error("OKX time probe returned no result");
+    return viaTauri;
+  }
 
   const localSendMs = Date.now();
   const json = await okxFetch<{ data: { ts: string }[] }>("/api/v5/public/time");
@@ -536,15 +539,21 @@ export async function saveWatchlistConfig(config: WatchlistConfig): Promise<Watc
 }
 
 export async function testPublicWsReachability(): Promise<OkxWsProbeResult> {
-  const viaTauri = await invokeOptional<OkxWsProbeResult>("okx_public_ws_probe");
-  if (viaTauri) return viaTauri;
+  if (isTauriRuntime()) {
+    const viaTauri = await invokeDesktop<OkxWsProbeResult>("okx_public_ws_probe");
+    if (!viaTauri) throw new Error("OKX Public WebSocket probe returned no result");
+    return viaTauri;
+  }
 
   return testBrowserWsReachability(PUBLIC_WS, { channel: "tickers", instId: "BTC-USDT-SWAP" }, "tickers", "OKX Public WS 可达", "OKX Public WebSocket");
 }
 
 export async function testBusinessWsReachability(): Promise<OkxWsProbeResult> {
-  const viaTauri = await invokeOptional<OkxWsProbeResult>("okx_business_ws_probe");
-  if (viaTauri) return viaTauri;
+  if (isTauriRuntime()) {
+    const viaTauri = await invokeDesktop<OkxWsProbeResult>("okx_business_ws_probe");
+    if (!viaTauri) throw new Error("OKX Business WebSocket probe returned no result");
+    return viaTauri;
+  }
 
   return testBrowserWsReachability(BUSINESS_WS, { channel: "candle1m", instId: "BTC-USDT-SWAP" }, "candle1m", "OKX Business WS 可达", "OKX Business WebSocket");
 }
@@ -656,8 +665,11 @@ function arrayBufferToBase64(buffer: ArrayBuffer) {
 }
 
 export async function fetchTicker(instId: string): Promise<Ticker> {
-  const viaTauri = await invokeOptional<Ticker>("okx_ticker", { instId });
-  if (viaTauri) return viaTauri;
+  if (isTauriRuntime()) {
+    const viaTauri = await invokeDesktop<Ticker>("okx_ticker", { instId });
+    if (!viaTauri) throw new Error(`OKX ticker returned no result for ${instId}`);
+    return viaTauri;
+  }
 
   const json = await okxFetch<{ data: Record<string, string>[] }>(`/api/v5/market/ticker?instId=${encodeURIComponent(instId)}`);
   return normalizeTicker(json.data[0]);
