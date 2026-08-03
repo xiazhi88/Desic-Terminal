@@ -4,9 +4,18 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Desic Terminal</title>
+    <style>
+      html, body, #root { width: 100%; min-width: 100%; height: 100%; min-height: 100%; margin: 0; background: #030304; }
+      .boot-placeholder { display: grid; min-height: 100%; place-items: center; overflow: hidden; color: #f7f3ff; font: 600 18px/1.2 system-ui, "Microsoft YaHei", sans-serif; background: radial-gradient(circle at 52% 46%, #171226 0, #070609 30%, #030304 68%); }
+      .boot-placeholder__content { display: grid; justify-items: center; gap: 18px; }
+      .boot-placeholder__mark { width: 38px; height: 38px; border: 1px solid rgba(183,146,255,.72); border-radius: 50%; box-shadow: 0 0 22px rgba(183,146,255,.35); animation: bootPulse 1.4s ease-in-out infinite; }
+      .boot-placeholder small { color: rgba(247,243,255,.62); font-size: 12px; font-weight: 500; }
+      @keyframes bootPulse { 50% { transform: scale(1.16); opacity: .64; } }
+      @media (prefers-reduced-motion: reduce) { .boot-placeholder__mark { animation: none; } }
+    </style>
   </head>
   <body>
-    <div id="root"></div>
+    <div id="root"><main class="boot-placeholder" aria-label="Desic Terminal 正在启动"><div class="boot-placeholder__content"><i class="boot-placeholder__mark"></i><span>Desic Terminal</span><small>正在准备桌面终端</small></div></main></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

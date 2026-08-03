@@ -1,3 +1,23 @@
+.startup-boot-screen {
+  min-height: 100%;
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  align-content: center;
+  color: #f7f3ff;
+  background: #030304;
+  font: 600 18px/1.2 Inter, ui-sans-serif, system-ui, sans-serif;
+}
+
+.startup-boot-screen i {
+  width: 26px;
+  height: 26px;
+  border: 2px solid rgba(183, 146, 255, 0.26);
+  border-top-color: #b792ff;
+  border-radius: 50%;
+  animation: spin 900ms linear infinite;
+}
+
 /* Generated from desictrade-startup.html. Keep visual rules aligned with the source startup page. */
 .startup-original {
   color-scheme: dark;

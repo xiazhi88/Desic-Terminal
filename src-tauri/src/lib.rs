@@ -16,7 +16,7 @@ use std::{
     process::Stdio,
     sync::{
         atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, Condvar, Mutex, OnceLock,
     },
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
@@ -945,6 +945,98 @@ struct AiRuntime {
     sidecar: Arc<tokio::sync::Mutex<Option<AiSidecarHandle>>>,
     session_sinks: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AiEvent>>>>,
     session_cancelled: Arc<Mutex<HashMap<String, bool>>>,
+}
+
+#[derive(Clone)]
+struct DatabaseRuntime {
+    state: Arc<(Mutex<DatabaseStartupState>, Condvar)>,
+}
+
+enum DatabaseStartupState {
+    Initializing,
+    Ready,
+    Failed(String),
+}
+
+impl Default for DatabaseRuntime {
+    fn default() -> Self {
+        Self {
+            state: Arc::new((
+                Mutex::new(DatabaseStartupState::Initializing),
+                Condvar::new(),
+            )),
+        }
+    }
+}
+
+impl DatabaseRuntime {
+    fn wait_until_ready(&self) -> Result<(), String> {
+        let (state, ready) = &*self.state;
+        let mut current = state
+            .lock()
+            .map_err(|_| "数据库初始化状态不可用".to_string())?;
+        loop {
+            match &*current {
+                DatabaseStartupState::Ready => return Ok(()),
+                DatabaseStartupState::Failed(error) => {
+                    return Err(format!("数据库初始化失败：{error}"));
+                }
+                DatabaseStartupState::Initializing => {
+                    current = ready
+                        .wait(current)
+                        .map_err(|_| "数据库初始化状态不可用".to_string())?;
+                }
+            }
+        }
+    }
+
+    fn complete(&self, result: Result<(), String>) {
+        let (state, ready) = &*self.state;
+        if let Ok(mut current) = state.lock() {
+            *current = match result {
+                Ok(()) => DatabaseStartupState::Ready,
+                Err(error) => DatabaseStartupState::Failed(error),
+            };
+            ready.notify_all();
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, Hash, PartialEq)]
+struct KlineSyncKey {
+    symbol: String,
+    interval: String,
+}
+
+#[derive(Clone, Default)]
+struct KlineSyncRuntime {
+    running: Arc<AsyncMutex<HashSet<KlineSyncKey>>>,
+}
+
+impl KlineSyncRuntime {
+    async fn reserve(&self, symbols: &[String], intervals: &[String]) -> HashSet<KlineSyncKey> {
+        let mut running = self.running.lock().await;
+        let mut reserved = HashSet::new();
+        for symbol in symbols {
+            for interval in intervals {
+                let key = KlineSyncKey {
+                    symbol: symbol.clone(),
+                    interval: interval.clone(),
+                };
+                if running.insert(key.clone()) {
+                    reserved.insert(key);
+                }
+            }
+        }
+        reserved
+    }
+
+    async fn release(&self, keys: &HashSet<KlineSyncKey>) {
+        let mut running = self.running.lock().await;
+        for key in keys {
+            running.remove(key);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -3401,10 +3493,54 @@ async fn okx_sync_time(runtime: tauri::State<'_, MarketRuntime>) -> Result<OkxTi
     Ok(state)
 }
 
+#[tauri::command]
+async fn okx_startup_network_probe(
+    runtime: tauri::State<'_, MarketRuntime>,
+) -> Result<OkxTimeState, String> {
+    const TIMEOUT: Duration = Duration::from_secs(4);
+    let started = Instant::now();
+    let _guard = timeout(TIMEOUT, OKX_CLOCK_SYNC_LOCK.lock())
+        .await
+        .map_err(|_| "OKX 网络检测等待时钟同步超时（4 秒）".to_string())?;
+    let remaining = TIMEOUT
+        .checked_sub(started.elapsed())
+        .ok_or_else(|| "OKX 网络检测超时（4 秒）".to_string())?;
+    let state = fetch_okx_time_state_once(remaining).await?;
+    store_okx_clock_offset(state.clock_offset_ms);
+    if let Ok(mut health) = runtime.health.lock() {
+        health.clock_offset_ms = Some(state.clock_offset_ms);
+    }
+    Ok(state)
+}
+
 async fn fetch_okx_time_state() -> Result<OkxTimeState, String> {
     let local_send_ms = now_ms();
     let envelope: OkxEnvelope<OkxTime> = get_json("/api/v5/public/time").await?;
     let local_recv_ms = now_ms();
+    okx_time_state_from_envelope(envelope, local_send_ms, local_recv_ms)
+}
+
+async fn fetch_okx_time_state_once(timeout_duration: Duration) -> Result<OkxTimeState, String> {
+    const PATH: &str = "/api/v5/public/time";
+    let local_send_ms = now_ms();
+    let client = reqwest_client()?;
+    let url = format!("{}{}", REST_BASE, PATH);
+    let envelope = timeout(
+        timeout_duration,
+        get_json_once::<OkxTime>(&client, &url, PATH),
+    )
+    .await
+    .map_err(|_| format!("OKX 网络检测超时（{} 秒）", timeout_duration.as_secs()))?
+    .map_err(|error| error.message)?;
+    let local_recv_ms = now_ms();
+    okx_time_state_from_envelope(envelope, local_send_ms, local_recv_ms)
+}
+
+fn okx_time_state_from_envelope(
+    envelope: OkxEnvelope<OkxTime>,
+    local_send_ms: i64,
+    local_recv_ms: i64,
+) -> Result<OkxTimeState, String> {
     let first = envelope
         .data
         .first()
@@ -4034,6 +4170,7 @@ async fn historical_candles_before(
 #[tauri::command]
 async fn sync_kline_integrity(
     app: tauri::AppHandle,
+    runtime: tauri::State<'_, KlineSyncRuntime>,
     request: KlineSyncRequest,
 ) -> Result<KlineSyncSummary, String> {
     let symbols = normalize_symbols(request.symbols);
@@ -4043,14 +4180,39 @@ async fn sync_kline_integrity(
         .filter(|hours| *hours > 0)
         .map(|hours| hours.min(24 * 30));
     let required_days = normalize_required_days(request.required_days);
+    let reserved = runtime.reserve(&symbols, &intervals).await;
+    if reserved.is_empty() {
+        return Ok(KlineSyncSummary {
+            reports: Vec::new(),
+        });
+    }
     if request.blocking.unwrap_or(false) {
-        let reports = sync_kline_set(app, symbols, intervals, recent_hours, required_days).await;
+        let reports = sync_kline_set(
+            app,
+            symbols,
+            intervals,
+            recent_hours,
+            required_days,
+            &reserved,
+        )
+        .await;
+        runtime.release(&reserved).await;
         return Ok(KlineSyncSummary { reports });
     }
 
     let app_handle = app.clone();
+    let runtime = runtime.inner().clone();
     tauri::async_runtime::spawn(async move {
-        let _ = sync_kline_set(app_handle, symbols, intervals, recent_hours, required_days).await;
+        let _ = sync_kline_set(
+            app_handle,
+            symbols,
+            intervals,
+            recent_hours,
+            required_days,
+            &reserved,
+        )
+        .await;
+        runtime.release(&reserved).await;
     });
     Ok(KlineSyncSummary {
         reports: Vec::new(),
@@ -7841,10 +8003,17 @@ async fn sync_kline_set(
     intervals: Vec<String>,
     recent_hours: Option<i64>,
     required_days: HashMap<String, i64>,
+    reserved: &HashSet<KlineSyncKey>,
 ) -> Vec<KlineSyncReport> {
     let mut reports = Vec::new();
     for symbol in symbols {
         for interval in &intervals {
+            if !reserved.contains(&KlineSyncKey {
+                symbol: symbol.clone(),
+                interval: interval.clone(),
+            }) {
+                continue;
+            }
             let interval_required_days = required_days_for_interval(&required_days, interval);
             let report = match sync_one_kline_range(
                 &app,
@@ -17267,6 +17436,9 @@ fn open_database_connection(
     app: &tauri::AppHandle,
     initialize_journal_mode: bool,
 ) -> Result<Connection, String> {
+    if !initialize_journal_mode {
+        app.state::<DatabaseRuntime>().wait_until_ready()?;
+    }
     let conn = Connection::open(database_path(app)?).map_err(|err| err.to_string())?;
     conn.busy_timeout(Duration::from_secs(5))
         .map_err(|err| err.to_string())?;
@@ -17298,6 +17470,7 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
 }
 
 fn open_read_database(app: &tauri::AppHandle) -> Result<Connection, String> {
+    app.state::<DatabaseRuntime>().wait_until_ready()?;
     let path = database_path(app)?;
     let conn = Connection::open_with_flags(
         path,
@@ -20927,16 +21100,38 @@ pub fn run() {
         .plugin(tauri_plugin_process::init())
         .manage(MarketRuntime::default())
         .manage(AiRuntime::default())
+        .manage(DatabaseRuntime::default())
+        .manage(KlineSyncRuntime::default())
         .manage(AiAutomationRuntime::default())
         .manage(IntelligenceRuntime::default())
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
-            initialize_database_v1(app.handle()).map_err(std::io::Error::other)?;
-            start_trade_execution_recovery(app.handle().clone());
-            instrument_operations::start_instrument_operation_recovery(app.handle().clone());
-            start_ai_automation_worker(app.handle().clone());
-            start_intelligence_collector(app.handle().clone(), app.state::<IntelligenceRuntime>());
+            let app_handle = app.handle().clone();
+            let database_runtime = app.state::<DatabaseRuntime>().inner().clone();
+            tauri::async_runtime::spawn(async move {
+                let database_app = app_handle.clone();
+                let result =
+                    tokio::task::spawn_blocking(move || initialize_database_v1(&database_app))
+                        .await
+                        .map_err(|error| format!("数据库初始化任务失败：{error}"))
+                        .and_then(|result| result);
+                database_runtime.complete(result.clone());
+                match result {
+                    Ok(()) => {
+                        start_trade_execution_recovery(app_handle.clone());
+                        instrument_operations::start_instrument_operation_recovery(
+                            app_handle.clone(),
+                        );
+                        start_ai_automation_worker(app_handle.clone());
+                        start_intelligence_collector(
+                            app_handle.clone(),
+                            app_handle.state::<IntelligenceRuntime>(),
+                        );
+                    }
+                    Err(error) => eprintln!("startup database initialization failed: {error}"),
+                }
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -21021,6 +21216,7 @@ pub fn run() {
             intelligence_settings_save,
             intelligence_track_trader,
             okx_sync_time,
+            okx_startup_network_probe,
             okx_public_ws_probe,
             okx_business_ws_probe,
             okx_private_ws_probe,
@@ -21119,6 +21315,23 @@ pub fn run() {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn kline_sync_runtime_reserves_each_symbol_interval_once() {
+        let runtime = KlineSyncRuntime::default();
+        let symbols = vec!["BTC-USDT-SWAP".to_string(), "ETH-USDT-SWAP".to_string()];
+        let intervals = vec!["1m".to_string(), "5m".to_string()];
+
+        let first = tauri::async_runtime::block_on(runtime.reserve(&symbols, &intervals));
+        assert_eq!(first.len(), 4);
+        assert!(tauri::async_runtime::block_on(runtime.reserve(&symbols, &intervals)).is_empty());
+
+        tauri::async_runtime::block_on(runtime.release(&first));
+        assert_eq!(
+            tauri::async_runtime::block_on(runtime.reserve(&symbols, &intervals)).len(),
+            4
+        );
+    }
 
     #[test]
     fn market_icon_base_rejects_paths_and_accepts_currency_codes() {

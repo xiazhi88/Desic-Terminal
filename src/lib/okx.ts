@@ -203,9 +203,9 @@ export type MarketConsumerStatus = {
   removedSubscriptions: number;
 };
 
-async function okxFetch<T>(path: string): Promise<T> {
+async function okxFetch<T>(path: string, signal?: AbortSignal): Promise<T> {
   const url = `${REST_BASE}${path}`;
-  const res = await fetch(url);
+  const res = await fetch(url, { signal });
   if (!res.ok) throw new Error(`OKX HTTP ${res.status} ${res.statusText}`);
   const json = await res.json();
   if (json.code !== "0") throw new Error(`OKX ${json.code}: ${json.msg ?? "unknown error"}`);
@@ -230,6 +230,56 @@ export async function syncOkxTime(): Promise<OkxTimeState> {
     clockOffsetMs: Math.round(okxNowEstimatedMs - localRecvMs),
     status: "synced"
   };
+}
+
+export async function probeOkxStartupNetwork(): Promise<OkxTimeState> {
+  const timeoutMs = 5_000;
+  if (isTauriRuntime()) {
+    const result = await withTimeout(
+      invokeDesktop<OkxTimeState>("okx_startup_network_probe"),
+      timeoutMs,
+      "OKX 网络检测超时（5 秒）"
+    );
+    if (result) return result;
+    throw new Error("OKX 网络检测服务不可用，请退出应用后重新打开");
+  }
+
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const localSendMs = Date.now();
+    const json = await okxFetch<{ data: { ts: string }[] }>("/api/v5/public/time", controller.signal);
+    const localRecvMs = Date.now();
+    const okxServerMs = Number(json.data[0]?.ts);
+    const rttMs = localRecvMs - localSendMs;
+    return {
+      okxServerMs,
+      localSendMs,
+      localRecvMs,
+      rttMs,
+      clockOffsetMs: Math.round(okxServerMs + rttMs / 2 - localRecvMs),
+      status: "synced"
+    };
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("OKX 网络检测超时（5 秒）");
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+async function withTimeout<T>(operation: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: number | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_, reject) => {
+        timer = window.setTimeout(() => reject(new Error(message)), timeoutMs);
+      })
+    ]);
+  } finally {
+    if (timer !== undefined) window.clearTimeout(timer);
+  }
 }
 
 export async function loadAccounts(): Promise<AccountSummary[]> {
