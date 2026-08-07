@@ -564,6 +564,15 @@ async function verifyHelpCenterLayout(page, label) {
 }
 
 async function verifyHelpCenterLayoutState(page, label) {
+  // The modal entrance animation temporarily scales its shell; measure the settled layout.
+  await page.waitForFunction(() => {
+    const modal = document.querySelector(".help-center-modal");
+    if (!modal) return false;
+    const box = modal.getBoundingClientRect();
+    return Math.abs(box.width - modal.offsetWidth) <= 1
+      && Math.abs(box.height - modal.offsetHeight) <= 1
+      && Number.parseFloat(getComputedStyle(modal).opacity) >= 0.99;
+  }, { timeout: 2_000 });
   const state = await page.evaluate(() => {
     const rect = (selector) => {
       const item = document.querySelector(selector);
@@ -744,7 +753,8 @@ async function verifyNotificationCenter(page) {
   if (state.firstItemHeight <= 0 || state.firstItemHeight > 86) {
     throw new Error(`notification center item is not compact enough: ${JSON.stringify(state)}`);
   }
-  if (!/通知中心/.test(state.title) || !/4/.test(state.summary)) {
+  const expectedSummary = new RegExp(`${state.itemCount}\\s*/\\s*${state.itemCount}`);
+  if (!/通知中心/.test(state.title) || !expectedSummary.test(state.summary)) {
     throw new Error(`notification center summary mismatch: ${JSON.stringify(state)}`);
   }
 

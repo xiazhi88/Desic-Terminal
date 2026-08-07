@@ -85,7 +85,7 @@ Desic Terminal 面向需要持续观察、快速决策和严格执行边界的�
 
 内置 MA、EMA、VWAP、Bollinger Bands、Supertrend、Ichimoku、MACD、RSI、KDJ、ATR、ADX/DMI、Stochastic、CCI、ROC、Williams %R、MFI、OBV 等常用指标，并支持重复实例、参数编辑、主副图分配、图层管理和组合模板。
 
-自定义指标使用资源受限的 JSON DSL，不执行任意 JavaScript，也不开放文件和网络访问。用户可以在 CodeMirror 编辑器中编写，也可以通过专用 AI 面板用自然语言生成，再经过 Schema 校验、版本保存与本地计算后加入指标库。
+自定义指标使用资源受限的 JSON DSL，不执行任意 JavaScript，也不开放文件和网络访问。用户可以在 CodeMirror 编辑器中编写，也可以通过专用 AI 面板多轮讨论指标思路；只有明确要求创建或更新时才生成安全 DSL，再经过 Schema 校验、版本保存与本地计算后加入指标库。
 
 ![AI-generated custom indicator](docs/assets/readme/ai-custom-indicator.png)
 

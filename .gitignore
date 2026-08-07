@@ -22,6 +22,7 @@ config/*.password
 cache/
 logs/
 diagnostics/
+systematic-python/
 outputs/
 output/
 artifacts/
@@ -29,6 +30,8 @@ coverage/
 src-tauri/binaries/
 src-tauri/resources/ai-sidecar/*
 !src-tauri/resources/ai-sidecar/.gitkeep
+src-tauri/resources/systematic-python/*
+!src-tauri/resources/systematic-python/.gitkeep
 *-setup.exe
 *.msi
 *.dmg
@@ -69,3 +72,7 @@ docs/okx-perpetual-desktop-spec.md
 Microsoft/
 .DS_Store
 Thumbs.db
+
+# Python development bytecode
+__pycache__/
+*.py[cod]

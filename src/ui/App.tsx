@@ -15,6 +15,7 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
+  Layers3,
   Loader2,
   Maximize2,
   Minus,
@@ -111,7 +112,6 @@ import type {
   TradeAuditEventSummary,
   TradeExecutionGuard,
   TradeOpportunity,
-  TradePrecheckResponse,
 } from "../types";
 import {
   approveAiTool,
@@ -180,7 +180,6 @@ import {
   clearTradeOpportunities,
   deleteTradeOpportunity,
   rejectTradeOpportunity,
-  requestTradePrecheck,
   reconcilePrivateStreams,
   runStorageMaintenance,
   fetchStorageStatus,
@@ -209,7 +208,7 @@ import {
   formatChartPositionQuantity,
 } from "../lib/chartTradeSemantics";
 import { logger } from "../lib/logger";
-import { syncIntelligence } from "../lib/intelligence";
+import { loadNewsReadState, syncIntelligence } from "../lib/intelligence";
 import { createDeferredCleanupSlot } from "../lib/deferredCleanup";
 import { BoundedEventCache } from "../lib/boundedEventCache";
 import { trimDevelopmentPerformanceEntries } from "../lib/performanceEntries";
@@ -286,6 +285,34 @@ const TradeOpportunitiesWorkspacePage = lazy(() =>
 const IntelligenceWorkspacePage = lazy(() =>
   import("./IntelligencePage").then((module) => ({ default: module.IntelligencePage }))
 );
+type SystematicResearchModule = typeof import("./SystematicResearchPage");
+
+let systematicResearchModulePromise: Promise<SystematicResearchModule> | null = null;
+
+const loadSystematicResearchModule = () => {
+  if (systematicResearchModulePromise) return systematicResearchModulePromise;
+
+  systematicResearchModulePromise = import("./SystematicResearchPage")
+    .catch(async (error) => {
+      systematicResearchModulePromise = null;
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 120));
+      return import("./SystematicResearchPage").catch((retryError) => {
+        systematicResearchModulePromise = null;
+        throw retryError ?? error;
+      });
+    });
+  return systematicResearchModulePromise;
+};
+
+const preloadSystematicResearchModule = () => {
+  void loadSystematicResearchModule().catch((error) => {
+    logger.warn("systematic research module preload failed", { error: String(error) });
+  });
+};
+
+const SystematicResearchWorkspacePage = lazy(() =>
+  loadSystematicResearchModule().then((module) => ({ default: module.SystematicResearchPage }))
+);
 
 const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
@@ -318,6 +345,65 @@ const KLINE_RECENT_CHECK_HOURS = 2;
 const PRIVATE_WS_DELAY_WARNING_MS = 10_000;
 const EMPTY_PREVIEW_ACCOUNTS: AccountSummary[] = [];
 const DISPLAY_TIME_ZONE = "Asia/Shanghai";
+const NOTIFICATION_SOUND_COOLDOWN_MS = 1_000;
+const NOTIFICATION_SOUND_PEAK_GAIN = 0.07;
+
+let notificationAudioContext: AudioContext | null = null;
+let notificationSoundLastPlayedAt = 0;
+
+function getNotificationAudioContext() {
+  if (typeof window === "undefined") return null;
+  const audioWindow = window as Window & { webkitAudioContext?: typeof AudioContext };
+  const AudioContextConstructor = window.AudioContext ?? audioWindow.webkitAudioContext;
+  if (!AudioContextConstructor) return null;
+  if (!notificationAudioContext) {
+    try {
+      notificationAudioContext = new AudioContextConstructor();
+    } catch {
+      return null;
+    }
+  }
+  return notificationAudioContext;
+}
+
+function unlockNotificationAudio() {
+  const context = getNotificationAudioContext();
+  if (context?.state === "suspended") void context.resume().catch(() => undefined);
+}
+
+function scheduleNotificationTone(context: AudioContext, frequency: number, startAt: number, duration: number, peakGain: number) {
+  const oscillator = context.createOscillator();
+  const gain = context.createGain();
+  oscillator.type = "sine";
+  oscillator.frequency.setValueAtTime(frequency, startAt);
+  gain.gain.setValueAtTime(0.0001, startAt);
+  gain.gain.exponentialRampToValueAtTime(peakGain, startAt + 0.014);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+  oscillator.connect(gain);
+  gain.connect(context.destination);
+  oscillator.start(startAt);
+  oscillator.stop(startAt + duration + 0.02);
+}
+
+function playNotificationSound(kind: AppNotification["kind"]) {
+  if (kind !== "trade" && kind !== "error") return;
+  const context = getNotificationAudioContext();
+  if (!context || context.state !== "running") return;
+  const now = performance.now();
+  if (now - notificationSoundLastPlayedAt < NOTIFICATION_SOUND_COOLDOWN_MS) return;
+  notificationSoundLastPlayedAt = now;
+
+  // A two-note sine chime keeps trade and error feedback distinct without an alarm-like tone.
+  const startAt = context.currentTime + 0.005;
+  const tones = kind === "trade"
+    ? [{ frequency: 659.25, offset: 0, duration: 0.12 }, { frequency: 880, offset: 0.075, duration: 0.16 }]
+    : [{ frequency: 523.25, offset: 0, duration: 0.12 }, { frequency: 392, offset: 0.075, duration: 0.17 }];
+  try {
+    for (const tone of tones) scheduleNotificationTone(context, tone.frequency, startAt + tone.offset, tone.duration, NOTIFICATION_SOUND_PEAK_GAIN);
+  } catch {
+    // Audio playback must never affect notification delivery or trading flows.
+  }
+}
 
 function buildTerminalPreviewCandles(symbol: string, timeframe: string): Candle[] {
   const seconds = ({ "1m": 60, "5m": 300, "15m": 900, "30m": 1_800, "1H": 3_600, "4H": 14_400, "1D": 86_400 } as Record<string, number>)[timeframe] ?? 1_800;
@@ -489,7 +575,17 @@ export function App() {
             : typeof windowApiCompat.getCurrentWebviewWindow === "function"
               ? windowApiCompat.getCurrentWebviewWindow()
               : null;
-        setWindowLabel(currentWindow?.label ?? "main");
+        const label = currentWindow?.label ?? "main";
+        setWindowLabel(label);
+        if (label === "main" && currentWindow) {
+          void currentWindow.isVisible()
+            .then((visible) => {
+              if (!cancelled && visible) setMainActivated(true);
+            })
+            .catch((error) => {
+              logger.warn("failed to restore visible main window", { error: String(error) });
+            });
+        }
       })
       .catch((error) => {
         logger.error("failed to read current window label", error);
@@ -855,6 +951,14 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
   const highRef = useRef<HTMLSpanElement | null>(null);
   const lowRef = useRef<HTMLSpanElement | null>(null);
   const volumeRef = useRef<HTMLSpanElement | null>(null);
+  const detailLastRef = useRef<HTMLElement | null>(null);
+  const detailChangeRef = useRef<HTMLElement | null>(null);
+  const detailHighRef = useRef<HTMLElement | null>(null);
+  const detailLowRef = useRef<HTMLElement | null>(null);
+  const detailVolumeRef = useRef<HTMLElement | null>(null);
+  const detailFundingRef = useRef<HTMLDivElement | null>(null);
+  const detailFundingRateRef = useRef<HTMLElement | null>(null);
+  const detailFundingCountdownRef = useRef<HTMLElement | null>(null);
   const fundingRef = useRef<HTMLSpanElement | null>(null);
   const fundingRateRef = useRef<HTMLElement | null>(null);
   const fundingCountdownRef = useRef<HTMLElement | null>(null);
@@ -875,6 +979,20 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
       if (highRef.current) highRef.current.textContent = `${t("trading:high")} ${fmtPrice(ticker?.high24h)}`;
       if (lowRef.current) lowRef.current.textContent = `${t("trading:low")} ${fmtPrice(ticker?.low24h)}`;
       if (volumeRef.current) volumeRef.current.textContent = `${t("trading:volume")} ${fmtCompact(ticker?.volCcy24h)} USDT`;
+      if (detailLastRef.current) detailLastRef.current.textContent = fmtPrice(ticker?.last);
+      if (detailChangeRef.current) {
+        detailChangeRef.current.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+        detailChangeRef.current.classList.toggle("up", change >= 0);
+        detailChangeRef.current.classList.toggle("down", change < 0);
+      }
+      if (detailHighRef.current) detailHighRef.current.textContent = fmtPrice(ticker?.high24h);
+      if (detailLowRef.current) detailLowRef.current.textContent = fmtPrice(ticker?.low24h);
+      if (detailVolumeRef.current) {
+        const volume = Number(ticker?.volCcy24h);
+        detailVolumeRef.current.textContent = Number.isFinite(volume)
+          ? `${formatLocalizedNumber(volume, { maximumFractionDigits: 2 })} USDT`
+          : "--";
+      }
     }
     if (fundingRef.current) {
       const rate = formatFundingRatePercent(fundingRate?.fundingRate);
@@ -883,8 +1001,11 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
       if (fundingSignatureRef.current !== fundingSignature) {
         fundingSignatureRef.current = fundingSignature;
         fundingRef.current.hidden = !rate;
+        if (detailFundingRef.current) detailFundingRef.current.hidden = !rate;
         if (fundingRateRef.current) fundingRateRef.current.textContent = rate ? `${t("trading:fundingRate")} ${rate}` : "";
         if (fundingCountdownRef.current) fundingCountdownRef.current.textContent = rate ? `/ ${formatFundingCountdown(fundingRate?.fundingTime, now)}` : "";
+        if (detailFundingRateRef.current) detailFundingRateRef.current.textContent = rate || "--";
+        if (detailFundingCountdownRef.current) detailFundingCountdownRef.current.textContent = rate ? formatFundingCountdown(fundingRate?.fundingTime, now) : "";
       }
     }
   }, [t, timeState?.clockOffsetMs]);
@@ -897,14 +1018,45 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
     return () => { unsubscribe(); window.clearInterval(timer); };
   }, [update]);
   return (
-    <div className="price-strip">
-      <strong ref={lastRef}>--</strong>
-      <span ref={markRef}>{t("trading:markPrice")} --</span>
-      <span ref={changeRef}>24H --</span>
-      <span ref={highRef}>{t("trading:high")} --</span>
-      <span ref={lowRef}>{t("trading:low")} --</span>
-      <span ref={volumeRef}>{t("trading:volume")} -- USDT</span>
-      <span ref={fundingRef} className="funding-chip" hidden><b ref={fundingRateRef} /><em ref={fundingCountdownRef} /></span>
+    <div className="price-strip" tabIndex={0} aria-label={t("trading:marketData")} aria-describedby="market-price-tooltip">
+      <div className="price-strip-values">
+        <strong ref={lastRef}>--</strong>
+        <span ref={markRef}>{t("trading:markPrice")} --</span>
+        <span ref={changeRef}>24H --</span>
+        <span ref={highRef}>{t("trading:high")} --</span>
+        <span ref={lowRef}>{t("trading:low")} --</span>
+        <span ref={volumeRef}>{t("trading:volume")} -- USDT</span>
+        <span ref={fundingRef} className="funding-chip" hidden><b ref={fundingRateRef} /><em ref={fundingCountdownRef} /></span>
+      </div>
+      <div className="price-strip-tooltip" id="market-price-tooltip" role="tooltip">
+        <div className="price-strip-tooltip-grid">
+          <div className="price-strip-tooltip-cell">
+            <span>{t("trading:markPrice")}</span>
+            <strong ref={detailLastRef}>--</strong>
+          </div>
+          <div className="price-strip-tooltip-cell">
+            <span>24H</span>
+            <strong ref={detailChangeRef}>--</strong>
+          </div>
+          <div className="price-strip-tooltip-cell">
+            <span>{t("trading:high")}</span>
+            <strong ref={detailHighRef}>--</strong>
+          </div>
+          <div className="price-strip-tooltip-cell">
+            <span>{t("trading:low")}</span>
+            <strong ref={detailLowRef}>--</strong>
+          </div>
+          <div className="price-strip-tooltip-cell price-strip-tooltip-volume">
+            <span>{t("trading:volume")}</span>
+            <strong ref={detailVolumeRef}>--</strong>
+          </div>
+          <div ref={detailFundingRef} className="price-strip-tooltip-cell" hidden>
+            <span>{t("trading:fundingRate")}</span>
+            <strong ref={detailFundingRateRef}>--</strong>
+            <small ref={detailFundingCountdownRef} />
+          </div>
+        </div>
+      </div>
     </div>
   );
 }
@@ -1248,6 +1400,8 @@ function TradingTerminal({
   const [symbolPickerOpen, setSymbolPickerOpen] = useState(false);
   const [bar, setBar] = useState("30m");
   const [historyLoading, setHistoryLoading] = useState(false);
+  const [marketCandleLoadError, setMarketCandleLoadError] = useState<{ symbol: string; bar: string; message: string } | null>(null);
+  const [marketCandleReloadToken, setMarketCandleReloadToken] = useState(0);
   const [timeState, setTimeState] = useState<OkxTimeState | null>(null);
   const [accounts, setAccounts] = useState<AccountSummary[]>(() => previewAccounts);
   const [accountsReady, setAccountsReady] = useState(previewAccounts.length > 0);
@@ -1299,7 +1453,8 @@ function TradingTerminal({
   const contentGridRef = useRef<HTMLDivElement | null>(null);
   const centerPanelRef = useRef<HTMLElement | null>(null);
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
-  const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "data" | "config">("terminal");
+  const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
+  const [newsUnreadCount, setNewsUnreadCount] = useState(0);
   const [isMaximized, setIsMaximized] = useState(false);
 
   useEffect(() => {
@@ -1339,6 +1494,17 @@ function TradingTerminal({
   const [pendingLivePreviousAccountScopeKey, setPendingLivePreviousAccountScopeKey] = useState<string | null>(null);
   const [liveRiskAcknowledged, setLiveRiskAcknowledged] = useState<Record<string, number>>(() => loadLiveRiskAcknowledgements());
   const approvedAccountScopeKeyRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    const unlock = () => unlockNotificationAudio();
+    window.addEventListener("pointerdown", unlock, { passive: true });
+    window.addEventListener("keydown", unlock);
+    return () => {
+      window.removeEventListener("pointerdown", unlock);
+      window.removeEventListener("keydown", unlock);
+    };
+  }, []);
+
   const requestAccountSelection = useCallback((accountId: string | null) => {
     if (!accountId) {
       approvedAccountScopeKeyRef.current = null;
@@ -1489,6 +1655,7 @@ function TradingTerminal({
   const marketAssetCacheDir = marketAssets?.cacheDir;
 
   const pushNotification = useCallback((notification: Omit<AppNotification, "id" | "createdAt">) => {
+    playNotificationSound(notification.kind);
     const item = { ...notification, id: `n-${Date.now()}-${Math.random().toString(16).slice(2)}`, createdAt: Date.now() };
     setNotifications((items) => [item, ...items].slice(0, 6));
     setNotificationHistory((items) => persistNotificationHistory([item, ...items].slice(0, 200)));
@@ -1563,9 +1730,20 @@ function TradingTerminal({
   useEffect(() => {
     const listenerCleanup = createDeferredCleanupSlot();
     void listenOptional<AiAutomationEvent>("ai:automation-event", (event) => {
+      const systematicProfileAutoStopped = event.type === "systematicProfileAutoStopped";
+      const systematicProfileProtectionWarning = event.type === "systematicProfileProtectionWarning";
+      const systematicProfileRecoveryFailed = event.type === "systematicProfileExecutionRecoveryFailed";
       const opensNotificationSettings = event.action?.settingsTab === "notifications";
-      const kind: AppNotification["kind"] = event.type === "notificationError" || event.type === "runFailed"
+      const opensAccountSettings = event.action?.settingsTab === "account";
+      const kind: AppNotification["kind"] = event.type === "notificationError"
+        || event.type === "runFailed"
+        || event.type === "accountPositionModeSwitchFailed"
+        || event.type === "accountPositionModeRequired"
+        || systematicProfileProtectionWarning
+        || systematicProfileRecoveryFailed
         ? "error"
+        : systematicProfileAutoStopped
+          ? "error"
         : event.type === "runCompleted"
           ? "success"
           : "info";
@@ -1577,6 +1755,16 @@ function TradingTerminal({
             ? uiText("自动化通知失败", "Automation notification failed")
             : event.type === "runFailed"
               ? uiText("AI 自动化异常", "AI Automation error")
+              : event.type === "accountPositionModeSwitchFailed"
+                ? t("automation:accountPositionModeSwitchFailedTitle")
+              : event.type === "accountPositionModeRequired"
+                ? t("automation:accountPositionModeRequiredTitle")
+              : systematicProfileAutoStopped
+                ? t("automation:systematicProfileAutoStoppedTitle")
+              : systematicProfileProtectionWarning
+                ? uiText("策略保护单告警", "Strategy protection warning")
+              : systematicProfileRecoveryFailed
+                ? uiText("策略信号恢复失败", "Strategy signal recovery failed")
               : event.type === "runCompleted"
                 ? uiText("AI 自动化完成", "AI Automation completed")
                 : uiText("AI 自动化通知", "AI Automation notification");
@@ -1584,9 +1772,13 @@ function TradingTerminal({
         kind,
         title,
         message: localizeAutomationEventMessage(event, t),
-        action: opensNotificationSettings ? "settings" : "ai-automation",
-        automationTab: opensNotificationSettings ? undefined : normalizeAutomationTab(event.action?.tab),
-        settingsTab: opensNotificationSettings ? "notifications" : undefined,
+        action: systematicProfileAutoStopped || systematicProfileProtectionWarning || systematicProfileRecoveryFailed ? undefined : opensNotificationSettings || opensAccountSettings ? "settings" : "ai-automation",
+        automationTab: systematicProfileAutoStopped || systematicProfileProtectionWarning || systematicProfileRecoveryFailed || opensNotificationSettings ? undefined : normalizeAutomationTab(event.action?.tab),
+        settingsTab: opensNotificationSettings && !systematicProfileAutoStopped
+          ? "notifications"
+          : opensAccountSettings && !systematicProfileAutoStopped
+            ? "account"
+            : undefined,
         targetId: event.action?.id ?? undefined
       });
     }).then((dispose) => listenerCleanup.settle(dispose));
@@ -1594,8 +1786,16 @@ function TradingTerminal({
   }, [pushNotification, t, uiText]);
 
   useEffect(() => {
+    if (!isTauriRuntime()) return;
+    void loadNewsReadState().then((state) => setNewsUnreadCount(state.unreadEvents)).catch(() => undefined);
+  }, []);
+
+  useEffect(() => {
     const listenerCleanup = createDeferredCleanupSlot();
     void listenOptional<Record<string, unknown>>("intelligence:event", (event) => {
+      if (event.type === "syncCompleted" || event.type === "syncDegraded") {
+        void loadNewsReadState().then((state) => setNewsUnreadCount(state.unreadEvents)).catch(() => undefined);
+      }
       if (event.type !== "syncDegraded") return;
       const errors = Array.isArray(event.errors)
         ? event.errors.filter((value): value is string => typeof value === "string").slice(0, 2)
@@ -2042,15 +2242,24 @@ function TradingTerminal({
         logger.error("failed to load account configuration", error);
       }
       try {
-        const [synced, initialTicker, initialFundingRate] = await Promise.all([
+        const [timeResult, tickerResult, fundingResult] = await Promise.allSettled([
           syncOkxTime(),
           fetchTicker(symbol),
           fetchFundingRate(symbol)
         ]);
         if (cancelled) return;
-        setTimeState(synced);
-        hydrateMarketHotState({ ticker: initialTicker, watchTickers: { ...getMarketHotState().watchTickers, [initialTicker.instId]: initialTicker } });
-        if (initialFundingRate) hydrateMarketHotState({ fundingRate: initialFundingRate });
+        if (timeResult.status === "fulfilled") setTimeState(timeResult.value);
+        if (tickerResult.status === "fulfilled") {
+          const initialTicker = tickerResult.value;
+          hydrateMarketHotState({ ticker: initialTicker, watchTickers: { ...getMarketHotState().watchTickers, [initialTicker.instId]: initialTicker } });
+        }
+        if (fundingResult.status === "fulfilled" && fundingResult.value) {
+          hydrateMarketHotState({ fundingRate: fundingResult.value });
+        }
+        const failed = [timeResult, tickerResult, fundingResult].find((result) => result.status === "rejected");
+        if (failed?.status === "rejected") {
+          logger.error("failed to load part of initial market data", failed.reason, { symbol });
+        }
       } catch (error) {
         logger.error("failed to load initial market data", error, { symbol });
       }
@@ -2069,15 +2278,30 @@ function TradingTerminal({
     if (previewAccounts.length > 0) return;
     let cancelled = false;
     replaceMarketCandles([]);
+    setMarketCandleLoadError(null);
     void fetchCandles(symbol, bar, 300)
       .then((items) => {
-        if (!cancelled) replaceMarketCandles(items);
+        if (cancelled) return;
+        if (items.length === 0) {
+          throw new Error(`No ${bar} candle data returned for ${symbol}`);
+        }
+        replaceMarketCandles(items);
+        setMarketCandleLoadError(null);
       })
-      .catch((error) => logger.error("failed to load candles for selected interval", error, { symbol, bar }));
+      .catch((error) => {
+        logger.error("failed to load candles for selected interval", error, { symbol, bar });
+        if (!cancelled) {
+          setMarketCandleLoadError({
+            symbol,
+            bar,
+            message: error instanceof Error ? error.message : String(error)
+          });
+        }
+      });
     return () => {
       cancelled = true;
     };
-  }, [symbol, bar, proxyRevision, previewAccounts.length]);
+  }, [symbol, bar, proxyRevision, previewAccounts.length, marketCandleReloadToken]);
 
   useEffect(() => {
     hydrateMarketHotState({ publicStreamStatuses: {} });
@@ -2120,7 +2344,10 @@ function TradingTerminal({
         derivedCandleRefreshRef.current = now;
         void fetchCandles(symbol, activeBar, 300)
           .then((items) => {
-            if (items.length > 0) mergeIntoMarketCandles(items);
+            if (items.length > 0) {
+              mergeIntoMarketCandles(items);
+              setMarketCandleLoadError(null);
+            }
           })
           .catch((error) => logger.error("failed to refresh derived candles from 1m stream", error, { symbol, bar: activeBar, candle }));
       },
@@ -2187,7 +2414,10 @@ function TradingTerminal({
       if (report.symbol === symbol && report.interval === "1m" && report.status === "complete" && report.missing === 0 && report.invalid === 0) {
         void fetchCandles(symbol, bar, 300)
           .then((items) => {
-            if (mounted && items.length > 0) mergeIntoMarketCandles(items);
+            if (mounted && items.length > 0) {
+              mergeIntoMarketCandles(items);
+              setMarketCandleLoadError(null);
+            }
           })
           .catch((error) => logger.error("failed to refresh candles after integrity sync", error, { symbol, bar }));
       }
@@ -2213,6 +2443,13 @@ function TradingTerminal({
       void syncKlineIntegrity([symbol], KLINE_INTEGRITY_INTERVALS, false, KLINE_RECENT_CHECK_HOURS, KLINE_REQUIRED_DAYS);
     }, 10 * 60_000);
     return () => window.clearInterval(activeTimer);
+  }, [symbol]);
+
+  const retryMarketCandles = useCallback(() => {
+    setMarketCandleLoadError(null);
+    setMarketCandleReloadToken((value) => value + 1);
+    void syncKlineIntegrity([symbol], KLINE_INTEGRITY_INTERVALS, false, KLINE_RECENT_CHECK_HOURS, KLINE_REQUIRED_DAYS)
+      .catch((error) => logger.error("failed to retry local candle synchronization", error, { symbol }));
   }, [symbol]);
 
   useEffect(() => {
@@ -2517,7 +2754,7 @@ function TradingTerminal({
       pushNotification({ kind: "warning", title: uiText("图表交易参数无效", "Invalid chart-trade parameters"), message: uiText("请确认数量满足 minSz/lotSz，开仓、止盈和止损价格满足 tickSz。", "Ensure quantity satisfies minSz/lotSz and entry, take-profit, and stop-loss prices satisfy tickSz.") });
       return;
     }
-    void requestTradePrecheck({
+    void placeOkxOrder({
       accountId: account.id,
       instId: intent.instId,
       tdMode,
@@ -2527,38 +2764,21 @@ function TradingTerminal({
       price: entryPrice,
       size: normalizedSize,
       lever,
-      environment: effectiveTradeEnvironment
+      environment: effectiveTradeEnvironment,
+      confirmedLive,
+      operator: "user",
+      executionKey: createTradeExecutionKey(account.id, effectiveTradeEnvironment, intent.instId),
+      attachAlgoOrds: intent.action === "bracket" ? [{
+        attachAlgoClOrdId: `chart-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
+        tpTriggerPx: takeProfitPrice,
+        tpOrdPx: "-1",
+        tpTriggerPxType: "last",
+        slTriggerPx: stopLossPrice,
+        slOrdPx: "-1",
+        slTriggerPxType: "last",
+        sz: normalizedSize
+      }] : undefined
     })
-      .then((precheck) => {
-        if (precheck?.blocked) {
-          throw new Error(precheck.reasons[0] ?? uiText("交易预检未通过", "Trade precheck did not pass"));
-        }
-        return placeOkxOrder({
-          accountId: account.id,
-          instId: intent.instId,
-          tdMode,
-          orderType: "limit",
-          ticketMode: "open",
-          action: intent.side,
-          price: entryPrice,
-          size: normalizedSize,
-          lever,
-          environment: effectiveTradeEnvironment,
-          confirmedLive,
-          operator: "user",
-          executionKey: createTradeExecutionKey(account.id, effectiveTradeEnvironment, intent.instId),
-          attachAlgoOrds: intent.action === "bracket" ? [{
-            attachAlgoClOrdId: `chart-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-            tpTriggerPx: takeProfitPrice,
-            tpOrdPx: "-1",
-            tpTriggerPxType: "last",
-            slTriggerPx: stopLossPrice,
-            slOrdPx: "-1",
-            slTriggerPxType: "last",
-            sz: normalizedSize
-          }] : undefined
-        });
-      })
       .then((result) => {
         if (!result) return;
         pushNotification({
@@ -3630,6 +3850,8 @@ function TradingTerminal({
                     ? mainSection === "automation"
                   : id === "intelligence"
                     ? mainSection === "intelligence"
+                  : id === "systematic"
+                    ? mainSection === "systematic"
                   : id === "data"
                     ? mainSection === "data"
                   : id === "settings"
@@ -3639,9 +3861,11 @@ function TradingTerminal({
             key={id}
             onPointerEnter={() => {
               if (id === "automation") void loadAiAutomationModule();
+              if (id === "systematic") preloadSystematicResearchModule();
             }}
             onFocus={() => {
               if (id === "automation") void loadAiAutomationModule();
+              if (id === "systematic") preloadSystematicResearchModule();
             }}
             onClick={() => {
               if (id === "terminal") {
@@ -3659,6 +3883,9 @@ function TradingTerminal({
               if (id === "intelligence") {
                 setMainSection("intelligence");
               }
+              if (id === "systematic") {
+                setMainSection("systematic");
+              }
               if (id === "data") {
                 setMainSection("data");
               }
@@ -3670,6 +3897,7 @@ function TradingTerminal({
           >
             <Icon size={20} />
             <span>{label}</span>
+            {id === "intelligence" && newsUnreadCount > 0 ? <b className="rail-unread-badge">{newsUnreadCount > 99 ? "99+" : newsUnreadCount}</b> : null}
           </button>
           );
         })}
@@ -3788,7 +4016,14 @@ function TradingTerminal({
                 selectedAccountId={account?.id ?? null}
                 selectedSymbol={symbol}
                 relatedSymbols={Array.from(new Set([symbol, ...watchlist, ...(visiblePrivateSnapshot?.positions ?? []).map((position) => position.instId)]))}
+                onNewsUnreadCountChange={setNewsUnreadCount}
               />
+            </Suspense>
+          </div>
+        ) : mainSection === "systematic" ? (
+          <div className="systematic-research-workspace">
+            <Suspense fallback={<div className="automation-page-loading"><Loader2 className="spin" size={20} /><span>{uiText("正在加载系统化研究工作台", "Loading Systematic Research workspace")}</span></div>}>
+              <SystematicResearchWorkspacePage selectedSymbol={symbol} watchlist={watchlist} marketAssets={marketAssets} accounts={accounts.map((item) => ({ id: item.id, name: item.name, environment: item.environment }))} onNotify={pushNotification} />
             </Suspense>
           </div>
         ) : mainSection === "data" ? (
@@ -4075,6 +4310,16 @@ function TradingTerminal({
               </ErrorBoundary>
               {symbolSyncStatus[symbol] && symbolSyncStatus[symbol] !== "已同步" && (
                 <div className="kline-sync-badge">{symbolSyncStatus[symbol]}</div>
+              )}
+              {marketCandleLoadError?.symbol === symbol && marketCandleLoadError.bar === bar && (
+                <div className="chart-candle-load-error" role="alert" title={marketCandleLoadError.message}>
+                  <strong>{t("chart:candleDataUnavailable")}</strong>
+                  <span>{t("chart:candleDataUnavailableHint")}</span>
+                  <button type="button" onClick={retryMarketCandles}>
+                    <RefreshCw size={13} />
+                    {t("common:retry")}
+                  </button>
+                </div>
               )}
               {historyLoading && <div className="kline-history-badge">{t("chart:loadingEarlier")}</div>}
               <div
@@ -4557,6 +4802,35 @@ function isChineseLanguage() {
 
 function localizeAutomationEventMessage(event: AiAutomationEvent, t: UiTranslation) {
   const message = String(event.message || "");
+  if (event.type === "accountPositionModeSwitchFailed") {
+    return t("automation:accountPositionModeSwitchFailedMessage", {
+      account: event.profileName || event.accountId || "OKX account",
+      error: event.error || message,
+    });
+  }
+  if (event.type === "accountPositionModeRequired") {
+    return t("automation:accountPositionModeRequiredMessage", {
+      account: event.profileName || event.accountId || "OKX account",
+      error: event.error || message,
+    });
+  }
+  if (event.type === "systematicProfileAutoStopped") {
+    return t("automation:systematicProfileAutoStoppedMessage", {
+      profile: event.profileName || event.profileId || "Profile",
+      count: event.consecutiveErrors || 3,
+      error: event.error || message,
+    });
+  }
+  if (event.type === "systematicProfileProtectionWarning") {
+    return isChineseLanguage()
+      ? `${event.profileName || event.profileId || "Profile"} 的保护单尚未确认：${event.error || message}`
+      : `${event.profileName || event.profileId || "Profile"} protection is not confirmed: ${event.error || message}`;
+  }
+  if (event.type === "systematicProfileExecutionRecoveryFailed") {
+    return isChineseLanguage()
+      ? `${event.profileName || event.profileId || "Profile"} 的信号恢复失败，已标记为失败：${event.error || message}`
+      : `${event.profileName || event.profileId || "Profile"} signal recovery failed and was marked failed: ${event.error || message}`;
+  }
   if (event.type === "runRecordUpdated" && message === "AI 运行记录已持久化") {
     return t("automation:runRecordPersisted");
   }
@@ -4618,7 +4892,8 @@ const FEISHU_EVENT_OPTIONS = [
   ["run_failed", "后台 Run 失败"],
   ["review_completed", "交易复盘完成"],
   ["daily_review_completed", "每日复盘完成"],
-  ["suggestion_created", "生成优化建议"]
+  ["suggestion_created", "生成优化建议"],
+  ["strategy_signal", "策略交易信号"]
 ] as const;
 
 type FeishuEventType = (typeof FEISHU_EVENT_OPTIONS)[number][0];
@@ -7349,6 +7624,7 @@ function AccountSettingsPane({
   const save = useCallback(async () => {
     setBusy(true);
     setStatus(t("settings:savingAccount"));
+    let accountWasSaved = false;
     try {
       const next = await saveAccountConfig(draft);
       if (next) {
@@ -7356,6 +7632,11 @@ function AccountSettingsPane({
         const saved = next.find((item) => item.id === draft.id) ?? next[next.length - 1];
         if (saved) onSelect(saved.id);
         setDraft(createAccountDraft(saved));
+        accountWasSaved = Boolean(saved);
+        if (saved && isTauriRuntime()) {
+          // Account creation immediately verifies and, when possible, switches OKX to hedge mode.
+          await testAccountConfig(saved.id);
+        }
         setStatus(saved
           ? t("settings:accountIdentifiedAndSaved", { environment: t(saved.environment === "live" ? "common:live" : "common:demo") })
           : t("settings:accountSaved"));
@@ -7373,8 +7654,10 @@ function AccountSettingsPane({
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.error("save account failed", error);
-      setStatus(t("settings:accountSaveFailed"));
-      onNotify({ kind: "error", title: t("settings:accountSaveFailed"), message });
+      setStatus(accountWasSaved ? t("settings:accountSaved") : t("settings:accountSaveFailed"));
+      if (!isPositionModeSwitchFailureMessage(message)) {
+        onNotify({ kind: "error", title: t("settings:accountSaveFailed"), message });
+      }
     } finally {
       setBusy(false);
     }
@@ -7434,7 +7717,9 @@ function AccountSettingsPane({
       const message = error instanceof Error ? error.message : String(error);
       logger.error("test account failed", error);
       setStatus(t("settings:connectionTestFailed"));
-      onNotify({ kind: "error", title: t("settings:connectionTestFailed"), message });
+      if (!isPositionModeSwitchFailureMessage(message)) {
+        onNotify({ kind: "error", title: t("settings:connectionTestFailed"), message });
+      }
     } finally {
       setBusy(false);
     }
@@ -7624,6 +7909,7 @@ const navItems = [
   { id: "opportunities", labelKey: "navigation:opportunities", Icon: ShieldAlert },
   { id: "automation", labelKey: "navigation:automation", Icon: Bot },
   { id: "intelligence", labelKey: "navigation:intelligence", Icon: Newspaper },
+  { id: "systematic", labelKey: "navigation:systematic", Icon: Layers3 },
   { id: "data", labelKey: "navigation:data", Icon: LayoutDashboard },
   { id: "settings", labelKey: "navigation:settings", Icon: Settings }
 ] as const;
@@ -9355,7 +9641,17 @@ function matchesPendingOrderTarget(
 }
 
 function isTerminalPendingOrderState(state?: string | null) {
-  return ["filled", "canceled", "cancelled", "failed", "rejected", "mmp_canceled", "order_failed"].includes(String(state ?? "").toLowerCase());
+  return [
+    "filled",
+    "canceled",
+    "cancelled",
+    "failed",
+    "rejected",
+    "mmp_canceled",
+    "order_failed",
+    "effective",
+    "triggered"
+  ].includes(String(state ?? "").toLowerCase());
 }
 
 function isActivePendingOrder(order: OkxPendingOrder) {
@@ -10482,6 +10778,10 @@ function formatTradeErrorMessage(error: unknown) {
   return parts.join("；");
 }
 
+function isPositionModeSwitchFailureMessage(message: string) {
+  return message.includes("ACCOUNT_POSITION_MODE_SWITCH_FAILED:");
+}
+
 function formatOkxErrorCategory(value?: string) {
   const map: Record<string, string> = {
     auth: "账号认证",
@@ -11022,9 +11322,6 @@ function OrderTicket({
   const [attachedExitsEnabled, setAttachedExitsEnabled] = useState(false);
   const [takeProfitPrice, setTakeProfitPrice] = useState("");
   const [stopLossPrice, setStopLossPrice] = useState("");
-  const [serverPrechecks, setServerPrechecks] = useState<Partial<Record<TradeActionSide, { fingerprint: string; response: TradePrecheckResponse }>>>({});
-  const [serverPrecheckStatus, setServerPrecheckStatus] = useState(() => t("trading:waitingInput"));
-  const serverPrecheckSeqRef = useRef(0);
   const [leverageInfo, setLeverageInfo] = useState<OkxLeverageInfo[]>([]);
   const [leverageStatus, setLeverageStatus] = useState(() => t("trading:waitingSync"));
   const [readingLeverage, setReadingLeverage] = useState(false);
@@ -11146,7 +11443,6 @@ function OrderTicket({
   }, [account?.id, leverage, marginMode, onChartTradeConfigChange, symbol, tradeEnvironment]);
   useEffect(() => {
     submitRequestSeqRef.current += 1;
-    serverPrecheckSeqRef.current += 1;
     tradeExecutionGuardSeqRef.current += 1;
     instrumentOperationSeqRef.current.cancel_orders += 1;
     instrumentOperationSeqRef.current.flatten_positions += 1;
@@ -11159,8 +11455,6 @@ function OrderTicket({
     setAttachedExitsEnabled(false);
     setTakeProfitPrice("");
     setStopLossPrice("");
-    setServerPrechecks({});
-    setServerPrecheckStatus(t("trading:waitingInput"));
     setConfirmingOrder(null);
     setConfirmingInstrumentOperation(null);
     setSubmittingSide(null);
@@ -11246,75 +11540,6 @@ function OrderTicket({
     if (stopLossEnabled && !validTickPrice(stopLossPrice)) blockers.push("实际止损触发价无效或不符合 tickSz");
     return blockers;
   }, [attachedExitsEnabled, instrument?.tickSz, orderType, stopLossEnabled, stopLossPrice, takeProfitEnabled, takeProfitPrice, ticketMode, trailingActivePrice, trailingCallbackRatio, triggerExecution, triggerOrderPrice]);
-  const serverPrecheckFingerprint = useMemo(() => JSON.stringify({
-    accountId: account?.id ?? null,
-    environment: tradeEnvironment,
-    symbol,
-    ticketMode,
-    marginMode,
-    leverage,
-    orderType,
-    price: effectiveOrderPrice,
-    size: effectiveSizeInput,
-    triggerSource,
-    triggerExecution,
-    triggerOrderPrice,
-    trailingCallbackRatio,
-    takeProfitPrice: takeProfitEnabled ? takeProfitPrice : "",
-    stopLossPrice: stopLossEnabled ? stopLossPrice : "",
-  }), [account?.id, effectiveOrderPrice, effectiveSizeInput, leverage, marginMode, orderType, stopLossEnabled, stopLossPrice, symbol, takeProfitEnabled, takeProfitPrice, ticketMode, tradeEnvironment, trailingCallbackRatio, triggerExecution, triggerOrderPrice, triggerSource]);
-  const serverPrecheckFingerprintFor = useCallback((action: TradeActionSide) => `${serverPrecheckFingerprint}:${action}`, [serverPrecheckFingerprint]);
-  useEffect(() => {
-    const requestSeq = ++serverPrecheckSeqRef.current;
-    setServerPrechecks({});
-    if (!account || precheck.blocked || advancedBlockers.length > 0) {
-      setServerPrecheckStatus(t("trading:waitingValidInput"));
-      return;
-    }
-    setServerPrecheckStatus(t("trading:waitingServerPrecheck"));
-    const timer = window.setTimeout(() => {
-      const actions: TradeActionSide[] = ticketMode === "open" ? ["long", "short"] : ["close-long", "close-short"];
-      let completed = 0;
-      let failures = 0;
-      setServerPrecheckStatus(t("trading:serverPrecheckProgress", { completed: 0, total: actions.length }));
-      actions.forEach((action) => {
-        void requestTradePrecheck({
-          accountId: account.id,
-          instId: symbol,
-          tdMode: marginMode,
-          orderType: legacyOrderType(orderType),
-          ticketMode,
-          action,
-          price: String(effectiveOrderPrice),
-          stopPrice: stopLossEnabled ? stopLossPrice : undefined,
-          size: effectiveSizeInput,
-          lever: leverage,
-          environment: tradeEnvironment,
-        })
-          .then((response) => {
-            if (!response || requestSeq !== serverPrecheckSeqRef.current) return;
-            setServerPrechecks((current) => ({
-              ...current,
-              [action]: { fingerprint: serverPrecheckFingerprintFor(action), response },
-            }));
-          })
-          .catch((error) => {
-            if (requestSeq !== serverPrecheckSeqRef.current) return;
-            failures += 1;
-            logger.warn("trade ticket background precheck failed", { action, error: formatTradeErrorMessage(error), symbol });
-          })
-          .finally(() => {
-            if (requestSeq !== serverPrecheckSeqRef.current) return;
-            completed += 1;
-            if (completed < actions.length) setServerPrecheckStatus(t("trading:serverPrecheckProgress", { completed, total: actions.length }));
-            else if (failures === actions.length) setServerPrecheckStatus(t("trading:serverPrecheckUnavailable"));
-            else if (failures > 0) setServerPrecheckStatus(t("trading:serverPrecheckPartial"));
-            else setServerPrecheckStatus(t("trading:serverPrecheckComplete"));
-          });
-      });
-    }, 420);
-    return () => window.clearTimeout(timer);
-  }, [account, advancedBlockers.length, effectiveOrderPrice, effectiveSizeInput, leverage, marginMode, orderType, precheck.blocked, serverPrecheckFingerprintFor, stopLossEnabled, stopLossPrice, symbol, t, ticketMode, tradeEnvironment]);
   useEffect(() => {
     const requestSeq = ++leverageRequestSeqRef.current;
     if (!account) {
@@ -11419,10 +11644,6 @@ function OrderTicket({
       });
   }, [account, marginMode, onNotify, symbol, t, tradeEnvironment]);
 
-  const currentServerPrecheckFor = useCallback((action: TradeActionSide) => {
-    const entry = serverPrechecks[action];
-    return entry?.fingerprint === serverPrecheckFingerprintFor(action) ? entry.response : null;
-  }, [serverPrecheckFingerprintFor, serverPrechecks]);
   const riskBlocked = precheck.blocked || advancedBlockers.length > 0;
   const leverageOptions = useMemo(() => {
     const maxLeverage = Math.max(1, Math.floor(Number(instrument?.lever) || 50));
@@ -11441,13 +11662,10 @@ function OrderTicket({
   const tradeSize = Number(effectiveSizeInput);
   const tradeLever = Number(leverage);
   const contractValue = Number(instrument?.ctVal);
-  const serverPositionMetrics = currentServerPrecheckFor("long")?.perpetualEvaluation?.candidate
-    ?? currentServerPrecheckFor("short")?.perpetualEvaluation?.candidate;
-  const evaluatedMargin = Number(serverPositionMetrics?.estimatedInitialMarginUsdt);
   const localEstimatedMargin = Number.isFinite(tradePrice) && Number.isFinite(tradeSize) && Number.isFinite(tradeLever) && tradePrice > 0 && tradeSize > 0 && tradeLever > 0
     ? (tradePrice * tradeSize * contractValue) / tradeLever
     : undefined;
-  const estimatedMargin = Number.isFinite(evaluatedMargin) ? evaluatedMargin : localEstimatedMargin;
+  const estimatedMargin = localEstimatedMargin;
   const rawMaxOpenSize = Number.isFinite(availableUsdt) && Number.isFinite(tradePrice) && Number.isFinite(tradeLever) && Number.isFinite(contractValue) && availableUsdt > 0 && tradePrice > 0 && tradeLever > 0 && contractValue > 0
     ? (availableUsdt * tradeLever) / (tradePrice * contractValue)
     : undefined;
@@ -11516,8 +11734,6 @@ function OrderTicket({
   const prepareOrder = useCallback((side: TradeActionSide): { order?: PreparedTradeOrder; reason?: string } => {
     if (!account) return { reason: "未配置账号" };
     if (riskBlocked) return { reason: advancedBlockers[0] ?? precheck.reasons[0] ?? precheck.buttonReason(side) };
-    const actionServerPrecheck = currentServerPrecheckFor(side);
-    if (actionServerPrecheck?.blocked) return { reason: actionServerPrecheck.reasons[0] ?? "后台预检已阻断该方向" };
     if (!precheck.allowedSides[side]) return { reason: precheck.buttonReason(side) };
     if ((ticketMode === "open" && !["long", "short"].includes(side)) || (ticketMode === "close" && !["close-long", "close-short"].includes(side))) {
       return { reason: "下单方向与当前开平仓模式不一致" };
@@ -11614,7 +11830,7 @@ function OrderTicket({
         createdAt: Date.now(),
       }),
     };
-  }, [account, advancedBlockers, closeSizeForSide, contractValue, currentServerPrecheckFor, effectiveSizeInput, instrument, leverage, marginMode, maxOpenSize, orderEntryPrice, orderType, precheck, priceInput, riskBlocked, stopLossEnabled, stopLossPrice, symbol, t, takeProfitEnabled, takeProfitPrice, ticketMode, ticker?.instId, ticker?.last, tradeEnvironment, tradeLever, trailingActivePrice, trailingCallbackRatio, triggerExecution, triggerOrderPrice, triggerSource]);
+  }, [account, advancedBlockers, closeSizeForSide, contractValue, effectiveSizeInput, instrument, leverage, marginMode, maxOpenSize, orderEntryPrice, orderType, precheck, priceInput, riskBlocked, stopLossEnabled, stopLossPrice, symbol, t, takeProfitEnabled, takeProfitPrice, ticketMode, ticker?.instId, ticker?.last, tradeEnvironment, tradeLever, trailingActivePrice, trailingCallbackRatio, triggerExecution, triggerOrderPrice, triggerSource]);
 
   const submitPreparedOrder = useCallback((prepared: PreparedTradeOrder) => {
     if (submittingSide) return;
@@ -12037,7 +12253,6 @@ function OrderTicket({
   const unresolvedOrder = tradeExecutionGuardBlocksOpen;
   const tradeActionStates = tradeActions.map((action) => {
     const closeMax = closeSizeForSide(action.side);
-    const actionServerPrecheck = currentServerPrecheckFor(action.side);
     const entryPrice = Number(orderEntryPrice || effectiveOrderPrice);
     const directionalReason = takeProfitEnabled && action.side === "long" && Number(takeProfitPrice) <= entryPrice
           ? "做多止盈价必须高于入场价"
@@ -12072,8 +12287,6 @@ function OrderTicket({
                 : "存在未完成对账的委托，请先在挂单或审计记录中核对"
             : riskBlocked
               ? advancedBlockers[0] ?? precheck.reasons[0] ?? precheck.buttonReason(action.side)
-              : actionServerPrecheck?.blocked
-                ? actionServerPrecheck.reasons[0] ?? "后台预检已阻断该方向"
               : directionalReason
                 ? directionalReason
               : !precheck.allowedSides[action.side]
@@ -12088,11 +12301,6 @@ function OrderTicket({
   const tradeBlockerText = Array.from(
     new Set(tradeActionStates.map((action) => action.disabledReason).filter(Boolean))
   ).join(" · ");
-  const visibleServerPrechecks = tradeActions
-    .map((action) => ({ action: action.side, label: action.label, response: currentServerPrecheckFor(action.side) }))
-    .filter((item): item is { action: TradeActionSide; label: string; response: TradePrecheckResponse } => Boolean(item.response));
-  const blockedServerPrecheck = visibleServerPrechecks.find((item) => item.response.blocked);
-  const serverPrechecksPassed = visibleServerPrechecks.length === tradeActions.length && visibleServerPrechecks.every((item) => !item.response.blocked);
   const priceFieldError = orderType === "market" ? "" : [...advancedBlockers, ...precheck.reasons].find((reason) => /价格|触发价|档位|激活/.test(reason)) ?? "";
   const sizeFieldError = precheck.reasons.find((reason) => /张数|数量|最小下单|单笔最大|步进/.test(reason)) ?? "";
 
@@ -12388,12 +12596,6 @@ function OrderTicket({
           </div>
         )}
         <div className="trade-submit-zone">
-          <div className={clsx("ticket-server-precheck", blockedServerPrecheck && "blocked", serverPrechecksPassed && "passed")} role="status">
-            <span>{serverPrecheckStatus}</span>
-            {blockedServerPrecheck
-              ? <strong>{blockedServerPrecheck.label}：{blockedServerPrecheck.response.reasons[0]}</strong>
-              : serverPrechecksPassed && <strong>两个方向均已复核</strong>}
-          </div>
           {lastOrderState?.scopeKey === tradeScopeKey && (
             <div className={clsx("trade-last-order", lastOrderState.status)} role="status">
               <span>{lastOrderState.status === "submitting" ? "提交中" : lastOrderState.status === "accepted" ? "已受理" : lastOrderState.status === "unknown" ? "状态不明" : "已拒绝"}</span>

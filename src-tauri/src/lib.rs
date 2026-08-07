@@ -40,12 +40,14 @@ mod intelligence;
 mod market_ws;
 mod private_history;
 mod storage_config;
+mod systematic;
 mod trade_commands;
 mod trade_domain;
 mod trade_support;
 use crate::ai_automation::{
     ai_agent_profile_delete, ai_agent_profile_run_daily_review, ai_agent_profile_run_now,
-    ai_agent_profile_save, ai_agent_scheme_delete, ai_agent_scheme_save, ai_automation_overview,
+    ai_agent_profile_save, ai_agent_profile_systematic_conflicts, ai_agent_scheme_delete,
+    ai_agent_scheme_save, ai_automation_overview,
     ai_automation_run_detail, ai_automation_run_statuses, ai_automation_save_master_enabled,
     ai_automation_section, ai_automation_summary, ai_optimization_suggestion_update,
     ai_skill_version_discard, ai_skill_version_publish, ai_token_usage_summary,
@@ -74,7 +76,8 @@ use crate::intelligence::{
     intelligence_derivatives_positioning, intelligence_derivatives_system_risk,
     intelligence_derivatives_taker_flow, intelligence_mark_active_instrument,
     intelligence_news_detail, intelligence_news_event_detail, intelligence_news_events_query,
-    intelligence_news_query, intelligence_news_reaction_query, intelligence_news_sources,
+    intelligence_news_feed, intelligence_news_mark_read, intelligence_news_query,
+    intelligence_news_read_state, intelligence_news_reaction_query, intelligence_news_sources,
     intelligence_sentiment_query, intelligence_settings_save, intelligence_settings_summary,
     intelligence_smart_query, intelligence_smart_signals_query, intelligence_smart_trader_detail,
     intelligence_smart_traders_query, intelligence_summary, intelligence_sync_now,
@@ -100,6 +103,20 @@ use crate::storage_config::{
     save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
     save_watchlist_config, storage_maintenance, storage_status, test_proxy_config,
     ui_preferences_summary,
+};
+use crate::systematic::{
+    start_systematic_worker, systematic_backtest_cancel, systematic_backtest_defaults,
+    systematic_backtest_delete, systematic_backtest_detail, systematic_backtest_start, systematic_capture_universe_snapshot,
+    systematic_factor_create_default, systematic_factor_evaluate, systematic_factor_save,
+    systematic_overview, systematic_python_prepare_environment,
+    systematic_python_run_sample, systematic_strategy_ai_cancel_session,
+    systematic_strategy_ai_execute_tool, systematic_strategy_ai_send_message,
+    systematic_strategy_ai_tool_respond,
+    systematic_optimization_start, systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
+    systematic_profile_signals,
+    systematic_strategy_create_python, systematic_strategy_delete, systematic_strategy_save_python,
+    systematic_strategy_version_detail, systematic_strategy_versions,
+    SystematicRuntime,
 };
 use crate::trade_commands::{
     capture_trade_opportunity_market_snapshot, materialize_trade_opportunity_commit,
@@ -149,6 +166,8 @@ const TRADE_AUDIT_EVENT: &str = "trade:audit";
 const AI_EVENT: &str = "ai:event";
 const AI_CHART_ACTION_EVENT: &str = "ai:chart-action";
 const CHART_ALERT_TRIGGERED_EVENT: &str = "chart:alert-triggered";
+const ACCOUNT_POSITION_MODE_SWITCH_FAILED_EVENT: &str = "ai:automation-event";
+const ACCOUNT_POSITION_MODE_SWITCH_FAILED_PREFIX: &str = "ACCOUNT_POSITION_MODE_SWITCH_FAILED:";
 
 fn decode_exchange_marker(material: &[u8; 16]) -> String {
     const SEED: u8 = 19;
@@ -229,10 +248,11 @@ fn scrub_private_exchange_text(text: &str) -> String {
             .fold(text.to_string(), |value, marker| value.replace(marker, "")),
     }
 }
-const CHART_INDICATOR_AI_SYSTEM_PROMPT: &str = r##"你是 desicTradeAI 指标中心里的“自定义指标生成器”。
-你的唯一任务：根据用户自然语言，调用 script.createOrUpdate 创建或更新一个本地图表自定义指标。
+const CHART_INDICATOR_AI_SYSTEM_PROMPT: &str = r##"你是 desicTradeAI 指标中心里的自定义指标对话助手。
+你可以和用户讨论指标想法、解释指标逻辑、询问缺少的细节，也可以在用户明确要求时创建或更新一个本地图表自定义指标。
 不要调用 Skill、子 Agent、交易、账户、行情、通知、文件或 shell 类工具；不要输出任意 JavaScript。
-不能只用自然语言声称已生成；没有成功调用 script.createOrUpdate 就视为失败。最终答复必须等待工具返回后再说明已写入指标库。
+只有在用户明确要求创建或更新指标，并且已经有足够信息时，才调用 script.createOrUpdate。没有调用工具时，正常回答用户的问题，不要声称指标已经生成或写入。
+调用工具后必须等待工具返回；只有工具成功返回后，才能说明指标已写入指标库。
 
 script.createOrUpdate 参数要求：
 - name：简短中文名称，最多 40 字。
@@ -316,8 +336,11 @@ DSL 字段名必须逐字匹配：
 - 百分比、比率、0-100 区间、-1/0/1 状态、0/1 布尔信号、价格差值、收益率、动量、成交量、波动率、零轴柱状图及其它独立数值尺度必须使用 sub，例如 RSI、MACD 类动量、ATR 数值、成交量和多空信号柱。
 - 禁止把远离当前价格的零值或小数值输出放到 main。尤其禁止在 main 的条件信号中用 else={ "type": "number", "value": 0 } 形成零基线，否则主图自动缩放会把 K 线压缩到不可见；这类信号应改放 sub。
 - 一个指标可以同时包含 main 和 sub 输出：价格结构输出放 main，信号强度、状态柱和振荡输出放 sub。生成前逐个检查所有 main 输出是否始终代表合理的绝对价格；无法确认时默认使用 sub。
+- 图表指标只读取当前图表周期的 OHLCV；它没有 Python 策略的 `ctx`、多周期 K 线快照、持仓、成交、保证金、保护单或回测时间线。不得声称能够访问这些数据，也不得把止盈止损、开平仓、资金管理或策略调优写成指标功能。
+- 用户提出策略研究需求时，只能把其中可由当前图表 OHLCV 计算的部分做成可视化研究证据，例如均线、通道、动量或条件状态；description 必须清楚表明它是图表研究用途，不能暗示已产生交易或可直接执行。多周期、持仓或历史回放需求不能用此 DSL 伪造实现。
+- 指标 DSL 的 parameters 只是本地图表显示参数，不是策略的 `ctx.params`，也不是策略调优范围。不得使用策略参数、策略 API 或任何交易动作命名为可执行接口。
 - 不确定用户想法时，选择稳健常用默认值并在 description 中说明。
-- 完成时必须调用一次 script.createOrUpdate；工具成功返回后再用一句中文说明已生成。"##;
+- 用户明确要求创建或更新时才调用一次 script.createOrUpdate；工具成功返回后再用一句中文说明已生成。"##;
 const MARKET_WS_MAX_BACKOFF_SECS: u64 = 15;
 const OKX_ACCOUNT_CONFIG_CACHE_TTL_MS: i64 = 5 * 60_000;
 const TRADE_PRECHECK_SNAPSHOT_MAX_AGE_MS: i64 = 5_000;
@@ -352,7 +375,6 @@ pub(crate) struct AccountMutationLease {
     credential_fingerprint: String,
 }
 static CHART_WINDOWS: OnceLock<Mutex<HashMap<String, ChartWindowState>>> = OnceLock::new();
-static CHART_ALERT_LAST_PRICES: OnceLock<Mutex<HashMap<String, f64>>> = OnceLock::new();
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1037,6 +1059,8 @@ struct AiSendRequest {
 struct AiChartIndicatorGenerateRequest {
     session_id: String,
     prompt: String,
+    #[serde(default)]
+    messages: Vec<AiChatMessage>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1047,6 +1071,7 @@ struct AiStreamOptions {
     system_prompt: Option<String>,
     custom_rules: Option<String>,
     enabled_skills: Option<Vec<String>>,
+    runtime_scoped_skills: Vec<desic_storage_config::AiSkillDefinition>,
     clear_skill_definitions: bool,
     disable_skills_tool: Option<bool>,
     enable_spawn_agent: Option<bool>,
@@ -2243,7 +2268,23 @@ fn ai_generate_chart_indicator(
     if prompt.is_empty() {
         return Err("请输入指标需求".to_string());
     }
-    let message_id = format!("u-{}", now_ms());
+    let mut messages = request.messages;
+    let has_current_user_message = messages.last().is_some_and(|message| {
+        message.role == "user" && message.content.trim() == prompt
+    });
+    if !has_current_user_message {
+        messages.push(AiChatMessage {
+            id: None,
+            role: "user".to_string(),
+            content: prompt.clone(),
+        });
+    }
+    let message_id = messages
+        .iter()
+        .rev()
+        .find(|message| message.role == "user" && !message.content.trim().is_empty())
+        .and_then(|message| message.id.clone())
+        .unwrap_or_else(|| format!("u-{}", now_ms()));
     {
         let conn = open_database(&app)?;
         let title = format!("AI 指标 · {}", prompt.chars().take(22).collect::<String>());
@@ -2271,24 +2312,20 @@ fn ai_generate_chart_indicator(
             AiEvent::Status {
                 session_id: task_session_id.clone(),
                 status: "connecting".to_string(),
-                message: "连接指标生成模型".to_string(),
+                message: "连接指标助手".to_string(),
             },
         );
-        let messages = vec![AiChatMessage {
-            id: Some(message_id),
-            role: "user".to_string(),
-            content: prompt,
-        }];
         let options = AiStreamOptions {
             model_id: None,
             permission_mode: Some("advisor".to_string()),
             reasoning_depth: None,
             system_prompt: Some(CHART_INDICATOR_AI_SYSTEM_PROMPT.to_string()),
             custom_rules: Some(
-                "本次会话只允许生成自定义指标脚本；必须通过 script.createOrUpdate 返回结果。"
+                "本次会话只允许使用 script.createOrUpdate。只有用户明确要求创建或更新指标且信息足够时才调用它；其他内容正常对话，不要声称已保存。"
                     .to_string(),
             ),
             enabled_skills: Some(Vec::new()),
+            runtime_scoped_skills: Vec::new(),
             clear_skill_definitions: true,
             disable_skills_tool: Some(true),
             enable_spawn_agent: Some(false),
@@ -2296,7 +2333,7 @@ fn ai_generate_chart_indicator(
             stream_fallback_text: false,
             max_iterations: Some(8),
             tool_allowlist: vec!["script.createOrUpdate".to_string()],
-            required_tool_name: Some("script.createOrUpdate".to_string()),
+            required_tool_name: None,
             interactive_account_id: None,
         };
         if let Err(message) = run_ai_stream(
@@ -2348,6 +2385,7 @@ async fn ai_stop(
     runtime: tauri::State<'_, AiRuntime>,
     session_id: String,
 ) -> Result<(), String> {
+    systematic_strategy_ai_cancel_session(&app, &session_id).await;
     let _ = send_ai_sidecar_command(
         &app,
         runtime.inner(),
@@ -2400,6 +2438,14 @@ struct PrivateAccountSnapshot {
     balances: Vec<OkxBalance>,
     positions: Vec<OkxPosition>,
     orders: Vec<OkxPendingOrder>,
+    #[serde(default)]
+    positions_complete: bool,
+    #[serde(default)]
+    position_seq_id: Option<i64>,
+    #[serde(default)]
+    orders_complete: bool,
+    #[serde(default)]
+    orders_error: Option<String>,
     synced_at: i64,
 }
 
@@ -3315,6 +3361,8 @@ struct AttachedAlgoOrder {
     #[serde(skip_serializing_if = "Option::is_none")]
     tp_ord_px: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tp_ord_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tp_trigger_px_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sl_trigger_px: Option<String>,
@@ -3852,6 +3900,30 @@ async fn okx_candles(inst_id: String, bar: String, limit: u16) -> Result<Vec<Can
         .collect::<Vec<_>>();
     candles.reverse();
     Ok(candles)
+}
+
+#[tauri::command]
+async fn okx_funding_rate(
+    runtime: tauri::State<'_, MarketRuntime>,
+    inst_id: String,
+) -> Result<Option<FundingRate>, String> {
+    if let Some(cached) = runtime
+        .store
+        .lock()
+        .ok()
+        .and_then(|store| store.funding_rates.get(&inst_id).cloned())
+    {
+        return Ok(Some(cached));
+    }
+    let path = format!("/api/v5/public/funding-rate?instId={}", url_encode(&inst_id));
+    let envelope: OkxEnvelope<FundingRate> = get_json(&path).await?;
+    let funding = envelope.data.into_iter().next();
+    if let Some(value) = funding.as_ref() {
+        if let Ok(mut store) = runtime.store.lock() {
+            store.funding_rates.insert(inst_id, value.clone());
+        }
+    }
+    Ok(funding)
 }
 
 fn okx_recent_candles_path(inst_id: &str, bar: &str, limit: u16) -> Result<String, String> {
@@ -4627,6 +4699,7 @@ async fn test_local_account(
     {
         return Err("账号配置在连接测试期间发生变化，请重试".to_string());
     }
+    ensure_okx_long_short_mode(&app, &account).await?;
     fetch_private_account_snapshot(&account).await
 }
 
@@ -4687,6 +4760,304 @@ async fn okx_private_snapshot(
     Ok(snapshot)
 }
 
+/// Builds the strictly shaped, read-only portfolio payload supplied to one
+/// Systematic Profile callback. The Python process receives this JSON only;
+/// credentials, account objects, and order clients never cross the boundary.
+pub(crate) async fn systematic_profile_portfolio_snapshot(
+    app: tauri::AppHandle,
+    account_id: &str,
+    inst_id: &str,
+    cutoff_at: i64,
+) -> Result<serde_json::Value, String> {
+    let runtime = app.state::<MarketRuntime>();
+    let snapshot = if let Some(snapshot) = ai_read_memory_account_snapshot(runtime.inner(), Some(account_id))
+        .filter(|value| {
+            value.positions_complete
+                && value.orders_complete
+                && now_ms().saturating_sub(value.synced_at) <= 5_000
+        })
+    {
+        snapshot
+    } else {
+        let snapshot = match okx_private_snapshot(
+            app.clone(),
+            PrivateSnapshotRequest {
+                account_id: Some(account_id.to_string()),
+            },
+        )
+        .await
+        {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                mark_memory_private_snapshot_incomplete(runtime.inner(), account_id, &error);
+                return Err(error);
+            }
+        };
+        // A REST read is the recovery baseline after a private-stream gap.
+        // Cache it so subsequent Profile cycles can return to the low-latency
+        // stream path instead of issuing REST reads forever.
+        if let Ok(mut store) = runtime.store.lock() {
+            store.private_snapshot = Some(snapshot.clone());
+            store.private_snapshots.insert(
+                format!(
+                    "{}:{}",
+                    normalize_environment(&snapshot.environment),
+                    snapshot.account_id
+                ),
+                snapshot.clone(),
+            );
+        }
+        snapshot
+    };
+    if snapshot.account_id != account_id {
+        return Err("策略 Profile 账户快照身份不匹配".to_string());
+    }
+    if !snapshot.positions_complete || !snapshot.orders_complete {
+        return Err("策略 Profile 账户快照不完整，无法安全执行".to_string());
+    }
+    let instrument = crate::trade_support::fetch_instrument(&app, inst_id).await?;
+    let contract_value = parse_optional_f64(&instrument.ct_val)
+        .filter(|value| *value > 0.0)
+        .unwrap_or(1.0);
+    let usdt = snapshot
+        .balances
+        .iter()
+        .find(|balance| balance.ccy.eq_ignore_ascii_case("USDT"));
+    let equity = usdt
+        .and_then(|balance| parse_optional_f64(&balance.eq))
+        .unwrap_or(0.0)
+        .max(0.0);
+    let available = usdt
+        .and_then(|balance| parse_optional_f64(&balance.avail_eq))
+        .or_else(|| usdt.and_then(|balance| parse_optional_f64(&balance.avail_bal)))
+        .unwrap_or(equity)
+        .clamp(0.0, equity);
+    let positions = snapshot
+        .positions
+        .iter()
+        .filter(|position| position.inst_id == inst_id)
+        .filter_map(|position| {
+            let signed_quantity = parse_optional_f64(&position.pos)?;
+            if signed_quantity.abs() <= f64::EPSILON {
+                return None;
+            }
+            let side = match position.pos_side.as_str() {
+                "long" => "long",
+                "short" => "short",
+                _ if signed_quantity > 0.0 => "long",
+                _ => "short",
+            };
+            let entry_price = parse_optional_f64(&position.avg_px)?;
+            let mark_price = parse_optional_f64(&position.mark_px)
+                .filter(|price| *price > 0.0)
+                .unwrap_or(entry_price);
+            let leverage = parse_optional_f64(&position.lever).unwrap_or(1.0).max(1.0);
+            let notional = parse_optional_f64(&position.notional_usd)
+                .filter(|value| *value > 0.0)
+                .unwrap_or_else(|| signed_quantity.abs() * contract_value * mark_price);
+            let margin = okx_position_used_margin(position, notional, leverage)
+                .unwrap_or(0.0);
+            Some(json!({
+                "instrumentId": inst_id,
+                "side": side,
+                "quantity": signed_quantity.abs(),
+                "averageEntryPrice": entry_price,
+                "markPrice": mark_price,
+                "contractValue": contract_value,
+                "notionalUsdt": notional,
+                "usedMarginUsdt": margin,
+                "leverage": leverage,
+                "marginSafetyMultiplier": 1.0,
+                "unrealizedPnlUsdt": parse_optional_f64(&position.upl).unwrap_or(0.0),
+                "entryFeeUsdt": 0.0,
+                "fundingCashflowUsdt": 0.0,
+                "openedAtMs": position.c_time.parse::<i64>().ok().unwrap_or(cutoff_at).min(cutoff_at),
+                "updatedAtMs": position.u_time.parse::<i64>().ok().unwrap_or(cutoff_at).min(cutoff_at),
+            }))
+        })
+        .collect::<Vec<_>>();
+    let used_margin = positions
+        .iter()
+        .filter_map(|value| value.get("usedMarginUsdt").and_then(serde_json::Value::as_f64))
+        .sum::<f64>()
+        .min(equity);
+    let available_margin = available.min((equity - used_margin).max(0.0));
+    let open_orders = snapshot
+        .orders
+        .iter()
+        .filter_map(|order| systematic_profile_open_order(order, inst_id, cutoff_at))
+        .collect::<Vec<_>>();
+    let recent_fills = systematic_profile_recent_fills(
+        &app,
+        account_id,
+        &snapshot.environment,
+        inst_id,
+        cutoff_at,
+        contract_value,
+    )?;
+    Ok(json!({
+        "cashUsdt": equity,
+        "equityUsdt": equity,
+        "usedMarginUsdt": used_margin,
+        "availableMarginUsdt": available_margin,
+        "positions": positions,
+        "openOrders": open_orders,
+        "recentFills": recent_fills,
+        "trades": [],
+        "ledgerMode": "replace",
+    }))
+}
+
+fn systematic_profile_open_order(
+    order: &OkxPendingOrder,
+    inst_id: &str,
+    cutoff_at: i64,
+) -> Option<serde_json::Value> {
+    if order.is_algo || order.inst_id != inst_id || order.ord_id.trim().is_empty() {
+        return None;
+    }
+    let action = match (order.side.as_str(), order.pos_side.as_str()) {
+        ("buy", "long") => "open_long",
+        ("sell", "short") => "open_short",
+        ("sell", "long") => "close_long",
+        ("buy", "short") => "close_short",
+        _ => return None,
+    };
+    let quantity = parse_optional_f64(&order.sz).filter(|value| *value > 0.0)?;
+    let filled_quantity = parse_optional_f64(&order.acc_fill_sz)
+        .unwrap_or(0.0)
+        .clamp(0.0, quantity);
+    if filled_quantity + f64::EPSILON >= quantity {
+        return None;
+    }
+    let created_at = order
+        .c_time
+        .parse::<i64>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= cutoff_at)?;
+    let state = order.state.to_ascii_lowercase();
+    let status = if filled_quantity > f64::EPSILON || state == "partially_filled" {
+        "partially_filled"
+    } else {
+        "open"
+    };
+    let mut value = json!({
+        "id": order.ord_id,
+        "instrumentId": inst_id,
+        "action": action,
+        "quantity": quantity,
+        "filledQuantity": filled_quantity,
+        "status": status,
+        "createdAtMs": created_at,
+    });
+    if let Some(price) = parse_optional_f64(&order.px).filter(|price| *price > 0.0) {
+        value["price"] = json!(price);
+    }
+    Some(value)
+}
+
+fn systematic_profile_recent_fills(
+    app: &tauri::AppHandle,
+    account_id: &str,
+    environment: &str,
+    inst_id: &str,
+    cutoff_at: i64,
+    contract_value: f64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let conn = open_read_database(app)?;
+    let mut statement = conn
+        .prepare(
+            "SELECT bill_id,ord_id,side,pos_side,fill_px,fill_sz,fee,COALESCE(okx_ts,synced_at)
+             FROM okx_fills
+             WHERE account_id=?1 AND environment=?2 AND inst_id=?3
+               AND COALESCE(okx_ts,synced_at)<=?4
+             ORDER BY COALESCE(okx_ts,synced_at) DESC LIMIT 200",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![account_id, environment, inst_id, cutoff_at], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, i64>(7)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?;
+    let raw_rows = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut fills = raw_rows
+        .into_iter()
+        .filter_map(|(bill_id, order_id, side, pos_side, price, quantity, fee, filled_at)| {
+            let quantity = parse_optional_f64(quantity.as_deref()?).filter(|value| *value > 0.0)?;
+            let price = parse_optional_f64(price.as_deref()?).filter(|value| *value > 0.0)?;
+            let action = match (
+                side.as_deref().unwrap_or_default(),
+                pos_side.as_deref().unwrap_or_default(),
+            ) {
+                ("buy", "long") => "open_long",
+                ("sell", "long") => "close_long",
+                ("sell", "short") => "open_short",
+                ("buy", "short") => "close_short",
+                _ => return None,
+            };
+            Some(json!({
+                "id": bill_id,
+                "orderId": order_id.unwrap_or_else(|| bill_id.clone()),
+                "instrumentId": inst_id,
+                "action": action,
+                "quantity": quantity,
+                "price": price,
+                "notionalUsdt": quantity * contract_value * price,
+                "filledAtMs": filled_at.max(1),
+                "feeUsdt": parse_optional_f64(fee.as_deref().unwrap_or("")).unwrap_or(0.0).abs(),
+            }))
+        })
+        .collect::<Vec<_>>();
+    fills.reverse();
+    Ok(fills)
+}
+
+const PRIVATE_PENDING_ORDER_MAX_RETRIES: usize = 3;
+const PRIVATE_PENDING_ORDER_RETRY_DELAYS_MS: &[u64] = &[150, 350, 750];
+
+async fn fetch_pending_orders_with_retry<T>(
+    account: &LocalAccount,
+    path: &str,
+    label: &str,
+) -> Result<OkxEnvelope<T>, String>
+where
+    T: serde::de::DeserializeOwned,
+{
+    let mut last_error = String::new();
+    for attempt in 0..=PRIVATE_PENDING_ORDER_MAX_RETRIES {
+        match okx_private_get::<T>(account, path).await {
+            Ok(envelope) => return Ok(envelope),
+            Err(error) => {
+                last_error = error;
+                if attempt < PRIVATE_PENDING_ORDER_MAX_RETRIES {
+                    sleep(Duration::from_millis(
+                        PRIVATE_PENDING_ORDER_RETRY_DELAYS_MS
+                            .get(attempt)
+                            .copied()
+                            .unwrap_or(750),
+                    ))
+                    .await;
+                }
+            }
+        }
+    }
+    Err(format!(
+        "PENDING_ORDERS_SNAPSHOT_UNAVAILABLE: {} after {} retries: {}",
+        label, PRIVATE_PENDING_ORDER_MAX_RETRIES, last_error
+    ))
+}
+
 async fn fetch_private_account_snapshot(
     account: &LocalAccount,
 ) -> Result<PrivateAccountSnapshot, String> {
@@ -4700,42 +5071,27 @@ async fn fetch_private_account_snapshot(
     let (balance, positions, orders, algo_orders, tpsl_algo_orders) = tokio::join!(
         okx_private_get::<OkxBalanceEnvelope>(&account, "/api/v5/account/balance"),
         okx_private_get::<OkxPosition>(&account, "/api/v5/account/positions?instType=SWAP"),
-        okx_private_get::<OkxPendingOrder>(&account, "/api/v5/trade/orders-pending?instType=SWAP"),
-        okx_private_get::<OkxAlgoPendingOrder>(
+        fetch_pending_orders_with_retry::<OkxPendingOrder>(
             &account,
-            "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=trigger"
+            "/api/v5/trade/orders-pending?instType=SWAP",
+            "orders-pending",
         ),
-        okx_private_get::<OkxAlgoPendingOrder>(
+        fetch_pending_orders_with_retry::<OkxAlgoPendingOrder>(
             &account,
-            "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional,oco"
+            "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=trigger",
+            "orders-algo-pending(trigger)",
+        ),
+        fetch_pending_orders_with_retry::<OkxAlgoPendingOrder>(
+            &account,
+            "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional,oco",
+            "orders-algo-pending(conditional,oco)",
         )
     );
     let balance = balance?;
     let positions = positions?;
-    let orders = orders.unwrap_or_else(|err| {
-        eprintln!("[warn] pending orders snapshot degraded: {err}");
-        OkxEnvelope {
-            code: "0".to_string(),
-            msg: String::new(),
-            data: Vec::new(),
-        }
-    });
-    let algo_orders = algo_orders.unwrap_or_else(|err| {
-        eprintln!("[warn] algo pending orders snapshot degraded: {err}");
-        OkxEnvelope {
-            code: "0".to_string(),
-            msg: String::new(),
-            data: Vec::new(),
-        }
-    });
-    let tpsl_algo_orders = tpsl_algo_orders.unwrap_or_else(|err| {
-        eprintln!("[warn] tpsl algo pending orders snapshot degraded: {err}");
-        OkxEnvelope {
-            code: "0".to_string(),
-            msg: String::new(),
-            data: Vec::new(),
-        }
-    });
+    let orders = orders?;
+    let algo_orders = algo_orders?;
+    let tpsl_algo_orders = tpsl_algo_orders?;
     let balances = balance
         .data
         .into_iter()
@@ -4762,6 +5118,10 @@ async fn fetch_private_account_snapshot(
         balances,
         positions: active_positions,
         orders: pending_orders,
+        positions_complete: true,
+        position_seq_id: None,
+        orders_complete: true,
+        orders_error: None,
         synced_at: now_ms(),
     })
 }
@@ -4811,6 +5171,131 @@ fn pending_order_from_algo(order: OkxAlgoPendingOrder) -> OkxPendingOrder {
 fn is_active_swap_position(position: &OkxPosition) -> bool {
     (position.inst_type.is_empty() || position.inst_type.eq_ignore_ascii_case("SWAP"))
         && parse_optional_f64(&position.pos).is_some_and(|value| value.abs() > 0.0)
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PrivatePositionSequence {
+    seq_id: Option<i64>,
+    prev_seq_id: Option<i64>,
+}
+
+fn private_sequence_value(value: Option<&Value>) -> Option<i64> {
+    value.and_then(|item| {
+        item.as_i64().or_else(|| {
+            item.as_str()
+                .and_then(|text| text.trim().parse::<i64>().ok())
+        })
+    })
+}
+
+fn private_position_sequence(value: &Value, data: &[Value]) -> PrivatePositionSequence {
+    let sequence_source = data.first().unwrap_or(value);
+    PrivatePositionSequence {
+        seq_id: private_sequence_value(
+            value
+                .get("seqId")
+                .or_else(|| sequence_source.get("seqId")),
+        ),
+        prev_seq_id: private_sequence_value(
+            value
+                .get("prevSeqId")
+                .or_else(|| sequence_source.get("prevSeqId")),
+        ),
+    }
+}
+
+fn private_position_key(position: &OkxPosition) -> String {
+    if !position.pos_id.trim().is_empty() {
+        return format!("pos:{}", position.pos_id.trim());
+    }
+    let side = if position.pos_side.trim().is_empty() {
+        parse_optional_f64(&position.pos)
+            .filter(|value| *value != 0.0)
+            .map(|value| if value > 0.0 { "long" } else { "short" })
+            .unwrap_or("unknown")
+    } else {
+        position.pos_side.trim()
+    };
+    format!(
+        "pair:{}:{}",
+        position.inst_id.trim().to_ascii_uppercase(),
+        side.to_ascii_lowercase()
+    )
+}
+
+fn private_position_update_is_newer(incoming: &OkxPosition, existing: &OkxPosition) -> bool {
+    match (
+        incoming.u_time.trim().parse::<i64>().ok(),
+        existing.u_time.trim().parse::<i64>().ok(),
+    ) {
+        (Some(incoming), Some(existing)) => incoming >= existing,
+        _ => true,
+    }
+}
+
+/// Applies one private positions event without treating its data array as a
+/// complete account snapshot. REST is the only operation that establishes a
+/// complete baseline; a sequence gap invalidates the baseline until REST
+/// succeeds again.
+fn merge_private_position_delta(
+    snapshot: &mut PrivateAccountSnapshot,
+    positions: &[OkxPosition],
+    sequence: PrivatePositionSequence,
+) {
+    if !snapshot.positions_complete {
+        return;
+    }
+    if let Some(previous) = sequence.prev_seq_id {
+        if let Some(current) = snapshot.position_seq_id {
+            if previous != current {
+                snapshot.positions_complete = false;
+                return;
+            }
+        }
+    }
+    if let Some(sequence_id) = sequence.seq_id {
+        if snapshot
+            .position_seq_id
+            .is_some_and(|current| sequence_id <= current)
+        {
+            return;
+        }
+        snapshot.position_seq_id = Some(sequence_id);
+    }
+    for position in positions {
+        let key = private_position_key(position);
+        if is_active_swap_position(position) {
+            if let Some(existing) = snapshot
+                .positions
+                .iter_mut()
+                .find(|item| private_position_key(item) == key)
+            {
+                if private_position_update_is_newer(position, existing) {
+                    *existing = position.clone();
+                }
+            } else {
+                snapshot.positions.push(position.clone());
+            }
+        } else {
+            let should_remove = snapshot
+                .positions
+                .iter()
+                .find(|item| private_position_key(item) == key)
+                .is_none_or(|existing| private_position_update_is_newer(position, existing));
+            if should_remove {
+                snapshot
+                    .positions
+                    .retain(|item| private_position_key(item) != key);
+            }
+        }
+    }
+}
+
+fn mark_private_snapshot_complete(snapshot: &mut PrivateAccountSnapshot) {
+    snapshot.positions_complete = true;
+    snapshot.position_seq_id = None;
+    snapshot.orders_complete = true;
+    snapshot.orders_error = None;
 }
 
 #[tauri::command]
@@ -6347,6 +6832,7 @@ fn chart_workspace_delete(app: tauri::AppHandle, id: String) -> Result<bool, Str
         .map_err(|err| err.to_string())?
         > 0;
     transaction.commit().map_err(|err| err.to_string())?;
+    chart_alerts::chart_price_alert_cache_remove_workspace(&id);
     Ok(deleted)
 }
 
@@ -6437,6 +6923,7 @@ fn chart_workspace_view_delete(
         .map_err(|err| err.to_string())?
         > 0;
     transaction.commit().map_err(|err| err.to_string())?;
+    chart_alerts::chart_price_alert_cache_remove_workspace_view(&workspace_id, &id);
     Ok(deleted)
 }
 
@@ -6590,10 +7077,12 @@ fn chart_alert_save(app: tauri::AppHandle, input: ChartAlertInput) -> Result<Cha
            definition_json = excluded.definition_json, updated_at = excluded.updated_at",
         params![id, workspace_id, view_id, status, input.last_triggered_at, definition, now],
     ).map_err(|err| err.to_string())?;
-    conn.query_row(
+    let alert = conn.query_row(
         "SELECT id, workspace_id, view_id, status, last_triggered_at, definition_json, created_at, updated_at FROM chart_alerts WHERE id = ?1",
         params![id], chart_alert_from_row,
-    ).map_err(|err| err.to_string())
+    ).map_err(|err| err.to_string())?;
+    chart_alerts::chart_price_alert_cache_after_save(&alert);
+    Ok(alert)
 }
 
 #[tauri::command]
@@ -6610,13 +7099,17 @@ fn chart_alert_delete(
         params![id],
     )
     .map_err(|err| err.to_string())?;
-    Ok(conn
+    let deleted = conn
         .execute(
             "DELETE FROM chart_alerts WHERE workspace_id = ?1 AND id = ?2",
             params![workspace_id, id],
         )
         .map_err(|err| err.to_string())?
-        > 0)
+        > 0;
+    if deleted {
+        chart_alerts::chart_price_alert_cache_remove(&id);
+    }
+    Ok(deleted)
 }
 
 fn chart_alert_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<ChartAlertEvent> {
@@ -6663,132 +7156,6 @@ fn chart_alert_events_list(
     .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
-}
-
-fn chart_alert_last_prices() -> &'static Mutex<HashMap<String, f64>> {
-    CHART_ALERT_LAST_PRICES.get_or_init(|| Mutex::new(HashMap::new()))
-}
-
-fn chart_alert_definition_price(
-    definition: &Value,
-) -> Option<(String, f64, String, i64, Option<i64>)> {
-    let object = definition.as_object()?;
-    let kind = object
-        .get("kind")
-        .and_then(Value::as_str)
-        .unwrap_or("price");
-    if kind != "price" {
-        return None;
-    }
-    let inst_id = object
-        .get("instId")
-        .or_else(|| object.get("symbol"))
-        .and_then(Value::as_str)?
-        .trim()
-        .to_uppercase();
-    let price = object.get("price").and_then(Value::as_f64)?;
-    let direction = object
-        .get("direction")
-        .and_then(Value::as_str)
-        .unwrap_or("cross")
-        .to_string();
-    if inst_id.is_empty()
-        || !price.is_finite()
-        || price <= 0.0
-        || !matches!(direction.as_str(), "above" | "below" | "cross")
-    {
-        return None;
-    }
-    let cooldown_ms = object
-        .get("cooldownSeconds")
-        .and_then(Value::as_i64)
-        .unwrap_or(60)
-        .clamp(0, 86_400)
-        .saturating_mul(1_000);
-    let expires_at = object.get("expiresAt").and_then(Value::as_i64);
-    Some((inst_id, price, direction, cooldown_ms, expires_at))
-}
-
-fn chart_alert_matches(direction: &str, previous: f64, current: f64, target: f64) -> bool {
-    match direction {
-        "above" => previous < target && current >= target,
-        "below" => previous > target && current <= target,
-        "cross" => {
-            (previous < target && current >= target) || (previous > target && current <= target)
-        }
-        _ => false,
-    }
-}
-
-fn process_chart_price_alerts(app: &tauri::AppHandle, ticker: &Ticker) {
-    let current = ticker
-        .last
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && *value > 0.0);
-    let Some(current) = current else {
-        return;
-    };
-    let now = now_ms();
-    let conn = match open_database(app).and_then(|conn| Ok(conn)) {
-        Ok(conn) => conn,
-        Err(_) => return,
-    };
-    let rows = match conn.prepare("SELECT id,workspace_id,last_triggered_at,definition_json FROM chart_alerts WHERE status='active'")
-        .and_then(|mut statement| statement.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<i64>>(2)?, row.get::<_, String>(3)?)))?.collect::<Result<Vec<_>, _>>()) {
-        Ok(rows) => rows,
-        Err(_) => return,
-    };
-    for (alert_id, workspace_id, last_triggered_at, raw_definition) in rows {
-        let definition: Value = match serde_json::from_str(&raw_definition) {
-            Ok(value) => value,
-            Err(_) => continue,
-        };
-        let Some((inst_id, trigger_price, direction, cooldown_ms, expires_at)) =
-            chart_alert_definition_price(&definition)
-        else {
-            continue;
-        };
-        if inst_id != ticker.inst_id {
-            continue;
-        }
-        if expires_at.is_some_and(|expires_at| expires_at <= now) {
-            let _ = conn.execute(
-                "UPDATE chart_alerts SET status='expired', updated_at=?2 WHERE id=?1",
-                params![alert_id, now],
-            );
-            continue;
-        }
-        let key = format!("{}:{}", alert_id, inst_id);
-        let previous = chart_alert_last_prices()
-            .lock()
-            .ok()
-            .and_then(|prices| prices.get(&key).copied());
-        if let Ok(mut prices) = chart_alert_last_prices().lock() {
-            prices.insert(key, current);
-        }
-        let Some(previous) = previous else {
-            continue;
-        };
-        if last_triggered_at.is_some_and(|last| now.saturating_sub(last) < cooldown_ms)
-            || !chart_alert_matches(&direction, previous, current, trigger_price)
-        {
-            continue;
-        }
-        chart_alerts::trigger_chart_alert(
-            app,
-            &conn,
-            alert_id,
-            workspace_id,
-            inst_id,
-            "price",
-            &direction,
-            trigger_price,
-            current,
-            &definition,
-            now,
-        );
-    }
 }
 
 #[tauri::command]
@@ -7437,39 +7804,44 @@ fn handle_private_message(app: &tauri::AppHandle, runtime: &MarketRuntime, accou
     let Some(data) = value.get("data").and_then(|data| data.as_array()) else {
         return;
     };
+    let position_sequence = private_position_sequence(&value, data);
     let event_time_ms = data.iter().filter_map(private_message_timestamp).min();
     let delay_ms = event_time_ms.map(|ts| update_private_health(runtime, ts));
     let event_at = delay_ms.map(|_| current_okx_now_ms(runtime));
     emit_private_status(app, Some(account), format!("private data {}", channel), delay_ms, event_at);
     match channel {
         "account" => merge_account_update(app, runtime, data),
-        "balance_and_position" => merge_balance_position_update(app, runtime, data),
+        "balance_and_position" => {
+            merge_balance_position_update(app, runtime, data, position_sequence)
+        }
         "positions" => {
             let positions = data
                 .iter()
                 .filter_map(|raw| serde_json::from_value::<OkxPosition>(raw.clone()).ok())
-                .filter(is_active_swap_position)
                 .collect::<Vec<_>>();
-            if !positions.is_empty() || !data.is_empty() {
-                mutate_private_snapshot(app, runtime, |snapshot| {
-                    snapshot.positions = positions;
-                });
-            }
+            mutate_private_snapshot(app, runtime, |snapshot| {
+                merge_private_position_delta(snapshot, &positions, position_sequence);
+            });
         }
         "orders" => {
             let orders = data
                 .iter()
                 .filter_map(|raw| serde_json::from_value::<OkxPendingOrder>(raw.clone()).ok())
+                .map(crate::market_ws::normalize_pending_order_identity)
+                .filter(crate::market_ws::pending_order_has_identity)
                 .collect::<Vec<_>>();
             mutate_private_snapshot(app, runtime, |snapshot| {
                 for order in orders {
-                    if order.ord_id.is_empty() {
-                        continue;
-                    }
                     let state = order.state.to_lowercase();
-                    if matches!(state.as_str(), "filled" | "canceled" | "cancelled" | "failed") {
-                        snapshot.orders.retain(|item| item.ord_id != order.ord_id);
-                    } else if let Some(existing) = snapshot.orders.iter_mut().find(|item| item.ord_id == order.ord_id) {
+                    if crate::market_ws::is_terminal_pending_order_state(&state) {
+                        snapshot
+                            .orders
+                            .retain(|item| !crate::market_ws::pending_orders_match_identity(item, &order));
+                    } else if let Some(existing) = snapshot
+                        .orders
+                        .iter_mut()
+                        .find(|item| crate::market_ws::pending_orders_match_identity(item, &order))
+                    {
                         *existing = order;
                     } else {
                         snapshot.orders.push(order);
@@ -7502,8 +7874,14 @@ fn merge_account_update(app: &tauri::AppHandle, runtime: &MarketRuntime, data: &
     });
 }
 
-fn merge_balance_position_update(app: &tauri::AppHandle, runtime: &MarketRuntime, data: &[serde_json::Value]) {
+fn merge_balance_position_update(
+    app: &tauri::AppHandle,
+    runtime: &MarketRuntime,
+    data: &[serde_json::Value],
+    sequence: PrivatePositionSequence,
+) {
     mutate_private_snapshot(app, runtime, |snapshot| {
+        let mut position_updates = Vec::new();
         for item in data {
             if let Some(balances) = item.get("balData").and_then(|value| value.as_array()) {
                 for raw_balance in balances {
@@ -7520,26 +7898,30 @@ fn merge_balance_position_update(app: &tauri::AppHandle, runtime: &MarketRuntime
                 }
             }
             if let Some(positions) = item.get("posData").and_then(|value| value.as_array()) {
-                let mut next_positions = Vec::new();
-                for raw_position in positions {
-                    if let Ok(position) = serde_json::from_value::<OkxPosition>(raw_position.clone()) {
-                        if is_active_swap_position(&position) {
-                            next_positions.push(position);
-                        }
-                    }
-                }
-                if !next_positions.is_empty() || !positions.is_empty() {
-                    snapshot.positions = next_positions;
-                }
+                position_updates.extend(
+                    positions
+                        .iter()
+                        .filter_map(|raw| serde_json::from_value::<OkxPosition>(raw.clone()).ok()),
+                );
             }
         }
+        merge_private_position_delta(snapshot, &position_updates, sequence);
     });
 }
 
 fn update_private_snapshot(app: &tauri::AppHandle, runtime: &MarketRuntime, mut snapshot: PrivateAccountSnapshot) {
+    mark_private_snapshot_complete(&mut snapshot);
     snapshot.synced_at = now_ms();
     if let Ok(mut store) = runtime.store.lock() {
         store.private_snapshot = Some(snapshot.clone());
+        store.private_snapshots.insert(
+            format!(
+                "{}:{}",
+                normalize_environment(&snapshot.environment),
+                snapshot.account_id
+            ),
+            snapshot.clone(),
+        );
     }
     emit_market(app, MarketEvent::PrivateSnapshot { snapshot });
 }
@@ -7554,6 +7936,16 @@ where
             mutate(snapshot);
             snapshot.synced_at = now_ms();
             updated = Some(snapshot.clone());
+        }
+        if let Some(snapshot) = updated.as_ref() {
+            store.private_snapshots.insert(
+                format!(
+                    "{}:{}",
+                    normalize_environment(&snapshot.environment),
+                    snapshot.account_id
+                ),
+                snapshot.clone(),
+            );
         }
     }
     if let Some(snapshot) = updated {
@@ -7897,13 +8289,33 @@ async fn sync_one_kline_range(
     recent_hours: Option<i64>,
     required_days: i64,
 ) -> Result<KlineSyncReport, String> {
-    let started_at = now_ms();
     let step = bar_ms(interval).ok_or_else(|| format!("unsupported interval {}", interval))?;
-    let end_open = align_open_time(now_ms(), interval, step) - step;
+    let end_open = align_open_time(now_ms(), interval, step).saturating_sub(step);
     let lookback_ms = recent_hours
         .map(|hours| hours * 60 * 60_000)
         .unwrap_or_else(|| required_days.max(1) * 86_400_000);
-    let start_open = align_open_time(end_open - lookback_ms, interval, step);
+    let start_open = align_open_time(end_open.saturating_sub(lookback_ms), interval, step);
+    sync_kline_window(app, symbol, interval, start_open, end_open).await
+}
+
+/// Synchronizes one exact, closed K-line window. Historical consumers such as
+/// reproducible backtests use this rather than a rolling retention window so
+/// a repair touches only the bars that are actually part of the snapshot.
+async fn sync_kline_window(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    start_open: i64,
+    end_open: i64,
+) -> Result<KlineSyncReport, String> {
+    let step = bar_ms(interval).ok_or_else(|| format!("unsupported interval {}", interval))?;
+    let start_open = align_open_time(start_open, interval, step);
+    let end_open = align_open_time(end_open, interval, step);
+    if end_open < start_open {
+        return Err("K-line synchronization range must end after it starts".to_string());
+    }
+
+    let started_at = now_ms();
     let expected = expected_open_times(start_open, end_open, step);
 
     let mut report = KlineSyncReport {
@@ -8400,6 +8812,7 @@ fn normalize_trade_operator(value: Option<&String>) -> String {
         .filter(|item| !item.is_empty())
     {
         Some("ai") => "ai".to_string(),
+        Some("strategy") => "strategy".to_string(),
         Some("system") => "system".to_string(),
         Some("user") => "user".to_string(),
         Some(_) => "user".to_string(),
@@ -11670,6 +12083,21 @@ fn ai_stream_terminal_state(
     }
 }
 
+fn is_recoverable_strategy_ai_tool_error(session_id: &str, message: &str) -> bool {
+    if !session_id.starts_with("systematic-strategy-ai-") {
+        return false;
+    }
+    let Some((count, detail)) = message
+        .trim()
+        .split_once(" tool call(s) failed:")
+    else {
+        return false;
+    };
+    count
+        .parse::<usize>()
+        .is_ok_and(|count| count > 0 && detail.trim_start().starts_with('['))
+}
+
 async fn run_ai_stream(
     app: tauri::AppHandle,
     runtime: AiRuntime,
@@ -11767,6 +12195,18 @@ async fn run_ai_stream(
         if options.clear_skill_definitions {
             config.enabled_skills.clear();
             config.skill_definitions.clear();
+        }
+        for skill in &options.runtime_scoped_skills {
+            crate::storage_config::sync_cline_runtime_scoped_skill(skill)?;
+            if let Some(existing) = config
+                .skill_definitions
+                .iter_mut()
+                .find(|item| item.id == skill.id)
+            {
+                *existing = skill.clone();
+            } else {
+                config.skill_definitions.push(skill.clone());
+            }
         }
     }
     let disable_skills_tool = options
@@ -11929,6 +12369,16 @@ async fn run_ai_stream(
             done_emitted = true;
             break;
         }
+        // Cline can report a failed tool as an intermediate agent error and
+        // continue with a repair tool call in the same turn. Treating that
+        // duplicate diagnostic as terminal removes the session sink before
+        // the repair request arrives, leaving the next tool pending forever.
+        // The authoritative failed ToolResult remains visible and persisted.
+        let recoverable_strategy_tool_error = matches!(
+            &event,
+            AiEvent::Error { message, .. }
+                if is_recoverable_strategy_ai_tool_error(&session_id, message)
+        );
         match &event {
             AiEvent::Delta {
                 channel, content, ..
@@ -12208,15 +12658,18 @@ async fn run_ai_stream(
                     let _ = send_ai_sidecar_command(&task_app, &task_runtime, payload).await;
                 });
             }
-            AiEvent::Error { message, .. } => {
+            AiEvent::Error { message, .. } if !recoverable_strategy_tool_error => {
                 error_message = Some(sanitize_secret(message, &config.api_key));
             }
+            AiEvent::Error { .. } => {}
             AiEvent::Done { .. } => {
                 done_emitted = true;
             }
             AiEvent::Status { .. } => {}
         }
-        emit_ai(&app, event);
+        if !recoverable_strategy_tool_error {
+            emit_ai(&app, event);
+        }
         if done_emitted || error_message.is_some() {
             break;
         }
@@ -12257,6 +12710,11 @@ async fn run_ai_stream(
         (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.clone());
     let message_status = terminal_state.message_status;
     let session_status = terminal_state.session_status;
+    let persisted_run_id = run_context
+        .as_ref()
+        .and_then(|context| context.run_id.clone());
+    let metadata_run_id = persisted_run_id.clone();
+    let persisted_usage = final_usage.clone();
     let persist_result = tokio::task::spawn_blocking(move || {
         let mut conn = open_database(&persist_app)?;
         let tx = conn
@@ -12272,6 +12730,14 @@ async fn run_ai_stream(
             Some(&tool_json),
             Some(message_status),
         )?;
+        if let Some(run_id) = metadata_run_id.as_deref() {
+            crate::ai_automation::persist_ai_automation_run_metadata(
+                &tx,
+                run_id,
+                &tool_json,
+                &persisted_usage,
+            )?;
+        }
         set_ai_session_status(&tx, &persist_session_id, session_status)?;
         tx.commit().map_err(|error| error.to_string())
     })
@@ -12279,10 +12745,7 @@ async fn run_ai_stream(
     .map_err(|error| format!("保存 AI 运行记录任务失败: {error}"))?;
     match persist_result {
         Ok(()) => {
-            if let Some(run_id) = run_context
-                .as_ref()
-                .and_then(|context| context.run_id.as_deref())
-            {
+            if let Some(run_id) = persisted_run_id.as_deref() {
                 notify_automation_run_record_persisted(&app, run_id);
             }
         }
@@ -13309,6 +13772,8 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
                 | "alert.listPriceAlerts"
                 | "script.list"
                 | "skills"
+                | "strategy.readCurrentSource"
+                | "strategy.testCurrentSource"
         )
 }
 
@@ -13522,6 +13987,9 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     {
         return Err("market.readDecisionContext 仅允许绑定后台 Run 的主 Agent 调用".to_string());
     }
+    if matches!(canonical, "strategy.readCurrentSource" | "strategy.testCurrentSource") && !is_main {
+        return Err("策略编辑器源码和受控测试仅可由主 AI 会话使用".to_string());
+    }
     let is_read = matches!(
         canonical,
         "market.readTicker"
@@ -13579,6 +14047,8 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "trade.precheck"
             | "tradeOpportunity.list"
             | "tradeOpportunity.get"
+            | "strategy.readCurrentSource"
+            | "strategy.testCurrentSource"
     );
     if is_read {
         return Ok(());
@@ -13604,6 +14074,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "script.enable"
             | "script.delete"
             | "script.list"
+            | "strategy.applySource"
             | "notification.feishu.send"
     ) {
         return Ok(());
@@ -14140,6 +14611,13 @@ async fn execute_ai_tool(
     let canonical_name = canonical_ai_tool_name(tool_name);
     authorize_ai_tool(canonical_name, context)?;
     let session_id = context.session_id.as_str();
+    if matches!(
+        canonical_name,
+        "strategy.readCurrentSource" | "strategy.testCurrentSource" | "strategy.applySource"
+    ) {
+        ensure_ai_run_is_active(&app, context).await?;
+        return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
+    }
     inject_ai_execution_context(&mut input, context);
     ensure_ai_run_is_active(&app, context).await?;
     enforce_background_run_scope(canonical_name, &mut input, context)?;
@@ -17257,6 +17735,37 @@ fn ai_read_memory_account_snapshot(
     store.private_snapshot.clone()
 }
 
+fn mark_memory_private_snapshot_incomplete(
+    runtime: &MarketRuntime,
+    account_id: &str,
+    error: &str,
+) {
+    let Ok(mut store) = runtime.store.lock() else {
+        return;
+    };
+    let mut updated = None;
+    for snapshot in store.private_snapshots.values_mut() {
+        if snapshot.account_id == account_id {
+            snapshot.positions_complete = false;
+            snapshot.position_seq_id = None;
+            snapshot.orders_complete = false;
+            snapshot.orders_error = Some(error.to_string());
+            snapshot.synced_at = now_ms();
+            updated = Some(snapshot.clone());
+            break;
+        }
+    }
+    if let Some(snapshot) = updated {
+        if store
+            .private_snapshot
+            .as_ref()
+            .is_some_and(|current| current.account_id == account_id)
+        {
+            store.private_snapshot = Some(snapshot);
+        }
+    }
+}
+
 fn database_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let data_dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
     fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
@@ -17331,6 +17840,9 @@ fn validate_database_v1(conn: &Connection) -> Result<(), String> {
         "ai_agent_runs",
         "ai_decision_contexts",
         "intelligence_settings",
+        "systematic_strategies",
+        "systematic_factor_definitions",
+        "systematic_paper_intents",
     ] {
         let exists = conn
             .query_row(
@@ -17485,6 +17997,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
             .map_err(|err| err.to_string())?;
         let result = (|| {
             crate::ai_automation::migrate_ai_automation(conn)?;
+            crate::systematic::migrate_systematic(conn)?;
             remove_database_v1_obsolete_objects(conn)?;
             scrub_private_exchange_storage(conn)?;
             validate_database_v1(conn)
@@ -17497,6 +18010,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
         migrate_database(conn)?;
         crate::ai_automation::migrate_ai_automation(conn)?;
         desic_intelligence::migrate_intelligence(conn)?;
+        crate::systematic::migrate_systematic(conn)?;
         remove_database_v1_obsolete_objects(conn)?;
         scrub_private_exchange_storage(conn)?;
         validate_database_v1(conn)?;
@@ -19880,6 +20394,14 @@ fn classify_okx_error(
             false,
         );
     }
+    if is_insufficient_margin_error(message) {
+        return (
+            "risk_or_balance",
+            "保证金、仓位或风控条件不满足。",
+            "检查可用余额、杠杆、全仓/逐仓、当前持仓方向和可平数量。",
+            false,
+        );
+    }
     if code.starts_with("510") {
         if lower.contains("tag") {
             return (
@@ -19896,11 +20418,7 @@ fn classify_okx_error(
             false,
         );
     }
-    if code.starts_with("511")
-        || lower.contains("insufficient")
-        || lower.contains("balance")
-        || lower.contains("margin")
-    {
+    if code.starts_with("511") || lower.contains("balance") || lower.contains("margin") {
         return (
             "risk_or_balance",
             "保证金、仓位或风控条件不满足。",
@@ -19930,6 +20448,12 @@ fn classify_okx_error(
         "保留原始错误码和信息，必要时查看 OKX 文档或通知中心诊断。",
         false,
     )
+}
+
+fn is_insufficient_margin_error(message: &str) -> bool {
+    let lower = message.to_ascii_lowercase();
+    lower.contains("insufficient")
+        && (lower.contains("margin") || lower.contains("balance") || lower.contains("usdt"))
 }
 
 fn okx_private_headers(
@@ -20253,6 +20777,162 @@ where
     unreachable!("OKX private POST timestamp retry loop must return")
 }
 
+fn account_position_mode_switch_error(cause: &str) -> String {
+    format!(
+        "{ACCOUNT_POSITION_MODE_SWITCH_FAILED_PREFIX}账号当前为单向持仓模式，自动切换到双向持仓模式失败。请先平掉所有未平仓位并撤销未完成委托，再在 OKX 中切换为双向持仓模式；否则策略 Profile 和 AI 自动化 Profile 不可启用。原因：{cause} / The account is currently in net position mode, but the automatic switch to long/short mode failed. Close all open positions and cancel all pending orders, then switch the account to long/short mode in OKX; otherwise Strategy Profiles and AI Automation Profiles cannot be enabled. Cause: {cause}"
+    )
+}
+
+fn emit_account_position_mode_switch_failed(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+    cause: &str,
+) {
+    let message = format!(
+        "账号当前为单向持仓模式，自动切换到双向持仓模式失败。请先平掉所有未平仓位并撤销未完成委托，再在 OKX 中切换为双向持仓模式，否则策略 Profile 和 AI 自动化 Profile 不可启用。"
+    );
+    let _ = app.emit(
+        ACCOUNT_POSITION_MODE_SWITCH_FAILED_EVENT,
+        json!({
+            "type": "accountPositionModeSwitchFailed",
+            "message": message,
+            "accountId": account.id,
+            "profileName": account.name,
+            "error": cause,
+            "action": { "tab": "settings", "settingsTab": "account" },
+        }),
+    );
+}
+
+fn emit_account_position_mode_required(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+    cause: &str,
+) {
+    let _ = app.emit(
+        ACCOUNT_POSITION_MODE_SWITCH_FAILED_EVENT,
+        json!({
+            "type": "accountPositionModeRequired",
+            "message": "该账号当前为单向持仓模式，策略 Profile 和 AI 自动化 Profile 无法启用。请先在 OKX 中切换为双向持仓模式。",
+            "accountId": account.id,
+            "profileName": account.name,
+            "error": cause,
+            "action": { "tab": "settings", "settingsTab": "account" },
+        }),
+    );
+}
+
+/// Ensures the account is in OKX hedge mode before any feature that requires
+/// independent long and short positions is enabled. OKX only allows this
+/// account-level change when there are no open positions or pending orders.
+pub(crate) async fn ensure_okx_long_short_mode(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+) -> Result<(), String> {
+    if account.exchange.to_lowercase() != "okx" {
+        return Err("unsupported exchange".to_string());
+    }
+    let config = match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config")
+        .await
+    {
+        Ok(envelope) => envelope
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| "OKX 账户配置为空".to_string())?,
+        Err(error) => return Err(error),
+    };
+    match config.pos_mode.trim() {
+        "long_short_mode" => {
+            if let Some(runtime) = app.try_state::<MarketRuntime>() {
+                if let Ok(mut cache) = runtime.account_config_cache.lock() {
+                    cache.remove(&account_config_cache_key(account));
+                }
+            }
+            return Ok(())
+        }
+        "net_mode" => {}
+        other => {
+            let cause = format!("OKX 返回了不支持的持仓模式：{other}");
+            emit_account_position_mode_switch_failed(app, account, &cause);
+            return Err(account_position_mode_switch_error(&cause));
+        }
+    }
+    if !account.permissions.trade {
+        let cause = "API Key 没有交易权限，无法调用持仓模式切换接口 / the API key has no trade permission";
+        emit_account_position_mode_switch_failed(app, account, cause);
+        return Err(account_position_mode_switch_error(cause));
+    }
+    let request = json!({ "posMode": "long_short_mode" });
+    if let Err(error) = okx_private_post::<Value, _>(
+        account,
+        "/api/v5/account/set-position-mode",
+        &request,
+    )
+    .await
+    {
+        emit_account_position_mode_switch_failed(app, account, &error);
+        return Err(account_position_mode_switch_error(&error));
+    }
+    let verified = match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config")
+        .await
+    {
+        Ok(envelope) => envelope
+            .data
+            .into_iter()
+            .next()
+            .ok_or_else(|| "OKX 账户配置为空".to_string())?,
+        Err(error) => {
+            emit_account_position_mode_switch_failed(app, account, &error);
+            return Err(account_position_mode_switch_error(&error));
+        }
+    };
+    if verified.pos_mode.trim() != "long_short_mode" {
+        let cause = format!(
+            "切换接口已返回，但重新读取到账户模式仍为 {} / the verified position mode is still {}",
+            verified.pos_mode, verified.pos_mode
+        );
+        emit_account_position_mode_switch_failed(app, account, &cause);
+        return Err(account_position_mode_switch_error(&cause));
+    }
+    if let Some(runtime) = app.try_state::<MarketRuntime>() {
+        if let Ok(mut cache) = runtime.account_config_cache.lock() {
+            cache.remove(&account_config_cache_key(account));
+        }
+    }
+    Ok(())
+}
+
+/// Verifies the mode at an activation boundary without changing the account.
+/// Account setup owns the automatic switch; enabling a Profile must fail
+/// closed if the account has since been returned to one-way mode.
+pub(crate) async fn require_okx_long_short_mode(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+) -> Result<(), String> {
+    let config = okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config")
+        .await?
+        .data
+        .into_iter()
+        .next()
+        .ok_or_else(|| "OKX 账户配置为空".to_string())?;
+    if config.pos_mode.trim() == "long_short_mode" {
+        if let Some(runtime) = app.try_state::<MarketRuntime>() {
+            if let Ok(mut cache) = runtime.account_config_cache.lock() {
+                cache.remove(&account_config_cache_key(account));
+            }
+        }
+        return Ok(());
+    }
+    let cause = if config.pos_mode.trim() == "net_mode" {
+        "账号仍为单向持仓模式，已阻止启用 Profile / the account is still in net position mode, so Profile activation was blocked"
+    } else {
+        "OKX 返回了不支持的持仓模式 / OKX returned an unsupported position mode"
+    };
+    emit_account_position_mode_required(app, account, cause);
+    Err(account_position_mode_switch_error(cause))
+}
+
 /*
 async fn fetch_instrument(inst_id: &str) -> Result<OkxInstrument, String> {
     let path = format!(
@@ -20417,6 +21097,23 @@ fn parse_optional_f64(value: &str) -> Option<f64> {
     }
 }
 
+fn okx_position_used_margin(position: &OkxPosition, notional: f64, leverage: f64) -> Option<f64> {
+    let positive = |value: &str| parse_optional_f64(value).filter(|number| *number > 0.0);
+    // OKX reports isolated margin in `margin`, but cross positions use their initial
+    // margin requirement in `imr`.
+    let reported = if position.mgn_mode.eq_ignore_ascii_case("isolated") {
+        positive(&position.margin).or_else(|| positive(&position.imr))
+    } else {
+        positive(&position.imr).or_else(|| positive(&position.margin))
+    };
+    reported.or_else(|| {
+        let notional = (notional.is_finite() && notional > 0.0).then_some(notional)?;
+        let leverage = (leverage.is_finite() && leverage > 0.0).then_some(leverage)?;
+        let estimated = notional / leverage;
+        estimated.is_finite().then_some(estimated).filter(|number| *number > 0.0)
+    })
+}
+
 fn is_multiple_of(value: f64, step: f64) -> bool {
     if step <= 0.0 {
         return true;
@@ -20433,14 +21130,71 @@ fn round_down_step(value: f64, step: f64) -> String {
 }
 
 fn trim_float(value: f64) -> String {
-    let mut text = format!("{:.12}", value);
-    while text.contains('.') && text.ends_with('0') {
-        text.pop();
+    if !value.is_finite() {
+        return "0".to_string();
     }
-    if text.ends_with('.') {
-        text.pop();
+    let compact = value.to_string();
+    let expanded = match compact.find(|character| character == 'e' || character == 'E') {
+        Some(exponent_index) => expand_scientific_float(&compact, exponent_index),
+        None => compact,
+    };
+    // Preserve normal exchange decimals verbatim, but hide long binary tails
+    // produced by arithmetic such as `0.1 + 0.2`.
+    if expanded
+        .split_once('.')
+        .is_some_and(|(_, fraction)| fraction.len() > 15)
+    {
+        trim_fixed_decimal(format!("{value:.12}"))
+    } else {
+        expanded
     }
-    if text.is_empty() {
+}
+
+fn expand_scientific_float(compact: &str, exponent_index: usize) -> String {
+    let (mantissa, exponent) = compact.split_at(exponent_index);
+    let exponent = exponent[1..].parse::<i32>().unwrap_or_default();
+    let (negative, mantissa) = mantissa
+        .strip_prefix('-')
+        .map(|value| (true, value))
+        .unwrap_or((false, mantissa));
+    let mut parts = mantissa.split('.');
+    let integer = parts.next().unwrap_or_default();
+    let fraction = parts.next().unwrap_or_default();
+    if parts.next().is_some()
+        || integer.is_empty()
+        || !integer.bytes().all(|byte| byte.is_ascii_digit())
+        || !fraction.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        return compact.to_string();
+    }
+    let digits = format!("{integer}{fraction}");
+    let decimal_index = integer.len() as i32 + exponent;
+    let expanded = if decimal_index <= 0 {
+        format!("0.{}{}", "0".repeat((-decimal_index) as usize), digits)
+    } else if decimal_index as usize >= digits.len() {
+        format!("{}{}", digits, "0".repeat(decimal_index as usize - digits.len()))
+    } else {
+        let index = decimal_index as usize;
+        format!("{}.{}", &digits[..index], &digits[index..])
+    };
+    let expanded = trim_fixed_decimal(expanded);
+    if negative && expanded != "0" {
+        format!("-{expanded}")
+    } else {
+        expanded
+    }
+}
+
+fn trim_fixed_decimal(mut text: String) -> String {
+    if text.contains('.') {
+        while text.ends_with('0') {
+            text.pop();
+        }
+        if text.ends_with('.') {
+            text.pop();
+        }
+    }
+    if text.is_empty() || text == "-0" {
         "0".to_string()
     } else {
         text
@@ -20929,6 +21683,7 @@ pub fn run() {
         .manage(AiRuntime::default())
         .manage(AiAutomationRuntime::default())
         .manage(IntelligenceRuntime::default())
+        .manage(SystematicRuntime::default())
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
@@ -20937,6 +21692,7 @@ pub fn run() {
             instrument_operations::start_instrument_operation_recovery(app.handle().clone());
             start_ai_automation_worker(app.handle().clone());
             start_intelligence_collector(app.handle().clone(), app.state::<IntelligenceRuntime>());
+            start_systematic_worker(app.handle().clone(), app.state::<SystematicRuntime>());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -20952,6 +21708,7 @@ pub fn run() {
             ai_automation_run_detail,
             ai_automation_save_master_enabled,
             ai_agent_profile_save,
+            ai_agent_profile_systematic_conflicts,
             ai_agent_profile_delete,
             ai_agent_scheme_save,
             ai_agent_scheme_delete,
@@ -21008,6 +21765,9 @@ pub fn run() {
             intelligence_derivatives_system_risk,
             intelligence_derivatives_position_tiers,
             intelligence_news_events_query,
+            intelligence_news_feed,
+            intelligence_news_read_state,
+            intelligence_news_mark_read,
             intelligence_news_event_detail,
             intelligence_news_reaction_query,
             intelligence_anomalies_query,
@@ -21020,6 +21780,30 @@ pub fn run() {
             intelligence_settings_summary,
             intelligence_settings_save,
             intelligence_track_trader,
+            systematic_overview,
+            systematic_capture_universe_snapshot,
+            systematic_factor_create_default,
+            systematic_factor_save,
+            systematic_factor_evaluate,
+            systematic_python_prepare_environment,
+            systematic_python_run_sample,
+            systematic_strategy_create_python,
+            systematic_strategy_ai_send_message,
+            systematic_strategy_ai_tool_respond,
+            systematic_strategy_save_python,
+            systematic_strategy_versions,
+            systematic_strategy_version_detail,
+            systematic_backtest_defaults,
+            systematic_backtest_start,
+            systematic_backtest_cancel,
+            systematic_backtest_delete,
+            systematic_backtest_detail,
+            systematic_optimization_start,
+            systematic_strategy_delete,
+            systematic_profile_save,
+            systematic_profile_delete,
+            systematic_profile_set_enabled,
+            systematic_profile_signals,
             okx_sync_time,
             okx_public_ws_probe,
             okx_business_ws_probe,
@@ -21030,6 +21814,7 @@ pub fn run() {
             ensure_instruments_cache,
             okx_ticker,
             okx_candles,
+            okx_funding_rate,
             init_local_storage,
             market_icon_data_url,
             ensure_market_icon_data_url,
@@ -21148,6 +21933,119 @@ mod tests {
             .expect("build recent 2H candle path")
             .ends_with("limit=1"));
         assert!(okx_recent_candles_path("BTC-USDT-SWAP", "7m", 300).is_err());
+    }
+
+    #[test]
+    fn profile_position_margin_uses_okx_field_for_margin_mode() {
+        let cross = OkxPosition {
+            mgn_mode: "cross".to_string(),
+            imr: "0.64489".to_string(),
+            margin: "8".to_string(),
+            ..Default::default()
+        };
+        let cross_margin = okx_position_used_margin(&cross, 100.0, 10.0).expect("cross margin");
+        assert!((cross_margin - 0.64489).abs() < 1e-12);
+
+        let isolated = OkxPosition {
+            mgn_mode: "isolated".to_string(),
+            imr: "0.64489".to_string(),
+            margin: "8".to_string(),
+            ..Default::default()
+        };
+        let isolated_margin = okx_position_used_margin(&isolated, 100.0, 10.0).expect("isolated margin");
+        assert!((isolated_margin - 8.0).abs() < 1e-12);
+    }
+
+    fn position_fixture(inst_id: &str, pos_side: &str, pos: &str, pos_id: &str, u_time: &str) -> OkxPosition {
+        OkxPosition {
+            inst_id: inst_id.to_string(),
+            inst_type: "SWAP".to_string(),
+            pos_side: pos_side.to_string(),
+            pos: pos.to_string(),
+            pos_id: pos_id.to_string(),
+            u_time: u_time.to_string(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn private_position_events_merge_deltas_without_dropping_unrelated_positions() {
+        let btc = position_fixture("BTC-USDT-SWAP", "long", "2", "btc-1", "10");
+        let eth = position_fixture("ETH-USDT-SWAP", "long", "3", "eth-1", "10");
+        let mut snapshot = PrivateAccountSnapshot {
+            account_id: "account".to_string(),
+            environment: "live".to_string(),
+            balances: Vec::new(),
+            positions: vec![btc.clone(), eth],
+            orders: Vec::new(),
+            positions_complete: true,
+            position_seq_id: Some(10),
+            orders_complete: true,
+            orders_error: None,
+            synced_at: 1,
+        };
+        let btc_update = position_fixture("BTC-USDT-SWAP", "long", "4", "btc-1", "11");
+        merge_private_position_delta(
+            &mut snapshot,
+            &[btc_update],
+            PrivatePositionSequence {
+                seq_id: Some(11),
+                prev_seq_id: Some(10),
+            },
+        );
+        assert_eq!(snapshot.positions.len(), 2);
+        assert_eq!(
+            snapshot
+                .positions
+                .iter()
+                .find(|position| position.pos_id == "btc-1")
+                .and_then(|position| position.pos.parse::<f64>().ok()),
+            Some(4.0)
+        );
+        assert!(snapshot.positions.iter().any(|position| position.pos_id == "eth-1"));
+        merge_private_position_delta(
+            &mut snapshot,
+            &[position_fixture("BTC-USDT-SWAP", "long", "0", "btc-1", "9")],
+            PrivatePositionSequence::default(),
+        );
+        assert!(snapshot.positions.iter().any(|position| position.pos_id == "btc-1"));
+    }
+
+    #[test]
+    fn private_position_sequence_gap_invalidates_the_snapshot_baseline() {
+        let mut snapshot = PrivateAccountSnapshot {
+            account_id: "account".to_string(),
+            environment: "live".to_string(),
+            balances: Vec::new(),
+            positions: vec![position_fixture("BTC-USDT-SWAP", "long", "2", "btc-1", "10")],
+            orders: Vec::new(),
+            positions_complete: true,
+            position_seq_id: Some(10),
+            orders_complete: true,
+            orders_error: None,
+            synced_at: 1,
+        };
+        merge_private_position_delta(
+            &mut snapshot,
+            &[position_fixture("BTC-USDT-SWAP", "long", "5", "btc-1", "12")],
+            PrivatePositionSequence {
+                seq_id: Some(12),
+                prev_seq_id: Some(11),
+            },
+        );
+        assert!(!snapshot.positions_complete);
+        assert_eq!(snapshot.positions[0].pos, "2");
+    }
+
+    #[test]
+    fn profile_position_margin_falls_back_to_notional_and_leverage() {
+        let position = OkxPosition {
+            mgn_mode: "cross".to_string(),
+            ..Default::default()
+        };
+        let margin = okx_position_used_margin(&position, 100.0, 10.0).expect("estimated margin");
+        assert!((margin - 10.0).abs() < 1e-12);
+        assert!(okx_position_used_margin(&position, 0.0, 10.0).is_none());
     }
 
     #[test]
@@ -21342,6 +22240,8 @@ mod tests {
             "account.readOpenOrders",
             "intelligence.news.list",
             "trade.precheck",
+            "strategy.readCurrentSource",
+            "strategy.testCurrentSource",
         ] {
             assert!(ai_tool_allows_concurrent_execution(tool), "{tool}");
         }
@@ -21368,12 +22268,46 @@ mod tests {
     }
 
     #[test]
+    fn strategy_tool_failures_remain_recoverable_inside_the_same_ai_turn() {
+        assert!(is_recoverable_strategy_ai_tool_error(
+            "systematic-strategy-ai-1785937998401-flpk4s",
+            "1 tool call(s) failed: [strategy_testCurrentSource] {\"error\":\"invalid source\"}",
+        ));
+        assert!(!is_recoverable_strategy_ai_tool_error(
+            "user-session",
+            "1 tool call(s) failed: [strategy_testCurrentSource] {\"error\":\"invalid source\"}",
+        ));
+        assert!(!is_recoverable_strategy_ai_tool_error(
+            "systematic-strategy-ai-1785937998401-flpk4s",
+            "provider connection failed",
+        ));
+    }
+
+    #[test]
     fn private_order_marker_error_does_not_expose_implementation_details() {
         let (category, user_message, suggestion, retryable) =
             classify_okx_error("51000", "Parameter tag error");
         assert_eq!(category, "order_param");
         assert!(user_message.contains("来源标识"));
         assert!(!suggestion.to_ascii_lowercase().contains("tag"));
+        assert!(!retryable);
+    }
+
+    #[test]
+    fn trim_float_preserves_a_tick_aligned_decimal_without_binary_drift() {
+        assert_eq!(trim_float(64_866.6), "64866.6");
+        assert_eq!(trim_float(64_927.2), "64927.2");
+        assert_eq!(trim_float(0.000_000_123_456_7), "0.0000001234567");
+        assert_eq!(trim_float(0.1 + 0.2), "0.3");
+    }
+
+    #[test]
+    fn insufficient_margin_overrides_a_generic_510_parameter_category() {
+        let (category, _, _, retryable) = classify_okx_error(
+            "51008",
+            "Order failed. Insufficient USDT margin in account",
+        );
+        assert_eq!(category, "risk_or_balance");
         assert!(!retryable);
     }
 
@@ -23491,6 +24425,10 @@ mod tests {
             ],
             positions: Vec::new(),
             orders: Vec::new(),
+            positions_complete: true,
+            position_seq_id: None,
+            orders_complete: true,
+            orders_error: None,
             synced_at: 1,
         });
         let expected = 13.326354961220199_f64;

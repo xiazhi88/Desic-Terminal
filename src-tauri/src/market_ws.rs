@@ -1,5 +1,5 @@
 use super::*;
-use crate::chart_alerts::process_chart_indicator_alerts;
+use crate::chart_alerts::{process_chart_indicator_alerts, process_chart_price_alerts};
 use crate::chart_consumers::{
     MarketChannel, MarketConsumerRegistry, MarketConsumerRequest, MarketSubscriptionDiff,
 };
@@ -1503,10 +1503,17 @@ async fn run_private_ws(
         tauri::async_runtime::spawn(async move {
             match fetch_private_account_snapshot(&snapshot_account).await {
                 Ok(snapshot) => update_private_snapshot(&snapshot_app, &snapshot_runtime, snapshot),
-                Err(error) => eprintln!(
-                    "private snapshot refresh failed account={} env={}: {}",
-                    snapshot_account.id, snapshot_account.environment, error
-                ),
+                Err(error) => {
+                    super::mark_memory_private_snapshot_incomplete(
+                        &snapshot_runtime,
+                        &snapshot_account.id,
+                        &error,
+                    );
+                    eprintln!(
+                        "private snapshot refresh failed account={} env={}: {}",
+                        snapshot_account.id, snapshot_account.environment, error
+                    );
+                }
             }
         });
     }
@@ -2004,6 +2011,7 @@ fn handle_private_message(
     let Some(data) = value.get("data").and_then(|data| data.as_array()) else {
         return;
     };
+    let position_sequence = private_position_sequence(&value, data);
     let event_time_ms = data
         .iter()
         .filter_map(|item| private_message_timestamp(channel, item))
@@ -2020,24 +2028,27 @@ fn handle_private_message(
     );
     match channel {
         "account" => merge_account_update(app, runtime, account, data),
-        "balance_and_position" => merge_balance_position_update(app, runtime, account, data),
+        "balance_and_position" => {
+            merge_balance_position_update(app, runtime, account, data, position_sequence)
+        }
         "positions" => {
             let positions = data
                 .iter()
                 .filter_map(|raw| serde_json::from_value::<OkxPosition>(raw.clone()).ok())
-                .filter(is_active_swap_position)
                 .collect::<Vec<_>>();
-            if !positions.is_empty() || !data.is_empty() {
-                mutate_private_snapshot(app, runtime, account, |snapshot| {
-                    snapshot.positions = positions;
-                });
-            }
+            mutate_private_snapshot(app, runtime, account, |snapshot| {
+                merge_private_position_delta(snapshot, &positions, position_sequence);
+            });
         }
         "orders" => {
             let orders = data
                 .iter()
                 .filter_map(|raw| serde_json::from_value::<OkxPendingOrder>(raw.clone()).ok())
+                .map(normalize_pending_order_identity)
                 .filter(|order| {
+                    if !pending_order_has_identity(order) {
+                        return false;
+                    }
                     let state = order.state.to_ascii_lowercase();
                     is_terminal_pending_order_state(&state)
                         || !pending_order_is_cancelled(runtime, account, order)
@@ -2053,16 +2064,14 @@ fn handle_private_message(
                 );
             }
             for order in &orders {
-                if !order.ord_id.is_empty() || !order.cl_ord_id.is_empty() {
-                    emit_market(
-                        app,
-                        MarketEvent::PrivateOrder {
-                            account_id: account.id.clone(),
-                            environment: account.environment.clone(),
-                            order: order.clone(),
-                        },
-                    );
-                }
+                emit_market(
+                    app,
+                    MarketEvent::PrivateOrder {
+                        account_id: account.id.clone(),
+                        environment: account.environment.clone(),
+                        order: order.clone(),
+                    },
+                );
                 let _ = crate::ai_automation::record_domain_event(
                     app,
                     &desic_agent_automation::DomainEvent {
@@ -2090,19 +2099,18 @@ fn handle_private_message(
             }
             mutate_private_snapshot(app, runtime, account, |snapshot| {
                 for order in orders {
-                    if order.ord_id.is_empty() {
+                    if !pending_order_has_identity(&order) {
                         continue;
                     }
                     let state = order.state.to_lowercase();
-                    if matches!(
-                        state.as_str(),
-                        "filled" | "canceled" | "cancelled" | "failed"
-                    ) {
-                        snapshot.orders.retain(|item| item.ord_id != order.ord_id);
+                    if is_terminal_pending_order_state(&state) {
+                        snapshot
+                            .orders
+                            .retain(|item| !pending_orders_match_identity(item, &order));
                     } else if let Some(existing) = snapshot
                         .orders
                         .iter_mut()
-                        .find(|item| item.ord_id == order.ord_id)
+                        .find(|item| pending_orders_match_identity(item, &order))
                     {
                         *existing = order;
                     } else {
@@ -2150,8 +2158,10 @@ fn merge_balance_position_update(
     runtime: &MarketRuntime,
     account: &LocalAccount,
     data: &[serde_json::Value],
+    sequence: PrivatePositionSequence,
 ) {
     mutate_private_snapshot(app, runtime, account, |snapshot| {
+        let mut position_updates = Vec::new();
         for item in data {
             if let Some(balances) = item.get("balData").and_then(|value| value.as_array()) {
                 for raw_balance in balances {
@@ -2172,21 +2182,14 @@ fn merge_balance_position_update(
                 }
             }
             if let Some(positions) = item.get("posData").and_then(|value| value.as_array()) {
-                let mut next_positions = Vec::new();
-                for raw_position in positions {
-                    if let Ok(position) =
-                        serde_json::from_value::<OkxPosition>(raw_position.clone())
-                    {
-                        if is_active_swap_position(&position) {
-                            next_positions.push(position);
-                        }
-                    }
-                }
-                if !next_positions.is_empty() || !positions.is_empty() {
-                    snapshot.positions = next_positions;
-                }
+                position_updates.extend(
+                    positions
+                        .iter()
+                        .filter_map(|raw| serde_json::from_value::<OkxPosition>(raw.clone()).ok()),
+                );
             }
         }
+        merge_private_position_delta(snapshot, &position_updates, sequence);
     });
 }
 
@@ -2196,6 +2199,7 @@ fn update_private_snapshot(
     mut snapshot: PrivateAccountSnapshot,
 ) {
     filter_cancelled_pending_orders(runtime, &mut snapshot);
+    mark_private_snapshot_complete(&mut snapshot);
     snapshot.synced_at = now_ms();
     if let Ok(mut store) = runtime.store.lock() {
         store.private_snapshot = Some(snapshot.clone());
@@ -2263,8 +2267,65 @@ fn prune_cancelled_pending_order_keys(store: &mut MarketStore, now: i64) {
         .retain(|_, expires_at| *expires_at > now);
 }
 
-fn is_terminal_pending_order_state(state: &str) -> bool {
-    matches!(state, "filled" | "canceled" | "cancelled" | "failed")
+pub(crate) fn is_terminal_pending_order_state(state: &str) -> bool {
+    matches!(
+        state,
+        "filled"
+            | "canceled"
+            | "cancelled"
+            | "failed"
+            | "rejected"
+            | "mmp_canceled"
+            | "order_failed"
+            | "effective"
+            | "triggered"
+    )
+}
+
+pub(crate) fn normalize_pending_order_identity(mut order: OkxPendingOrder) -> OkxPendingOrder {
+    if order.ord_id.trim().is_empty() && !order.algo_id.trim().is_empty() {
+        order.ord_id = order.algo_id.clone();
+    }
+    if order.cl_ord_id.trim().is_empty() && !order.algo_cl_ord_id.trim().is_empty() {
+        order.cl_ord_id = order.algo_cl_ord_id.clone();
+    }
+    order
+}
+
+pub(crate) fn pending_order_has_identity(order: &OkxPendingOrder) -> bool {
+    [
+        order.ord_id.as_str(),
+        order.cl_ord_id.as_str(),
+        order.algo_id.as_str(),
+        order.algo_cl_ord_id.as_str(),
+    ]
+    .iter()
+    .any(|identifier| !identifier.trim().is_empty())
+}
+
+pub(crate) fn pending_orders_match_identity(
+    left: &OkxPendingOrder,
+    right: &OkxPendingOrder,
+) -> bool {
+    let right_ids = [
+        right.ord_id.as_str(),
+        right.cl_ord_id.as_str(),
+        right.algo_id.as_str(),
+        right.algo_cl_ord_id.as_str(),
+    ];
+    [
+        left.ord_id.as_str(),
+        left.cl_ord_id.as_str(),
+        left.algo_id.as_str(),
+        left.algo_cl_ord_id.as_str(),
+    ]
+    .iter()
+    .filter(|identifier| !identifier.trim().is_empty())
+    .any(|identifier| {
+        right_ids
+            .iter()
+            .any(|candidate| !candidate.trim().is_empty() && candidate == identifier)
+    })
 }
 
 fn pending_order_is_cancelled(
@@ -2411,6 +2472,10 @@ fn handle_business_message(app: &tauri::AppHandle, runtime: &MarketRuntime, text
     if let Some(candle) = normalize_candle(&row) {
         cache_candle(runtime, inst_id, bar, &candle);
         if candle.confirm {
+            if bar == "1m" {
+                app.state::<crate::systematic::SystematicRuntime>()
+                    .notify_live_profile_bar(inst_id, confirmed_one_minute_cutoff_ms(candle.time));
+            }
             let alert_app = app.clone();
             let alert_inst_id = inst_id.to_string();
             let alert_candle = candle.clone();
@@ -2427,6 +2492,14 @@ fn handle_business_message(app: &tauri::AppHandle, runtime: &MarketRuntime, text
             },
         );
     }
+}
+
+// UI-facing Candle timestamps are seconds, while strategy and SQLite contracts
+// use millisecond cutoffs. Keep the conversion at this boundary explicit.
+fn confirmed_one_minute_cutoff_ms(candle_open_time_seconds: i64) -> i64 {
+    candle_open_time_seconds
+        .saturating_mul(1_000)
+        .saturating_add(60_000)
 }
 
 fn cache_orderbook(runtime: &MarketRuntime, inst_id: &str, book: &OrderBook) {
@@ -2991,6 +3064,10 @@ mod tests {
                 state: "live".to_string(),
                 ..Default::default()
             }],
+            positions_complete: true,
+            position_seq_id: None,
+            orders_complete: true,
+            orders_error: None,
             synced_at: now_ms(),
         };
         let expires_at = now_ms().saturating_add(CANCELLED_PENDING_ORDER_TOMBSTONE_TTL_MS);
@@ -3003,6 +3080,42 @@ mod tests {
         filter_cancelled_pending_orders(&runtime, &mut snapshot);
 
         assert!(snapshot.orders.is_empty());
+    }
+
+    #[test]
+    fn algo_order_identity_matches_snapshot_and_normalizes_missing_ids() {
+        let incoming = normalize_pending_order_identity(OkxPendingOrder {
+            algo_id: "algo-1".to_string(),
+            algo_cl_ord_id: "algo-client-1".to_string(),
+            state: "effective".to_string(),
+            ..Default::default()
+        });
+        let snapshot_order = OkxPendingOrder {
+            ord_id: "algo-1".to_string(),
+            cl_ord_id: "algo-client-1".to_string(),
+            algo_id: "algo-1".to_string(),
+            algo_cl_ord_id: "algo-client-1".to_string(),
+            state: "live".to_string(),
+            ..Default::default()
+        };
+
+        assert_eq!(incoming.ord_id, "algo-1");
+        assert_eq!(incoming.cl_ord_id, "algo-client-1");
+        assert!(pending_order_has_identity(&incoming));
+        assert!(pending_orders_match_identity(&snapshot_order, &incoming));
+    }
+
+    #[test]
+    fn terminal_algo_states_are_not_renderable_pending_orders() {
+        for state in [
+            "effective",
+            "triggered",
+            "rejected",
+            "mmp_canceled",
+            "order_failed",
+        ] {
+            assert!(is_terminal_pending_order_state(state), "state={state}");
+        }
     }
 
     #[test]
@@ -3420,5 +3533,14 @@ mod tests {
             trades.last().map(|trade| trade.trade_id.as_str()),
             Some("t99")
         );
+    }
+
+    #[test]
+    fn confirmed_one_minute_profile_cutoff_converts_candle_seconds_to_milliseconds() {
+        assert_eq!(
+            confirmed_one_minute_cutoff_ms(1_786_000_000),
+            1_786_000_060_000
+        );
+        assert_eq!(confirmed_one_minute_cutoff_ms(i64::MAX), i64::MAX);
     }
 }

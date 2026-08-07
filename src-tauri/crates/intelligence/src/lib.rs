@@ -219,6 +219,42 @@ pub struct IntelligenceResponse {
     pub series_metadata: Vec<IntelligenceSeriesMetadata>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NewsFeedQuery {
+    pub mode: Option<String>,
+    pub keyword: Option<String>,
+    pub coins: Option<Vec<String>>,
+    pub importance: Option<String>,
+    pub language: Option<String>,
+    pub start_time: Option<i64>,
+    pub end_time: Option<i64>,
+    pub page: Option<u32>,
+    pub page_size: Option<u16>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct NewsReadState {
+    pub events_read_at: i64,
+    pub articles_read_at: i64,
+    pub unread_events: u64,
+    pub unread_articles: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NewsFeedPage {
+    pub mode: String,
+    pub items: Vec<Value>,
+    pub page: u32,
+    pub page_size: u16,
+    pub total: u64,
+    pub total_pages: u32,
+    pub unread_count: u64,
+    pub read_state: NewsReadState,
+}
+
 impl IntelligenceResponse {
     pub fn new(fetched_at: i64, items: Vec<Value>) -> Self {
         Self {
@@ -452,6 +488,7 @@ pub fn migrate_intelligence(conn: &Connection) -> Result<(), String> {
           PRIMARY KEY(id, language)
         );
         CREATE INDEX IF NOT EXISTS idx_intelligence_news_time ON intelligence_news_articles(published_at DESC,last_seen_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_intelligence_news_first_seen ON intelligence_news_articles(first_seen_at DESC);
         CREATE INDEX IF NOT EXISTS idx_intelligence_news_platform ON intelligence_news_articles(platform,published_at DESC);
         CREATE TABLE IF NOT EXISTS intelligence_news_contents (
           id TEXT NOT NULL,
@@ -460,6 +497,11 @@ pub fn migrate_intelligence(conn: &Connection) -> Result<(), String> {
           raw_json TEXT NOT NULL,
           fetched_at INTEGER NOT NULL,
           PRIMARY KEY(id, language)
+        );
+        CREATE TABLE IF NOT EXISTS intelligence_news_read_state (
+          stream TEXT PRIMARY KEY,
+          last_read_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS intelligence_coin_sentiment (
           ccy TEXT NOT NULL,
@@ -2223,10 +2265,10 @@ fn json_string_set(raw: &str) -> BTreeSet<String> {
 pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id,language,title,summary,platform,url,coins_json,sentiment,importance,published_time,raw_json
+            "SELECT id,language,title,summary,platform,url,coins_json,sentiment,importance,published_time,first_seen_at,raw_json
              FROM (
                SELECT id,language,title,summary,platform,url,coins_json,sentiment,importance,
-                      COALESCE(published_at,last_seen_at) AS published_time,raw_json
+                      COALESCE(published_at,last_seen_at) AS published_time,first_seen_at,raw_json
                FROM intelligence_news_articles
                ORDER BY COALESCE(published_at,last_seen_at) DESC LIMIT 5000
              ) ORDER BY published_time ASC",
@@ -2245,7 +2287,8 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
                 row.get::<_, Option<String>>(7)?.unwrap_or_default(),
                 row.get::<_, Option<String>>(8)?.unwrap_or_default(),
                 row.get::<_, i64>(9)?,
-                row.get::<_, String>(10)?,
+                row.get::<_, i64>(10)?,
+                row.get::<_, String>(11)?,
             ))
         })
         .map_err(|error| error.to_string())?
@@ -2262,6 +2305,7 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
         sentiment: String,
         first_at: i64,
         last_at: i64,
+        latest_article_first_seen_at: i64,
         articles: Vec<(String, String, Value)>,
         canonical_urls: BTreeSet<String>,
     }
@@ -2277,6 +2321,7 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
         sentiment,
         importance,
         published_at,
+        first_seen_at,
         raw,
     ) in articles
     {
@@ -2302,6 +2347,9 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
         if let Some(index) = match_index {
             let cluster = &mut clusters[index];
             cluster.last_at = cluster.last_at.max(published_at);
+            cluster.latest_article_first_seen_at = cluster
+                .latest_article_first_seen_at
+                .max(first_seen_at);
             cluster.coins.extend(coins);
             if !platform.is_empty() {
                 cluster.sources.insert(platform);
@@ -2335,6 +2383,7 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
                 sentiment,
                 first_at: published_at,
                 last_at: published_at,
+                latest_article_first_seen_at: first_seen_at,
                 articles: vec![(id, language, article_value)],
                 canonical_urls,
             });
@@ -2362,6 +2411,7 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
             "coins": coins, "sources": sources, "importance": cluster.importance,
             "sentiment": cluster.sentiment, "status": status,
             "firstPublishedAt": cluster.first_at, "lastPublishedAt": cluster.last_at,
+            "latestArticleFirstSeenAt": cluster.latest_article_first_seen_at,
             "articleCount": cluster.articles.len(), "sourceCount": cluster.sources.len(),
             "multiSourceConfirmed": cluster.sources.len() >= 2,
         });
@@ -2429,6 +2479,203 @@ pub fn query_news_events_local(
             &limit,
         ],
     )
+}
+
+fn ensure_news_read_state(conn: &Connection, now: i64) -> Result<(), String> {
+    conn.execute(
+        "INSERT OR IGNORE INTO intelligence_news_read_state(stream,last_read_at,updated_at) VALUES('events',?1,?1),('articles',?1,?1)",
+        params![now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn unread_news_counts(conn: &Connection, events_read_at: i64, articles_read_at: i64) -> Result<(u64, u64), String> {
+    let unread_articles = conn
+        .query_row(
+            "SELECT COUNT(*) FROM intelligence_news_articles WHERE first_seen_at>?1",
+            params![articles_read_at],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())? as u64;
+    let unread_events = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT e.id)
+             FROM intelligence_news_events e
+             JOIN intelligence_news_event_articles l ON l.event_id=e.id
+             JOIN intelligence_news_articles a ON a.id=l.article_id AND a.language=l.language
+             WHERE a.first_seen_at>?1",
+            params![events_read_at],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())? as u64;
+    Ok((unread_events, unread_articles))
+}
+
+pub fn query_news_read_state(conn: &Connection, now: i64) -> Result<NewsReadState, String> {
+    ensure_news_read_state(conn, now)?;
+    let events_read_at = conn
+        .query_row(
+            "SELECT last_read_at FROM intelligence_news_read_state WHERE stream='events'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let articles_read_at = conn
+        .query_row(
+            "SELECT last_read_at FROM intelligence_news_read_state WHERE stream='articles'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let (unread_events, unread_articles) = unread_news_counts(conn, events_read_at, articles_read_at)?;
+    Ok(NewsReadState {
+        events_read_at,
+        articles_read_at,
+        unread_events,
+        unread_articles,
+    })
+}
+
+pub fn mark_news_read(conn: &Connection, stream: &str, now: i64) -> Result<NewsReadState, String> {
+    let stream = stream.trim();
+    if !matches!(stream, "events" | "articles" | "all") {
+        return Err("新闻阅读流无效".to_string());
+    }
+    ensure_news_read_state(conn, now)?;
+    let tx = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+    if stream == "all" || stream == "events" {
+        tx.execute(
+            "UPDATE intelligence_news_read_state SET last_read_at=?1,updated_at=?1 WHERE stream='events'",
+            params![now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    if stream == "all" || stream == "articles" {
+        tx.execute(
+            "UPDATE intelligence_news_read_state SET last_read_at=?1,updated_at=?1 WHERE stream='articles'",
+            params![now],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+    query_news_read_state(conn, now)
+}
+
+fn decorate_news_item(mut value: Value, id: &str, language: Option<&str>, first_seen_at: i64, unread: bool) -> Value {
+    if let Some(object) = value.as_object_mut() {
+        object.insert("id".to_string(), json!(id));
+        if let Some(language) = language {
+            object.insert("language".to_string(), json!(language));
+        }
+        object.insert("firstSeenAt".to_string(), json!(first_seen_at));
+        object.insert("unread".to_string(), json!(unread));
+    }
+    value
+}
+
+pub fn query_news_feed_local(
+    conn: &Connection,
+    query: &NewsFeedQuery,
+    now: i64,
+) -> Result<NewsFeedPage, String> {
+    let mode = query.mode.as_deref().unwrap_or("events").trim().to_ascii_lowercase();
+    if !matches!(mode.as_str(), "events" | "articles") {
+        return Err("新闻展示模式无效".to_string());
+    }
+    ensure_news_read_state(conn, now)?;
+    let read_state = query_news_read_state(conn, now)?;
+    let keyword = query.keyword.as_deref().unwrap_or("").trim();
+    let coin = query
+        .coins
+        .as_ref()
+        .and_then(|items| items.first())
+        .map(|value| value.trim().to_ascii_uppercase())
+        .unwrap_or_default();
+    let importance = query.importance.as_deref().unwrap_or("").trim();
+    let language = query.language.as_deref().unwrap_or("").trim();
+    let start_time = query.start_time;
+    let end_time = query.end_time;
+    let page_size = query.page_size.unwrap_or(20).clamp(1, 100) as i64;
+    let requested_page = query.page.unwrap_or(1).max(1) as i64;
+    let (total, mut rows) = if mode == "events" {
+        let filter = "WHERE (?1='' OR e.title LIKE '%'||?1||'%' OR e.summary LIKE '%'||?1||'%')
+           AND (?2='' OR e.coins_json LIKE '%'||?2||'%')
+           AND (?3='' OR e.importance=?3)
+           AND (?4 IS NULL OR e.last_published_at>=?4) AND (?5 IS NULL OR e.last_published_at<?5)
+           AND (?6='' OR EXISTS (SELECT 1 FROM intelligence_news_event_articles el JOIN intelligence_news_articles al ON al.id=el.article_id AND al.language=el.language WHERE el.event_id=e.id AND al.language=?6))";
+        let total = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM intelligence_news_events e {filter}"),
+                params![keyword, coin, importance, start_time, end_time, language],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| error.to_string())? as u64;
+        let page = requested_page.min(((total as i64 + page_size - 1) / page_size).max(1));
+        let offset = (page - 1) * page_size;
+        let mut stmt = conn
+            .prepare(&format!("SELECT e.raw_json FROM intelligence_news_events e {filter} ORDER BY e.last_published_at DESC,e.id DESC LIMIT ?7 OFFSET ?8"))
+            .map_err(|error| error.to_string())?;
+        let values = stmt
+            .query_map(params![keyword, coin, importance, start_time, end_time, language, page_size, offset], |row| row.get::<_, String>(0))
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let items = values
+            .into_iter()
+            .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
+            .map(|value| {
+                let first_seen = value_i64(&value, &["latestArticleFirstSeenAt"]).unwrap_or_default();
+                let unread = first_seen > read_state.events_read_at;
+                let id = value_string(&value, &["id"]).unwrap_or_default();
+                decorate_news_item(value, &id, None, first_seen, unread)
+            })
+            .collect::<Vec<_>>();
+        (total, items)
+    } else {
+        let filter = "WHERE (?1='' OR a.title LIKE '%'||?1||'%' OR a.summary LIKE '%'||?1||'%')
+           AND (?2='' OR a.coins_json LIKE '%'||?2||'%')
+           AND (?3='' OR a.importance=?3)
+           AND (?4 IS NULL OR COALESCE(a.published_at,a.first_seen_at)>=?4) AND (?5 IS NULL OR COALESCE(a.published_at,a.first_seen_at)<?5)
+           AND (?6='' OR a.language=?6)";
+        let total = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM intelligence_news_articles a {filter}"),
+                params![keyword, coin, importance, start_time, end_time, language],
+                |row| row.get::<_, i64>(0),
+            )
+            .map_err(|error| error.to_string())? as u64;
+        let page = requested_page.min(((total as i64 + page_size - 1) / page_size).max(1));
+        let offset = (page - 1) * page_size;
+        let mut stmt = conn
+            .prepare(&format!("SELECT a.raw_json,a.id,a.language,a.first_seen_at FROM intelligence_news_articles a {filter} ORDER BY COALESCE(a.published_at,a.first_seen_at) DESC,a.id DESC LIMIT ?7 OFFSET ?8"))
+            .map_err(|error| error.to_string())?;
+        let rows = stmt
+            .query_map(params![keyword, coin, importance, start_time, end_time, language, page_size, offset], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?
+            .into_iter()
+            .filter_map(|(raw, id, language, first_seen)| serde_json::from_str::<Value>(&raw).ok().map(|value| (value, id, language, first_seen)))
+            .map(|(value, id, language, first_seen)| decorate_news_item(value, &id, Some(&language), first_seen, first_seen > read_state.articles_read_at))
+            .collect::<Vec<_>>();
+        (total, rows)
+    };
+    let total_pages = ((total + page_size as u64 - 1) / page_size as u64).max(1) as u32;
+    let page = requested_page.min(i64::from(total_pages)) as u32;
+    let unread_count = if mode == "events" { read_state.unread_events } else { read_state.unread_articles };
+    Ok(NewsFeedPage {
+        mode,
+        items: std::mem::take(&mut rows),
+        page,
+        page_size: page_size as u16,
+        total,
+        total_pages,
+        unread_count,
+        read_state,
+    })
 }
 
 pub fn query_news_event_detail_local(conn: &Connection, id: &str) -> Result<Vec<Value>, String> {
@@ -4084,6 +4331,59 @@ mod tests {
             Some("confirmed")
         );
         assert_eq!(value_i64(confirmed, &["articleCount"]), Some(2));
+    }
+
+    #[test]
+    fn news_feed_paginates_and_tracks_first_seen_unread_state() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_intelligence(&conn).expect("migration");
+        upsert_news(
+            &conn,
+            &[
+                json!({"id":"old-news","title":"BTC market update","platform":"A","coins":["BTC"],"publishTime":100}),
+                json!({"id":"new-news","title":"ETH market update","platform":"B","coins":["ETH"],"publishTime":200}),
+            ],
+            "zh-CN",
+            None,
+            1_000,
+        )
+        .expect("initial news");
+        rebuild_news_events(&conn, 1_000).expect("initial events");
+        query_news_read_state(&conn, 2_000).expect("initial read state");
+        upsert_news(
+            &conn,
+            &[json!({"id":"latest-news","title":"SOL market update","platform":"C","coins":["SOL"],"publishTime":300})],
+            "zh-CN",
+            None,
+            3_000,
+        )
+        .expect("latest news");
+        rebuild_news_events(&conn, 3_000).expect("latest events");
+
+        let page = query_news_feed_local(
+            &conn,
+            &NewsFeedQuery {
+                mode: Some("articles".to_string()),
+                start_time: Some(0),
+                end_time: Some(1_000),
+                page: Some(2),
+                page_size: Some(1),
+                language: Some("zh-CN".to_string()),
+                ..Default::default()
+            },
+            4_000,
+        )
+        .expect("feed page");
+        assert_eq!(page.total, 3);
+        assert_eq!(page.total_pages, 3);
+        assert_eq!(page.page, 2);
+        assert_eq!(page.items.len(), 1);
+        assert_eq!(page.unread_count, 1);
+        assert_eq!(page.items[0].get("unread"), Some(&Value::Bool(false)));
+
+        let read = mark_news_read(&conn, "all", 4_000).expect("mark read");
+        assert_eq!(read.unread_events, 0);
+        assert_eq!(read.unread_articles, 0);
     }
 
     #[test]

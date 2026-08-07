@@ -715,8 +715,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desic-systematic"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+]
+
+[[package]]
 name = "desic-terminal"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -728,6 +737,7 @@ dependencies = [
  "desic-intelligence",
  "desic-private-history",
  "desic-storage-config",
+ "desic-systematic",
  "desic-trade-domain",
  "futures-util",
  "hmac",

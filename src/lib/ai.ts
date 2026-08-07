@@ -69,9 +69,9 @@ export async function sendAiMessage(
   });
 }
 
-export async function generateChartIndicatorWithAi(sessionId: string, prompt: string) {
+export async function generateChartIndicatorWithAi(sessionId: string, prompt: string, messages: AiChatMessage[] = []) {
   return invokeDesktop("ai_generate_chart_indicator", {
-    request: { sessionId, prompt }
+    request: { sessionId, prompt, messages }
   });
 }
 

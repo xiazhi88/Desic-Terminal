@@ -108,6 +108,17 @@ type NotificationInput = {
   message: string;
 };
 
+type SystematicProfileConflict = {
+  id: string;
+  name: string;
+  instId: string;
+};
+
+type SystematicProfileConflictConfirmation = {
+  profile: AiAgentProfile;
+  conflicts: SystematicProfileConflict[];
+};
+
 type AiAutomationPanelProps = {
   accounts: AccountSummary[];
   marketAssets?: MarketAssetsSummary | null;
@@ -806,7 +817,7 @@ function ProfileEditor({
           </label>
           <button onClick={onRun} disabled={busy || !draft.id} title={t("automation:profileRunNow")}><Play size={14} />{t("common:run")}</button>
           <button className="automation-danger-button" onClick={onDelete} disabled={busy} title={t("automation:profileDelete")}><Trash2 size={14} />{t("common:delete")}</button>
-          <button className="primary" onClick={onSave} disabled={busy}><Save size={14} />{t("common:save")}</button>
+          <button className="primary" onClick={() => onSave()} disabled={busy}><Save size={14} />{t("common:save")}</button>
         </div>
       </div>
 
@@ -1045,6 +1056,58 @@ function ProfileEditor({
       ) : null}
 
     </div>
+  );
+}
+
+function SystematicProfileConflictDialog({
+  confirmation,
+  onCancel,
+  onConfirm
+}: {
+  confirmation: SystematicProfileConflictConfirmation;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const { t } = useTranslation(["automation", "common"]);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    closeButtonRef.current?.focus();
+    const onKeyDown = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.body.style.overflow = previousOverflow;
+      window.removeEventListener("keydown", onKeyDown);
+    };
+  }, [onCancel]);
+
+  return createPortal(
+    <div className="modal-backdrop automation-profile-conflict-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <section className="modal-shell automation-profile-conflict-modal" role="dialog" aria-modal="true" aria-labelledby="automation-profile-conflict-title">
+        <header className="modal-head">
+          <div>
+            <strong id="automation-profile-conflict-title">{t("automation:profileStrategyConflictTitle")}</strong>
+            <span>{confirmation.profile.name}</span>
+          </div>
+          <button ref={closeButtonRef} className="window-button" type="button" onClick={onCancel} title={t("common:close")}><X size={16} /></button>
+        </header>
+        <div className="automation-profile-conflict-body">
+          <span className="automation-profile-conflict-icon"><AlertTriangle size={18} /></span>
+          <p>{t("automation:profileStrategyConflictDetail")}</p>
+          <ul>
+            {confirmation.conflicts.map((conflict) => <li key={conflict.id}><strong>{conflict.name}</strong><span>{conflict.instId}</span></li>)}
+          </ul>
+        </div>
+        <footer className="automation-profile-conflict-actions">
+          <button type="button" onClick={onCancel}>{t("common:cancel")}</button>
+          <button type="button" className="danger" onClick={onConfirm}>{t("automation:profileStrategyConflictConfirm")}</button>
+        </footer>
+      </section>
+    </div>,
+    document.body
   );
 }
 
@@ -3595,8 +3658,11 @@ function AiAutomationPanelComponent({
   const [loadedSections, setLoadedSections] = useState<Set<Exclude<AiAutomationTab, "profiles">>>(() => new Set(automationSectionCache.keys()));
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [systematicProfileConflict, setSystematicProfileConflict] = useState<SystematicProfileConflictConfirmation | null>(null);
   const summaryRequestIdRef = useRef(0);
   const appliedSummaryRequestIdRef = useRef(0);
+  const sectionLoadPromisesRef = useRef(new Map<Exclude<AiAutomationTab, "profiles">, Promise<void>>());
+  const runSectionRefreshTimerRef = useRef<number | null>(null);
 
   const applySummaryResponse = useCallback((requestId: number, rawSummary: AiAutomationSummary) => {
     if (requestId < appliedSummaryRequestIdRef.current) return null;
@@ -3670,22 +3736,34 @@ function AiAutomationPanelComponent({
     });
   }, []);
 
-  const loadSection = useCallback(async (section: Exclude<AiAutomationTab, "profiles">, silent = false) => {
+  const loadSection = useCallback((section: Exclude<AiAutomationTab, "profiles">, silent = false, force = false): Promise<void> => {
     const cached = automationSectionCache.get(section);
     if (cached) applySectionResponse(section, cached);
-    if (!isTauriRuntime()) return;
+    if (cached && !force) return Promise.resolve();
+    if (!isTauriRuntime()) return Promise.resolve();
+    const inFlight = sectionLoadPromisesRef.current.get(section);
+    if (inFlight) return inFlight;
     if (!silent) setSectionLoading(section);
-    const startedAt = performance.now();
-    try {
-      const value = await invokeDesktop<AiAutomationSection>("ai_automation_section", { section });
-      if (value) applySectionResponse(section, value);
-      logger.info("ai automation section loaded", { section, durationMs: Math.round(performance.now() - startedAt) });
-    } catch (nextError) {
-      logger.warn("ai automation section refresh failed", { section, error: nextError instanceof Error ? nextError.message : String(nextError) });
-      if (!cached) setError(nextError instanceof Error ? nextError.message : String(nextError));
-    } finally {
-      setSectionLoading((current) => current === section ? null : current);
-    }
+    const request = (async () => {
+      const startedAt = performance.now();
+      try {
+        const value = await invokeDesktop<AiAutomationSection>("ai_automation_section", { section });
+        if (value) applySectionResponse(section, value);
+        logger.info("ai automation section loaded", { section, durationMs: Math.round(performance.now() - startedAt) });
+      } catch (nextError) {
+        logger.warn("ai automation section refresh failed", { section, error: nextError instanceof Error ? nextError.message : String(nextError) });
+        if (!cached) setError(nextError instanceof Error ? nextError.message : String(nextError));
+      } finally {
+        setSectionLoading((current) => current === section ? null : current);
+      }
+    })();
+    sectionLoadPromisesRef.current.set(section, request);
+    void request.finally(() => {
+      if (sectionLoadPromisesRef.current.get(section) === request) {
+        sectionLoadPromisesRef.current.delete(section);
+      }
+    });
+    return request;
   }, [applySectionResponse]);
 
   const refreshRunStatuses = useCallback(async (ids: string[]) => {
@@ -3732,7 +3810,7 @@ function AiAutomationPanelComponent({
       const selected = next.profiles.find((item) => item.id === targetId) ?? next.profiles[0] ?? null;
       setSelectedProfileId(selected?.id ?? null);
       setProfileDraft(selected ? normalizeProfile({ ...selected, model: resolveProfileModelId(selected.model, config) }) : null);
-      if (activeTab !== "profiles") await loadSection(activeTab, true);
+      if (activeTab !== "profiles") await loadSection(activeTab, true, true);
       logger.info("ai automation overview loaded", { durationMs: Math.round(performance.now() - startedAt), tab: activeTab });
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : String(nextError);
@@ -3758,7 +3836,16 @@ function AiAutomationPanelComponent({
     const listenerCleanup = createDeferredCleanupSlot();
     void listenOptional<AiAutomationEvent>("ai:automation-event", (event) => {
       if (event.type === "runRecordUpdated") {
-        void loadSection("runs", true);
+        automationSectionCache.delete("runs");
+        if (activeTab === "runs") {
+          if (runSectionRefreshTimerRef.current !== null) {
+            window.clearTimeout(runSectionRefreshTimerRef.current);
+          }
+          runSectionRefreshTimerRef.current = window.setTimeout(() => {
+            runSectionRefreshTimerRef.current = null;
+            void loadSection("runs", true, true);
+          }, 350);
+        }
         return;
       }
       if (event.type === "reviewCreated") {
@@ -3777,8 +3864,14 @@ function AiAutomationPanelComponent({
       }
       void loadSection("runs", true);
     }).then((dispose) => listenerCleanup.settle(dispose));
-    return () => listenerCleanup.dispose();
-  }, [loadSection, refreshRunStatuses]);
+    return () => {
+      if (runSectionRefreshTimerRef.current !== null) {
+        window.clearTimeout(runSectionRefreshTimerRef.current);
+        runSectionRefreshTimerRef.current = null;
+      }
+      listenerCleanup.dispose();
+    };
+  }, [activeTab, loadSection, refreshRunStatuses]);
 
   const activeRunIds = useMemo(
     () => (summary?.runs ?? [])
@@ -3829,7 +3922,9 @@ function AiAutomationPanelComponent({
       const message = nextError instanceof Error ? nextError.message : String(nextError);
       logger.error(`ai automation command failed: ${command}`, nextError);
       setError(message);
-      onNotify({ kind: "error", title: t("automation:workbenchActionFailed", { action: successTitle }), message });
+      if (!message.includes("ACCOUNT_POSITION_MODE_SWITCH_FAILED:")) {
+        onNotify({ kind: "error", title: t("automation:workbenchActionFailed", { action: successTitle }), message });
+      }
       return false;
     } finally {
       setBusyAction(null);
@@ -3904,7 +3999,21 @@ function AiAutomationPanelComponent({
     }
   }, [onNotify, t]);
 
-  const saveProfile = useCallback(() => {
+  const persistProfile = useCallback((profile: AiAgentProfile, forceSystematicConflict: boolean) => {
+    void runCommand(
+      `profile-save:${profile.id}`,
+      "ai_agent_profile_save",
+      { profile, forceSystematicConflict },
+      t("automation:profileSaved"),
+      `${profile.name} · ${t(permissionModeI18nKey(profile.mode))}`,
+      profile.id
+    )
+      .then((saved) => {
+        if (saved) onProfileSaved?.(profile);
+      });
+  }, [onProfileSaved, runCommand, t]);
+
+  const saveProfile = useCallback((forceSystematicConflict = false) => {
     if (!profileDraft) return;
     const name = profileDraft.name.trim();
     if (!name) {
@@ -3973,18 +4082,31 @@ function AiAutomationPanelComponent({
       createdAt: profileDraft.createdAt || now,
       updatedAt: now
     };
-    void runCommand(
-      `profile-save:${profile.id}`,
-      "ai_agent_profile_save",
-      { profile },
-      t("automation:profileSaved"),
-      `${profile.name} · ${t(permissionModeI18nKey(profile.mode))}`,
-      profile.id
-    )
-      .then((saved) => {
-        if (saved) onProfileSaved?.(profile);
+    if (!profile.enabled || forceSystematicConflict || !isTauriRuntime()) {
+      persistProfile(profile, forceSystematicConflict);
+      return;
+    }
+    void invokeDesktop<SystematicProfileConflict[]>("ai_agent_profile_systematic_conflicts", {
+      request: {
+        accountId: profile.accountId,
+        environment: profile.environment,
+        symbols: profile.symbols
+      }
+    })
+      .then((conflicts) => {
+        if (conflicts?.length) {
+          setSystematicProfileConflict({ profile, conflicts });
+          return;
+        }
+        persistProfile(profile, false);
+      })
+      .catch((nextError) => {
+        const message = nextError instanceof Error ? nextError.message : String(nextError);
+        logger.error("strategy Profile conflict check failed", nextError);
+        setError(message);
+        onNotify({ kind: "error", title: t("automation:profileNotSaved"), message });
       });
-  }, [onNotify, onProfileSaved, profileDraft, runCommand, t]);
+  }, [onNotify, persistProfile, profileDraft, t]);
 
   const deleteProfile = useCallback(() => {
     if (!profileDraft) return;
@@ -4339,6 +4461,17 @@ function AiAutomationPanelComponent({
         )}
         </div>
       </section>
+      {systematicProfileConflict ? (
+        <SystematicProfileConflictDialog
+          confirmation={systematicProfileConflict}
+          onCancel={() => setSystematicProfileConflict(null)}
+          onConfirm={() => {
+            const pending = systematicProfileConflict;
+            setSystematicProfileConflict(null);
+            persistProfile(pending.profile, true);
+          }}
+        />
+      ) : null}
     </div>
   );
 }

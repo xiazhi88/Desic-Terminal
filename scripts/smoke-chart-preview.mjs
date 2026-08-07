@@ -214,6 +214,9 @@ async function main() {
       signalMarkerCount: Number(document.querySelector(".chart-wrap")?.getAttribute("data-signal-marker-count") || 0),
       fillMarkerCount: Number(document.querySelector(".chart-wrap")?.getAttribute("data-fill-marker-count") || 0),
       tradeMarkerLabels: document.querySelector(".chart-wrap")?.getAttribute("data-trade-marker-labels") || "",
+      markerLabelMode: document.querySelector(".chart-wrap")?.getAttribute("data-marker-label-mode") || "",
+      visibleMarkerBars: Number(document.querySelector(".chart-wrap")?.getAttribute("data-visible-marker-bars") || 0),
+      visibleMarkerEvents: Number(document.querySelector(".chart-wrap")?.getAttribute("data-visible-marker-events") || 0),
       fillActions: Array.from(document.querySelectorAll(".chart-fill-hit-target")).map((item) => item.getAttribute("data-fill-action") || ""),
       orderLabelText: document.querySelector(".chart-wrap")?.getAttribute("data-order-line-labels") || "",
       positionRangeCount: Number(document.querySelector(".chart-wrap")?.getAttribute("data-position-range-count") || 0),
@@ -266,8 +269,8 @@ async function main() {
     throw new Error(`order label is too large: ${JSON.stringify(baseState)}`);
   }
   if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-order-label.png`, fullPage: false });
-  if (baseState.signalMarkerCount < 2 || !/看多/.test(baseState.tradeMarkerLabels) || !/看空/.test(baseState.tradeMarkerLabels)) {
-    throw new Error(`analysis opinion markers missing from preview: ${JSON.stringify(baseState)}`);
+  if (baseState.signalMarkerCount < 2 || baseState.markerLabelMode !== "compact" || !Number.isFinite(baseState.visibleMarkerBars)) {
+    throw new Error(`analysis opinion markers should default to compact mode: ${JSON.stringify(baseState)}`);
   }
   if (baseState.fillMarkerCount < 3 || !baseState.fillActions.includes("做多") || !baseState.fillActions.includes("平多")) {
     throw new Error(`historical fill markers missing from preview: ${JSON.stringify(baseState)}`);
@@ -381,6 +384,29 @@ async function main() {
 
   await page.getByRole("button", { name: "指标中心" }).click();
   await page.waitForSelector(".chart-indicator-workspace", { timeout: 10_000 });
+  const indicatorPopoverState = await page.evaluate(() => {
+    const trigger = document.querySelector(".chart-indicator-center-trigger");
+    const popover = document.querySelector(".chart-indicator-floating-popover");
+    if (!trigger || !popover) return null;
+    const triggerRect = trigger.getBoundingClientRect();
+    const popoverRect = popover.getBoundingClientRect();
+    const styles = getComputedStyle(popover);
+    return {
+      trigger: { left: triggerRect.left, right: triggerRect.right, top: triggerRect.top, bottom: triggerRect.bottom },
+      popover: { left: popoverRect.left, right: popoverRect.right, top: popoverRect.top, bottom: popoverRect.bottom, width: popoverRect.width },
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      placement: popover.getAttribute("data-popover-placement"),
+      animationName: styles.animationName
+    };
+  });
+  if (!indicatorPopoverState) throw new Error("indicator popover did not expose its trigger and position");
+  const { popover: indicatorPopoverRect, viewport: indicatorViewport } = indicatorPopoverState;
+  if (indicatorPopoverRect.width < 520 || indicatorPopoverRect.left < 8 || indicatorPopoverRect.right > indicatorViewport.width - 8 || indicatorPopoverRect.top < 8 || indicatorPopoverRect.bottom > indicatorViewport.height - 8) {
+    throw new Error(`indicator popover is out of viewport: ${JSON.stringify(indicatorPopoverState)}`);
+  }
+  if (indicatorPopoverState.animationName !== "desic-popup-enter") {
+    throw new Error(`indicator popover entrance animation missing: ${JSON.stringify(indicatorPopoverState)}`);
+  }
   await page.locator("[data-indicator-add=ema]").click();
   await page.locator("[data-indicator-add=vwap]").click();
   await page.locator("[data-indicator-add=adx]").click();
@@ -486,8 +512,17 @@ async function main() {
   await page.locator(".chart-fill-hit-target").first().hover();
   await page.waitForTimeout(120);
   const fillTooltipText = await page.locator(".chart-fill-tooltip").textContent();
-  if (!fillTooltipText || !/(做多|做空|平多|平空)/.test(fillTooltipText) || !/价格|数量/.test(fillTooltipText)) {
+  if (!fillTooltipText || !/(做多|做空|平多|平空)/.test(fillTooltipText) || !/价格|数量|时间/.test(fillTooltipText)) {
     throw new Error(`historical fill tooltip did not appear near fill marker: ${fillTooltipText}`);
+  }
+  if (!/×2/.test(baseState.tradeMarkerLabels)) {
+    throw new Error(`same-candle executions should aggregate into a count marker: ${JSON.stringify(baseState)}`);
+  }
+  await page.locator(".chart-fill-hit-target").first().click();
+  await page.waitForTimeout(80);
+  const pinnedFillTooltip = await page.locator(".chart-fill-tooltip").textContent();
+  if (!pinnedFillTooltip || !/价格|数量|时间/.test(pinnedFillTooltip)) {
+    throw new Error(`clicking a fill marker should pin its details: ${pinnedFillTooltip}`);
   }
 
   const positionHandle = await page.locator(".chart-position-drag-handle").first().boundingBox();
@@ -851,6 +886,28 @@ async function main() {
     throw new Error(`detached chart OHLC strip has excessive top spacing: ${JSON.stringify(detachedOhlcLayout)}`);
   }
   if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-detached-ohlc.png`, fullPage: false });
+
+  const chartCanvas = page.locator(".chart-canvas canvas").first();
+  await chartCanvas.evaluate((node) => {
+    for (let index = 0; index < 30; index += 1) {
+      node.dispatchEvent(new WheelEvent("wheel", {
+        bubbles: true,
+        cancelable: true,
+        ctrlKey: true,
+        deltaMode: 0,
+        deltaY: -100
+      }));
+    }
+  });
+  await page.waitForTimeout(260);
+  const expandedMarkerState = await page.locator(".chart-wrap").evaluate((node) => ({
+    mode: node.getAttribute("data-marker-label-mode") || "",
+    bars: Number(node.getAttribute("data-visible-marker-bars") || 0),
+    labels: node.getAttribute("data-trade-marker-labels") || ""
+  }));
+  if (expandedMarkerState.mode !== "expanded" || expandedMarkerState.bars > 48 || !/看多|看空/.test(expandedMarkerState.labels)) {
+    throw new Error(`zoomed chart should expand recent marker labels: ${JSON.stringify(expandedMarkerState)}`);
+  }
 
   const actionableConsoleErrors = consoleErrors.filter((text) => !/ResizeObserver loop|WebSocket|ERR_|Failed to load resource/i.test(text));
   if (pageErrors.length > 0 || actionableConsoleErrors.length > 0) {

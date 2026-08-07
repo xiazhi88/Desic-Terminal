@@ -10,8 +10,9 @@ use desic_intelligence::{
     sync_states, tracked_traders, upsert_derivatives_items, upsert_generic, upsert_news, value_f64,
     value_i64, value_string, BriefingQuery, CalendarQuery, DerivativesQuery, IntelligenceQuery,
     IntelligenceResponse, IntelligenceSeriesMetadata, IntelligenceSettings, IntelligenceSummary,
-    IntelligenceSyncState, NewsEventQuery, SentimentQuery, SmartMoneyQuery, DERIVATIVES_SOURCE,
-    DERIVATIVES_VERSION, LINEAR_SIGNAL_LIMITATION,
+    IntelligenceSyncState, NewsEventQuery, NewsFeedPage, NewsFeedQuery, NewsReadState,
+    SentimentQuery, SmartMoneyQuery, DERIVATIVES_SOURCE, DERIVATIVES_VERSION,
+    LINEAR_SIGNAL_LIMITATION,
 };
 use reqwest::header::ACCEPT_LANGUAGE;
 use std::sync::{
@@ -2779,6 +2780,41 @@ pub(crate) async fn intelligence_news_events_query(
             query_news_events_local(&conn, &query)?,
             false,
         ))
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn intelligence_news_feed(
+    app: tauri::AppHandle,
+    query: NewsFeedQuery,
+) -> Result<NewsFeedPage, String> {
+    run_intelligence_blocking(move || {
+        let conn = open_intelligence_database(&app)?;
+        desic_intelligence::query_news_feed_local(&conn, &query, now_ms())
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn intelligence_news_read_state(
+    app: tauri::AppHandle,
+) -> Result<NewsReadState, String> {
+    run_intelligence_blocking(move || {
+        let conn = open_intelligence_database(&app)?;
+        desic_intelligence::query_news_read_state(&conn, now_ms())
+    })
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn intelligence_news_mark_read(
+    app: tauri::AppHandle,
+    stream: String,
+) -> Result<NewsReadState, String> {
+    run_intelligence_blocking(move || {
+        let conn = open_intelligence_database(&app)?;
+        desic_intelligence::mark_news_read(&conn, &stream, now_ms())
     })
     .await
 }

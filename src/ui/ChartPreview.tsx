@@ -139,6 +139,15 @@ function buildPreviewFills(candles: Candle[], t: ReturnType<typeof useTranslatio
       label: formatChartAction({ side: "buy", posSide: "long" }, "0.08", t)
     },
     {
+      id: "preview-fill-open-long-follow-up",
+      time: openFill.time + 18,
+      price: openFill.close + 0.4,
+      side: "buy",
+      posSide: "long",
+      size: "0.02",
+      label: formatChartAction({ side: "buy", posSide: "long" }, "0.02", t)
+    },
+    {
       id: "preview-fill-reduce-long",
       time: reduceFill.time + 14,
       price: reduceFill.close,

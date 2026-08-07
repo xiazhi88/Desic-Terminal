@@ -84,7 +84,17 @@ function getWindowIdFromUrlOrLabel(label?: string | null) {
 
 function isActivePendingOrder(order: OkxPendingOrder) {
   const state = String(order.state || "").toLowerCase();
-  return !["filled", "canceled", "cancelled", "failed", "effective", "triggered"].includes(state);
+  return ![
+    "filled",
+    "canceled",
+    "cancelled",
+    "failed",
+    "rejected",
+    "mmp_canceled",
+    "order_failed",
+    "effective",
+    "triggered"
+  ].includes(state);
 }
 
 function isActiveAlgoOrder(order: OkxAlgoOrder) {

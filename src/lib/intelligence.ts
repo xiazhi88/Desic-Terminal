@@ -167,6 +167,36 @@ export type NewsEventQuery = {
   limit?: number;
 };
 
+export type NewsFeedQuery = {
+  mode?: "events" | "articles";
+  keyword?: string;
+  coins?: string[];
+  importance?: "high" | "low" | "1" | "2" | "3";
+  language?: "zh-CN" | "en-US";
+  startTime?: number;
+  endTime?: number;
+  page?: number;
+  pageSize?: number;
+};
+
+export type NewsReadState = {
+  eventsReadAt: number;
+  articlesReadAt: number;
+  unreadEvents: number;
+  unreadArticles: number;
+};
+
+export type NewsFeedPage = {
+  mode: "events" | "articles";
+  items: IntelligenceRecord[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+  unreadCount: number;
+  readState: NewsReadState;
+};
+
 export type BriefingQuery = {
   profileId?: string;
   briefingDate?: string;
@@ -247,6 +277,18 @@ export async function queryDerivatives(view: DerivativesView, query: Derivatives
 
 export async function queryNewsEvents(query: NewsEventQuery = {}) {
   return requireDesktop<IntelligenceResponse>("intelligence_news_events_query", { query });
+}
+
+export async function queryNewsFeed(query: NewsFeedQuery = {}) {
+  return requireDesktop<NewsFeedPage>("intelligence_news_feed", { query });
+}
+
+export async function loadNewsReadState() {
+  return requireDesktop<NewsReadState>("intelligence_news_read_state");
+}
+
+export async function markNewsRead(stream: "events" | "articles" | "all") {
+  return requireDesktop<NewsReadState>("intelligence_news_mark_read", { stream });
 }
 
 export async function readNewsEvent(id: string) {

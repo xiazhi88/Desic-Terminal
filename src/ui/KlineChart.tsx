@@ -41,6 +41,7 @@ import {
   type ChartCrosshairPosition,
   type ChartMarkerPoint,
   type ChartPriceLine,
+  type ChartVisibleLogicalRange,
   type TradingChartHandle,
   formatShanghaiChartTimestamp
 } from "./chartAdapter";
@@ -61,6 +62,7 @@ import { TerminalSelect } from "./TerminalSelect";
 import { useDraggableSurface } from "./useDraggableSurface";
 import {
   chartTradeVisual,
+  formatChartAmount,
   resolveChartTradeAction,
 } from "../lib/chartTradeSemantics";
 import type { Candle, ChartFillMarker, ChartOrderLine, ChartOrderLineEdit, ChartPositionRange, ChartRiskRewardTradeIntent, ChartSignalMarker, FundingRate, OrderBook, PositionLineTradeIntent, Ticker, Trade } from "../types";
@@ -101,6 +103,7 @@ type Props = {
   onChartVisibleRange?: (range: { from: number; to: number } | null) => void;
   synchronizedCrosshairTime?: number | null;
   synchronizedCrosshairPosition?: ChartCrosshairPosition | null;
+  followSynchronizedCrosshair?: boolean;
   synchronizedVisibleRange?: { from: number; to: number } | null;
   onPriceAlert?: (payload: { price: number; direction: "above" | "below" | "cross"; last: number; source?: "manual" | "script" | "ai"; name?: string }) => void;
   onCreateChartAlert?: (payload: { id: string; symbol: string; definition: Record<string, unknown> }) => void;
@@ -351,6 +354,10 @@ const lineToolItems = [
 ] as const;
 
 const AUTO_FIT_READY_CANDLE_COUNT = 80;
+const FILL_SOURCE_LIMIT = 160;
+const DISPLAY_FILL_LIMIT = 100;
+const EXPANDED_MARKER_MAX_VISIBLE_BARS = 48;
+const EXPANDED_MARKER_MAX_VISIBLE_EVENTS = 36;
 const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-ma5", definitionId: "ma", paneId: "main", visible: true, parameters: { period: 5 } },
   { id: "builtin-ma10", definitionId: "ma", paneId: "main", visible: true, parameters: { period: 10 } },
@@ -358,7 +365,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, synchronizedVisibleRange, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -367,13 +374,21 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     if (action === "close-short") return t("trading:closeShort");
     return t("trading:trade");
   }, [t]);
+  const reviewVariant = variant === "review";
   const localizedTradeOpinion = useCallback((signal: ChartSignalMarker) => {
     const action = resolveChartTradeAction(signal);
     if (action === "open-long" || action === "close-short") return { label: t("chart:bullish"), positive: true };
     if (action === "open-short" || action === "close-long") return { label: t("chart:bearish"), positive: false };
     return { label: t("chart:opinion"), positive: true };
   }, [t]);
-  const reviewVariant = variant === "review";
+  const localizedFillMarker = useCallback((fill: ChartFillMarker) => {
+    const actionLabel = localizedTradeAction(resolveChartTradeAction(fill));
+    if (!reviewVariant) return t("chart:fillMarker", { action: actionLabel });
+    const reason = String(fill.label ?? "").toLowerCase().replace(/[^a-z]/g, "");
+    if (reason.includes("protectivestop")) return `${t("trading:stopLoss")} · ${actionLabel}`;
+    if (reason.includes("protectivetakeprofit")) return `${t("trading:takeProfit")} · ${actionLabel}`;
+    return actionLabel;
+  }, [localizedTradeAction, reviewVariant, t]);
   const orderLineCancellationEnabled = !reviewVariant && Boolean(onOrderLineCancel);
   const scriptPanelDrag = useDraggableSurface<HTMLDivElement>();
   const shouldPersistWorkspace = persistWorkspace ?? !reviewVariant;
@@ -492,6 +507,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const [draggingOrderLine, setDraggingOrderLine] = useState<OrderLineDrag | null>(null);
   const [draggingPositionLine, setDraggingPositionLine] = useState<PositionLineDrag | null>(null);
   const [fillTooltip, setFillTooltip] = useState<FillTooltip | null>(null);
+  const [fillTooltipPinned, setFillTooltipPinned] = useState(false);
+  const [visibleLogicalRange, setVisibleLogicalRange] = useState<ChartVisibleLogicalRange | null>(null);
   const [hoveringEditableOrderLine, setHoveringEditableOrderLine] = useState(false);
   const [hoveringPositionHandle, setHoveringPositionHandle] = useState(false);
   const [chartContextMenu, setChartContextMenu] = useState<{ x: number; y: number; price: number } | null>(null);
@@ -555,25 +572,50 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const scriptVisibilitySignature = chartScripts.map((script) => `${script.id}:${script.enabled ? 1 : 0}:${script.hidden ? 1 : 0}`).join("|");
   const scriptOutput = useMemo(() => mergeScriptOutputs(chartScripts, scriptRunStates), [chartScripts, scriptRunStates]);
   const orderBookPressure = useMemo(() => calculateOrderBookPressure(orderBook, recentTrades), [orderBook, recentTrades]);
-  const signalMarkers = useMemo(() => buildSignalMarkers(candles, signals, localizedTradeOpinion), [candles, localizedTradeOpinion, signals]);
-  const fillMarkers = useMemo(() => buildFillMarkers(candles, fills, (fill) => t("chart:fillMarker", { action: localizedTradeAction(resolveChartTradeAction(fill)) })), [candles, fills, localizedTradeAction, t]);
+  const markerDisplayMode = useMemo(() => {
+    if (!visibleLogicalRange || candles.length === 0) {
+      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: fills.length + signals.length };
+    }
+    const fromIndex = Math.max(0, Math.floor(visibleLogicalRange.from));
+    const toIndex = Math.min(candles.length - 1, Math.ceil(visibleLogicalRange.to));
+    if (fromIndex > toIndex) {
+      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: fills.length + signals.length };
+    }
+    const fromTime = candles[fromIndex]?.time ?? candles[0]?.time;
+    const toTime = candles[toIndex]?.time ?? candles[candles.length - 1]?.time;
+    const isVisible = (time: number) => time >= Number(fromTime) && time <= Number(toTime);
+    const visibleEventCount = fills.filter((fill) => isVisible(Number(fill.time))).length
+      + signals.filter((signal) => isVisible(Number(signal.time))).length;
+    const visibleBarSpan = Math.max(1, toIndex - fromIndex + 1);
+    return {
+      expanded: visibleBarSpan <= EXPANDED_MARKER_MAX_VISIBLE_BARS
+        && visibleEventCount <= EXPANDED_MARKER_MAX_VISIBLE_EVENTS,
+      visibleBarSpan,
+      visibleEventCount
+    };
+  }, [candles, fills, signals, visibleLogicalRange]);
+  const displayFillMarkers = useMemo(() => aggregateFillMarkers(candles, fills), [candles, fills]);
+  const signalMarkers = useMemo(
+    () => buildSignalMarkers(candles, signals, localizedTradeOpinion, markerDisplayMode.expanded),
+    [candles, localizedTradeOpinion, markerDisplayMode.expanded, signals]
+  );
+  const fillMarkers = useMemo(
+    () => buildFillMarkers(displayFillMarkers, localizedFillMarker, markerDisplayMode.expanded),
+    [displayFillMarkers, localizedFillMarker, markerDisplayMode.expanded]
+  );
   const fillMarkerOverlays = useMemo(() => {
     const chart = chartRef.current;
-    if (!chart || candles.length === 0 || fills.length === 0) return [];
+    if (!chart || candles.length === 0 || displayFillMarkers.length === 0) return [];
     coordinateVersion;
-    const sortedTimes = candles.map((candle) => candle.time);
-    return fills
-      .slice(0, 160)
+    return displayFillMarkers
       .map((marker): FillMarkerOverlay | null => {
-        const time = nearestCandleTime(sortedTimes, marker.time);
-        if (time === null) return null;
-        const x = chart.timeToCoordinate(time);
+        const x = chart.timeToCoordinate(marker.time);
         const y = chart.priceToCoordinate(marker.price);
         if (x === null || y === null) return null;
         return { marker, x: Number(x), y: Number(y) };
       })
       .filter((item): item is FillMarkerOverlay => Boolean(item));
-  }, [candles, coordinateVersion, fills]);
+  }, [coordinateVersion, displayFillMarkers]);
   const measureStats = useMemo(() => calcMeasureStats(measureSelection.start, measureSelection.end), [measureSelection]);
   const latestCandleX = useMemo(() => {
     const chart = chartRef.current;
@@ -875,6 +917,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     setPendingDrawPoint(null);
     setPreviewDrawPoint(null);
     setHoverStats(null);
+    setFillTooltip(null);
+    setFillTooltipPinned(false);
     setMeasureSelection({ start: null, end: null });
     setAutoFit(true);
     previousLivePriceRef.current = null;
@@ -901,12 +945,15 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     orderPriceLinesRef.current.clear();
     orderPriceLineSignaturesRef.current.clear();
     lastHistoryRequestFirstTimeRef.current = null;
-    setDrawingLines(loadDrawingLines(symbol));
-  }, [symbol, timeframe]);
+    // Review charts are read-only evidence views; never inherit or persist
+    // drawings created on the live trading chart.
+    setDrawingLines(reviewVariant ? [] : loadDrawingLines(symbol));
+  }, [reviewVariant, symbol, timeframe]);
 
   useEffect(() => {
+    if (reviewVariant) return;
     saveDrawingLines(symbol, drawingLines);
-  }, [drawingLines, symbol]);
+  }, [drawingLines, reviewVariant, symbol]);
 
   useEffect(() => {
     onNeedMoreHistoryRef.current = onNeedMoreHistory;
@@ -1081,6 +1128,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
 
     const unsubscribeRange = chart.onVisibleRangeChange((range) => {
       setCoordinateVersion((version) => version + 1);
+      setVisibleLogicalRange(range);
       requestMoreHistoryIfNeeded(range);
       onChartVisibleRangeRef.current?.(range);
     });
@@ -1095,6 +1143,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       resizeObserver.disconnect();
       chart.destroy();
       chartRef.current = null;
+      setVisibleLogicalRange(null);
       priceAlertLinesRef.current.clear();
       orderPriceLinesRef.current.clear();
       orderPriceLineSignaturesRef.current.clear();
@@ -1102,9 +1151,37 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   }, [requestMoreHistoryIfNeeded]);
 
   useEffect(() => {
-    if (synchronizedCrosshairPosition) chartRef.current?.setCrosshairPosition(synchronizedCrosshairPosition);
-    else chartRef.current?.setCrosshairTime(synchronizedCrosshairTime ?? null);
-  }, [synchronizedCrosshairPosition, synchronizedCrosshairTime]);
+    // `undefined` means this chart owns its crosshair. Keep ordinary trading
+    // charts independent while allowing replay to explicitly pass a time/null.
+    if (synchronizedCrosshairPosition === undefined && synchronizedCrosshairTime === undefined) return;
+    const frame = window.requestAnimationFrame(() => {
+      const chart = chartRef.current;
+      if (!chart) return;
+      if (synchronizedCrosshairPosition) chart.setCrosshairPosition(synchronizedCrosshairPosition);
+      else chart.setCrosshairTime(synchronizedCrosshairTime ?? null);
+
+      const cursorTime = synchronizedCrosshairPosition?.time ?? synchronizedCrosshairTime;
+      if (!followSynchronizedCrosshair || cursorTime === null || cursorTime === undefined) return;
+      const cursorIndex = candleIndexRef.current.get(cursorTime);
+      const range = chart.getVisibleLogicalRange();
+      if (cursorIndex === undefined || !range || (cursorIndex >= range.from && cursorIndex <= range.to)) return;
+
+      const span = Math.max(16, range.to - range.from);
+      const lastIndex = Math.max(0, candleIndexRef.current.size - 1);
+      let from = cursorIndex - span * 0.55;
+      let to = cursorIndex + span * 0.45;
+      if (from < -0.5) {
+        to += -0.5 - from;
+        from = -0.5;
+      }
+      if (to > lastIndex + 0.5) {
+        from -= to - (lastIndex + 0.5);
+        to = lastIndex + 0.5;
+      }
+      chart.setVisibleLogicalRange({ from: Math.max(-0.5, from), to });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [candles, followSynchronizedCrosshair, synchronizedCrosshairPosition, synchronizedCrosshairTime]);
 
   useEffect(() => {
     if (synchronizedVisibleRange) chartRef.current?.setVisibleLogicalRange(synchronizedVisibleRange);
@@ -1288,7 +1365,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       });
     }
     renderedFirstTimeRef.current = canonicalCandles[0]?.time ?? null;
-    requestMoreHistoryIfNeeded(chart.getVisibleLogicalRange());
+    const currentVisibleRange = chart.getVisibleLogicalRange();
+    setVisibleLogicalRange(currentVisibleRange);
+    requestMoreHistoryIfNeeded(currentVisibleRange);
     setCoordinateVersion((version) => version + 1);
   }, [autoFit, candles, indicatorConfigSignature, indicatorInstances, layerVisibility.indicators, requestMoreHistoryIfNeeded]);
 
@@ -1736,7 +1815,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     const x = clientX - box.left;
     const y = clientY - box.top;
     let match: { marker: ChartFillMarker; x: number; y: number; distance: number } | null = null;
-    for (const marker of fills) {
+    for (const marker of displayFillMarkers) {
       if (!Number.isFinite(marker.time) || !Number.isFinite(marker.price)) continue;
       const markerX = chart.timeToCoordinate(marker.time);
       const markerY = chart.priceToCoordinate(marker.price);
@@ -1747,6 +1826,16 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       }
     }
     return match ? { marker: match.marker, x: match.x, y: match.y } : null;
+  };
+
+  const fillTooltipPosition = (x: number, y: number) => {
+    const box = containerRef.current?.getBoundingClientRect();
+    const maxX = Math.max(10, (box?.width ?? 220) - 190);
+    const maxY = Math.max(66, (box?.height ?? 160) - 86);
+    return {
+      x: Math.min(maxX, Math.max(10, x + 12)),
+      y: Math.min(maxY, Math.max(66, y - 34))
+    };
   };
 
   const pointFromPointer = (clientX: number, clientY: number, snap = false): MeasurePoint | null => {
@@ -2133,7 +2222,11 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const handleChartPointerDown = (event: ReactPointerEvent<HTMLDivElement>) => {
     setAutoFit(false);
     setDrawingMenu(null);
-    if (event.button === 0) setChartContextMenu(null);
+    if (event.button === 0) {
+      setChartContextMenu(null);
+      setFillTooltip(null);
+      setFillTooltipPinned(false);
+    }
     if (measureMode || drawMode) {
       const point = pointFromPointer(event.clientX, event.clientY, event.shiftKey);
       if (!point) return;
@@ -2184,6 +2277,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     if (measureMode || drawMode) {
       setHoveringEditableOrderLine(false);
       setFillTooltip(null);
+      setFillTooltipPinned(false);
       const riskRewardGesture = riskRewardCreateGestureRef.current;
       if (drawMode && riskRewardGesture?.pointerId === event.pointerId) {
         const point = pointFromPointer(event.clientX, event.clientY, event.shiftKey);
@@ -2221,12 +2315,15 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       setHoveringEditableOrderLine(false);
       setHoveringPositionHandle(false);
       setFillTooltip(null);
+      setFillTooltipPinned(false);
       return;
     }
     const hasEditableOrder = Boolean(orderLineAtPointer(event.clientY));
     setHoveringEditableOrderLine(hasEditableOrder);
     setHoveringPositionHandle(!hasEditableOrder && Boolean(positionHandleAtPointer(event.clientY)));
-    setFillTooltip(hasEditableOrder ? null : fillMarkerAtPointer(event.clientX, event.clientY));
+    if (!fillTooltipPinned) {
+      setFillTooltip(hasEditableOrder ? null : fillMarkerAtPointer(event.clientX, event.clientY));
+    }
   };
 
   const finishRiskRewardCreate = (event: ReactPointerEvent<HTMLDivElement>, cancelled: boolean) => {
@@ -2331,6 +2428,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       data-signal-marker-count={signalMarkers.length}
       data-fill-marker-count={fillMarkers.length}
       data-trade-marker-labels={[...signalMarkers, ...fillMarkers].map((marker) => marker.text).filter(Boolean).join("|")}
+      data-marker-label-mode={markerDisplayMode.expanded ? "expanded" : "compact"}
+      data-visible-marker-bars={markerDisplayMode.visibleBarSpan}
+      data-visible-marker-events={markerDisplayMode.visibleEventCount}
       data-position-range-count={positionRangeOverlays.length}
       data-latest-candle-x={latestCandleX ?? ""}
       data-candle-count={candles.length}
@@ -3010,29 +3110,77 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
           )}
           style={{ left: fillTooltip.x, top: fillTooltip.y }}
         >
-          <strong>{localizedTradeAction(resolveChartTradeAction(fillTooltip.marker))}</strong>
+          <strong>
+            {localizedTradeAction(resolveChartTradeAction(fillTooltip.marker))}
+            {Number(fillTooltip.marker.groupCount) > 1 ? ` ×${fillTooltip.marker.groupCount}` : ""}
+          </strong>
+          {Number(fillTooltip.marker.groupCount) > 1 && (
+            <span>{chartText("Aggregated executions", "合并成交")} {fillTooltip.marker.groupCount}</span>
+          )}
           <span>{t("common:price")} {formatChartNumber(fillTooltip.marker.price)}</span>
           <span>{t("common:quantity")} {fillTooltip.marker.size || "--"} {t("trading:contracts")}</span>
-          {fillTooltip.marker.pnl && <span>{t("trading:pnl")} {fillTooltip.marker.pnl} USDT</span>}
+          {fillTooltip.marker.pnl !== null && fillTooltip.marker.pnl !== undefined && String(fillTooltip.marker.pnl).trim() !== "" && (
+            <span>{t("trading:pnl")} {formatChartNumber(Number(fillTooltip.marker.pnl))} USDT</span>
+          )}
+          <span>
+            {t("common:time")} {formatShanghaiChartTimestamp(fillTooltip.marker.groupStartTime ?? fillTooltip.marker.time, true)}
+          </span>
+          {Number(fillTooltip.marker.groupCount) > 1
+            && fillTooltip.marker.groupEndTime
+            && fillTooltip.marker.groupEndTime !== fillTooltip.marker.groupStartTime && (
+              <span>
+                {chartText("Through", "至")} {formatShanghaiChartTimestamp(fillTooltip.marker.groupEndTime, true)}
+              </span>
+            )}
         </div>
       )}
       {layerVisibility.fills && fillMarkerOverlays.length > 0 && (
-        <div className="chart-fill-hit-layer" aria-hidden="true">
+        <div className="chart-fill-hit-layer">
           {fillMarkerOverlays.map((item) => (
             <span
               className="chart-fill-hit-target"
               key={item.marker.id}
               data-fill-action={localizedTradeAction(resolveChartTradeAction(item.marker))}
+              role="button"
+              tabIndex={0}
+              aria-label={chartText(
+                `View ${localizedTradeAction(resolveChartTradeAction(item.marker))} execution details`,
+                `查看${localizedTradeAction(resolveChartTradeAction(item.marker))}成交详情`
+              )}
               style={{ left: item.x, top: item.y }}
               onPointerEnter={() => {
-                const box = containerRef.current?.getBoundingClientRect();
+                const position = fillTooltipPosition(item.x, item.y);
+                setFillTooltipPinned(false);
                 setFillTooltip({
                   marker: item.marker,
-                  x: Math.min((box?.width ?? 220) - 190, Math.max(10, item.x + 12)),
-                  y: Math.min((box?.height ?? 160) - 86, Math.max(66, item.y - 34))
+                  ...position
                 });
               }}
-              onPointerLeave={() => setFillTooltip(null)}
+              onPointerLeave={() => {
+                if (!fillTooltipPinned) setFillTooltip(null);
+              }}
+              onPointerDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.preventDefault();
+                event.stopPropagation();
+                setFillTooltipPinned(true);
+                const position = fillTooltipPosition(item.x, item.y);
+                setFillTooltip({
+                  marker: item.marker,
+                  ...position
+                });
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") {
+                  setFillTooltipPinned(false);
+                  setFillTooltip(null);
+                  return;
+                }
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                setFillTooltipPinned(true);
+                setFillTooltip({ marker: item.marker, ...fillTooltipPosition(item.x, item.y) });
+              }}
             />
           ))}
         </div>
@@ -4038,7 +4186,12 @@ function defaultDrawingEnd(tool: DrawingTool, start: MeasurePoint, candles: Cand
   return { ...start, time: start.time + barSeconds * 8, index: start.index + 8, price: start.price * 1.002 };
 }
 
-function buildSignalMarkers(candles: Candle[], signals: ChartSignalMarker[], labelFor: (signal: ChartSignalMarker) => { label: string; positive: boolean }): ChartMarkerPoint[] {
+function buildSignalMarkers(
+  candles: Candle[],
+  signals: ChartSignalMarker[],
+  labelFor: (signal: ChartSignalMarker) => { label: string; positive: boolean },
+  showLabels = true
+): ChartMarkerPoint[] {
   if (candles.length === 0 || signals.length === 0) return [];
   const sortedTimes = candles.map((candle) => candle.time);
   const first = sortedTimes[0];
@@ -4058,41 +4211,131 @@ function buildSignalMarkers(candles: Candle[], signals: ChartSignalMarker[], lab
       position: opinion.positive ? "belowBar" : "aboveBar",
       shape: "circle",
       color: signal.source === "ai" ? "#b792ff" : "#67e8f9",
-      text: opinion.label,
+      text: showLabels ? opinion.label : undefined,
       size: signal.source === "ai" ? 0.66 : 0.62
     });
   }
   return markers.sort((a, b) => a.time - b.time).slice(-60);
 }
 
-function buildFillMarkers(candles: Candle[], fills: ChartFillMarker[], labelFor: (fill: ChartFillMarker) => string): ChartMarkerPoint[] {
+function aggregateFillMarkers(candles: Candle[], fills: ChartFillMarker[], limit = DISPLAY_FILL_LIMIT): ChartFillMarker[] {
   if (candles.length === 0 || fills.length === 0) return [];
   const sortedTimes = candles.map((candle) => candle.time);
   const first = sortedTimes[0];
   const last = sortedTimes[sortedTimes.length - 1];
-  const markers: ChartMarkerPoint[] = [];
-  const seen = new Set<string>();
-  for (const fill of fills.slice(0, 160)) {
-    const time = nearestCandleTime(sortedTimes, fill.time);
+  type FillAggregate = {
+    marker: ChartFillMarker;
+    action: ReturnType<typeof resolveChartTradeAction>;
+    time: number;
+    count: number;
+    quantity: number;
+    quantityValid: boolean;
+    pnl: number;
+    pnlValid: boolean;
+    weightedPrice: number;
+    priceWeight: number;
+    priceSum: number;
+    priceCount: number;
+    startTime: number;
+    endTime: number;
+  };
+  const groups = new Map<string, FillAggregate>();
+  for (const fill of fills.slice(0, FILL_SOURCE_LIMIT)) {
+    const sourceTime = Number(fill.time);
+    if (!Number.isFinite(sourceTime)) continue;
+    const time = nearestCandleTime(sortedTimes, sourceTime);
     if (time === null || time < first || time > last) continue;
-    const key = `${fill.id}-${time}-${fill.label}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
     const action = resolveChartTradeAction(fill);
-    const visual = chartTradeVisual(action);
-    const buyLike = visual.buyLike;
-    const text = labelFor(fill);
-    markers.push({
-      id: `fill-${fill.id}`,
+    const key = `${time}:${action}`;
+    const quantity = Number(fill.size);
+    const price = Number(fill.price);
+    const pnlText = fill.pnl === null || fill.pnl === undefined ? "" : String(fill.pnl).trim();
+    const pnl = pnlText ? Number(pnlText) : Number.NaN;
+    const existing = groups.get(key);
+    if (existing) {
+      existing.count += 1;
+      if (Number.isFinite(quantity) && quantity > 0) {
+        existing.quantity += Math.abs(quantity);
+      } else {
+        existing.quantityValid = false;
+      }
+      if (Number.isFinite(pnl)) {
+        existing.pnl += pnl;
+      } else {
+        existing.pnlValid = false;
+      }
+      if (Number.isFinite(price) && price > 0) {
+        const weight = Number.isFinite(quantity) && quantity > 0 ? Math.abs(quantity) : 1;
+        existing.weightedPrice += price * weight;
+        existing.priceWeight += weight;
+        existing.priceSum += price;
+        existing.priceCount += 1;
+      }
+      existing.startTime = Math.min(existing.startTime, sourceTime);
+      existing.endTime = Math.max(existing.endTime, sourceTime);
+      continue;
+    }
+    groups.set(key, {
+      marker: fill,
+      action,
       time,
-      position: buyLike ? "belowBar" : "aboveBar",
-      shape: buyLike ? "arrowUp" : "arrowDown",
-      color: visual.color,
-      text,
-      size: 0.72
+      count: 1,
+      quantity: Number.isFinite(quantity) && quantity > 0 ? Math.abs(quantity) : 0,
+      quantityValid: Number.isFinite(quantity) && quantity > 0,
+      pnl: Number.isFinite(pnl) ? pnl : 0,
+      pnlValid: Number.isFinite(pnl),
+      weightedPrice: Number.isFinite(price) && price > 0 ? price * (Number.isFinite(quantity) && quantity > 0 ? Math.abs(quantity) : 1) : 0,
+      priceWeight: Number.isFinite(price) && price > 0 ? (Number.isFinite(quantity) && quantity > 0 ? Math.abs(quantity) : 1) : 0,
+      priceSum: Number.isFinite(price) && price > 0 ? price : 0,
+      priceCount: Number.isFinite(price) && price > 0 ? 1 : 0,
+      startTime: sourceTime,
+      endTime: sourceTime
     });
   }
-  return markers.sort((a, b) => a.time - b.time).slice(-100);
+  return [...groups.values()]
+    .map((group): ChartFillMarker => {
+      const averagePrice = group.priceWeight > 0
+        ? group.weightedPrice / group.priceWeight
+        : group.priceCount > 0
+          ? group.priceSum / group.priceCount
+          : Number(group.marker.price);
+      return {
+        ...group.marker,
+        id: group.count > 1 ? `group-${group.time}-${group.action}` : group.marker.id,
+        time: group.time,
+        price: averagePrice,
+        action: group.action,
+        size: group.quantityValid ? formatChartAmount(group.quantity) : group.marker.size,
+        pnl: group.pnlValid ? formatChartAmount(group.pnl) : group.marker.pnl,
+        groupCount: group.count > 1 ? group.count : undefined,
+        groupStartTime: group.startTime,
+        groupEndTime: group.endTime
+      };
+    })
+    .sort((left, right) => left.time - right.time)
+    .slice(-limit);
+}
+
+function buildFillMarkers(
+  fills: ChartFillMarker[],
+  labelFor: (fill: ChartFillMarker) => string,
+  showLabels = false
+): ChartMarkerPoint[] {
+  return fills.map((fill) => {
+    const action = resolveChartTradeAction(fill);
+    const visual = chartTradeVisual(action);
+    const count = Number(fill.groupCount) > 1 ? Number(fill.groupCount) : 0;
+    const label = labelFor(fill);
+    return {
+      id: `fill-${fill.id}`,
+      time: fill.time,
+      position: visual.buyLike ? "belowBar" : "aboveBar",
+      shape: visual.buyLike ? "arrowUp" : "arrowDown",
+      color: visual.color,
+      text: showLabels ? `${label}${count > 1 ? ` ×${count}` : ""}` : count > 1 ? `×${count}` : undefined,
+      size: 0.72
+    };
+  });
 }
 
 function nearestCandleTime(sortedTimes: number[], target: number) {

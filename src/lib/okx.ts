@@ -676,19 +676,42 @@ export async function fetchTicker(instId: string): Promise<Ticker> {
 }
 
 export async function fetchFundingRate(instId: string): Promise<FundingRate | null> {
+  if (isTauriRuntime()) {
+    return await invokeDesktop<FundingRate | null>("okx_funding_rate", { instId });
+  }
   const json = await okxFetch<{ data: Record<string, string>[] }>(`/api/v5/public/funding-rate?instId=${encodeURIComponent(instId)}`);
   return json.data[0] ? normalizeFundingRate(json.data[0]) : null;
 }
 
 export async function fetchCandles(instId: string, bar: string, limit = 300): Promise<Candle[]> {
   const boundedLimit = Math.min(Math.max(limit, 1), 300);
-  const local = await invokeOptional<Candle[]>("local_candles", { instId, bar, limit: boundedLimit });
-  if (local && local.length > 0) return local;
+  if (isTauriRuntime()) {
+    let localFailure: unknown = null;
+    try {
+      const local = await invokeDesktop<Candle[]>("local_candles", { instId, bar, limit: boundedLimit });
+      if (local && local.length > 0) return local;
+    } catch (error) {
+      localFailure = error;
+      logger.warn("local candle read failed; requesting native market snapshot", {
+        instId,
+        bar,
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
 
-  const viaTauri = await invokeOptional<Candle[]>("okx_candles", { instId, bar, limit: boundedLimit });
-  if (viaTauri) return viaTauri;
-
-  if (bar !== "1m") return [];
+    try {
+      const snapshot = await invokeDesktop<Candle[]>("okx_candles", { instId, bar, limit: boundedLimit });
+      if (snapshot && snapshot.length > 0) return snapshot;
+      throw new Error(`OKX returned no ${bar} candles for ${instId}`);
+    } catch (snapshotFailure) {
+      const localDetail = localFailure
+        ? ` Local cache: ${localFailure instanceof Error ? localFailure.message : String(localFailure)}`
+        : " Local cache returned no candles.";
+      throw new Error(
+        `Unable to load ${bar} candles for ${instId}.${localDetail} Native market request: ${snapshotFailure instanceof Error ? snapshotFailure.message : String(snapshotFailure)}`
+      );
+    }
+  }
 
   const json = await okxFetch<{ data: string[][] }>(
     `/api/v5/market/candles?instId=${encodeURIComponent(instId)}&bar=${encodeURIComponent(bar)}&limit=${boundedLimit}`

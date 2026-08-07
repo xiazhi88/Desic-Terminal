@@ -47,6 +47,12 @@ export type ChartLineConfig = {
 
 export const MAIN_CHART_PANE_ID = "main";
 
+// Keep the time scale useful for both a broad market scan and close inspection
+// of an individual execution without allowing data refreshes to narrow it again.
+const DEFAULT_TIME_SCALE_BAR_SPACING = 8;
+const MIN_TIME_SCALE_BAR_SPACING = 0.5;
+const MAX_TIME_SCALE_BAR_SPACING = 0;
+
 export type ChartPaneId = string;
 
 export type ChartPane = {
@@ -172,8 +178,10 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       timeVisible: true,
       secondsVisible: false,
       rightOffset: 8,
-      barSpacing: 8,
-      minBarSpacing: 3,
+      barSpacing: DEFAULT_TIME_SCALE_BAR_SPACING,
+      minBarSpacing: MIN_TIME_SCALE_BAR_SPACING,
+      maxBarSpacing: MAX_TIME_SCALE_BAR_SPACING,
+      enableConflation: true,
       tickMarkFormatter: (time: Time) => formatShanghaiChartTime(time)
     },
     crosshair: {
@@ -222,6 +230,10 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
   // flight, so keep a numeric cursor for every mutable series.
   let candleLatestTime: number | null = null;
   let volumeLatestTime: number | null = null;
+  // Programmatic crosshair movement must target a candle that already exists
+  // in this series. lightweight-charts throws when a time is in transit while
+  // the series is being replaced, which is common during replay scrubbing.
+  const candleCloseByTime = new Map<number, number>();
   const lineLatestTimes = new Map<string, number | null>();
   const indicatorLatestTimes = new Map<string, number | null>();
 
@@ -231,6 +243,11 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
   };
 
   const acceptsIncrementalPoint = (lastTime: number | null, nextTime: number) => lastTime === null || nextTime >= lastTime;
+
+  const replaceCandleCrosshairData = (candles: readonly { time: UTCTimestamp; close: number }[]) => {
+    candleCloseByTime.clear();
+    for (const candle of candles) candleCloseByTime.set(Number(candle.time), candle.close);
+  };
 
   const getPaneIndex = (paneId: ChartPaneId) => {
     const paneIndex = paneIds.indexOf(paneId);
@@ -309,6 +326,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       volumeSeries.setData(nextVolumes);
       candleLatestTime = latestTimeOf(nextCandles);
       volumeLatestTime = latestTimeOf(nextVolumes);
+      replaceCandleCrosshairData(nextCandles);
       latestCandlePoint = normalizedLatestCandle(candles);
     },
     appendLatest: (candle, volume) => {
@@ -322,6 +340,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       volumeSeries.update(nextVolume);
       candleLatestTime = candleTime;
       volumeLatestTime = volumeTime;
+      candleCloseByTime.set(candleTime, nextCandle.close);
       latestCandlePoint = { ...candle, time: Number(nextCandle.time) };
     },
     updateLatest: (candle, volume) => {
@@ -335,12 +354,14 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       volumeSeries.update(nextVolume);
       candleLatestTime = candleTime;
       volumeLatestTime = volumeTime;
+      candleCloseByTime.set(candleTime, nextCandle.close);
       latestCandlePoint = { ...candle, time: Number(nextCandle.time) };
     },
     setCandles: (data) => {
       const nextCandles = toChartCandles(data);
       candleSeries.setData(nextCandles);
       candleLatestTime = latestTimeOf(nextCandles);
+      replaceCandleCrosshairData(nextCandles);
       latestCandlePoint = normalizedLatestCandle(data);
     },
     setVolumes: (data) => {
@@ -521,8 +542,10 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         },
         timeScale: {
           rightOffset: 8,
-          barSpacing: 8,
-          minBarSpacing: 3
+          barSpacing: DEFAULT_TIME_SCALE_BAR_SPACING,
+          minBarSpacing: MIN_TIME_SCALE_BAR_SPACING,
+          maxBarSpacing: MAX_TIME_SCALE_BAR_SPACING,
+          enableConflation: true
         }
       });
       chart.timeScale().fitContent();
@@ -586,10 +609,13 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         chart.clearCrosshairPosition();
         return;
       }
-      // The chart API needs a price as well as time. A neutral price keeps the
-      // shared vertical cursor aligned without changing the local price scale.
       const normalized = coerceChartTimestamp(time);
-      if (normalized !== null) chart.setCrosshairPosition(latestCandlePoint?.close ?? 0, normalized as UTCTimestamp, candleSeries);
+      const close = normalized === null ? undefined : candleCloseByTime.get(normalized);
+      if (normalized === null || close === undefined || !Number.isFinite(close)) {
+        chart.clearCrosshairPosition();
+        return;
+      }
+      chart.setCrosshairPosition(close, normalized as UTCTimestamp, candleSeries);
     },
     setCrosshairPosition: (position) => {
       if (!position) {
@@ -597,7 +623,16 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         return;
       }
       const normalized = coerceChartTimestamp(position.time);
-      if (normalized !== null) chart.setCrosshairPosition(position.price, normalized as UTCTimestamp, candleSeries);
+      const fallbackPrice = normalized === null ? undefined : candleCloseByTime.get(normalized);
+      if (normalized === null || fallbackPrice === undefined) {
+        chart.clearCrosshairPosition();
+        return;
+      }
+      chart.setCrosshairPosition(
+        Number.isFinite(position.price) ? position.price : fallbackPrice,
+        normalized as UTCTimestamp,
+        candleSeries,
+      );
     },
     onClick: (handler) => {
       const listener = (param: Parameters<typeof chart.subscribeClick>[0] extends (arg: infer P) => void ? P : never) => {

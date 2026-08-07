@@ -140,7 +140,7 @@ export function TradeOpportunitiesPage({
                     <span className="opportunity-list-plan">
                       <b className={opportunityActionTone(item)}>{formatOpportunityDirection(item)}</b>
                       <em>{formatOpportunityListSizing(item)}</em>
-                      <time>{formatRelativeTime(item.updatedAt || item.createdAt)}</time>
+                      <time>{formatOpportunityListTime(item.updatedAt || item.createdAt)}</time>
                     </span>
                     <span className="opportunity-list-strategy">{item.strategyName || item.entryCondition || opportunityText("opportunityAiPlan", "AI trading plan", "AI 交易计划")}</span>
                     <span className="opportunity-list-meta">
@@ -465,13 +465,16 @@ function formatUsdt(value?: number | null) {
   return `${formatLocalizedNumber(Number(value), { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USDT`;
 }
 
-function formatRelativeTime(value?: number | null) {
+function formatOpportunityListTime(value?: number | null) {
   if (!value) return "--";
-  const delta = Math.max(0, Date.now() - value);
-  if (delta < 60_000) return opportunityText("opportunityJustNow", "Just now", "刚刚");
-  if (delta < 3_600_000) return opportunityText("opportunityMinutesAgo", "{{count}} minutes ago", "{{count}} 分钟前", { count: Math.floor(delta / 60_000) });
-  if (delta < 86_400_000) return opportunityText("opportunityHoursAgo", "{{count}} hours ago", "{{count}} 小时前", { count: Math.floor(delta / 3_600_000) });
-  return formatLocalizedDate(value, { month: "2-digit", day: "2-digit" });
+  return formatLocalizedDate(value, {
+    year: "2-digit",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  });
 }
 
 function formatExpiry(value?: number | null, detailed = false) {

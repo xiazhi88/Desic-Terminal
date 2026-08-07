@@ -128,7 +128,17 @@ function isShortPosition(position: Pick<OkxPosition, "posSide" | "pos">) {
 }
 
 function isActivePendingOrder(order: OkxPendingOrder) {
-  return !["filled", "canceled", "cancelled", "failed", "effective", "triggered"].includes(String(order.state).toLowerCase());
+  return ![
+    "filled",
+    "canceled",
+    "cancelled",
+    "failed",
+    "rejected",
+    "mmp_canceled",
+    "order_failed",
+    "effective",
+    "triggered"
+  ].includes(String(order.state).toLowerCase());
 }
 
 function isActiveAlgoOrder(order: OkxAlgoOrder) {

@@ -1,7 +1,7 @@
 use super::*;
 use desic_storage_config::{
     AiConfig, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiLocalAuthStatus,
-    AiLocalCliStatus, AiModelConfig, AiModelConfigSummary, AiModelConfigUpdate,
+    AiLocalCliStatus, AiModelConfig, AiModelConfigSummary, AiModelConfigUpdate, AiSkillDefinition,
     DiagnosticExportResult, FrontendLogEntry, KlineDataRange, ProxyConfig, ProxyConfigSummary,
     ProxyConfigUpdate, ProxyTestResult, SensitiveConfigMigrationResult, StorageMaintenanceResult,
     StorageStatusResult, UiPreferencesConfig, UiPreferencesQuery, UiPreferencesSummary,
@@ -447,7 +447,7 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
         let path = entry.path();
         if path.is_dir() {
             if let Some(name) = path.file_name().and_then(|item| item.to_str()) {
-                if !enabled_dirs.contains(name) {
+                if !enabled_dirs.contains(name) && !is_runtime_scoped_skill_dir(name) {
                     fs::remove_dir_all(&path).map_err(|err| {
                         format!("删除已停用 Skill 目录 {} 失败：{}", path.display(), err)
                     })?;
@@ -473,6 +473,38 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
         write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
     }
     Ok(())
+}
+
+/// Writes an application-owned, non-persistent Skill for a narrowly scoped
+/// interaction. These Skills are never inserted into the user's AI
+/// configuration; the caller must still explicitly include its id in the
+/// per-run Cline configuration before it can be used.
+pub(crate) fn sync_cline_runtime_scoped_skill(skill: &AiSkillDefinition) -> Result<(), String> {
+    let id = skill.id.trim();
+    if id.is_empty() || !is_runtime_scoped_skill_id(id) {
+        return Err("未知的运行时 Skill 标识".to_string());
+    }
+    let root = runtime_paths().cline_skills_dir;
+    fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    let dir = root.join(sanitize_skill_dir_name(id));
+    fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+    let content = format!(
+        "---\nname: {}\ndescription: {}\ndisabled: false\n---\n\n# {}\n\n## 规则\n{}\n\n## 内容\n{}\n",
+        yaml_scalar(id),
+        yaml_scalar(&skill.description),
+        id,
+        skill.rules.trim(),
+        skill.content.trim(),
+    );
+    write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())
+}
+
+fn is_runtime_scoped_skill_id(id: &str) -> bool {
+    matches!(id, "systematic-strategy-authoring")
+}
+
+fn is_runtime_scoped_skill_dir(name: &str) -> bool {
+    is_runtime_scoped_skill_id(name)
 }
 
 fn sanitize_skill_dir_name(value: &str) -> String {

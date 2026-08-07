@@ -54,6 +54,8 @@ export const ANALYSIS_TOOLS = new Set([
   "intelligence.smartMoney.readConsensusDivergence",
   "trade.evaluatePlan",
   "trade.precheck",
+  "strategy.readCurrentSource",
+  "strategy.testCurrentSource",
   "skills"
 ]);
 
@@ -70,7 +72,8 @@ export const LOCAL_SIDE_EFFECT_TOOLS = new Set([
   "script.run",
   "script.enable",
   "script.delete",
-  "script.list"
+  "script.list",
+  "strategy.applySource"
 ]);
 
 export const OPPORTUNITY_READ_TOOLS = new Set([
@@ -237,6 +240,12 @@ export function resolveToolPolicy(name, config = {}) {
     return disabledPolicy("disabled:use-spawn-agent-for-observable-subtasks");
   }
   if (ANALYSIS_TOOLS.has(canonicalName)) {
+    if (
+      (canonicalName === "strategy.readCurrentSource" || canonicalName === "strategy.testCurrentSource")
+      && role !== "main"
+    ) {
+      return disabledPolicy("disabled:strategy-editor-main-session-only");
+    }
     return enabledPolicy("auto-approved:analysis-read");
   }
 

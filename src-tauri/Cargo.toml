@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.5"
+version = "0.1.6"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
@@ -17,6 +17,7 @@ members = [
   "crates/chart-dsl",
   "crates/intelligence",
   "crates/private-history",
+  "crates/systematic",
   "crates/smoke-tools",
   "crates/storage-config",
   "crates/trade-domain",
@@ -64,6 +65,7 @@ desic-storage-config = { path = "crates/storage-config" }
 desic-trade-domain = { path = "crates/trade-domain" }
 desic-chart-dsl = { path = "crates/chart-dsl" }
 desic-intelligence = { path = "crates/intelligence" }
+desic-systematic = { path = "crates/systematic" }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }

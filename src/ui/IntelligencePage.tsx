@@ -6,6 +6,7 @@ import {
   Activity,
   BarChart3,
   BookOpen,
+  CheckCheck,
   BrainCircuit,
   CalendarDays,
   ChevronDown,
@@ -38,25 +39,29 @@ import {
   queryCalendar,
   queryDerivatives,
   queryNews,
+  queryNewsFeed,
   queryNewsEvents,
   querySentiment,
   querySmartMoney,
   readNewsDetail,
   readNewsEvent,
+  markNewsRead,
   saveIntelligenceSettings,
   syncIntelligence,
   trackSmartTrader,
   type IntelligenceRecord,
   type IntelligenceResponse,
   type IntelligenceSettings,
-  type IntelligenceSummary
+  type IntelligenceSummary,
+  type NewsFeedPage,
+  type NewsReadState
 } from "../lib/intelligence";
 import { logger } from "../lib/logger";
 import { invokeDesktop, isTauriRuntime } from "../lib/tauri";
 import { IntelligenceEvidenceChart } from "./IntelligenceEvidenceChart";
 import { SymbolIcon, SymbolLabel } from "./SymbolIcon";
 import { TerminalSelect } from "./TerminalSelect";
-import { formatLocalizedDate, resolvedLocale } from "../i18n/runtime";
+import { formatLocalizedDate, intelligenceLanguage, resolvedLocale } from "../i18n/runtime";
 
 type IntelligenceTab = "news" | "sentiment" | "derivatives" | "smart" | "history";
 
@@ -64,6 +69,7 @@ type IntelligenceVisibleLoaders = {
   applySummary: (summary: IntelligenceSummary | null) => void;
   loadDerivatives: (remote?: boolean) => Promise<void>;
   loadNewsEvents: () => Promise<void>;
+  loadNewsFeed: (options?: { page?: number; date?: Date; markSeen?: boolean }) => Promise<void>;
   loadNews: (localOnly?: boolean) => Promise<void>;
   loadSentiment: (localOnly?: boolean) => Promise<void>;
   loadSmart: (localOnly?: boolean) => Promise<void>;
@@ -75,6 +81,7 @@ type IntelligencePageProps = {
   selectedAccountId?: string | null;
   selectedSymbol?: string | null;
   relatedSymbols?: string[];
+  onNewsUnreadCountChange?: (count: number) => void;
 };
 
 type TraderEvidence = {
@@ -220,6 +227,24 @@ function previewNewsEvents(): IntelligenceRecord[] {
       ]
     }
   ];
+}
+
+function localDayStart(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function newsDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function newsDateRange(date: Date) {
+  const start = localDayStart(date);
+  const end = new Date(start);
+  end.setDate(end.getDate() + 1);
+  return { startTime: start.getTime(), endTime: end.getTime() };
 }
 
 function previewDerivatives() {
@@ -672,7 +697,7 @@ function ResultMeta({ response }: { response: IntelligenceResponse | null }) {
   );
 }
 
-export function IntelligencePage({ accounts, marketAssets, selectedAccountId, selectedSymbol, relatedSymbols = [] }: IntelligencePageProps) {
+export function IntelligencePage({ accounts, marketAssets, selectedAccountId, selectedSymbol, relatedSymbols = [], onNewsUnreadCountChange }: IntelligencePageProps) {
   const { t, i18n } = useTranslation(["intelligence", "common", "trading"]);
   const eligibleAccounts = useMemo(() => eligibleIntelligenceAccounts(accounts), [accounts]);
   const previewMarket = useMemo(previewDerivatives, []);
@@ -688,6 +713,10 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
   const [selectedEvent, setSelectedEvent] = useState<IntelligenceRecord | null>(null);
   const [eventDetail, setEventDetail] = useState<IntelligenceRecord | null>(null);
   const [newsResponse, setNewsResponse] = useState<IntelligenceResponse | null>(null);
+  const [newsFeedPage, setNewsFeedPage] = useState<NewsFeedPage | null>(null);
+  const [newsReadState, setNewsReadState] = useState<NewsReadState | null>(null);
+  const [newsDate, setNewsDate] = useState(() => localDayStart(new Date()));
+  const [newsPage, setNewsPage] = useState(1);
   const [newsKeyword, setNewsKeyword] = useState("");
   const [newsCoin, setNewsCoin] = useState("");
   const [newsImportance, setNewsImportance] = useState<"all" | "high">("all");
@@ -992,6 +1021,84 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
     }
   }, [accountId, newsCoin, newsImportance, newsKeyword]);
 
+  const loadNewsFeed = useCallback(async ({
+    page = newsPage,
+    date = newsDate,
+    markSeen = false,
+    mode = newsMode
+  }: { page?: number; date?: Date; markSeen?: boolean; mode?: "events" | "articles" } = {}) => {
+    const range = newsDateRange(date);
+    const feedMode = mode;
+    setBusy("news-feed");
+    try {
+      if (!isTauriRuntime()) {
+        const source = feedMode === "events" ? previewNewsEvents() : previewSummary(accountId || "preview").latestNews;
+        const items = source
+          .filter((record) => {
+            const timestamp = Number(record.lastPublishedAt ?? record.publishTime ?? record.publishedAt ?? 0);
+            const title = textField(record, "title", "summary", "headline").toLowerCase();
+            const coins = Array.isArray(record.coins) ? record.coins.map(String) : [];
+            return timestamp >= range.startTime && timestamp < range.endTime
+              && (!newsKeyword.trim() || title.includes(newsKeyword.trim().toLowerCase()))
+              && (!newsCoin.trim() || coins.some((value) => value.toUpperCase() === newsCoin.trim().toUpperCase()))
+              && (newsImportance === "all" || textField(record, "importance") === "high");
+          });
+        const pageSize = 20;
+        const totalPages = Math.max(1, Math.ceil(items.length / pageSize));
+        const safePage = Math.min(Math.max(1, page), totalPages);
+        const nextPage: NewsFeedPage = { mode: feedMode, items: items.slice((safePage - 1) * pageSize, safePage * pageSize), page: safePage, pageSize, total: items.length, totalPages, unreadCount: 0, readState: { eventsReadAt: Date.now(), articlesReadAt: Date.now(), unreadEvents: 0, unreadArticles: 0 } };
+        setNewsFeedPage(nextPage);
+        setNewsReadState(nextPage.readState);
+        if (feedMode === "events") setNewsEvents(nextPage.items); else setNews(nextPage.items);
+        setNewsPage(safePage);
+        setStatus(`${feedMode === "events" ? "新闻事件" : "新闻原文"} ${items.length} 条`);
+        onNewsUnreadCountChange?.(0);
+        return;
+      }
+      let response = await queryNewsFeed({
+        mode: feedMode,
+        keyword: newsKeyword.trim() || undefined,
+        coins: newsCoin.trim() ? [newsCoin.trim().toUpperCase()] : undefined,
+        importance: newsImportance === "all" ? undefined : "high",
+        language: intelligenceLanguage(resolvedLocale()),
+        ...range,
+        page,
+        pageSize: 20
+      });
+      const isCurrentUnfilteredDay = newsDateKey(date) === newsDateKey(new Date())
+        && !newsKeyword.trim() && !newsCoin.trim() && newsImportance === "all" && !newsRelevantOnly;
+      if (markSeen && isCurrentUnfilteredDay) {
+        const readState = await markNewsRead(feedMode);
+        response = { ...response, unreadCount: 0, readState, items: response.items.map((item) => ({ ...item, unread: false })) };
+      }
+      setNewsFeedPage(response);
+      setNewsReadState(response.readState);
+      setNewsPage(response.page);
+      if (feedMode === "events") setNewsEvents(response.items); else setNews(response.items);
+      setNewsResponse(null);
+      setStatus(`${feedMode === "events" ? "新闻事件" : "新闻原文"} ${response.total} 条`);
+      onNewsUnreadCountChange?.(response.readState.unreadEvents);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "新闻列表加载失败");
+    } finally {
+      setBusy(null);
+    }
+  }, [accountId, newsCoin, newsDate, newsImportance, newsKeyword, newsMode, newsPage, newsRelevantOnly, onNewsUnreadCountChange]);
+
+  const refreshNewsFeed = useCallback(async () => {
+    if (isTauriRuntime() && accountId) {
+      setBusy("news-sync");
+      try {
+        await syncIntelligence(accountId, "news");
+      } catch (error) {
+        setStatus(error instanceof Error ? error.message : "新闻同步失败，继续读取本地缓存");
+      } finally {
+        setBusy(null);
+      }
+    }
+    await loadNewsFeed({ page: 1, markSeen: true });
+  }, [accountId, loadNewsFeed]);
+
   const openNews = useCallback(async (record: IntelligenceRecord) => {
     setSelectedNews(record);
     setNewsDetail(null);
@@ -1088,24 +1195,25 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
     }
   }, [accountId]);
 
-  const intelligenceViewRef = useRef({ tab, newsMode });
+  const intelligenceViewRef = useRef({ tab, newsMode, newsPage, newsDate });
   const intelligenceLoadersRef = useRef<IntelligenceVisibleLoaders | null>(null);
   const initialVisibleLoadRef = useRef<string | null>(null);
 
   useEffect(() => {
-    intelligenceViewRef.current = { tab, newsMode };
-  }, [newsMode, tab]);
+    intelligenceViewRef.current = { tab, newsMode, newsPage, newsDate };
+  }, [newsDate, newsMode, newsPage, tab]);
 
   useEffect(() => {
     intelligenceLoadersRef.current = {
       applySummary,
       loadDerivatives,
       loadNewsEvents,
+      loadNewsFeed,
       loadNews: runNewsQuery,
       loadSentiment,
       loadSmart
     };
-  }, [applySummary, loadDerivatives, loadNewsEvents, loadSentiment, loadSmart, runNewsQuery]);
+  }, [applySummary, loadDerivatives, loadNewsEvents, loadNewsFeed, loadSentiment, loadSmart, runNewsQuery]);
 
   useEffect(() => {
     const viewKey = tab === "news"
@@ -1118,10 +1226,8 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
     const loaders = intelligenceLoadersRef.current;
     if (!loaders) return;
     if (tab === "derivatives") void loaders.loadDerivatives(false);
-    else if (tab === "news") {
-      if (newsMode === "events") void loaders.loadNewsEvents();
-      else void loaders.loadNews(true);
-    } else if (tab === "sentiment") void loaders.loadSentiment(true);
+    else if (tab === "news") void loaders.loadNewsFeed({ page: 1, markSeen: true });
+    else if (tab === "sentiment") void loaders.loadSentiment(true);
     else if (tab === "smart") void loaders.loadSmart(true);
   }, [derivativesPeriod, derivativesSymbol, newsMode, tab]);
 
@@ -1152,8 +1258,7 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
           void loaders.loadDerivatives(false);
         } else if (eventType !== "derivativesStreamUpdated") {
           if (view.tab === "news") {
-            if (view.newsMode === "events") void loaders.loadNewsEvents();
-            else void loaders.loadNews(true);
+            void loaders.loadNewsFeed({ page: view.newsPage, date: view.newsDate, markSeen: false });
           } else if (view.tab === "sentiment") {
             void loaders.loadSentiment(true);
           } else if (view.tab === "smart") {
@@ -1367,6 +1472,43 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
       .filter(Boolean)
       .map((symbol) => symbol.split("-")[0].toUpperCase())
   ), [derivativesSymbol, relatedSymbols, selectedSymbol]);
+  const todayNewsDate = localDayStart(new Date());
+  const isNewsToday = newsDateKey(newsDate) === newsDateKey(todayNewsDate);
+  const changeNewsDate = useCallback((offset: number) => {
+    const next = new Date(newsDate);
+    next.setDate(next.getDate() + offset);
+    const normalized = localDayStart(next);
+    if (normalized > todayNewsDate) return;
+    setNewsDate(normalized);
+    setNewsPage(1);
+    void loadNewsFeed({ page: 1, date: normalized, markSeen: isNewsToday || offset > 0 });
+  }, [isNewsToday, loadNewsFeed, newsDate, todayNewsDate]);
+  const selectNewsDate = useCallback((value: string) => {
+    const [year, month, day] = value.split("-").map(Number);
+    if (![year, month, day].every(Number.isFinite)) return;
+    const next = localDayStart(new Date(year, month - 1, day));
+    if (next > todayNewsDate) return;
+    setNewsDate(next);
+    setNewsPage(1);
+    void loadNewsFeed({ page: 1, date: next, markSeen: newsDateKey(next) === newsDateKey(todayNewsDate) });
+  }, [loadNewsFeed, todayNewsDate]);
+  const setNewsDisplayMode = useCallback((mode: "events" | "articles") => {
+    setNewsMode(mode);
+    setNewsPage(1);
+    void loadNewsFeed({ page: 1, mode, markSeen: isNewsToday });
+  }, [isNewsToday, loadNewsFeed]);
+  const markCurrentNewsRead = useCallback(async () => {
+    try {
+      const readState = await markNewsRead(newsMode);
+      setNewsReadState(readState);
+      setNewsFeedPage((current) => current ? { ...current, unreadCount: 0, readState, items: current.items.map((item) => ({ ...item, unread: false })) } : current);
+      if (newsMode === "events") setNewsEvents((items) => items.map((item) => ({ ...item, unread: false })));
+      else setNews((items) => items.map((item) => ({ ...item, unread: false })));
+      onNewsUnreadCountChange?.(readState.unreadEvents);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "新闻已读状态保存失败");
+    }
+  }, [newsMode, onNewsUnreadCountChange]);
   const visibleNewsEvents = newsRelevantOnly
     ? newsEvents.filter((record) => Array.isArray(record.coins) && record.coins.map((coin) => String(coin).toUpperCase()).some((coin) => relevantCoins.has(coin)))
     : newsEvents;
@@ -1449,17 +1591,27 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
               <div className="intelligence-news-layout">
                 <div className="intelligence-list-pane">
                   <div className="intelligence-toolbar">
-                    <div className="intelligence-segmented" role="tablist" aria-label={t("intelligence:newsDisplayMode")}><button type="button" className={newsMode === "events" ? "active" : undefined} onClick={() => setNewsMode("events")}>{t("intelligence:events")}</button><button type="button" className={newsMode === "articles" ? "active" : undefined} onClick={() => setNewsMode("articles")}>{t("intelligence:original")}</button></div>
+                    <div className="intelligence-segmented" role="tablist" aria-label={t("intelligence:newsDisplayMode")}><button type="button" className={newsMode === "events" ? "active" : undefined} onClick={() => setNewsDisplayMode("events")}>{t("intelligence:events")}</button><button type="button" className={newsMode === "articles" ? "active" : undefined} onClick={() => setNewsDisplayMode("articles")}>{t("intelligence:original")}</button></div>
+                    <div className="intelligence-news-date-nav" aria-label={t("intelligence:newsDate")}>
+                      <button type="button" onClick={() => changeNewsDate(-1)} title={t("intelligence:previousDay")} aria-label={t("intelligence:previousDay")}><ChevronLeft size={14} /></button>
+                      <input type="date" value={newsDateKey(newsDate)} max={newsDateKey(todayNewsDate)} onChange={(event) => selectNewsDate(event.target.value)} aria-label={t("intelligence:newsDate")} />
+                      <button type="button" onClick={() => changeNewsDate(1)} disabled={isNewsToday} title={t("intelligence:nextDay")} aria-label={t("intelligence:nextDay")}><ChevronRight size={14} /></button>
+                    </div>
                     <label><Search size={14} /><input value={newsKeyword} onChange={(event) => setNewsKeyword(event.target.value)} placeholder={t("intelligence:keyword")} /></label>
                     <input value={newsCoin} onChange={(event) => setNewsCoin(event.target.value.toUpperCase())} placeholder={t("intelligence:coinPlaceholder")} />
                     <TerminalSelect ariaLabel={t("intelligence:newsImportance")} value={newsImportance} options={[{ value: "all", label: t("intelligence:allNews") }, { value: "high", label: t("intelligence:importantNews") }]} onChange={(value) => setNewsImportance(value as "all" | "high")} />
                     <button type="button" className={newsRelevantOnly ? "active" : undefined} onClick={() => setNewsRelevantOnly((value) => !value)}>{t("intelligence:relevantToMe")}</button>
-                    <button type="button" onClick={() => void (newsMode === "events" ? loadNewsEvents() : runNewsQuery(false))} disabled={busy === "news" || busy === "news-events"}><RefreshCw size={14} />{t("intelligence:query")}</button>
+                    <button type="button" onClick={() => void refreshNewsFeed()} disabled={busy === "news-feed" || busy === "news-sync" || busy === "news" || busy === "news-events"}><RefreshCw className={busy === "news-feed" || busy === "news-sync" ? "spin" : undefined} size={14} />{t("intelligence:query")}</button>
+                    <button type="button" onClick={() => void markCurrentNewsRead()} disabled={!newsReadState || (newsMode === "events" ? newsReadState.unreadEvents === 0 : newsReadState.unreadArticles === 0)} title={t("intelligence:markAllRead")} aria-label={t("intelligence:markAllRead")}><CheckCheck size={14} /></button>
                   </div>
-                  <ResultMeta response={newsResponse} />
-                  <div className="intelligence-feed">
-                    {newsMode === "events" ? visibleNewsEvents.map((record) => { const id = recordId(record, "event"); const sources = Array.isArray(record.sources) ? record.sources.map(String) : []; const coins = Array.isArray(record.coins) ? record.coins.map(String) : []; const related = relevanceLabel(record); const eventStatus = textField(record, "status"); const statusLabel = eventStatus === "confirmed" ? t("intelligence:multipleSources") : eventStatus === "developing" ? t("intelligence:singleSourceTracking") : t("intelligence:singleSourceQuiet"); const statusTitle = eventStatus === "confirmed" ? t("intelligence:multipleSourcesHelp") : eventStatus === "developing" ? t("intelligence:singleSourceTrackingHelp") : t("intelligence:singleSourceQuietHelp"); return <button type="button" className={selectedEvent && recordId(selectedEvent, "event") === id ? "active" : undefined} key={id} onClick={() => void openEvent(record)}><span className="intelligence-feed-time">{formatTime(record.lastPublishedAt ?? record.firstPublishedAt)}</span><strong data-i18n-skip>{textField(record, "title") || t("intelligence:unnamedEvent")}</strong><small><span className={`intelligence-event-status status-${eventStatus}`} title={statusTitle}>{statusLabel}</span>{related ? <span className="intelligence-relevance-tag">{related}</span> : null}{coins.join(" / ") || t("intelligence:wholeMarket")} · {t("intelligence:sourceCount", { count: sources.length || Number(record.sourceCount ?? 0) })} · {t("intelligence:articleCount", { count: Number(record.articleCount ?? 0) })}</small></button>; }) : news.map((record) => { const id = recordId(record, "news"); const title = textField(record, "title", "headline", "name") || t("intelligence:unnamedNews"); return <button type="button" className={selectedNews && recordId(selectedNews, "news") === id ? "active" : undefined} key={id} onClick={() => void openNews(record)}><span className="intelligence-feed-time">{formatTime(record.publishTime ?? record.publishedAt ?? record.ts)}</span><strong data-i18n-skip>{title}</strong><small data-i18n-skip>{textField(record, "platform", "source", "domain") || "OKX News"} · {localizedSentimentLabel(sentimentLabel(textField(record, "sentiment")), t)}</small></button>; })}
+                  <div className="intelligence-news-feed-meta">
+                    <span>{newsFeedPage ? `${newsFeedPage.total} · ${newsFeedPage.page}/${newsFeedPage.totalPages}` : t("intelligence:loadingLocal")}</span>
+                    {newsFeedPage && newsFeedPage.unreadCount > 0 ? <b>{t("intelligence:unreadNews", { count: newsFeedPage.unreadCount })}</b> : null}
                   </div>
+                  <div className="intelligence-feed" data-empty={t("intelligence:noNewsForDate")}>
+                    {newsMode === "events" ? visibleNewsEvents.map((record) => { const id = recordId(record, "event"); const sources = Array.isArray(record.sources) ? record.sources.map(String) : []; const coins = Array.isArray(record.coins) ? record.coins.map(String) : []; const related = relevanceLabel(record); const eventStatus = textField(record, "status"); const statusLabel = eventStatus === "confirmed" ? t("intelligence:multipleSources") : eventStatus === "developing" ? t("intelligence:singleSourceTracking") : t("intelligence:singleSourceQuiet"); const statusTitle = eventStatus === "confirmed" ? t("intelligence:multipleSourcesHelp") : eventStatus === "developing" ? t("intelligence:singleSourceTrackingHelp") : t("intelligence:singleSourceQuietHelp"); return <button type="button" className={clsx(selectedEvent && recordId(selectedEvent, "event") === id && "active", record.unread === true && "unread")} key={id} onClick={() => void openEvent(record)}><span className="intelligence-feed-time">{formatTime(record.lastPublishedAt ?? record.firstPublishedAt)}</span><span className="intelligence-feed-title"><i aria-hidden="true" /> <strong data-i18n-skip>{textField(record, "title") || t("intelligence:unnamedEvent")}</strong></span><small><span className={`intelligence-event-status status-${eventStatus}`} title={statusTitle}>{statusLabel}</span>{related ? <span className="intelligence-relevance-tag">{related}</span> : null}{coins.join(" / ") || t("intelligence:wholeMarket")} · {t("intelligence:sourceCount", { count: sources.length || Number(record.sourceCount ?? 0) })} · {t("intelligence:articleCount", { count: Number(record.articleCount ?? 0) })}</small></button>; }) : news.map((record) => { const id = recordId(record, "news"); const title = textField(record, "title", "headline", "name") || t("intelligence:unnamedNews"); return <button type="button" className={clsx(selectedNews && recordId(selectedNews, "news") === id && "active", record.unread === true && "unread")} key={id} onClick={() => void openNews(record)}><span className="intelligence-feed-time">{formatTime(record.publishTime ?? record.publishedAt ?? record.ts)}</span><span className="intelligence-feed-title"><i aria-hidden="true" /> <strong data-i18n-skip>{title}</strong></span><small data-i18n-skip>{textField(record, "platform", "source", "domain") || "OKX News"} · {localizedSentimentLabel(sentimentLabel(textField(record, "sentiment")), t)}</small></button>; })}
+                  </div>
+                  {newsFeedPage ? <div className="intelligence-news-pager"><button type="button" onClick={() => void loadNewsFeed({ page: newsFeedPage.page - 1, markSeen: false })} disabled={newsFeedPage.page <= 1 || busy === "news-feed"}><ChevronLeft size={14} />{t("intelligence:previousPage")}</button><span>{t("intelligence:newsPage", { page: newsFeedPage.page, total: newsFeedPage.totalPages })}</span><button type="button" onClick={() => void loadNewsFeed({ page: newsFeedPage.page + 1, markSeen: false })} disabled={newsFeedPage.page >= newsFeedPage.totalPages || busy === "news-feed"}>{t("intelligence:nextPage")}<ChevronRight size={14} /></button></div> : null}
                 </div>
                 <aside className="intelligence-detail-pane">
                   {newsMode === "events" && selectedEventRecord ? (

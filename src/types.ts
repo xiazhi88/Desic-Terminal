@@ -1283,6 +1283,8 @@ export type ChartFillMarker = {
   id: string;
   time: number;
   price: number;
+  /** Explicit semantic action for sources that already know open/close side. */
+  action?: "open-long" | "open-short" | "close-long" | "close-short" | string | null;
   side?: string | null;
   posSide?: string | null;
   size?: string | null;
@@ -1292,6 +1294,10 @@ export type ChartFillMarker = {
   executionKey?: string | null;
   operator?: string | null;
   strategyId?: string | null;
+  /** UI-only aggregation metadata; raw fills and audit records remain unchanged. */
+  groupCount?: number;
+  groupStartTime?: number;
+  groupEndTime?: number;
   label: string;
 };
 
@@ -2018,6 +2024,12 @@ export type NotificationSettingsSummary = {
 export type AiAutomationEvent = {
   type: "notificationError" | "runCompleted" | "runFailed" | "reviewCreated" | "suggestionCreated" | string;
   message: string;
+  accountId?: string | null;
+  profileId?: string | null;
+  profileName?: string | null;
+  instId?: string | null;
+  consecutiveErrors?: number | null;
+  error?: string | null;
   action?: {
     tab?: AiAutomationTab | string | null;
     id?: string | null;

@@ -13,7 +13,7 @@ import {
   type IndicatorParameters
 } from "../lib/chartIndicators";
 import { listenOptional } from "../lib/tauri";
-import type { AiEvent } from "../types";
+import type { AiChatMessage, AiEvent } from "../types";
 import { AiMessageError, AiProcessTimeline, AiTokenUsageLine, MarkdownMessage, applyAiEvent, updateLastAssistant, type AiUiMessage } from "./AiMessageProcess";
 import type { ChartScriptDefinition, ChartScriptRunState } from "./chartScriptEngine";
 
@@ -36,6 +36,7 @@ type PopoverPosition = {
   left: number;
   top: number;
   maxHeight: number;
+  placement: "above" | "below";
 };
 
 type IndicatorTooltip = {
@@ -172,16 +173,21 @@ function resolvePopoverPosition(trigger: HTMLElement, wide = false): PopoverPosi
   const rect = trigger.getBoundingClientRect();
   const margin = 10;
   const targetWidth = wide ? 1120 : 760;
-  const minWidth = wide ? 760 : 540;
-  const width = Math.min(targetWidth, Math.max(minWidth, window.innerWidth - margin * 2));
-  const left = Math.min(Math.max(margin, rect.right - width), Math.max(margin, window.innerWidth - width - margin));
+  const width = Math.min(targetWidth, Math.max(0, window.innerWidth - margin * 2));
+  const maxLeft = Math.max(margin, window.innerWidth - width - margin);
+  const centeredLeft = rect.left + (rect.width - width) / 2;
+  const left = Math.min(Math.max(margin, centeredLeft), maxLeft);
   const below = rect.bottom + 8;
-  const belowSpace = window.innerHeight - below - margin;
+  const belowSpace = Math.max(0, window.innerHeight - below - margin);
+  const aboveSpace = Math.max(0, rect.top - margin);
   const estimatedHeight = Math.min(610, Math.max(320, window.innerHeight * 0.72));
-  const openAbove = belowSpace < Math.min(260, estimatedHeight) && rect.top - margin > belowSpace;
-  const availableHeight = openAbove ? Math.max(220, rect.top - margin) : Math.max(220, belowSpace);
-  const top = openAbove ? Math.max(margin, rect.top - Math.min(estimatedHeight, availableHeight)) : below;
-  return { left, top, maxHeight: Math.min(estimatedHeight, availableHeight) };
+  const openAbove = belowSpace < Math.min(260, estimatedHeight) && aboveSpace > belowSpace;
+  const availableHeight = openAbove ? aboveSpace : belowSpace;
+  const maxHeight = Math.min(estimatedHeight, availableHeight);
+  const top = openAbove
+    ? Math.max(margin, rect.top - maxHeight)
+    : Math.min(Math.max(margin, below), Math.max(margin, window.innerHeight - margin - maxHeight));
+  return { left, top, maxHeight, placement: openAbove ? "above" : "below" };
 }
 
 function resolveTooltipPosition(target: HTMLElement) {
@@ -206,6 +212,17 @@ function canonicalAiToolName(name: string) {
 
 function formatIndicatorAiError(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : String(error || fallback);
+}
+
+function toIndicatorAiChatMessages(messages: AiUiMessage[]): AiChatMessage[] {
+  return messages
+    .filter((message) => message.id !== "welcome" && (message.role === "user" || message.role === "assistant"))
+    .map((message) => ({
+      id: message.id,
+      role: message.role,
+      content: message.text.trim()
+    }))
+    .filter((message) => message.content.length > 0);
 }
 
 function indicatorAiRuntimeStatus(status: string): IndicatorAiStatus {
@@ -311,24 +328,26 @@ export function ChartIndicatorCenter({
     const content = aiPrompt.trim();
     if (!content || aiStatus === "running") return;
     const now = Date.now();
+    const userMessage: AiUiMessage = { id: `user-${now}`, role: "user", text: content, tools: [], approvals: [] };
+    const nextConversation = toIndicatorAiChatMessages([...aiMessages, userMessage]);
     aiCreatedScriptRef.current = false;
     aiTerminalErrorRef.current = false;
     setAiStatus("running");
     setAiPrompt("");
     setAiMessages((items) => [
       ...items,
-      { id: `user-${now}`, role: "user", text: content, tools: [], approvals: [] },
+      userMessage,
       { id: `assistant-${now}`, role: "assistant", text: "", reasoning: "", tools: [], approvals: [], status: t("chart:indicatorAiPreparing") }
     ]);
     try {
-      await generateChartIndicatorWithAi(aiSessionId, content);
+      await generateChartIndicatorWithAi(aiSessionId, content, nextConversation);
     } catch (error) {
       aiTerminalErrorRef.current = true;
       setAiStatus("error");
       setAiMessages((items) => updateLastAssistant(items, (message) => ({
         ...message,
-        text: formatIndicatorAiError(error, t("chart:indicatorAiGenerationFailed")),
-        status: t("chart:indicatorAiGenerationFailed"),
+        text: formatIndicatorAiError(error, t("chart:indicatorAiRequestFailed")),
+        status: t("chart:indicatorAiRequestFailed"),
         error: true
       })));
     }
@@ -389,16 +408,6 @@ export function ChartIndicatorCenter({
   useEffect(() => {
     let disposed = false;
     let unlisten: (() => void) | null = null;
-    const markMissingToolError = () => {
-      aiTerminalErrorRef.current = true;
-      setAiStatus("error");
-      setAiMessages((items) => updateLastAssistant(items, (message) => ({
-        ...message,
-        text: `${message.text}\n${t("chart:indicatorAiMissingToolText")}`.trim(),
-        status: t("chart:indicatorAiNotSaved"),
-        error: true
-      })));
-    };
     void listenAiEvents((event: AiEvent) => {
       if (disposed || event.sessionId !== aiSessionId) return;
       if (event.type === "error") {
@@ -409,10 +418,14 @@ export function ChartIndicatorCenter({
       }
       if (event.type === "done") {
         applyAiEvent(event, (status) => setAiStatus(indicatorAiRuntimeStatus(status)), setAiMessages);
-        if (aiCreatedScriptRef.current) {
+        const failed = event.finishReason?.trim().toLowerCase() === "error";
+        if (!failed && !aiTerminalErrorRef.current) {
           setAiStatus("done");
-        } else if (!aiTerminalErrorRef.current) {
-          markMissingToolError();
+          setAiMessages((items) => updateLastAssistant(items, (message) => ({
+            ...message,
+            error: false,
+            status: aiCreatedScriptRef.current ? undefined : t("chart:indicatorAiReady")
+          })));
         }
         return;
       }
@@ -449,7 +462,6 @@ export function ChartIndicatorCenter({
           ? action.id.trim()
           : t("chart:indicatorAiDefaultScriptName");
       aiCreatedScriptRef.current = true;
-      setAiStatus("done");
       setAiMessages((items) => updateLastAssistant(items, (message) => ({
         ...message,
         text: `${message.text.trim() ? message.text.trimEnd() : t("chart:indicatorAiCreatedDefault")}\n${t("chart:indicatorAiSavedToLibrary", { name: scriptName })}`,
@@ -499,6 +511,7 @@ export function ChartIndicatorCenter({
         }}
         id={popoverId}
         className={aiPanelOpen ? "chart-indicator-popover chart-indicator-floating-popover ai-open" : "chart-indicator-popover chart-indicator-floating-popover"}
+        data-popover-placement={position.placement}
         aria-label={t("chart:indicatorCenter")}
         style={{ left: position.left, top: position.top, maxHeight: position.maxHeight }}
         onPointerDown={(event) => event.stopPropagation()}
@@ -674,8 +687,8 @@ export function ChartIndicatorCenter({
                   disabled={aiStatus === "running"}
                 />
                 <div>
-                  <span>{aiStatus === "running" ? t("chart:indicatorAiGenerating") : aiStatus === "done" ? t("common:completed") : aiStatus === "error" ? t("chart:indicatorAiGenerationFailed") : t("chart:indicatorAiWaitingInput")}</span>
-                  <button type="submit" disabled={!aiPrompt.trim() || aiStatus === "running"}><Send size={13} /> {t("chart:indicatorAiGenerate")}</button>
+                  <span>{aiStatus === "running" ? t("chart:indicatorAiGenerating") : aiStatus === "done" ? t("chart:indicatorAiReady") : aiStatus === "error" ? t("chart:indicatorAiRequestFailed") : t("chart:indicatorAiWaitingInput")}</span>
+                  <button type="submit" disabled={!aiPrompt.trim() || aiStatus === "running"}><Send size={13} /> {t("chart:indicatorAiSend")}</button>
                 </div>
               </form>
             </aside>

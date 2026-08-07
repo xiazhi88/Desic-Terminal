@@ -49,11 +49,17 @@ node scripts/kill-dev-port.mjs
 cargo check --manifest-path src-tauri/Cargo.toml --workspace
 ```
 
+- AI 策略源码测试的主要目标是代码协议正确性，不是评价策略是否合理。应先通过 AST 定位全部 `ctx` 动作调用并检查已知签名、参数和字面量协议字段，再使用一组自然确定性行情运行一次，验证实际返回动作。未被自然行情触发的调用点应标记为“静态检查通过、运行时未到达”，不得强行篡改条件来制造交易动作，也不得把未到达分支描述成已完成动态验证。
+- 长区间回放首次只读取有上限的 K 线页；用户移动回放时间线时再加载包含目标时间的 K 线页，并保持当前回放游标、账户快照和账本时点不变。回测列表必须展示持久化记录固定的策略版本，不能用策略当前最新版本代替。
+- 实盘策略 Profile 必须在 Python 执行前验证完整可见历史和本轮精确收线截点。刚收线数据允许短暂等待并刷新最近 REST 尾部；补洞失败时跳过本轮、保留真实同步诊断并在后续收线重试，禁止继续用部分窗口执行，也禁止把具体修复失败统一覆盖成无证据的泛化错误。
+
 - 每次前端行为调整后至少跑：
 
 ```powershell
 npm run build
 ```
+
+- 新闻阅读状态必须按本地“首次入库时间”计算，不能使用同步更新时间；后台重复同步不得制造未读数。日期导航和分页只查询本地情报库，手动刷新才触发远端同步。阅读游标属于本地用户/设备范围，不绑定交易账号；首次初始化应从当前时间开始，避免把已有历史一次性标成未读。
 
 ## 3. 前端日志与通知中心
 
@@ -137,7 +143,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 ## 7. 交易安全
 
-- 下单预检不能包含会拖慢实时下单的网络请求。
+- 普通交易面板和图表下单不得在输入变化或点击前发起高频 `trade.precheck` 网络请求；应依赖本地合约规则和最终下单边界校验。后台 AI 机会仍可使用一次性决策上下文复核来冻结候选和记录审计证据。
 - 行情延迟和私有频道延迟只做 UI 提示，不作为下单 blocker。
 - private WS 延迟不能用于阻断交易，它主要负责余额、持仓、挂单事件推送和兜底同步。
 - 账户快照 REST 同步失败不能直接阻断快速下单。它只能降级为 warning，因为持仓、余额和挂单已有 private WS / 定时同步兜底，最终风控仍以 OKX 下单接口返回为准。
@@ -230,6 +236,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 结构化字段语义固定：`effectiveExposureMultiple=名义敞口÷USDT权益` 是账户有效敞口倍数，也是每 `1%` 标的价格变化对应的近似权益百分比敏感度；`notionalPctOfEquity=effectiveExposureMultiple×100%`，`marginPctOfEquity` 是预估初始保证金占权益，`stopRiskPctOfEquity` 是含双边手续费止损占权益，`oneAtrRiskPctOfEquity` 是固定张数的一倍 ATR 价格风险占权益。固定张数下杠杆只改变保证金，不改变价格盈亏；禁止把名义敞口比例改称为保证金占用、账户亏损或单独推导为“容错空间有限”。账户容错必须结合止损/ATR 风险、剩余保证金、强平距离、已有持仓、组合风险和确定性 blocker。
 - 后台交易候选必须采用两阶段事务：只有字段完整、准备通过 `tradeOpportunity.create` 提交的可执行候选才调用 `market.readDecisionContext`；无新候选的 `wait/abandon` 直接调用 `background.finishRun`，禁止用 `size=0`、缺失限价/触发价或其它占位参数伪造候选。`open/close` 的张数必须大于 0，`limit/trigger` 必须提供 `price`，这些约束应在 Sidecar JSON Schema 中先于 Rust 执行。模型提交完整候选后只能通过 `tradeOpportunity.create` 提交后端冻结的候选，禁止向后台模型暴露独立 `tradeOpportunity.reuse/revise` 或要求其搬运候选字段、context ID。重复处理只通过 commit 的 `duplicateResolution` 表达；exact 才能直接 reuse，similar 若要 reuse 必须先按原机会参数重新复核。复核消费与重复决议必须在一个事务内持久化，不能改写原机会的创建归属。`background.finishRun` 中新建/复用机会 ID、复核 ID、系统原因码和 `accountAssessment` 属于系统事实，必须由后端按 Run/Profile 的持久化记录派生；模型只提交语义决策和唤醒计划。
 - AI 工具在应用内部、策略和持久化事件中使用点号规范名，Provider 注册时使用只含字母、数字与下划线的名称。系统提示、Profile/Skill 内容、用户任务、工具说明、Schema 描述和返回给模型的修正信息必须在模型边界统一转换为实际注册名；不得把内部点号名称作为 `Canonical tool name` 暴露给模型，否则调用会在进入 Sidecar/Rust 前被 SDK 以 unavailable tool 拒绝。新增工具时必须覆盖提示、描述、Schema 与纠错结果的名称一致性测试。
+- Python 策略的开仓/平仓动作第二个位置参数固定为审计原因 `reason`，价格只能通过命名参数 `execution=ctx.limit_order(price)` 传递。Skill 必须同时给出正确模板和 `ctx.open_long(quantity, price, reason=...)` 反例；源码写入与测试必须先经过 Python AST/source-load 校验，不能只靠某一组行情夹具实际触发交易分支后才发现签名错误。
 - 具有本地 Schema 校验并返回可重试修正信息的完成工具，不得设置“调用即结束”的静态 lifecycle。只有后端成功提交终态才能结束 Run；校验失败必须回到模型继续修正，最终失败记录应从持久化 tool result 提取真实原因，不能把“调用失败”写成“从未调用”。
 - Smart Money 必须以当前线上接口实际契约为准：overview 始终返回当前小时，禁止向上游发送 `ts/dataVersion`；signal-history 只发送 OKX UTC+8 小时格式 `dataVersion=yyyyMMddHH`。Agent 工具仍接收易用的 13 位毫秒 `ts`，后端负责转换且绝不透传；历史趋势还必须带完整 `instId`、`granularity` 和 `limit`。上游过滤字段统一为 `sortType/pnl/winRatio/maxRetreat/asset`；signal/overview/history 使用枚举池过滤，leaderboard 使用 USD/比率数值阈值，不得混用。不得继续提示模型使用 `instCcy/asOfTime`；远端 5xx/timeout 只能回退本地同币种、同粒度、截止时间内的历史行，不能拿当前 overview 快照冒充历史。解析后若 `dataAt` 领先当前时间超过 5 分钟，必须标记 stale 并提示检查时区，不能把负 `ageMs` 静默截断。
 - 普通/精英拥挤度必须使用确定性字段语义：`accountRatio/topAccountRatio` 是多头账户数与空头账户数之比，`topPositionRatio` 是头部交易者多头持仓价值与空头持仓价值之比。Agent 优先使用后端派生的 `accountBias/topAccountBias/topPositionBias/eliteInternalDivergence`，禁止把 `topPositionRatio` 解释成相对普通交易者的仓位规模。

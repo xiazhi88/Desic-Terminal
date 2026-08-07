@@ -176,6 +176,949 @@ fn bind_manual_order_identity(
     Ok(())
 }
 
+/// Narrow adapter for Systematic Profile execution. Python never receives this
+/// interface; it returns a validated high-level action which is translated
+/// here into the same audited order pipeline used by the terminal.
+#[derive(Debug, Clone)]
+pub(crate) struct SystematicProfileOrderRequest {
+    pub profile_id: String,
+    pub profile_generation: u64,
+    pub account_id: String,
+    pub environment: String,
+    pub inst_id: String,
+    pub margin_mode: String,
+    pub leverage: f64,
+    pub action: String,
+    pub order_type: String,
+    pub limit_price: Option<f64>,
+    pub quantity: f64,
+    pub reason: String,
+    pub execution_key: String,
+    pub stop_loss: Option<f64>,
+    pub take_profit: Option<f64>,
+    pub stop_loss_order_type: String,
+    pub take_profit_order_type: String,
+    pub take_profit_client_order_id: Option<String>,
+    pub take_profit_closed_quantity: Option<f64>,
+    pub take_profit_current_filled_quantity: Option<f64>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SystematicProfileOrderResponse {
+    pub order_id: String,
+    pub client_order_id: String,
+    pub protection_client_order_id: Option<String>,
+    pub protection_status: Option<String>,
+    pub filled_quantity: Option<f64>,
+    pub protection_error: Option<String>,
+    pub post_fill_take_profit_client_order_id: Option<String>,
+    pub post_fill_take_profit_closed_quantity: Option<f64>,
+    pub post_fill_take_profit_current_filled_quantity: Option<f64>,
+}
+
+fn normalize_systematic_price(
+    value: f64,
+    tick_size: &str,
+    field: &str,
+) -> Result<f64, String> {
+    if !value.is_finite() || value <= 0.0 {
+        return Err(format!("策略 Profile {field} 必须是正数"));
+    }
+    let raw = trim_float(value);
+    let normalized = desic_trade_domain::normalize_price(&raw, tick_size).map_err(|error| {
+        format!(
+            "策略 Profile {field} 无法按 tickSz {} 对齐：{}",
+            tick_size.trim(), error
+        )
+    })?;
+    normalized.parse::<f64>().map_err(|error| {
+        format!(
+            "策略 Profile {field} 归一化结果无效：{} ({error})",
+            normalized
+        )
+    })
+}
+
+fn normalize_optional_systematic_price(
+    value: Option<f64>,
+    tick_size: &str,
+    field: &str,
+) -> Result<Option<f64>, String> {
+    value
+        .map(|value| normalize_systematic_price(value, tick_size, field))
+        .transpose()
+}
+
+async fn normalize_systematic_profile_prices(
+    app: &tauri::AppHandle,
+    request: &mut SystematicProfileOrderRequest,
+) -> Result<(), String> {
+    if request.limit_price.is_none()
+        && request.stop_loss.is_none()
+        && request.take_profit.is_none()
+    {
+        return Ok(());
+    }
+    let instrument = fetch_instrument(app, &request.inst_id).await?;
+    let tick_size = instrument.tick_sz.trim();
+    if tick_size.is_empty() {
+        return Err(format!(
+            "策略 Profile {} 缺少有效 tickSz，无法规范化价格",
+            request.inst_id
+        ));
+    }
+    request.limit_price = normalize_optional_systematic_price(
+        request.limit_price,
+        tick_size,
+        "开仓限价",
+    )?;
+    request.stop_loss =
+        normalize_optional_systematic_price(request.stop_loss, tick_size, "止损价")?;
+    request.take_profit = normalize_optional_systematic_price(
+        request.take_profit,
+        tick_size,
+        "止盈价",
+    )?;
+    Ok(())
+}
+
+const SYSTEMATIC_PROFILE_PROTECTION_RETRY_DELAYS_MS: &[u64] =
+    &[0, 150, 350, 750, 1_250, 2_000];
+
+async fn reconcile_systematic_profile_protection_order(
+    account: &LocalAccount,
+    inst_id: &str,
+    client_order_id: &str,
+    is_algo: bool,
+) -> Result<Option<OkxPendingOrder>, String> {
+    let mut last_error = None;
+    let mut confirmed_response = false;
+    for delay_ms in SYSTEMATIC_PROFILE_PROTECTION_RETRY_DELAYS_MS {
+        if *delay_ms > 0 {
+            sleep(Duration::from_millis(*delay_ms)).await;
+        }
+        match reconcile_order_by_client_id(account, inst_id, client_order_id, is_algo).await {
+            Ok(Some(order)) => return Ok(Some(order)),
+            Ok(None) => confirmed_response = true,
+            Err(error) => last_error = Some(error),
+        }
+    }
+    if confirmed_response {
+        Ok(None)
+    } else {
+        Err(last_error.unwrap_or_else(|| "保护单对账未返回结果".to_string()))
+    }
+}
+
+pub(crate) async fn systematic_profile_sync_leverage(
+    app: tauri::AppHandle,
+    account_id: &str,
+    environment: &str,
+    inst_id: &str,
+    margin_mode: &str,
+    leverage: f64,
+    profile_id: &str,
+) -> Result<bool, String> {
+    let account = load_local_account_secret(&app, Some(account_id))?;
+    ensure_account_snapshot_current(&app, &account)?;
+    if normalize_environment(&account.environment) != normalize_environment(environment) {
+        return Err("策略 Profile 账号环境已变化，已阻止调整杠杆".to_string());
+    }
+    if !matches!(margin_mode, "cross" | "isolated") {
+        return Err("策略 Profile 保证金模式无效".to_string());
+    }
+    if !leverage.is_finite() || !(1.0..=50.0).contains(&leverage) {
+        return Err("策略 Profile 杠杆必须在 1x 到 50x 之间".to_string());
+    }
+    let current = okx_private_get::<OkxLeverageInfo>(
+        &account,
+        &leverage_info_path(inst_id, margin_mode),
+    )
+    .await
+    .map(|response| response.data)
+    .unwrap_or_default();
+    let already_matched = !current.is_empty()
+        && current.iter().all(|row| {
+            row.mgn_mode == margin_mode
+                && row
+                    .lever
+                    .parse::<f64>()
+                    .map(|value| (value - leverage).abs() <= 1e-10)
+                    .unwrap_or(false)
+        });
+    if already_matched {
+        return Ok(false);
+    }
+    okx_set_leverage(
+        app,
+        SetLeverageRequest {
+            account_id: Some(account_id.to_string()),
+            inst_id: inst_id.to_string(),
+            mgn_mode: margin_mode.to_string(),
+            lever: trim_float(leverage),
+            pos_side: None,
+            environment: environment.to_string(),
+            operator: Some("strategy".to_string()),
+            opportunity_id: None,
+            opportunity_revision: None,
+            agent_run_id: None,
+            reason: Some(format!("Systematic Profile {profile_id} target leverage")),
+            profile_target_authorized: false,
+        },
+    )
+    .await?;
+    Ok(true)
+}
+
+pub(crate) async fn systematic_profile_place_order(
+    app: tauri::AppHandle,
+    mut request: SystematicProfileOrderRequest,
+) -> Result<SystematicProfileOrderResponse, String> {
+    if !request.quantity.is_finite() || request.quantity <= 0.0 {
+        return Err("策略 Profile 返回的合约张数无效".to_string());
+    }
+    let action = request.action.trim().to_string();
+    if !matches!(action.as_str(), "long" | "short" | "close-long" | "close-short") {
+        return Err("策略 Profile 返回了不支持的交易动作".to_string());
+    }
+    let open_action = matches!(action.as_str(), "long" | "short");
+    let stop_loss_order_type = request.stop_loss_order_type.trim().to_ascii_lowercase();
+    let take_profit_order_type = request.take_profit_order_type.trim().to_ascii_lowercase();
+    if !matches!(stop_loss_order_type.as_str(), "market" | "limit")
+        || !matches!(take_profit_order_type.as_str(), "market" | "limit" | "post_fill_limit")
+    {
+        return Err("策略 Profile 的止盈止损执行方式无效 / Profile protection execution type is invalid".to_string());
+    }
+    let order_type = request.order_type.trim().to_ascii_lowercase();
+    if !matches!(order_type.as_str(), "market" | "limit") {
+        return Err("策略 Profile 返回了不支持的订单类型".to_string());
+    }
+    match order_type.as_str() {
+        "market" if request.limit_price.is_none() => {}
+        "market" => return Err("市价单不能附带限价".to_string()),
+        "limit"
+            if request
+                .limit_price
+                .filter(|price| price.is_finite() && *price > 0.0)
+                .is_none() =>
+        {
+            return Err("限价单必须提供有效限价".to_string());
+        }
+        "limit" => {}
+        _ => unreachable!(),
+    }
+    if !open_action && (request.stop_loss.is_some() || request.take_profit.is_some()) {
+        return Err("平仓动作不能附带新的止盈止损".to_string());
+    }
+    ensure_systematic_profile_submission_current(&app, &request)?;
+    normalize_systematic_profile_prices(&app, &mut request).await?;
+    let limit_price = if order_type == "limit" {
+        request.limit_price
+    } else {
+        None
+    };
+    let protection_client_order_id = (open_action
+        && (request.stop_loss.is_some() || request.take_profit.is_some()))
+        .then(|| stable_client_order_id(&format!("{}:protection", request.execution_key)));
+    let attach_take_profit = request.take_profit.is_some()
+        && matches!(take_profit_order_type.as_str(), "market" | "limit");
+    let attach_stop_loss = request.stop_loss.is_some();
+    let attach_algo_ords = if attach_take_profit || attach_stop_loss {
+        let attach_key = protection_client_order_id
+            .clone()
+            .ok_or_else(|| "保护单缺少稳定客户端订单 ID".to_string())?;
+        Some(vec![AttachedAlgoOrder {
+            attach_algo_cl_ord_id: Some(attach_key),
+            tp_trigger_px: attach_take_profit.then(|| request.take_profit).flatten().map(trim_float),
+            tp_ord_px: attach_take_profit.then(|| request.take_profit).flatten().map(|price| {
+                if take_profit_order_type == "limit" { trim_float(price) } else { "-1".to_string() }
+            }),
+            tp_ord_kind: (attach_take_profit && take_profit_order_type == "limit")
+                .then(|| "limit".to_string()),
+            tp_trigger_px_type: attach_take_profit.then(|| "last".to_string()),
+            sl_trigger_px: request.stop_loss.map(trim_float),
+            sl_ord_px: request.stop_loss.map(|price| {
+                if stop_loss_order_type == "limit" { trim_float(price) } else { "-1".to_string() }
+            }),
+            sl_trigger_px_type: request.stop_loss.map(|_| "last".to_string()),
+            sz: None,
+        }])
+    } else {
+        None
+    };
+    let state_app = app.clone();
+    let runtime = state_app.state::<MarketRuntime>();
+    let response = okx_place_order(
+        app.clone(),
+        runtime,
+        PlaceOrderRequest {
+            account_id: Some(request.account_id.clone()),
+            inst_id: request.inst_id.clone(),
+            td_mode: request.margin_mode.clone(),
+            order_type,
+            ticket_mode: if open_action { "open" } else { "close" }.to_string(),
+            action,
+            price: limit_price.map(trim_float).unwrap_or_default(),
+            size: trim_float(request.quantity),
+            lever: trim_float(request.leverage),
+            environment: request.environment.clone(),
+            confirmed_live: Some(true),
+            operator: Some("strategy".to_string()),
+            strategy_id: Some(request.profile_id.clone()),
+            session_id: None,
+            opportunity_id: None,
+            opportunity_revision: None,
+            agent_run_id: None,
+            execution_key: Some(request.execution_key.clone()),
+            algo_cl_ord_id: None,
+            execution_leg: Some("primary".to_string()),
+            reason: Some(request.reason.clone()),
+            attach_algo_ords,
+            order_spec_v2: None,
+        },
+    )
+    .await?;
+    let protection = if open_action && protection_client_order_id.is_some() {
+        reconcile_systematic_profile_protection(
+            &app,
+            &request,
+            &response.ord_id,
+            protection_client_order_id.as_deref().unwrap_or_default(),
+        )
+        .await
+    } else {
+        ProtectionReconcileResult::default()
+    };
+    Ok(SystematicProfileOrderResponse {
+        order_id: response.ord_id,
+        client_order_id: response.cl_ord_id,
+        protection_client_order_id,
+        protection_status: protection.status,
+        filled_quantity: protection.filled_quantity,
+        protection_error: protection.error,
+        post_fill_take_profit_client_order_id: protection.post_fill_take_profit_client_order_id,
+        post_fill_take_profit_closed_quantity: protection.post_fill_take_profit_closed_quantity,
+        post_fill_take_profit_current_filled_quantity: protection
+            .post_fill_take_profit_current_filled_quantity,
+    })
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct ProtectionReconcileResult {
+    pub(crate) status: Option<String>,
+    pub(crate) filled_quantity: Option<f64>,
+    pub(crate) error: Option<String>,
+    pub(crate) post_fill_take_profit_client_order_id: Option<String>,
+    pub(crate) post_fill_take_profit_closed_quantity: Option<f64>,
+    pub(crate) post_fill_take_profit_current_filled_quantity: Option<f64>,
+}
+
+pub(crate) async fn reconcile_systematic_profile_protection(
+    app: &tauri::AppHandle,
+    request: &SystematicProfileOrderRequest,
+    primary_order_id: &str,
+    protection_client_order_id: &str,
+) -> ProtectionReconcileResult {
+    let account = match load_local_account_secret(app, Some(&request.account_id)) {
+        Ok(account) => account,
+        Err(error) => {
+            return ProtectionReconcileResult {
+                status: Some("unconfirmed".to_string()),
+                error: Some(format!("读取保护对账账号失败：{error}")),
+                ..Default::default()
+            }
+        }
+    };
+    let primary = match reconcile_order_by_client_id_with_retry(
+        &account,
+        &request.inst_id,
+        &stable_client_order_id(&request.execution_key),
+        false,
+    )
+    .await
+    {
+        Ok(Some(order)) => order,
+        Ok(None) => {
+            return ProtectionReconcileResult {
+                status: Some("unconfirmed".to_string()),
+                error: Some(format!(
+                    "主订单 {} 尚未能通过 OKX 对账确认",
+                    primary_order_id
+                )),
+                ..Default::default()
+            }
+        }
+        Err(error) => {
+            return ProtectionReconcileResult {
+                status: Some("unconfirmed".to_string()),
+                error: Some(format!("保护对账暂不可用：{error}")),
+                ..Default::default()
+            }
+        }
+    };
+    let filled_quantity = primary
+        .acc_fill_sz
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite() && *value > 0.0);
+    let Some(filled_quantity) = filled_quantity else {
+        return ProtectionReconcileResult {
+            status: Some("pending_fill".to_string()),
+            filled_quantity: Some(0.0),
+            ..Default::default()
+        };
+    };
+    let mut normalized_request = request.clone();
+    if normalized_request.stop_loss.is_some() || normalized_request.take_profit.is_some() {
+        if let Err(error) = normalize_systematic_profile_prices(app, &mut normalized_request).await
+        {
+            return ProtectionReconcileResult {
+                status: Some("warning".to_string()),
+                filled_quantity: Some(filled_quantity),
+                error: Some(format!("保护价格规范化失败：{error}")),
+                ..Default::default()
+            };
+        }
+    }
+    let request = &normalized_request;
+    let take_profit_order_type = request.take_profit_order_type.trim().to_ascii_lowercase();
+    let attached_protection_requested = request.stop_loss.is_some()
+        || (request.take_profit.is_some() && take_profit_order_type != "post_fill_limit");
+    let post_fill_take_profit_requested = request.take_profit.is_some()
+        && take_profit_order_type == "post_fill_limit";
+    let mut statuses = Vec::new();
+    let mut errors = Vec::new();
+    let mut attached_can_fallback = attached_protection_requested;
+
+    if attached_protection_requested {
+        match reconcile_systematic_profile_protection_order(
+            &account,
+            &request.inst_id,
+            protection_client_order_id,
+            true,
+        )
+        .await
+        {
+            Ok(Some(order))
+                if !order.algo_id.trim().is_empty()
+                    && !matches!(
+                        order.state.trim().to_ascii_lowercase().as_str(),
+                        "failed" | "canceled" | "cancelled"
+                    ) =>
+            {
+                let protected_size = order
+                    .sz
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+                    .or_else(|| order.acc_fill_sz.trim().parse::<f64>().ok())
+                    .filter(|value| value.is_finite() && *value > 0.0);
+                // A protection order without an exchange-reported size is not
+                // evidence that the partial fill is actually covered.
+                if protected_size.is_some_and(|value| value + f64::EPSILON >= filled_quantity) {
+                    statuses.push("attached");
+                    attached_can_fallback = false;
+                }
+            }
+            Ok(Some(_)) | Ok(None) => {}
+            Err(error) => {
+                attached_can_fallback = false;
+                errors.push(format!("附加保护单尚未能通过 OKX 对账确认：{error}"));
+            }
+        }
+        if attached_can_fallback {
+            match ensure_systematic_profile_submission_current(app, request) {
+                Err(error) => errors.push(error),
+                Ok(()) => match place_systematic_profile_fallback_protection(
+                    app,
+                    request,
+                    filled_quantity,
+                )
+                .await
+                {
+                    Ok(_) => statuses.push("fallback_submitted"),
+                    Err(error) => errors.push(format!(
+                        "附加保护未生效，独立保护单补挂失败：{error}"
+                    )),
+                },
+            }
+        }
+    }
+
+    let mut post_fill_take_profit_client_order_id = None;
+    let mut post_fill_take_profit_closed_quantity = request
+        .take_profit_closed_quantity
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0);
+    let mut post_fill_take_profit_current_filled_quantity = request
+        .take_profit_current_filled_quantity
+        .filter(|value| value.is_finite() && *value >= 0.0)
+        .unwrap_or(0.0);
+    if post_fill_take_profit_requested {
+        match ensure_systematic_profile_submission_current(app, request) {
+            Err(error) => errors.push(error),
+            Ok(()) => match place_systematic_profile_post_fill_take_profit(
+                app,
+                request,
+                filled_quantity,
+                post_fill_take_profit_closed_quantity,
+                post_fill_take_profit_current_filled_quantity,
+            )
+            .await
+            {
+                Ok(result) => {
+                    post_fill_take_profit_client_order_id = Some(result.client_order_id);
+                    post_fill_take_profit_closed_quantity = result.closed_quantity;
+                    post_fill_take_profit_current_filled_quantity = result.current_filled_quantity;
+                    statuses.push("post_fill_limit_submitted");
+                }
+                Err(error) => errors.push(format!(
+                    "成交后止盈限价单提交失败：{error}"
+                )),
+            },
+        }
+    }
+
+    let status = if !errors.is_empty() {
+        Some("warning".to_string())
+    } else if statuses.len() > 1 {
+        Some("attached_and_post_fill_limit".to_string())
+    } else {
+        statuses.first().map(|value| (*value).to_string())
+    };
+    ProtectionReconcileResult {
+        status,
+        filled_quantity: Some(filled_quantity),
+        error: (!errors.is_empty()).then(|| errors.join("；")),
+        post_fill_take_profit_client_order_id,
+        post_fill_take_profit_closed_quantity: post_fill_take_profit_requested
+            .then_some(post_fill_take_profit_closed_quantity),
+        post_fill_take_profit_current_filled_quantity: post_fill_take_profit_requested
+            .then_some(post_fill_take_profit_current_filled_quantity),
+    }
+}
+
+#[derive(Debug, Default)]
+struct PostFillTakeProfitOrderResult {
+    client_order_id: String,
+    closed_quantity: f64,
+    current_filled_quantity: f64,
+}
+
+async fn place_systematic_profile_post_fill_take_profit(
+    app: &tauri::AppHandle,
+    request: &SystematicProfileOrderRequest,
+    filled_quantity: f64,
+    previously_closed_quantity: f64,
+    previously_current_filled_quantity: f64,
+) -> Result<PostFillTakeProfitOrderResult, String> {
+    let take_profit = request
+        .take_profit
+        .filter(|value| value.is_finite() && *value > 0.0)
+        .ok_or_else(|| "成交后止盈限价单缺少有效止盈价".to_string())?;
+    let base_execution_key = format!("{}:take-profit-resting", request.execution_key);
+    let mut client_order_id = request
+        .take_profit_client_order_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| stable_client_order_id(&base_execution_key));
+    let mut execution_key = if client_order_id == stable_client_order_id(&base_execution_key) {
+        base_execution_key.clone()
+    } else {
+        format!("{base_execution_key}:retry:{client_order_id}")
+    };
+    let mut prior_closed_quantity =
+        (previously_closed_quantity - previously_current_filled_quantity).max(0.0);
+    let mut submit_quantity = (filled_quantity - prior_closed_quantity).max(0.0);
+
+    for _ in 0..4 {
+        let account = load_local_account_secret(app, Some(&request.account_id))?;
+        if let Some(existing) = reconcile_order_by_client_id_with_retry(
+            &account,
+            &request.inst_id,
+            &client_order_id,
+            false,
+        )
+        .await?
+        {
+            let state = existing.state.trim().to_ascii_lowercase();
+            let order_size = existing
+                .sz
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0);
+            let order_filled = existing
+                .acc_fill_sz
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value >= 0.0)
+                .unwrap_or(0.0);
+            let total_closed = (prior_closed_quantity + order_filled).min(filled_quantity);
+            let terminal = matches!(
+                state.as_str(),
+                "filled" | "canceled" | "cancelled" | "failed" | "mmp_canceled"
+            );
+            if terminal {
+                prior_closed_quantity = total_closed;
+                submit_quantity = (filled_quantity - prior_closed_quantity).max(0.0);
+                if submit_quantity <= f64::EPSILON {
+                    return Ok(PostFillTakeProfitOrderResult {
+                        client_order_id,
+                        closed_quantity: total_closed,
+                        current_filled_quantity: order_filled,
+                    });
+                }
+                let next_execution_key = format!(
+                    "{base_execution_key}:retry:{client_order_id}"
+                );
+                client_order_id = stable_client_order_id(&next_execution_key);
+                execution_key = next_execution_key;
+                continue;
+            }
+            if order_size + f64::EPSILON < submit_quantity {
+                let runtime_app = app.clone();
+                let runtime = runtime_app.state::<MarketRuntime>();
+                okx_amend_order(
+                    app.clone(),
+                    runtime,
+                    AmendOrderRequest {
+                        account_id: Some(request.account_id.clone()),
+                        environment: request.environment.clone(),
+                        inst_id: request.inst_id.clone(),
+                        ord_id: (!existing.ord_id.trim().is_empty()).then_some(existing.ord_id),
+                        cl_ord_id: (!existing.cl_ord_id.trim().is_empty())
+                            .then_some(existing.cl_ord_id),
+                        new_size: Some(trim_float(submit_quantity)),
+                        new_price: None,
+                        confirmed_live: Some(true),
+                        operator: Some("strategy".to_string()),
+                        opportunity_id: None,
+                        opportunity_revision: None,
+                        agent_run_id: None,
+                        execution_key: Some(format!(
+                            "{execution_key}:amend:{}",
+                            trim_float(submit_quantity)
+                        )),
+                        execution_leg: Some("protection".to_string()),
+                        reason: Some("成交后补足止盈限价单".to_string()),
+                    },
+                )
+                .await?;
+            }
+            return Ok(PostFillTakeProfitOrderResult {
+                client_order_id,
+                closed_quantity: total_closed,
+                current_filled_quantity: order_filled,
+            });
+        }
+
+        if submit_quantity <= f64::EPSILON {
+            return Ok(PostFillTakeProfitOrderResult {
+                client_order_id,
+                closed_quantity: prior_closed_quantity,
+                current_filled_quantity: 0.0,
+            });
+        }
+        let action = match request.action.as_str() {
+            "long" => "close-long",
+            "short" => "close-short",
+            _ => return Err("只有开仓动作可以挂成交后止盈限价单".to_string()),
+        };
+        let runtime_app = app.clone();
+        let runtime = runtime_app.state::<MarketRuntime>();
+        let response = okx_place_order(
+            app.clone(),
+            runtime,
+            PlaceOrderRequest {
+                account_id: Some(request.account_id.clone()),
+                inst_id: request.inst_id.clone(),
+                td_mode: request.margin_mode.clone(),
+                order_type: "limit".to_string(),
+                ticket_mode: "close".to_string(),
+                action: action.to_string(),
+                price: trim_float(take_profit),
+                size: trim_float(submit_quantity),
+                lever: trim_float(request.leverage),
+                environment: request.environment.clone(),
+                confirmed_live: Some(true),
+                operator: Some("strategy".to_string()),
+                strategy_id: Some(request.profile_id.clone()),
+                session_id: None,
+                opportunity_id: None,
+                opportunity_revision: None,
+                agent_run_id: None,
+                execution_key: Some(execution_key),
+                algo_cl_ord_id: None,
+                execution_leg: Some("protection".to_string()),
+                reason: Some("成交后立即挂止盈限价单".to_string()),
+                attach_algo_ords: None,
+                order_spec_v2: None,
+            },
+        )
+        .await?;
+        return Ok(PostFillTakeProfitOrderResult {
+            client_order_id: response.cl_ord_id,
+            closed_quantity: prior_closed_quantity,
+            current_filled_quantity: 0.0,
+        });
+    }
+    Err("成交后止盈限价单重试次数超限".to_string())
+}
+
+async fn place_systematic_profile_fallback_protection(
+    app: &tauri::AppHandle,
+    request: &SystematicProfileOrderRequest,
+    filled_quantity: f64,
+) -> Result<(), String> {
+    let (side, pos_side) = match request.action.as_str() {
+        "long" => ("sell", "long"),
+        "short" => ("buy", "short"),
+        _ => return Err("只有开仓动作可以补挂保护单".to_string()),
+    };
+    let execution_key = format!("{}:fallback-protection", request.execution_key);
+    let attach_take_profit = request.take_profit.is_some()
+        && !request
+            .take_profit_order_type
+            .trim()
+            .eq_ignore_ascii_case("post_fill_limit");
+    let account = load_local_account_secret(app, Some(&request.account_id))?;
+    let fallback_client_order_id = stable_client_order_id(&execution_key);
+    if let Some(existing) = reconcile_order_by_client_id_with_retry(
+        &account,
+        &request.inst_id,
+        &fallback_client_order_id,
+        true,
+    )
+    .await?
+    {
+        let state = existing.state.trim().to_ascii_lowercase();
+        if !matches!(state.as_str(), "failed" | "canceled" | "cancelled") {
+            let existing_size = existing
+                .sz
+                .trim()
+                .parse::<f64>()
+                .ok()
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .unwrap_or(0.0);
+            if existing_size + f64::EPSILON >= filled_quantity {
+                return Ok(());
+            }
+            okx_amend_algo_order(
+                app.clone(),
+                AmendAlgoOrderRequest {
+                    account_id: Some(request.account_id.clone()),
+                    environment: request.environment.clone(),
+                    inst_id: request.inst_id.clone(),
+                    algo_id: (!existing.algo_id.trim().is_empty())
+                        .then_some(existing.algo_id),
+                    algo_cl_ord_id: (!existing.algo_cl_ord_id.trim().is_empty())
+                        .then_some(existing.algo_cl_ord_id),
+                    new_size: Some(trim_float(filled_quantity)),
+                    new_trigger_px: None,
+                    new_ord_px: None,
+                    new_tp_trigger_px: None,
+                    new_tp_ord_px: None,
+                    new_sl_trigger_px: None,
+                    new_sl_ord_px: None,
+                    confirmed_live: Some(true),
+                    execution_key: Some(format!(
+                        "{}:amend:{}",
+                        execution_key,
+                        trim_float(filled_quantity)
+                    )),
+                },
+            )
+            .await
+            .map(|_| ())?;
+            return Ok(());
+        }
+    }
+    okx_place_algo_order(
+        app.clone(),
+        PlaceAlgoOrderRequest {
+            account_id: Some(request.account_id.clone()),
+            environment: request.environment.clone(),
+            inst_id: request.inst_id.clone(),
+            td_mode: request.margin_mode.clone(),
+            pos_side: pos_side.to_string(),
+            side: side.to_string(),
+            ord_type: "conditional".to_string(),
+            size: trim_float(filled_quantity),
+            tp_trigger_px: attach_take_profit
+                .then(|| request.take_profit)
+                .flatten()
+                .map(trim_float),
+            tp_ord_px: attach_take_profit
+                .then(|| request.take_profit)
+                .flatten()
+                .map(|price| {
+                if request.take_profit_order_type.trim().eq_ignore_ascii_case("limit") {
+                    trim_float(price)
+                } else {
+                    "-1".to_string()
+                }
+            }),
+            sl_trigger_px: request.stop_loss.map(trim_float),
+            sl_ord_px: request.stop_loss.map(|price| {
+                if request.stop_loss_order_type.trim().eq_ignore_ascii_case("limit") {
+                    trim_float(price)
+                } else {
+                    "-1".to_string()
+                }
+            }),
+            confirmed_live: Some(true),
+            operator: Some("strategy".to_string()),
+            strategy_id: Some(request.profile_id.clone()),
+            session_id: None,
+            execution_key: Some(execution_key),
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+fn ensure_systematic_profile_submission_current(
+    app: &tauri::AppHandle,
+    request: &SystematicProfileOrderRequest,
+) -> Result<(), String> {
+    let runtime = app
+        .try_state::<crate::systematic::SystematicRuntime>()
+        .ok_or_else(|| "策略 Profile 运行时不可用，已阻止提交".to_string())?;
+    if !runtime.live_profile_generation_is_current(
+        &request.profile_id,
+        request.profile_generation,
+    ) {
+        return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
+    }
+    let conn = open_database(app)?;
+    let enabled: i64 = conn
+        .query_row(
+            "SELECT enabled FROM systematic_profiles WHERE id=?1",
+            [&request.profile_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?
+        .ok_or_else(|| "策略 Profile 不存在，已阻止提交".to_string())?;
+    if enabled == 0 {
+        return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
+    }
+    Ok(())
+}
+
+/// Cancels one normal order after the Profile layer has verified that the
+/// order belongs to that exact Profile. Python never reaches this function.
+pub(crate) async fn systematic_profile_cancel_order(
+    app: tauri::AppHandle,
+    account_id: &str,
+    environment: &str,
+    inst_id: &str,
+    order_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let runtime_app = app.clone();
+    let runtime = runtime_app.state::<MarketRuntime>();
+    okx_cancel_order(
+        runtime,
+        app,
+        CancelOrderRequest {
+            account_id: Some(account_id.to_string()),
+            environment: environment.to_string(),
+            inst_id: inst_id.to_string(),
+            ord_id: Some(order_id.to_string()),
+            cl_ord_id: None,
+            is_algo: Some(false),
+            algo_id: None,
+            algo_cl_ord_id: None,
+            operator: Some("strategy".to_string()),
+            opportunity_id: None,
+            agent_run_id: None,
+            reason: Some(reason.to_string()),
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// Cancels a normal Profile-owned order by its stable client order ID.
+/// Missing or already-terminal orders are treated as successfully cancelled;
+/// an order that remains active after a failed cancel is surfaced to the caller.
+pub(crate) async fn systematic_profile_cancel_order_by_client_id(
+    app: tauri::AppHandle,
+    account_id: &str,
+    environment: &str,
+    inst_id: &str,
+    client_order_id: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let client_order_id = client_order_id.trim();
+    if client_order_id.is_empty() {
+        return Err("策略 Profile 撤销普通委托缺少 clOrdId".to_string());
+    }
+    let account = load_local_account_secret(&app, Some(account_id))?;
+    ensure_account_snapshot_current(&app, &account)?;
+    if normalize_environment(&account.environment) != normalize_environment(environment) {
+        return Err("策略 Profile 账号环境已变化，无法撤销普通委托".to_string());
+    }
+    let order = reconcile_order_by_client_id_with_retry(&account, inst_id, client_order_id, false)
+        .await?;
+    let Some(order) = order else {
+        return Ok(());
+    };
+    let state = order.state.trim().to_ascii_lowercase();
+    if matches!(
+        state.as_str(),
+        "filled" | "canceled" | "cancelled" | "failed" | "mmp_canceled"
+    ) {
+        return Ok(());
+    }
+    let runtime_app = app.clone();
+    let runtime = runtime_app.state::<MarketRuntime>();
+    match okx_cancel_order(
+        runtime,
+        app.clone(),
+        CancelOrderRequest {
+            account_id: Some(account_id.to_string()),
+            environment: environment.to_string(),
+            inst_id: inst_id.to_string(),
+            ord_id: (!order.ord_id.trim().is_empty()).then_some(order.ord_id.clone()),
+            cl_ord_id: (!order.cl_ord_id.trim().is_empty())
+                .then_some(order.cl_ord_id.clone())
+                .or_else(|| Some(client_order_id.to_string())),
+            is_algo: Some(false),
+            algo_id: None,
+            algo_cl_ord_id: None,
+            operator: Some("strategy".to_string()),
+            opportunity_id: None,
+            agent_run_id: None,
+            reason: Some(reason.to_string()),
+        },
+    )
+    .await
+    {
+        Ok(_) => Ok(()),
+        Err(error) => match reconcile_order_by_client_id_with_retry(
+            &account,
+            inst_id,
+            client_order_id,
+            false,
+        )
+        .await?
+        {
+            Some(order) if matches!(
+                order.state.trim().to_ascii_lowercase().as_str(),
+                "filled" | "canceled" | "cancelled" | "failed" | "mmp_canceled"
+            ) => Ok(()),
+            None => Ok(()),
+            Some(_) => Err(error),
+        },
+    }
+}
+
 #[tauri::command]
 pub async fn okx_set_leverage(
     app: tauri::AppHandle,
@@ -416,6 +1359,13 @@ pub async fn okx_place_order(
     let account_config_ready_ms = submit_started.elapsed().as_millis() as i64;
     let mut final_blockers = final_order_blockers(&account, &request, &instrument);
     final_blockers.extend(final_account_config_blockers(&config));
+    if config.pos_mode == "net_mode"
+        && normalize_trade_operator(request.operator.as_ref()) != "user"
+    {
+        final_blockers.push(
+            "自动化交易要求 OKX 账号使用双向持仓模式；请先在 OKX 中切换为 long_short_mode / Automated trading requires OKX long/short position mode; switch the account to long_short_mode first".to_string(),
+        );
+    }
     let _trade_mutation_guard = if request.ticket_mode == "open" {
         let guard = TRADE_MUTATION_LOCK.lock().await;
         let unresolved = unresolved_trade_execution_guards_for_scope(
@@ -1108,13 +2058,21 @@ pub async fn okx_place_order(
             finish_trade_execution(&app, &execution_lease, "unknown", None, None, Some(&error))?;
             return Err(error);
         }
+        let classified_error = classified_order_rejection_with_required_margin(
+            &request,
+            &instrument,
+            "okx_trade_order",
+            "下单",
+            &result.s_code,
+            &result.s_msg,
+        );
         finish_trade_execution(
             &app,
             &execution_lease,
             "rejected",
             optional_string(Some(result.ord_id.clone())).as_deref(),
             None,
-            Some(&result.s_msg),
+            Some(&classified_error),
         )?;
         audit_trade_event(
             &app,
@@ -1137,7 +2095,7 @@ pub async fn okx_place_order(
             request.confirmed_live == Some(true),
             Some(&result.s_code),
             Some(&result.s_msg),
-            Some(&result.s_msg),
+            Some(&classified_error),
             json!({
                 "request": &request,
                 "okxBody": &body,
@@ -1158,12 +2116,7 @@ pub async fn okx_place_order(
             Some(json!(&result)),
         );
         fail_ai_opportunity_order(&app, &request, &result.s_msg);
-        return Err(classified_okx_error(
-            "okx_trade_order",
-            "下单",
-            &result.s_code,
-            &result.s_msg,
-        ));
+        return Err(classified_error);
     }
     if let Err(error) = validate_order_result_identity(&result, &cl_ord_id) {
         finish_trade_execution(&app, &execution_lease, "unknown", None, None, Some(&error))?;
@@ -3439,6 +4392,67 @@ async fn reconcile_order_by_client_id_with_retry(
     Ok(None)
 }
 
+#[derive(Debug, Clone)]
+pub(crate) struct SystematicProfileReconciledOrder {
+    pub order_id: String,
+    pub state: String,
+    pub filled_quantity: f64,
+}
+
+pub(crate) fn systematic_profile_client_order_id(execution_key: &str) -> String {
+    stable_client_order_id(execution_key)
+}
+
+pub(crate) async fn reconcile_systematic_profile_execution(
+    app: &tauri::AppHandle,
+    account_id: &str,
+    environment: &str,
+    inst_id: &str,
+    client_order_id: &str,
+) -> Result<Option<SystematicProfileReconciledOrder>, String> {
+    let account = load_local_account_secret(app, Some(account_id))?;
+    if normalize_environment(&account.environment) != normalize_environment(environment) {
+        return Err("策略 Profile 账号环境已变化，无法安全恢复信号".to_string());
+    }
+    let stored_fingerprint: Option<String> = open_database(app)?
+        .query_row(
+            "SELECT credential_fingerprint FROM trade_execution_attempts
+             WHERE operation='place_order' AND client_order_id=?1
+             ORDER BY updated_at DESC LIMIT 1",
+            [client_order_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    if let Some(fingerprint) = stored_fingerprint.filter(|value| !value.trim().is_empty()) {
+        if fingerprint != account_config_cache_fingerprint(&account) {
+            return Err("策略执行记录绑定的账号凭据已变化，禁止自动恢复".to_string());
+        }
+    }
+    let Some(order) = reconcile_order_by_client_id_with_retry(
+        &account,
+        inst_id,
+        client_order_id,
+        false,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+    let filled_quantity = order
+        .acc_fill_sz
+        .trim()
+        .parse::<f64>()
+        .ok()
+        .filter(|value| value.is_finite())
+        .unwrap_or(0.0);
+    Ok(Some(SystematicProfileReconciledOrder {
+        order_id: order.ord_id,
+        state: order.state,
+        filled_quantity,
+    }))
+}
+
 fn is_duplicate_client_order_error(code: &str, message: &str) -> bool {
     let lower = message.to_ascii_lowercase();
     matches!(code, "51016" | "51503")
@@ -3826,6 +4840,75 @@ fn exact_order_decimal_blockers(
         _ => {}
     }
     reasons
+}
+
+fn classified_order_rejection_with_required_margin(
+    request: &PlaceOrderRequest,
+    instrument: &OkxInstrument,
+    source: &str,
+    operation: &str,
+    code: &str,
+    message: &str,
+) -> String {
+    let classified = classified_okx_error(source, operation, code, message);
+    if request.ticket_mode != "open" || !is_insufficient_margin_error(message) {
+        return classified;
+    }
+    let Some(required_margin) = estimated_open_margin_usdt(request, instrument) else {
+        return classified;
+    };
+    let required_text = format!("需要保证金：{} USDT", trim_float(required_margin));
+    let Ok(mut payload) = serde_json::from_str::<Value>(&classified) else {
+        return classified;
+    };
+    let Some(object) = payload.as_object_mut() else {
+        return classified;
+    };
+    for field in ["userMessage", "suggestion"] {
+        let existing = object
+            .get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if !existing.contains("需要保证金：") {
+            let value = if existing.is_empty() {
+                required_text.clone()
+            } else {
+                format!("{existing}；{required_text}")
+            };
+            object.insert(field.to_string(), Value::String(value));
+        }
+    }
+    serde_json::to_string(&payload).unwrap_or(classified)
+}
+
+fn estimated_open_margin_usdt(
+    request: &PlaceOrderRequest,
+    instrument: &OkxInstrument,
+) -> Option<f64> {
+    if !instrument.ct_type.eq_ignore_ascii_case("linear")
+        || !instrument.settle_ccy.eq_ignore_ascii_case("USDT")
+    {
+        return None;
+    }
+    let evaluation = desic_trade_domain::evaluate_linear_usdt_perpetual(
+        &desic_trade_domain::LinearUsdtPerpetualEvaluationRequest {
+            size: request.size.clone(),
+            entry_price: request.price.clone(),
+            contract_value: instrument.ct_val.clone(),
+            leverage: request.lever.clone(),
+            min_size: instrument.min_sz.clone(),
+            lot_size: instrument.lot_sz.clone(),
+            equity: None,
+            available_usdt: None,
+            max_single_trade_margin_pct: None,
+            stop_price: None,
+            atr: None,
+            entry_fee_rate: "0".to_string(),
+            exit_fee_rate: "0".to_string(),
+        },
+    )
+    .ok()?;
+    parse_optional_f64(&evaluation.candidate.estimated_initial_margin_usdt)
 }
 
 fn ensure_final_order_blockers(blockers: &[String]) -> Result<(), String> {
@@ -5013,6 +6096,8 @@ struct PlaceTpSlAlgoBody {
     #[serde(skip_serializing_if = "Option::is_none")]
     tp_ord_px: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    tp_ord_kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     sl_trigger_px: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     sl_trigger_px_type: Option<String>,
@@ -5204,6 +6289,9 @@ fn place_algo_body(request: &PlaceAlgoOrderRequest, algo_cl_ord_id: &str) -> Pla
         tp_trigger_px: optional_non_empty(&request.tp_trigger_px),
         tp_trigger_px_type: optional_non_empty(&request.tp_trigger_px).map(|_| "last".to_string()),
         tp_ord_px: optional_non_empty(&request.tp_ord_px),
+        tp_ord_kind: optional_non_empty(&request.tp_ord_px)
+            .filter(|value| value != "-1")
+            .map(|_| "limit".to_string()),
         sl_trigger_px: optional_non_empty(&request.sl_trigger_px),
         sl_trigger_px_type: optional_non_empty(&request.sl_trigger_px).map(|_| "last".to_string()),
         sl_ord_px: optional_non_empty(&request.sl_ord_px),
@@ -6253,6 +7341,9 @@ async fn okx_place_algo_order_inner(
     validate_algo_request(&request, &instrument, &account_config.pos_mode)?;
 
     let operator = normalize_trade_operator(request.operator.as_ref());
+    if account_config.pos_mode == "net_mode" && operator != "user" {
+        return Err("自动化策略委托要求 OKX 账号使用双向持仓模式；请先在 OKX 中切换为 long_short_mode / Automated strategy orders require OKX long/short position mode; switch the account to long_short_mode first".to_string());
+    }
     let algo_cl_ord_id = stable_client_order_id(&execution_key);
     let body = place_algo_body(&request, &algo_cl_ord_id);
     let request_json = serde_json::to_string(&request).map_err(|err| err.to_string())?;
@@ -9195,6 +10286,7 @@ fn attached_algo_orders(opportunity: &TradeOpportunitySummary) -> Option<Vec<Att
             .as_ref()
             .and_then(|item| optional_string(item.order_px.clone()))
             .or_else(|| has_tp.then(|| "-1".to_string())),
+        tp_ord_kind: None,
         tp_trigger_px_type: has_tp.then(|| {
             opportunity
                 .take_profit
@@ -10126,6 +11218,15 @@ mod idempotency_tests {
         }
     }
 
+    #[test]
+    fn limit_take_profit_is_encoded_as_a_limit_tp_order() {
+        let mut request = place_algo_request();
+        request.tp_ord_px = Some("66000".to_string());
+        let body = place_algo_body(&request, "algo-client-limit-tp");
+        assert_eq!(body.tp_ord_kind.as_deref(), Some("limit"));
+        assert_eq!(body.tp_ord_px.as_deref(), Some("66000"));
+    }
+
     fn amend_algo_request() -> AmendAlgoOrderRequest {
         AmendAlgoOrderRequest {
             account_id: Some("account-demo".to_string()),
@@ -10808,6 +11909,7 @@ mod idempotency_tests {
             tp_trigger_px: Some("65000".to_string()),
             tp_trigger_px_type: Some("mark".to_string()),
             tp_ord_px: Some("-1".to_string()),
+            tp_ord_kind: None,
             sl_trigger_px: Some("58000".to_string()),
             sl_trigger_px_type: Some("mark".to_string()),
             sl_ord_px: Some("-1".to_string()),
@@ -11726,6 +12828,19 @@ mod idempotency_tests {
     }
 
     #[test]
+    fn systematic_strategy_prices_are_normalized_to_instrument_tick_size() {
+        assert_eq!(
+            normalize_systematic_price(65_763.072, "0.1", "止盈价").unwrap(),
+            65_763.0
+        );
+        assert_eq!(
+            normalize_systematic_price(101.26, "0.25", "止盈价").unwrap(),
+            101.25
+        );
+        assert!(normalize_systematic_price(0.05, "0.1", "止盈价").is_err());
+    }
+
+    #[test]
     fn hard_final_precheck_requires_exchange_trade_permission_and_derivatives_mode() {
         let valid = OkxAccountConfig {
             acct_lv: "2".to_string(),
@@ -11821,6 +12936,7 @@ mod idempotency_tests {
             attach_algo_cl_ord_id: Some("placeholderAttachedExit".to_string()),
             tp_trigger_px: Some("66000".to_string()),
             tp_ord_px: Some("-1".to_string()),
+            tp_ord_kind: None,
             tp_trigger_px_type: Some("last".to_string()),
             sl_trigger_px: None,
             sl_ord_px: None,
@@ -11992,6 +13108,42 @@ mod idempotency_tests {
             "OKX 返回重复 clOrdId，订单结果需要按稳定 ID 对账"
         )
         .is_none());
+    }
+
+    #[test]
+    fn margin_rejection_records_the_estimated_required_usdt_margin() {
+        let mut request = place_request("limit");
+        request.price = "64866.6".to_string();
+        let mut instrument = valid_swap_instrument();
+        instrument.ct_type = "linear".to_string();
+        instrument.settle_ccy = "USDT".to_string();
+
+        let encoded = classified_order_rejection_with_required_margin(
+            &request,
+            &instrument,
+            "okx_trade_order",
+            "下单",
+            "51008",
+            "Order failed. Insufficient USDT margin in account",
+        );
+        let payload: Value = serde_json::from_str(&encoded).expect("classified margin error");
+        assert_eq!(payload["category"], "risk_or_balance");
+        assert!(payload["userMessage"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("需要保证金："));
+        assert!(payload["suggestion"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("USDT"));
+    }
+
+    #[test]
+    fn exact_decimal_precheck_accepts_float_backed_tick_price() {
+        let mut request = place_request("limit");
+        request.price = trim_float(64_866.6);
+        let instrument = valid_swap_instrument();
+        assert!(exact_order_decimal_blockers(&request, &instrument).is_empty());
     }
 
     #[test]
@@ -12648,7 +13800,12 @@ pub async fn trade_precheck(
             .and_then(|evaluation| evaluation.capacity.candidate_within_available)
             == Some(false)
         {
-            reasons.push("可用余额不足".to_string());
+            reasons.push(format!(
+                "可用 USDT 保证金不足；需要保证金：{} USDT",
+                estimated_margin
+                    .map(trim_float)
+                    .unwrap_or_else(|| "--".to_string())
+            ));
         }
         if max_single_trade_margin_pct.is_some() {
             match perpetual_evaluation

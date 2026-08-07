@@ -5,13 +5,16 @@ use desic_agent_automation::{
     AiProfileSubAgent, DomainEvent, RollingFeatureCache, WakeCondition, WakeMarketState,
     ADVISOR_MODE, MULTI_AGENT_CUSTOM_MAX_AGENTS,
 };
-use rusqlite::TransactionBehavior;
+use rusqlite::{params_from_iter, TransactionBehavior};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Notify, Semaphore};
 
 const AUTOMATION_EVENT: &str = "ai:automation-event";
+const FEISHU_CONFIG_EVENT_TYPES_VERSION: i64 = 2;
+const FEISHU_STRATEGY_SIGNAL_EVENT: &str = "strategy_signal";
+const AUTOMATION_RUN_LIST_PAGE_SIZE: i64 = 50;
 const SKILL_FILES_FINGERPRINT_SETTING: &str = "skill_files_fingerprint";
 const BUILTIN_PERPETUAL_DECISION_DESK_ID: &str = "builtin-perpetual-decision-desk";
 const REQUIRED_PROFILE_SKILL_IDS: [&str; 4] = [
@@ -164,6 +167,25 @@ pub(crate) struct AiAgentProfileInput {
     pub multi_agent_scheme_id: Option<String>,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAgentProfileSystematicConflictRequest {
+    #[serde(default)]
+    pub account_id: Option<String>,
+    #[serde(default = "default_environment")]
+    pub environment: String,
+    #[serde(default)]
+    pub symbols: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAgentProfileSystematicConflict {
+    pub id: String,
+    pub name: String,
+    pub inst_id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiAgentScheme {
@@ -188,12 +210,16 @@ pub(crate) struct AiAgentSchemeInput {
     pub agents: Vec<AiProfileSubAgent>,
 }
 
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiAgentRunActionCounts {
+    #[serde(default)]
     pub opportunity: u32,
+    #[serde(default)]
     pub wake: u32,
+    #[serde(default)]
     pub trade: u32,
+    #[serde(default)]
     pub notification: u32,
 }
 
@@ -741,6 +767,8 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
           skill_versions_json TEXT NOT NULL DEFAULT '{}',
           initial_market_snapshot_json TEXT,
           final_decision_json TEXT,
+          action_counts_json TEXT NOT NULL DEFAULT '{}',
+          token_usage_json TEXT,
           summary TEXT,
           error TEXT,
           started_at INTEGER NOT NULL,
@@ -753,6 +781,8 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
           ON ai_agent_runs(status, created_at ASC);
         CREATE INDEX IF NOT EXISTS idx_ai_agent_runs_profile
           ON ai_agent_runs(profile_id, started_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_agent_runs_created
+          ON ai_agent_runs(created_at DESC);
         CREATE TABLE IF NOT EXISTS ai_wake_conditions (
           id TEXT PRIMARY KEY,
           profile_id TEXT NOT NULL,
@@ -836,6 +866,8 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         );
         CREATE INDEX IF NOT EXISTS idx_ai_notification_deliveries_created
           ON ai_notification_deliveries(created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_notification_deliveries_run
+          ON ai_notification_deliveries(run_id);
         CREATE TABLE IF NOT EXISTS ai_domain_events (
           id TEXT PRIMARY KEY,
           event_type TEXT NOT NULL,
@@ -898,6 +930,14 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE ai_agent_runs ADD COLUMN skill_versions_json TEXT NOT NULL DEFAULT '{}'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_runs ADD COLUMN action_counts_json TEXT NOT NULL DEFAULT '{}'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_runs ADD COLUMN token_usage_json TEXT",
         [],
     );
     let _ = conn.execute(
@@ -965,6 +1005,18 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
     conn.execute(
         "CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_agent_runs_one_active_profile
          ON ai_agent_runs(profile_id) WHERE status IN ('queued','running')",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_agent_runs_created
+         ON ai_agent_runs(created_at DESC)",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_notification_deliveries_run
+         ON ai_notification_deliveries(run_id)",
         [],
     )
     .map_err(|err| err.to_string())?;
@@ -1059,12 +1111,13 @@ pub(crate) async fn ai_automation_section(
         };
         match section.as_str() {
             "runs" => {
-                result.runs = load_runs(&conn, 100)?;
-                result.notification_deliveries = load_notification_deliveries(&conn, 100)?;
+                result.runs = load_runs(&conn, AUTOMATION_RUN_LIST_PAGE_SIZE)?;
+                result.notification_deliveries =
+                    load_notification_deliveries(&conn, AUTOMATION_RUN_LIST_PAGE_SIZE)?;
             }
             "wake_conditions" => {
                 result.wake_conditions = load_wake_conditions(&conn, 200)?;
-                result.runs = load_runs(&conn, 100)?;
+                result.runs = load_runs(&conn, AUTOMATION_RUN_LIST_PAGE_SIZE)?;
             }
             "reviews" => {
                 result.reviews = load_reviews(&conn, 100)?;
@@ -1709,10 +1762,11 @@ pub(crate) fn set_automation_master_enabled(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_profile_save(
+pub(crate) async fn ai_agent_profile_save(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     profile: AiAgentProfileInput,
+    force_systematic_conflict: Option<bool>,
 ) -> Result<AiAgentProfileSummary, String> {
     let conn = open_automation_database(&app)?;
     ensure_skill_versions(&app, &conn)?;
@@ -1732,6 +1786,24 @@ pub(crate) fn ai_agent_profile_save(
     )?;
     profile.model = Some(selected_model.active_model_id);
     bind_profile_account_environment(&app, &mut profile)?;
+    if profile.enabled {
+        if let Some(account_id) = profile.account_id.as_deref() {
+            let account = load_local_account_secret(&app, Some(account_id))?;
+            crate::require_okx_long_short_mode(&app, &account).await?;
+        }
+    }
+    let systematic_conflicts = enabled_systematic_profile_conflicts(
+        &conn,
+        profile.account_id.as_deref(),
+        &profile.environment,
+        &profile.symbols,
+    )?;
+    if profile.enabled
+        && !systematic_conflicts.is_empty()
+        && !force_systematic_conflict.unwrap_or(false)
+    {
+        return Err(systematic_profile_conflict_message(&systematic_conflicts));
+    }
     normalize_profile_skill_version_preferences(&mut profile);
     let _ = resolve_skill_versions(
         &conn,
@@ -1838,6 +1910,24 @@ pub(crate) fn ai_agent_profile_save(
     stop_automation_sessions(&app, sessions_to_stop);
     runtime.notify.notify_one();
     load_profile(&conn, &id)
+}
+
+#[tauri::command]
+pub(crate) fn ai_agent_profile_systematic_conflicts(
+    app: tauri::AppHandle,
+    request: AiAgentProfileSystematicConflictRequest,
+) -> Result<Vec<AiAgentProfileSystematicConflict>, String> {
+    let conn = open_automation_database(&app)?;
+    let environment = match request.account_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        Some(account_id) => normalize_environment(&load_local_account_secret(&app, Some(account_id))?.environment),
+        None => normalize_environment(&request.environment),
+    };
+    enabled_systematic_profile_conflicts(
+        &conn,
+        request.account_id.as_deref(),
+        &environment,
+        &request.symbols,
+    )
 }
 
 #[tauri::command]
@@ -2113,6 +2203,7 @@ pub(crate) fn notification_feishu_config_save(
                 | "review_completed"
                 | "daily_review_completed"
                 | "suggestion_created"
+                | "strategy_signal"
         ) {
             return Err(format!("暂不支持飞书事件类型：{}", event_type));
         }
@@ -2120,7 +2211,11 @@ pub(crate) fn notification_feishu_config_save(
     set_setting(
         &conn,
         "feishu_config",
-        json!({ "enabled": config.enabled, "eventTypes": event_types }),
+        json!({
+            "enabled": config.enabled,
+            "eventTypes": event_types,
+            "eventTypesVersion": FEISHU_CONFIG_EVENT_TYPES_VERSION
+        }),
     )?;
     Ok(load_feishu_config(&conn))
 }
@@ -2725,6 +2820,59 @@ fn normalize_symbols(items: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn enabled_systematic_profile_conflicts(
+    conn: &Connection,
+    account_id: Option<&str>,
+    environment: &str,
+    symbols: &[String],
+) -> Result<Vec<AiAgentProfileSystematicConflict>, String> {
+    let Some(account_id) = account_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(Vec::new());
+    };
+    let symbols = normalize_symbols(symbols.to_vec())
+        .into_iter()
+        .collect::<HashSet<_>>();
+    if symbols.is_empty() {
+        return Ok(Vec::new());
+    }
+    let environment = normalize_environment(environment);
+    let mut statement = conn
+        .prepare(
+            "SELECT id,name,inst_id FROM systematic_profiles
+             WHERE enabled=1 AND account_id=?1 AND environment=?2
+             ORDER BY updated_at DESC,name COLLATE NOCASE ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(params![account_id, environment], |row| {
+            Ok(AiAgentProfileSystematicConflict {
+                id: row.get(0)?,
+                name: row.get(1)?,
+                inst_id: row.get(2)?,
+            })
+        })
+        .map_err(|error| error.to_string())?;
+    rows.filter_map(|row| match row {
+        Ok(conflict) if symbols.contains(&conflict.inst_id) => Some(Ok(conflict)),
+        Ok(_) => None,
+        Err(error) => Some(Err(error.to_string())),
+    })
+    .collect()
+}
+
+fn systematic_profile_conflict_message(
+    conflicts: &[AiAgentProfileSystematicConflict],
+) -> String {
+    let scopes = conflicts
+        .iter()
+        .map(|conflict| format!("{} ({})", conflict.name, conflict.inst_id))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "An enabled strategy Profile already manages the same account, environment, and contract: {scopes}. Review the conflict or explicitly confirm enabling this AI Profile."
+    )
+}
+
 fn normalize_strings(items: Vec<String>) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut result = Vec::new();
@@ -2854,61 +3002,224 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
     })
 }
 
+#[derive(Debug, Clone)]
+struct StoredRunRow {
+    id: String,
+    profile_id: String,
+    trigger_type: String,
+    status: String,
+    summary: Option<String>,
+    error: Option<String>,
+    started_at: i64,
+    finished_at: Option<i64>,
+    next_wake_at: Option<i64>,
+    action_counts_json: String,
+    token_usage_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct RunMetadata {
+    action_counts: AiAgentRunActionCounts,
+    token_usage: Option<AiUsageSummary>,
+}
+
+fn stored_run_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRunRow> {
+    Ok(StoredRunRow {
+        id: row.get(0)?,
+        profile_id: row.get(1)?,
+        trigger_type: row.get(2)?,
+        status: row.get(3)?,
+        summary: row.get(4)?,
+        error: row.get(5)?,
+        started_at: row.get(6)?,
+        finished_at: row.get(7)?,
+        next_wake_at: row.get(8)?,
+        action_counts_json: row.get(9)?,
+        token_usage_json: row.get(10)?,
+    })
+}
+
+fn cached_run_metadata(row: &StoredRunRow) -> Option<RunMetadata> {
+    if row.action_counts_json.trim().is_empty() || row.action_counts_json.trim() == "{}" {
+        return None;
+    }
+    let action_counts = serde_json::from_str(&row.action_counts_json).ok()?;
+    let token_usage = row
+        .token_usage_json
+        .as_deref()
+        .and_then(|value| serde_json::from_str(value).ok());
+    Some(RunMetadata {
+        action_counts,
+        token_usage,
+    })
+}
+
+fn run_summary_from_stored(row: StoredRunRow, metadata: RunMetadata) -> AiAgentRunSummary {
+    AiAgentRunSummary {
+        id: row.id,
+        profile_id: row.profile_id,
+        trigger_type: row.trigger_type,
+        status: row.status,
+        summary: row.summary,
+        error: row.error,
+        started_at: row.started_at,
+        finished_at: row.finished_at,
+        next_wake_at: row.next_wake_at,
+        action_counts: metadata.action_counts,
+        token_usage: metadata.token_usage,
+    }
+}
+
+fn run_ids_placeholders(ids: &[String]) -> String {
+    vec!["?"; ids.len()].join(",")
+}
+
+fn load_run_delivery_counts(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<HashMap<String, u32>, String> {
+    if run_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let placeholders = run_ids_placeholders(run_ids);
+    let query = format!(
+        "SELECT run_id,COUNT(*) FROM ai_notification_deliveries
+         WHERE run_id IN ({placeholders}) GROUP BY run_id"
+    );
+    let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(run_ids.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let counts = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?
+        .into_iter()
+        .map(|(run_id, count)| (run_id, count.max(0) as u32))
+        .collect::<HashMap<_, _>>();
+    Ok(counts)
+}
+
+fn load_missing_run_metadata(
+    conn: &Connection,
+    run_ids: &[String],
+) -> Result<HashMap<String, RunMetadata>, String> {
+    if run_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let session_to_run = run_ids
+        .iter()
+        .map(|run_id| (format!("background:{run_id}"), run_id.clone()))
+        .collect::<HashMap<_, _>>();
+    let session_ids = session_to_run.keys().cloned().collect::<Vec<_>>();
+    let placeholders = run_ids_placeholders(&session_ids);
+    let query = format!(
+        "SELECT session_id,tool_json FROM ai_messages
+         WHERE role='assistant' AND tool_json IS NOT NULL AND session_id IN ({placeholders})
+         ORDER BY session_id ASC,created_at DESC"
+    );
+    let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params_from_iter(session_ids.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|error| error.to_string())?;
+    let mut results = HashMap::new();
+    for row in rows {
+        let (session_id, tool_json) = row.map_err(|error| error.to_string())?;
+        let Some(run_id) = session_to_run.get(&session_id) else {
+            continue;
+        };
+        if results.contains_key(run_id) {
+            continue;
+        }
+        results.insert(run_id.clone(), parse_run_metadata(&tool_json));
+    }
+    Ok(results)
+}
+
+fn persist_run_metadata(
+    conn: &Connection,
+    run_id: &str,
+    metadata: &RunMetadata,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE ai_agent_runs SET action_counts_json=?2,token_usage_json=?3 WHERE id=?1",
+        params![
+            run_id,
+            to_json(&metadata.action_counts)?,
+            metadata.token_usage.as_ref().map(to_json).transpose()?,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+pub(crate) fn persist_ai_automation_run_metadata(
+    conn: &Connection,
+    run_id: &str,
+    tool_json: &str,
+    token_usage: &AiUsageSummary,
+) -> Result<(), String> {
+    let mut metadata = RunMetadata {
+        action_counts: parse_run_action_counts(tool_json),
+        token_usage: token_usage.reported.then(|| token_usage.clone()),
+    };
+    let delivery_count = load_run_delivery_counts(conn, &[run_id.to_string()])
+        .ok()
+        .and_then(|counts| counts.get(run_id).copied())
+        .unwrap_or(0);
+    metadata.action_counts.notification = metadata.action_counts.notification.max(delivery_count);
+    persist_run_metadata(conn, run_id, &metadata)
+}
+
 fn load_runs(conn: &Connection, limit: i64) -> Result<Vec<AiAgentRunSummary>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at
+            "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,
+                    action_counts_json,token_usage_json
              FROM ai_agent_runs ORDER BY created_at DESC LIMIT ?1",
         )
-        .map_err(|err| err.to_string())?;
+        .map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![limit], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, i64>(6)?,
-                row.get::<_, Option<i64>>(7)?,
-                row.get::<_, Option<i64>>(8)?,
-            ))
-        })
-        .map_err(|err| err.to_string())?;
-    let rows = rows
+        .query_map(params![limit], stored_run_row_from_row)
+        .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())?;
-    rows.into_iter()
-        .map(
-            |(
-                id,
-                profile_id,
-                trigger_type,
-                status,
-                summary,
-                error,
-                started_at,
-                finished_at,
-                next_wake_at,
-            )| {
-                let (action_counts, token_usage) = load_run_metadata(conn, &id)?;
-                Ok(AiAgentRunSummary {
-                    action_counts,
-                    token_usage,
-                    id,
-                    profile_id,
-                    trigger_type,
-                    status,
-                    summary,
-                    error,
-                    started_at,
-                    finished_at,
-                    next_wake_at,
-                })
-            },
-        )
-        .collect()
+        .map_err(|error| error.to_string())?;
+    let run_ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    let delivery_counts = load_run_delivery_counts(conn, &run_ids)?;
+    let missing_ids = rows
+        .iter()
+        .filter(|row| cached_run_metadata(row).is_none())
+        .map(|row| row.id.clone())
+        .collect::<Vec<_>>();
+    let hydrated_metadata = load_missing_run_metadata(conn, &missing_ids)?;
+    let mut cache_updates = Vec::new();
+    let runs = rows
+        .into_iter()
+        .map(|row| {
+            let cache_missing = cached_run_metadata(&row).is_none();
+            let mut metadata = cached_run_metadata(&row)
+                .or_else(|| hydrated_metadata.get(&row.id).cloned())
+                .unwrap_or(RunMetadata {
+                    action_counts: AiAgentRunActionCounts::default(),
+                    token_usage: None,
+                });
+            metadata.action_counts.notification = metadata
+                .action_counts
+                .notification
+                .max(delivery_counts.get(&row.id).copied().unwrap_or(0));
+            if cache_missing && hydrated_metadata.contains_key(&row.id) {
+                cache_updates.push((row.id.clone(), metadata.clone()));
+            }
+            run_summary_from_stored(row, metadata)
+        })
+        .collect::<Vec<_>>();
+    for (run_id, metadata) in cache_updates {
+        let _ = persist_run_metadata(conn, &run_id, &metadata);
+    }
+    Ok(runs)
 }
 
 fn load_run_statuses(conn: &Connection, ids: &[String]) -> Result<Vec<AiAgentRunStatus>, String> {
@@ -2943,43 +3254,25 @@ fn load_run_statuses(conn: &Connection, ids: &[String]) -> Result<Vec<AiAgentRun
 
 fn load_run(conn: &Connection, id: &str) -> Result<AiAgentRunSummary, String> {
     conn.query_row(
-        "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at
+        "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,
+                action_counts_json,token_usage_json
          FROM ai_agent_runs WHERE id=?1",
         params![id],
-        |row| {
-            Ok(AiAgentRunSummary {
-                id: row.get(0)?,
-                profile_id: row.get(1)?,
-                trigger_type: row.get(2)?,
-                status: row.get(3)?,
-                summary: row.get(4)?,
-                error: row.get(5)?,
-                started_at: row.get(6)?,
-                finished_at: row.get(7)?,
-                next_wake_at: row.get(8)?,
-                action_counts: AiAgentRunActionCounts {
-                    opportunity: 0,
-                    wake: 0,
-                    trade: 0,
-                    notification: 0,
-                },
-                token_usage: None,
-            })
-        },
+        stored_run_row_from_row,
     )
     .map_err(|err| err.to_string())
-    .and_then(|mut run| {
-        let (action_counts, token_usage) = load_run_metadata(conn, &run.id)?;
-        run.action_counts = action_counts;
-        run.token_usage = token_usage;
-        Ok(run)
+    .and_then(|row| {
+        let metadata = cached_run_metadata(&row)
+            .map(Ok)
+            .unwrap_or_else(|| load_run_metadata(conn, &row.id));
+        metadata.map(|metadata| run_summary_from_stored(row, metadata))
     })
 }
 
 fn load_run_metadata(
     conn: &Connection,
     run_id: &str,
-) -> Result<(AiAgentRunActionCounts, Option<AiUsageSummary>), String> {
+) -> Result<RunMetadata, String> {
     let session_id = format!("background:{run_id}");
     let tool_json = conn
         .query_row(
@@ -2992,21 +3285,19 @@ fn load_run_metadata(
         .optional()
         .map_err(|err| err.to_string())?
         .flatten();
-    let mut counts = tool_json
+    let mut metadata = tool_json
         .as_deref()
-        .map(parse_run_action_counts)
-        .unwrap_or_default();
-    let token_usage = tool_json.as_deref().and_then(parse_ai_usage_summary);
-    let delivery_count = conn
-        .query_row(
-            "SELECT COUNT(*) FROM ai_notification_deliveries WHERE run_id=?1",
-            params![run_id],
-            |row| row.get::<_, i64>(0),
-        )
-        .unwrap_or(0)
-        .max(0) as u32;
-    counts.notification = counts.notification.max(delivery_count);
-    Ok((counts, token_usage))
+        .map(parse_run_metadata)
+        .unwrap_or(RunMetadata {
+            action_counts: AiAgentRunActionCounts::default(),
+            token_usage: None,
+        });
+    let delivery_count = load_run_delivery_counts(conn, &[run_id.to_string()])
+        .ok()
+        .and_then(|counts| counts.get(run_id).copied())
+        .unwrap_or(0);
+    metadata.action_counts.notification = metadata.action_counts.notification.max(delivery_count);
+    Ok(metadata)
 }
 
 fn usage_u64(value: &Value, keys: &[&str]) -> u64 {
@@ -3137,8 +3428,15 @@ pub(crate) fn append_ai_usage_summary_event(
     summary
 }
 
-fn parse_ai_usage_summary(tool_json: &str) -> Option<AiUsageSummary> {
-    let events = serde_json::from_str::<Vec<Value>>(tool_json).ok()?;
+fn parse_run_metadata(tool_json: &str) -> RunMetadata {
+    let events = serde_json::from_str::<Vec<Value>>(tool_json).unwrap_or_default();
+    RunMetadata {
+        action_counts: parse_run_action_counts_events(&events),
+        token_usage: parse_ai_usage_summary_events(&events),
+    }
+}
+
+fn parse_ai_usage_summary_events(events: &[Value]) -> Option<AiUsageSummary> {
     if let Some(summary) = events
         .iter()
         .rev()
@@ -3147,12 +3445,21 @@ fn parse_ai_usage_summary(tool_json: &str) -> Option<AiUsageSummary> {
     {
         return Some(summary);
     }
-    let summary = build_ai_usage_summary(&events, "unknown", "unknown", "unknown", "历史记录");
+    let summary = build_ai_usage_summary(events, "unknown", "unknown", "unknown", "历史记录");
     summary.reported.then_some(summary)
+}
+
+fn parse_ai_usage_summary(tool_json: &str) -> Option<AiUsageSummary> {
+    let events = serde_json::from_str::<Vec<Value>>(tool_json).ok()?;
+    parse_ai_usage_summary_events(&events)
 }
 
 fn parse_run_action_counts(tool_json: &str) -> AiAgentRunActionCounts {
     let events = serde_json::from_str::<Vec<Value>>(tool_json).unwrap_or_default();
+    parse_run_action_counts_events(&events)
+}
+
+fn parse_run_action_counts_events(events: &[Value]) -> AiAgentRunActionCounts {
     let mut counts = AiAgentRunActionCounts::default();
     let internal_tool_call_ids = events
         .iter()
@@ -3164,7 +3471,7 @@ fn parse_run_action_counts(tool_json: &str) -> AiAgentRunActionCounts {
         .map(str::to_string)
         .collect::<HashSet<_>>();
     let mut results: HashMap<String, Value> = HashMap::new();
-    for event in &events {
+    for event in events {
         if event.get("type").and_then(Value::as_str) == Some("toolResult") {
             if let Some(tool_call_id) = event.get("toolCallId").and_then(Value::as_str) {
                 if internal_tool_call_ids.contains(tool_call_id) {
@@ -3794,12 +4101,32 @@ fn load_feishu_config(conn: &Connection) -> FeishuConfigSummary {
             .unwrap_or(false),
         configured: !webhook.trim().is_empty(),
         webhook_masked: mask_webhook(&webhook),
-        event_types: value
-            .get("eventTypes")
-            .cloned()
-            .and_then(|item| serde_json::from_value(item).ok())
-            .unwrap_or_default(),
+        event_types: normalized_feishu_event_types(&value),
     }
+}
+
+fn normalized_feishu_event_types(value: &Value) -> Vec<String> {
+    let mut event_types = value
+        .get("eventTypes")
+        .cloned()
+        .and_then(|item| serde_json::from_value::<Vec<String>>(item).ok())
+        .map(normalize_strings)
+        .unwrap_or_default();
+    // `strategy_signal` was added after the original Feishu settings shape.
+    // Treat an unversioned non-empty list as that legacy shape so existing
+    // users do not silently lose Profile signal delivery after an upgrade.
+    if value
+        .get("eventTypesVersion")
+        .and_then(Value::as_i64)
+        .is_none()
+        && !event_types.is_empty()
+        && !event_types
+            .iter()
+            .any(|event_type| event_type == FEISHU_STRATEGY_SIGNAL_EVENT)
+    {
+        event_types.push(FEISHU_STRATEGY_SIGNAL_EVENT.to_string());
+    }
+    event_types
 }
 
 fn validate_feishu_webhook(value: &str) -> Result<(), String> {
@@ -4189,16 +4516,10 @@ async fn send_feishu_delivery(
     }
     let conn = open_automation_database(&app)?;
     let config = load_feishu_config(&conn);
-    if require_enabled
+    let event_disabled = require_enabled
         && !config.event_types.is_empty()
         && event_type
-            .is_some_and(|event| !config.event_types.iter().any(|allowed| allowed == event))
-    {
-        return Err(format!(
-            "FEISHU_EVENT_DISABLED: 当前配置未允许事件类型 {}",
-            event_type.unwrap_or("unknown")
-        ));
-    }
+            .is_some_and(|event| !config.event_types.iter().any(|allowed| allowed == event));
     let delivery_id = format!("delivery-{}", unique_suffix());
     let created_at = now_ms();
     let profile_id = input
@@ -4230,6 +4551,19 @@ async fn send_feishu_delivery(
         ],
     )
     .map_err(|err| err.to_string())?;
+
+    if event_disabled {
+        return fail_delivery(
+            &app,
+            &conn,
+            &delivery_id,
+            &format!(
+                "FEISHU_EVENT_DISABLED: 当前配置未允许事件类型 {}",
+                event_type.unwrap_or("unknown")
+            ),
+            false,
+        );
+    }
 
     if require_enabled {
         if let Some(profile_id) = input
@@ -4366,6 +4700,35 @@ pub(crate) fn spawn_chart_alert_feishu(
         )
         .await;
     });
+}
+
+pub(crate) fn spawn_systematic_profile_signal_feishu(
+    app: &tauri::AppHandle,
+    profile_name: &str,
+    inst_id: &str,
+    action: &str,
+    quantity: f64,
+    reason: &str,
+    status: &str,
+    profile_id: &str,
+) {
+    let level = if status == "submitted" { "success" } else { "warning" };
+    spawn_feishu_notification(
+        app,
+        FeishuSendInput {
+            title: format!("策略信号 {}: {}", status, profile_name),
+            content: format!(
+                "**合约**：`{inst_id}`\n\n**动作**：`{action}`\n\n**数量**：`{quantity}` 张\n\n**原因**：{}",
+                reason.chars().take(1_000).collect::<String>(),
+            ),
+            level: level.to_string(),
+            related_type: Some("systematic_profile_signal".to_string()),
+            related_id: Some(profile_id.to_string()),
+            agent_profile_id: None,
+            agent_run_id: None,
+        },
+        "strategy_signal",
+    );
 }
 
 fn feishu_transport_error(error: &reqwest::Error) -> &'static str {
@@ -6876,36 +7239,37 @@ async fn execute_profile_run(
             )
         }
     };
-    let (analysis_owner, confirmed_by, rerun_workflow) =
-        if profile.multi_agent_mode == desic_agent_automation::MULTI_AGENT_OFF_MODE {
-            if chinese_prompt {
-                (
-                    "由主 Agent 独立完成证据分析并决定是否形成交易候选",
-                    "本轮主 Agent 分析",
-                    "重新运行当前 Profile",
-                )
-            } else {
-                (
+    let (analysis_owner, confirmed_by, rerun_workflow) = if profile.multi_agent_mode
+        == desic_agent_automation::MULTI_AGENT_OFF_MODE
+    {
+        if chinese_prompt {
+            (
+                "由主 Agent 独立完成证据分析并决定是否形成交易候选",
+                "本轮主 Agent 分析",
+                "重新运行当前 Profile",
+            )
+        } else {
+            (
                     "the main Agent independently analyzes the evidence and decides whether to form a trade candidate",
                     "this run's main-Agent analysis",
                     "rerunning the current Profile",
                 )
-            }
+        }
+    } else {
+        if chinese_prompt {
+            (
+                "由专家 Agent 完成证据分析，主 Agent 比较证据并决定是否形成交易候选",
+                "本轮多 Agent 讨论",
+                "重新运行多 Agent",
+            )
         } else {
-            if chinese_prompt {
-                (
-                    "由专家 Agent 完成证据分析，主 Agent 比较证据并决定是否形成交易候选",
-                    "本轮多 Agent 讨论",
-                    "重新运行多 Agent",
-                )
-            } else {
-                (
+            (
                     "expert Agents analyze evidence and the main Agent compares it before deciding whether to form a trade candidate",
                     "this run's Multi-Agent review",
                     "rerunning the Multi-Agent workflow",
                 )
-            }
-        };
+        }
+    };
     let decision_workflow_instruction = if chinese_prompt {
         format!(
             "请先使用工具读取本地情报、行情、账户、挂单和必要历史，{}。涉及开仓方案时，Agent 可以在 Profile 单笔保证金上限内自行选择张数，但必须使用目标杠杆调用 trade.precheck，以 perpetualEvaluation、maxSingleTradeSize 和 normalizedSize 为准；超过上限的方案会被后端阻断。若 leverageInfo 与目标不一致且目标不超过合约/档位上限，copilot 或 limited_auto 主 Agent 应调用 trade.setLeverage 同步，再次调用 trade.precheck 确认通过。trade.setLeverage 是唯一允许主 Agent 直接调用的交易设置工具；下单、撤单、改单和平仓仍必须通过交易机会链路。当前价格未到计划入场价并不妨碍提前挂单：经{}确认的回调做多或反弹做空使用 limit，突破做多或跌破做空使用 trigger；limited_auto 可立即提交为等待成交或触发的 OKX 订单。只有仍依赖未来闭合 K 线、OI、主动流等复合证据时才等待唤醒后{}。只有形成字段完整、准备通过 tradeOpportunity.create 提交的可执行候选时，主 Agent 才使用完整候选参数调用 market.readDecisionContext，独立取得当场行情、账户、杠杆、挂单、预检和本轮起止差异。若结论是 wait 或 abandon 且本轮没有新交易候选，不调用 market.readDecisionContext，直接通过 background.finishRun 结束；不得使用 size=0、缺失 price 或其它占位参数伪造候选。open/close 的 size 必须大于 0，limit/trigger 必须提供 price。revise 后必须用修改后的完整参数重新复核；上下文 60 秒内未用于机会操作就必须重新读取。确认最后一次复核通过后，调用 tradeOpportunity.create 提交系统已经冻结的候选；不要再次抄写候选字段，也不要提交或生成 decisionContextId。limited_auto 模式由后端按 Profile 权限自动批准并执行。",
@@ -7011,7 +7375,11 @@ async fn execute_profile_run(
             &session_id,
             &format!(
                 "{} · {}",
-                if chinese_prompt { "后台 Agent" } else { "Background Agent" },
+                if chinese_prompt {
+                    "后台 Agent"
+                } else {
+                    "Background Agent"
+                },
                 profile.name
             ),
             "running",
@@ -8160,6 +8528,65 @@ mod tests {
     }
 
     #[test]
+    fn run_list_hydrates_legacy_metadata_once_and_then_uses_cached_summary() {
+        let conn = Connection::open_in_memory().expect("open run list database");
+        conn.execute_batch(
+            "CREATE TABLE ai_agent_runs(
+               id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,trigger_type TEXT NOT NULL,status TEXT NOT NULL,
+               summary TEXT,error TEXT,started_at INTEGER NOT NULL,finished_at INTEGER,next_wake_at INTEGER,
+               created_at INTEGER NOT NULL,action_counts_json TEXT NOT NULL DEFAULT '{}',token_usage_json TEXT
+             );
+             CREATE TABLE ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,status TEXT,created_at INTEGER NOT NULL
+             );
+             CREATE TABLE ai_notification_deliveries(id TEXT PRIMARY KEY,run_id TEXT);",
+        )
+        .expect("create run list schema");
+        let mut events = vec![
+            json!({
+                "type": "toolCall",
+                "toolCallId": "opportunity-1",
+                "name": "tradeOpportunity.create"
+            }),
+            json!({
+                "type": "toolResult",
+                "toolCallId": "opportunity-1",
+                "ok": true
+            }),
+            json!({
+                "type": "usage",
+                "usage": { "inputTokens": 12, "outputTokens": 3 }
+            }),
+        ];
+        append_ai_usage_summary_event(&mut events, "test", "model", "model", "Model");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(
+               id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,created_at
+             ) VALUES('run-1','profile-1','manual','completed',NULL,NULL,10,11,NULL,11)",
+            [],
+        )
+        .expect("insert run");
+        conn.execute(
+            "INSERT INTO ai_messages(id,session_id,role,content,tool_json,created_at)
+             VALUES('message-1','background:run-1','assistant','done',?1,11)",
+            [serde_json::to_string(&events).expect("serialize tool history")],
+        )
+        .expect("insert tool history");
+
+        let first = load_runs(&conn, 50).expect("hydrate legacy run summary");
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].action_counts.opportunity, 1);
+        assert_eq!(first[0].token_usage.as_ref().map(|usage| usage.usage.total_tokens), Some(15));
+
+        conn.execute("DELETE FROM ai_messages", [])
+            .expect("remove raw history after cache write");
+        let second = load_runs(&conn, 50).expect("read cached run summary");
+        assert_eq!(second[0].action_counts.opportunity, 1);
+        assert_eq!(second[0].token_usage.as_ref().map(|usage| usage.usage.total_tokens), Some(15));
+    }
+
+    #[test]
     fn usage_summary_adds_main_and_each_sub_agent_once() {
         let mut events = vec![
             json!({
@@ -8427,6 +8854,46 @@ mod tests {
             params![id, profile_id, snapshot],
         )
         .expect("insert test run");
+    }
+
+    #[test]
+    fn enabled_systematic_profile_conflicts_match_account_environment_and_symbol() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE systematic_profiles (
+               id TEXT PRIMARY KEY,
+               name TEXT NOT NULL,
+               inst_id TEXT NOT NULL,
+               account_id TEXT NOT NULL,
+               environment TEXT NOT NULL,
+               enabled INTEGER NOT NULL,
+               updated_at INTEGER NOT NULL
+             );
+             INSERT INTO systematic_profiles VALUES
+               ('strategy-btc','BTC strategy','BTC-USDT-SWAP','account-1','live',1,30),
+               ('strategy-eth','ETH strategy','ETH-USDT-SWAP','account-1','live',1,20),
+               ('strategy-demo','Demo BTC strategy','BTC-USDT-SWAP','account-1','demo',1,10),
+               ('strategy-off','Stopped BTC strategy','BTC-USDT-SWAP','account-1','live',0,40),
+               ('strategy-other-account','Other account BTC strategy','BTC-USDT-SWAP','account-2','live',1,50);",
+        )
+        .expect("create systematic profile fixture");
+
+        let conflicts = enabled_systematic_profile_conflicts(
+            &conn,
+            Some("account-1"),
+            "live",
+            &["BTC-USDT-SWAP".to_string(), "SOL-USDT-SWAP".to_string()],
+        )
+        .expect("load conflicts");
+
+        assert_eq!(
+            conflicts,
+            vec![AiAgentProfileSystematicConflict {
+                id: "strategy-btc".to_string(),
+                name: "BTC strategy".to_string(),
+                inst_id: "BTC-USDT-SWAP".to_string(),
+            }]
+        );
     }
 
     #[test]
@@ -8895,6 +9362,24 @@ mod tests {
         let sanitized = sanitize_feishu_error(&format!("request to {webhook} failed"), webhook);
         assert!(!sanitized.contains("test-token"));
         assert!(sanitized.contains("[redacted-webhook]"));
+    }
+
+    #[test]
+    fn legacy_feishu_event_settings_enable_new_strategy_signal_event() {
+        let legacy = json!({
+            "enabled": true,
+            "eventTypes": ["agent_message", "run_completed"]
+        });
+        let normalized = normalized_feishu_event_types(&legacy);
+        assert!(normalized.iter().any(|value| value == "strategy_signal"));
+
+        let explicitly_saved = json!({
+            "enabled": true,
+            "eventTypes": ["agent_message", "run_completed"],
+            "eventTypesVersion": FEISHU_CONFIG_EVENT_TYPES_VERSION
+        });
+        let normalized_saved = normalized_feishu_event_types(&explicitly_saved);
+        assert!(!normalized_saved.iter().any(|value| value == "strategy_signal"));
     }
 
     #[test]

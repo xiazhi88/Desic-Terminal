@@ -180,6 +180,31 @@ expectPolicy(
   "market.readTicker",
   disabled
 );
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  "strategy.readCurrentSource",
+  enabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  "strategy.testCurrentSource",
+  enabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  "strategy.applySource",
+  enabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource"] },
+  "strategy.readCurrentSource",
+  disabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource"] },
+  "strategy.testCurrentSource",
+  disabled
+);
 
 const providerOpportunity = toProviderToolName("tradeOpportunity.create");
 expectPolicy({ permissionMode: "copilot", agentRole: "main" }, providerOpportunity, enabled);

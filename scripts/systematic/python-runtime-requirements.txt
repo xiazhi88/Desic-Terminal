@@ -1,0 +1,15 @@
+# Desic local Python research runtime.
+#
+# These are the only third-party import roots allowed by the strategy source
+# policy. The complete resolved set is pinned so a recreated environment does
+# not silently pick newer transitive dependencies on another machine.
+joblib==1.5.3
+numpy==2.2.6
+pandas==2.2.3
+python-dateutil==2.9.0.post0
+pytz==2026.3.post1
+scikit-learn==1.6.1
+scipy==1.18.0
+six==1.17.0
+threadpoolctl==3.6.0
+tzdata==2026.3
