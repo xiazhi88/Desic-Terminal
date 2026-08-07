@@ -22,7 +22,7 @@ config/*.password
 cache/
 logs/
 diagnostics/
-systematic-python/
+/systematic-python/
 outputs/
 output/
 artifacts/
