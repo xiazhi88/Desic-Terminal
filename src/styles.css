@@ -1102,6 +1102,38 @@ button {
   }
 }
 
+@media (max-width: 1100px) {
+  .content-grid.compact-layout {
+    --chart-depth-default: 152px;
+    --chart-depth-min: 152px;
+    --watchlist-min: 0px;
+    --watchlist-max: 0px;
+    grid-template-columns:
+      minmax(0, 0px)
+      minmax(0, 1fr)
+      minmax(152px, 152px)
+      minmax(198px, 198px);
+  }
+
+  .content-grid.compact-layout .watchlist:not(.collapsed) {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 26;
+    width: min(280px, calc(100% - 374px));
+    min-width: 232px;
+    box-shadow: 16px 0 30px rgba(0, 0, 0, 0.5);
+  }
+
+  .content-grid.compact-layout .watchlist.collapsed {
+    width: auto;
+    min-width: 0;
+  }
+
+  .content-grid.compact-layout .center-panel { grid-column: 2; }
+  .content-grid.compact-layout .market-depth { grid-column: 3; }
+  .content-grid.compact-layout .ticket { grid-column: 4; }
+}
+
 .content-grid.watchlist-collapsed {
   --watchlist-min: 0px;
   --watchlist-max: 0px;

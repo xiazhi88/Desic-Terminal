@@ -188,6 +188,7 @@ import {
   saveWatchlistConfig,
   saveProxyConfig,
   setOkxLeverage,
+  probeOkxStartupNetwork,
   syncMarketAssets,
   syncKlineIntegrity,
   syncPrivateHistory,
@@ -341,6 +342,7 @@ const KLINE_REQUIRED_DAYS: Record<string, number> = {
   "1m": 365
 };
 const KLINE_STARTUP_RECENT_CHECK_HOURS = 24 * 30;
+const COMPACT_TERMINAL_MEDIA_QUERY = "(max-width: 1100px)";
 const KLINE_RECENT_CHECK_HOURS = 2;
 const PRIVATE_WS_DELAY_WARNING_MS = 10_000;
 const EMPTY_PREVIEW_ACCOUNTS: AccountSummary[] = [];
@@ -622,7 +624,9 @@ export function App() {
     );
   }
 
-  if (windowLabel === null) return null;
+  if (windowLabel === null) {
+    return <main className="startup-boot-screen" aria-label={t("common:startupAria")}><span>Desic Terminal</span><i /></main>;
+  }
   const isChartWindow =
     windowLabel.startsWith("chart-");
   if (isChartWindow) {
@@ -661,11 +665,11 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
     setChecks(createInitialChecks(t));
 
     try {
-      updateCheck("network", { status: "running", detail: t("common:startupRequestingOkxTime") });
+      updateCheck("network", { status: "running", detail: t("common:startupCheckingOkxConnectivity") });
       if (previewFailure === "okx-network") {
         throw new Error(t("common:startupOkxUnavailable"));
       }
-      const synced = await syncOkxTime();
+      const synced = await probeOkxStartupNetwork();
       setTimeState(synced);
       updateCheck("network", { status: "running", detail: t("common:startupConnectingPublicWs") });
       const [wsProbe, businessProbe, ticker] = await Promise.all([
@@ -1394,6 +1398,8 @@ function TradingTerminal({
   const [ticketPriceFill, setTicketPriceFill] = useState<{ symbol: string; price: string; nonce: number } | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>(() => loadWatchlist());
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(() => loadWatchlistCollapsed());
+  const [compactTerminalLayout, setCompactTerminalLayout] = useState(() => window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY).matches);
+  const [compactWatchlistOpen, setCompactWatchlistOpen] = useState(false);
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(initialMarketAssets);
   const [draggedSymbol, setDraggedSymbol] = useState<string | null>(null);
   const [symbolSearch, setSymbolSearch] = useState("");
@@ -1456,6 +1462,20 @@ function TradingTerminal({
   const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
   const [newsUnreadCount, setNewsUnreadCount] = useState(0);
   const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY);
+    const updateCompactTerminalLayout = () => setCompactTerminalLayout(media.matches);
+    updateCompactTerminalLayout();
+    media.addEventListener("change", updateCompactTerminalLayout);
+    return () => media.removeEventListener("change", updateCompactTerminalLayout);
+  }, []);
+
+  useEffect(() => {
+    if (!compactTerminalLayout) setCompactWatchlistOpen(false);
+  }, [compactTerminalLayout]);
+
+  const effectiveWatchlistCollapsed = compactTerminalLayout ? !compactWatchlistOpen : watchlistCollapsed;
 
   useEffect(() => {
     const idleWindow = window as Window & {
@@ -2422,12 +2442,11 @@ function TradingTerminal({
           .catch((error) => logger.error("failed to refresh candles after integrity sync", error, { symbol, bar }));
       }
     }).then((unlisten) => listenerCleanup.settle(unlisten));
-    void syncKlineIntegrity(streamWatchlist, KLINE_INTEGRITY_INTERVALS, false, undefined, KLINE_REQUIRED_DAYS);
     return () => {
       mounted = false;
       listenerCleanup.dispose();
     };
-  }, [bar, notifyKlineSyncIssue, symbol, streamWatchlist]);
+  }, [bar, notifyKlineSyncIssue, symbol]);
 
   useEffect(() => {
     if (watchlist.length === 0) return;
@@ -3649,8 +3668,12 @@ function TradingTerminal({
   }, []);
   const toggleWatchlist = useCallback(() => {
     setSymbolPickerOpen(false);
+    if (compactTerminalLayout) {
+      setCompactWatchlistOpen((open) => !open);
+      return;
+    }
     setWatchlistCollapsed((current) => persistWatchlistCollapsed(!current));
-  }, []);
+  }, [compactTerminalLayout]);
   const handleWindowAction = useCallback(async (action: "minimize" | "maximize" | "close") => {
     const handled = await invokeOptional<boolean>("window_action", { action });
     if (handled !== null) {
@@ -4070,22 +4093,22 @@ function TradingTerminal({
             onAiValidated={() => firstLaunchOnboarding.completeStep("ai")}
           />
         ) : (
-        <div className={clsx("content-grid", watchlistCollapsed && "watchlist-collapsed")} ref={contentGridRef}>
-          <aside className={clsx("watchlist", watchlistCollapsed && "collapsed")}>
+        <div className={clsx("content-grid", effectiveWatchlistCollapsed && "watchlist-collapsed", compactTerminalLayout && "compact-layout")} ref={contentGridRef}>
+          <aside className={clsx("watchlist", effectiveWatchlistCollapsed && "collapsed")}>
             <div className="watch-title">
-              {!watchlistCollapsed && <span>{t("trading:watchlist")}</span>}
+              {!effectiveWatchlistCollapsed && <span>{t("trading:watchlist")}</span>}
               <button
                 type="button"
                 className="watchlist-toggle"
                 onClick={toggleWatchlist}
-                title={watchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-label={watchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-expanded={!watchlistCollapsed}
+                title={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
+                aria-label={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
+                aria-expanded={!effectiveWatchlistCollapsed}
               >
-                {watchlistCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={15} />}
+                {effectiveWatchlistCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={15} />}
               </button>
             </div>
-            {!watchlistCollapsed && <>
+            {!effectiveWatchlistCollapsed && <>
             <div className="watch-search" ref={watchSearchRef}>
               <div className={clsx("search-box", symbolPickerOpen && "active")}>
                 <Search size={16} />
@@ -4175,7 +4198,10 @@ function TradingTerminal({
                     <button className="drag-symbol" title={uiText("拖拽排序", "Drag to reorder")} aria-label={uiText(`拖拽排序 ${item}`, `Drag to reorder ${item}`)}>
                       <GripVertical size={14} />
                     </button>
-                    <button className="symbol-row" onClick={() => setSymbol(item)}>
+                    <button className="symbol-row" onClick={() => {
+                      setSymbol(item);
+                      if (compactTerminalLayout) setCompactWatchlistOpen(false);
+                    }}>
                       <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssetCacheDir} />
                       <span className="symbol-main">
                         <span className="symbol-name">{base}</span>
@@ -4653,8 +4679,9 @@ function StartupOrbitalCanvas() {
     const activeCanvas = canvas;
     const activeCtx = ctx;
 
-    const nodes = Array.from({ length: 72 }, (_, i) => ({
-      angle: (Math.PI * 2 * i) / 72,
+    const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const nodes = Array.from({ length: 48 }, (_, i) => ({
+      angle: (Math.PI * 2 * i) / 48,
       lane: i % 5,
       size: 1.6 + Math.random() * 2.4,
       speed: 0.002 + Math.random() * 0.003,
@@ -4669,15 +4696,10 @@ function StartupOrbitalCanvas() {
       activeCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
     }
 
-    const frameDelayMs = 1_000 / 30;
     let raf = 0;
-    let timer = 0;
-    function scheduleNextFrame() {
-      timer = window.setTimeout(() => {
-        raf = window.requestAnimationFrame(draw);
-      }, frameDelayMs);
-    }
+    let visible = document.visibilityState === "visible";
     function draw(t: number) {
+      if (!visible) return;
       const w = activeCanvas.clientWidth;
       const h = activeCanvas.clientHeight;
       const cx = w * 0.5;
@@ -4696,7 +4718,7 @@ function StartupOrbitalCanvas() {
       activeCtx.arc(0, 0, 300, 0, Math.PI * 2);
       activeCtx.fill();
 
-      for (let ring = 0; ring < 7; ring += 1) {
+      for (let ring = 0; ring < 5; ring += 1) {
         const rx = 112 + ring * 35;
         const ry = 42 + ring * 16;
         activeCtx.save();
@@ -4734,7 +4756,7 @@ function StartupOrbitalCanvas() {
         const y = Math.sin(a) * radius * (0.42 + z * 0.18);
         const alpha = 0.24 + z * 0.72;
         activeCtx.fillStyle = i % 4 === 0 ? `rgba(84,240,255,${alpha})` : `rgba(183,146,255,${alpha})`;
-        activeCtx.shadowBlur = 18;
+        activeCtx.shadowBlur = 12;
         activeCtx.shadowColor = i % 4 === 0 ? "#54f0ff" : "#b792ff";
         activeCtx.beginPath();
         activeCtx.arc(x, y, node.size + z * 2.4, 0, Math.PI * 2);
@@ -4768,15 +4790,22 @@ function StartupOrbitalCanvas() {
       activeCtx.textBaseline = "middle";
       activeCtx.fillText("DT", 0, 2);
       activeCtx.restore();
-      scheduleNextFrame();
+      if (!prefersReducedMotion.matches) {
+        raf = window.requestAnimationFrame(draw);
+      }
     }
 
     resizeCanvas();
+    const onVisibilityChange = () => {
+      visible = document.visibilityState === "visible";
+      if (visible && !prefersReducedMotion.matches) raf = window.requestAnimationFrame(draw);
+    };
     window.addEventListener("resize", resizeCanvas);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     raf = window.requestAnimationFrame(draw);
     return () => {
       window.removeEventListener("resize", resizeCanvas);
-      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       window.cancelAnimationFrame(raf);
     };
   }, []);
