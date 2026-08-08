@@ -6,6 +6,8 @@ use crate::chart_consumers::{
 use std::collections::BTreeSet;
 
 const OKX_KLINE_BARS: &[&str] = &["1m"];
+const LIVE_CANDLE_BATCH_MAX_ROWS: usize = 500;
+const LIVE_CANDLE_BATCH_DELAY_MS: u64 = 250;
 const MIN_RENDER_ORDERBOOK_LEVELS: usize = 24;
 const PUBLIC_SHARD_SIZE: usize = 5;
 const WS_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -20,6 +22,101 @@ const PUBLIC_META_BOOK_FRESH_MS: i64 = 5_000;
 const BUSINESS_DATA_STALE_AFTER: Duration = Duration::from_secs(20);
 const WS_DATA_RECOVERY_GRACE: Duration = Duration::from_secs(10);
 const CANCELLED_PENDING_ORDER_TOMBSTONE_TTL_MS: i64 = 120_000;
+
+#[derive(Clone)]
+struct LiveCandleWrite {
+    symbol: String,
+    interval: String,
+    candle: RawCandle,
+}
+
+struct LiveCandleWriteQueue {
+    sender: mpsc::UnboundedSender<LiveCandleWrite>,
+}
+
+static LIVE_CANDLE_WRITE_QUEUE: OnceLock<LiveCandleWriteQueue> = OnceLock::new();
+
+impl LiveCandleWriteQueue {
+    fn start(app: tauri::AppHandle) -> Self {
+        let (sender, mut receiver) = mpsc::unbounded_channel::<LiveCandleWrite>();
+        tauri::async_runtime::spawn(async move {
+            while let Some(first) = receiver.recv().await {
+                let mut pending = HashMap::<(String, String, i64), RawCandle>::new();
+                insert_live_candle_write(&mut pending, first);
+                let deadline = sleep(Duration::from_millis(LIVE_CANDLE_BATCH_DELAY_MS));
+                tokio::pin!(deadline);
+                while pending.len() < LIVE_CANDLE_BATCH_MAX_ROWS {
+                    tokio::select! {
+                        item = receiver.recv() => {
+                            match item {
+                                Some(item) => insert_live_candle_write(&mut pending, item),
+                                None => break,
+                            }
+                        }
+                        _ = &mut deadline => break,
+                    }
+                }
+                if pending.is_empty() {
+                    continue;
+                }
+
+                let mut grouped = HashMap::<(String, String), Vec<RawCandle>>::new();
+                for ((symbol, interval, _), candle) in pending {
+                    grouped.entry((symbol, interval)).or_default().push(candle);
+                }
+                let batch_app = app.clone();
+                let result = tauri::async_runtime::spawn_blocking(move || {
+                    let mut conn = open_database(&batch_app)?;
+                    let mut inserted = 0usize;
+                    for ((symbol, interval), mut candles) in grouped {
+                        candles.sort_by_key(|candle| candle.open_time_ms);
+                        inserted += upsert_raw_candles(
+                            &mut conn,
+                            &symbol,
+                            &interval,
+                            &candles,
+                            "websocket",
+                        )?;
+                    }
+                    Ok::<usize, String>(inserted)
+                })
+                .await;
+                match result {
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => eprintln!("live candle batch write failed: {error}"),
+                    Err(error) => eprintln!("live candle batch task failed: {error}"),
+                }
+            }
+        });
+        Self { sender }
+    }
+
+    fn enqueue(&self, item: LiveCandleWrite) {
+        let _ = self.sender.send(item);
+    }
+}
+
+fn insert_live_candle_write(
+    pending: &mut HashMap<(String, String, i64), RawCandle>,
+    item: LiveCandleWrite,
+) {
+    let key = (item.symbol, item.interval, item.candle.open_time_ms);
+    pending.insert(key, item.candle);
+}
+
+fn enqueue_live_candle_write(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    candle: RawCandle,
+) {
+    let queue = LIVE_CANDLE_WRITE_QUEUE.get_or_init(|| LiveCandleWriteQueue::start(app.clone()));
+    queue.enqueue(LiveCandleWrite {
+        symbol: symbol.to_string(),
+        interval: interval.to_string(),
+        candle,
+    });
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PublicStreamKind {
@@ -2465,9 +2562,7 @@ fn handle_business_message(app: &tauri::AppHandle, runtime: &MarketRuntime, text
         .map(|item| item.as_str().unwrap_or_default().to_string())
         .collect::<Vec<_>>();
     if let Some(raw_candle) = normalize_raw_candle(&row) {
-        if let Ok(mut conn) = open_database(app) {
-            let _ = upsert_raw_candles(&mut conn, inst_id, bar, &[raw_candle.clone()], "websocket");
-        }
+        enqueue_live_candle_write(app, inst_id, bar, raw_candle);
     }
     if let Some(candle) = normalize_candle(&row) {
         cache_candle(runtime, inst_id, bar, &candle);

@@ -1561,8 +1561,32 @@ function TradingTerminal({
   const privateOrderEventRef = useRef(new BoundedEventCache());
   const terminalRenderCountRef = useRef(0);
   const marketEventCountersRef = useRef<Record<string, number>>({});
+  const marketCandleRequestRef = useRef<{
+    key: string;
+    promise: Promise<Candle[]>;
+    queued: boolean;
+  } | null>(null);
   const watchSearchRef = useRef<HTMLDivElement | null>(null);
   terminalRenderCountRef.current += 1;
+  const requestMarketCandles = useCallback((nextBar: string) => {
+    const key = `${symbol}\u0000${nextBar}`;
+    const existing = marketCandleRequestRef.current;
+    if (existing?.key === key) {
+      existing.queued = true;
+      return { promise: existing.promise, started: false };
+    }
+    const promise = fetchCandles(symbol, nextBar, 300);
+    marketCandleRequestRef.current = { key, promise, queued: false };
+    const clearRequest = () => {
+      const current = marketCandleRequestRef.current;
+      if (current?.promise !== promise) return;
+      const queued = current.queued;
+      marketCandleRequestRef.current = null;
+      if (queued) derivedCandleRefreshRef.current = 0;
+    };
+    void promise.then(clearRequest, clearRequest);
+    return { promise, started: true };
+  }, [symbol]);
   useRendererMemoryMonitor("terminal", () => {
     const hot = getMarketHotState();
     return {
@@ -2297,9 +2321,11 @@ function TradingTerminal({
     }
     if (previewAccounts.length > 0) return;
     let cancelled = false;
+    derivedCandleRefreshRef.current = 0;
     replaceMarketCandles([]);
     setMarketCandleLoadError(null);
-    void fetchCandles(symbol, bar, 300)
+    const request = requestMarketCandles(bar);
+    void request.promise
       .then((items) => {
         if (cancelled) return;
         if (items.length === 0) {
@@ -2321,11 +2347,12 @@ function TradingTerminal({
     return () => {
       cancelled = true;
     };
-  }, [symbol, bar, proxyRevision, previewAccounts.length, marketCandleReloadToken]);
+  }, [symbol, bar, proxyRevision, previewAccounts.length, marketCandleReloadToken, requestMarketCandles]);
 
   useEffect(() => {
     hydrateMarketHotState({ publicStreamStatuses: {} });
     if (previewMarketConsistency) return;
+    let streamActive = true;
     const close = connectMarketStream(symbol, bar, {
       onTicker: (item) => {
         countRendererEvent(marketEventCountersRef, "ticker");
@@ -2359,12 +2386,20 @@ function TradingTerminal({
           queueCandle(candle);
           return;
         }
+        const requestKey = `${symbol}\u0000${activeBar}`;
+        const pendingRequest = marketCandleRequestRef.current;
+        if (pendingRequest?.key === requestKey) {
+          pendingRequest.queued = true;
+          return;
+        }
         const now = Date.now();
         if (now - derivedCandleRefreshRef.current < 2000) return;
         derivedCandleRefreshRef.current = now;
-        void fetchCandles(symbol, activeBar, 300)
+        const request = requestMarketCandles(activeBar);
+        if (!request.started) return;
+        void request.promise
           .then((items) => {
-            if (items.length > 0) {
+            if (streamActive && barRef.current === activeBar && items.length > 0) {
               mergeIntoMarketCandles(items);
               setMarketCandleLoadError(null);
             }
@@ -2416,8 +2451,11 @@ function TradingTerminal({
       },
       onPrivateStatus: (event) => privateWsStatusHandlerRef.current(event)
     }, streamWatchlist);
-    return close;
-  }, [symbol, streamWatchlist, proxyRevision, pushNotification, previewMarketConsistency]);
+    return () => {
+      streamActive = false;
+      close();
+    };
+  }, [symbol, streamWatchlist, proxyRevision, pushNotification, previewMarketConsistency, requestMarketCandles]);
 
   useEffect(() => {
     if (previewAccounts.length > 0) return;
@@ -2432,7 +2470,8 @@ function TradingTerminal({
       setKlineSync((items) => ({ ...items, [`${report.symbol}:${report.interval}`]: report }));
       notifyKlineSyncIssue(report);
       if (report.symbol === symbol && report.interval === "1m" && report.status === "complete" && report.missing === 0 && report.invalid === 0) {
-        void fetchCandles(symbol, bar, 300)
+        const request = requestMarketCandles(bar);
+        void request.promise
           .then((items) => {
             if (mounted && items.length > 0) {
               mergeIntoMarketCandles(items);
@@ -2446,7 +2485,7 @@ function TradingTerminal({
       mounted = false;
       listenerCleanup.dispose();
     };
-  }, [bar, notifyKlineSyncIssue, symbol]);
+  }, [bar, notifyKlineSyncIssue, requestMarketCandles, symbol]);
 
   useEffect(() => {
     if (watchlist.length === 0) return;
