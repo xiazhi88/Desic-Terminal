@@ -1550,6 +1550,7 @@ function TradingTerminal({
   const [proxyRevision, setProxyRevision] = useState(0);
   const klineNotificationCooldownRef = useRef<Record<string, number>>({});
   const derivedCandleRefreshRef = useRef(0);
+  const marketCandleRequestSequenceRef = useRef(0);
   const historyLoadingRef = useRef(false);
   const historyExhaustedRef = useRef(new Set<string>());
   const privateHistorySyncRef = useRef<Record<string, number>>({});
@@ -1575,7 +1576,32 @@ function TradingTerminal({
       existing.queued = true;
       return { promise: existing.promise, started: false };
     }
-    const promise = fetchCandles(symbol, nextBar, 300);
+    const requestId = `chart-${Date.now()}-${++marketCandleRequestSequenceRef.current}`;
+    const startedAt = performance.now();
+    logger.info("chart candle request started", { requestId, symbol, bar: nextBar, limit: 300 });
+    const promise = fetchCandles(symbol, nextBar, 300)
+      .then((candles) => {
+        logger.info("chart candle request completed", {
+          requestId,
+          symbol,
+          bar: nextBar,
+          limit: 300,
+          rows: candles.length,
+          elapsedMs: Math.round(performance.now() - startedAt),
+          emptyWithoutError: candles.length === 0
+        });
+        return candles;
+      })
+      .catch((error) => {
+        logger.error("chart candle request failed", error, {
+          requestId,
+          symbol,
+          bar: nextBar,
+          limit: 300,
+          elapsedMs: Math.round(performance.now() - startedAt)
+        });
+        throw error;
+      });
     marketCandleRequestRef.current = { key, promise, queued: false };
     const clearRequest = () => {
       const current = marketCandleRequestRef.current;
@@ -2469,8 +2495,14 @@ function TradingTerminal({
       if (!mounted) return;
       setKlineSync((items) => ({ ...items, [`${report.symbol}:${report.interval}`]: report }));
       notifyKlineSyncIssue(report);
-      if (report.symbol === symbol && report.interval === "1m" && report.status === "complete" && report.missing === 0 && report.invalid === 0) {
-        const request = requestMarketCandles(bar);
+      const activeBar = barRef.current;
+      const hasNewOneMinuteData = report.inserted > 0;
+      const completedCleanly = report.status === "complete" && report.missing === 0 && report.invalid === 0;
+      if (report.symbol === symbol && report.interval === "1m" && activeBar !== "1m" && (hasNewOneMinuteData || completedCleanly)) {
+        const now = Date.now();
+        if (now - derivedCandleRefreshRef.current < 750) return;
+        derivedCandleRefreshRef.current = now;
+        const request = requestMarketCandles(activeBar);
         void request.promise
           .then((items) => {
             if (mounted && items.length > 0) {
@@ -2478,7 +2510,7 @@ function TradingTerminal({
               setMarketCandleLoadError(null);
             }
           })
-          .catch((error) => logger.error("failed to refresh candles after integrity sync", error, { symbol, bar }));
+          .catch((error) => logger.error("failed to refresh candles after integrity sync", error, { symbol, bar: activeBar, inserted: report.inserted, status: report.status }));
       }
     }).then((unlisten) => listenerCleanup.settle(unlisten));
     return () => {

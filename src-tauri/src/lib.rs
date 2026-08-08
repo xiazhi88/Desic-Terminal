@@ -27,7 +27,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     process::Command,
-    sync::{mpsc, oneshot, Mutex as AsyncMutex, RwLock as AsyncRwLock, Semaphore, SemaphorePermit},
+    sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore, SemaphorePermit},
     time::{sleep, timeout, Duration},
 };
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
@@ -365,6 +365,9 @@ pub(crate) static TRADE_MUTATION_LOCK: AsyncMutex<()> = AsyncMutex::const_new(()
 static ACCOUNT_CONFIG_MUTATION_LOCK: AsyncMutex<()> = AsyncMutex::const_new(());
 static ACCOUNT_MUTATION_LEASE_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 static TRADE_PLAN_EVALUATION_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static LOCAL_CANDLE_REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static LOCAL_CANDLE_READ_FLIGHTS: OnceLock<Mutex<HashMap<String, Arc<LocalCandleReadFlight>>>> =
+    OnceLock::new();
 
 const ACCOUNT_MUTATION_LEASE_MS: i64 = 120_000;
 
@@ -655,6 +658,20 @@ struct Candle {
     close: f64,
     volume: f64,
     confirm: bool,
+}
+
+struct LocalCandleReadFlight {
+    result: AsyncMutex<Option<Result<Vec<Candle>, String>>>,
+    completed: Notify,
+}
+
+impl LocalCandleReadFlight {
+    fn new() -> Self {
+        Self {
+            result: AsyncMutex::new(None),
+            completed: Notify::new(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -4148,19 +4165,168 @@ async fn ensure_market_icon_data_url(
     market_icon_data_url(app, icon_path.to_string_lossy().to_string())
 }
 
+async fn wait_for_local_candle_read(
+    flight: &LocalCandleReadFlight,
+) -> Result<Vec<Candle>, String> {
+    loop {
+        let notified = flight.completed.notified();
+        if let Some(result) = flight.result.lock().await.clone() {
+            return result;
+        }
+        notified.await;
+    }
+}
+
+async fn finish_local_candle_read(
+    key: &str,
+    flight: &Arc<LocalCandleReadFlight>,
+    result: Result<Vec<Candle>, String>,
+) {
+    let registry = LOCAL_CANDLE_READ_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
+    *flight.result.lock().await = Some(result);
+    flight.completed.notify_waiters();
+    if let Ok(mut flights) = registry.lock() {
+        if flights
+            .get(key)
+            .is_some_and(|registered| Arc::ptr_eq(registered, flight))
+        {
+            flights.remove(key);
+        }
+    }
+}
+
 #[tauri::command]
 async fn local_candles(
     app: tauri::AppHandle,
+    runtime: tauri::State<'_, KlineSyncRuntime>,
     inst_id: String,
     bar: String,
     limit: u16,
 ) -> Result<Vec<Candle>, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let conn = open_read_database(&app)?;
-        aggregate_candles_from_1m(&conn, &inst_id, &bar, None, None, limit.min(1000), false)
-    })
-    .await
-    .map_err(|error| format!("读取本地 K 线任务失败：{error}"))?
+    let request_id = LOCAL_CANDLE_REQUEST_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let request_started = Instant::now();
+    let sync_wait_started = Instant::now();
+    let active_sync_tasks = runtime.running.lock().await.len();
+    let sync_wait_ms = sync_wait_started.elapsed().as_millis();
+    let bounded_limit = limit.clamp(1, 1_000);
+    let step = bar_ms(&bar).ok_or_else(|| format!("unsupported interval: {bar}"))?;
+    let end_open = align_open_time(now_ms(), &bar, step);
+    let start_open = end_open.saturating_sub(
+        step.saturating_mul((bounded_limit as i64).saturating_sub(1)),
+    );
+    let source_end_open = if bar == "1m" {
+        end_open
+    } else {
+        end_open.saturating_add(step).saturating_sub(60_000)
+    };
+    let flight_key = format!("{inst_id}\u{0}{bar}\u{0}{start_open}\u{0}{source_end_open}\u{0}{bounded_limit}");
+    let flights = LOCAL_CANDLE_READ_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
+    let (flight, is_leader) = {
+        let mut active = flights
+            .lock()
+            .map_err(|_| "图表 K 线读取协调器不可用。".to_string())?;
+        if let Some(existing) = active.get(&flight_key) {
+            (existing.clone(), false)
+        } else {
+            let created = Arc::new(LocalCandleReadFlight::new());
+            active.insert(flight_key.clone(), created.clone());
+            (created, true)
+        }
+    };
+    let error_symbol = inst_id.clone();
+    let error_bar = bar.clone();
+    eprintln!(
+        "kline_read request_id={request_id} phase=start symbol={inst_id} interval={bar} \
+         limit={bounded_limit} start_time={start_open} end_time={source_end_open} \
+         database=true sync_tasks={active_sync_tasks} sync_mutex_wait_ms={sync_wait_ms}"
+    );
+
+    if !is_leader {
+        eprintln!(
+            "kline_read request_id={request_id} phase=singleflight_join symbol={inst_id} interval={bar}"
+        );
+        return timeout(Duration::from_secs(10), wait_for_local_candle_read(&flight))
+            .await
+            .map_err(|_| "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。".to_string())?;
+    }
+
+    let (sender, receiver) = oneshot::channel();
+    let spawn_result = std::thread::Builder::new()
+        .name(format!("chart-kline-read-{request_id}"))
+        .spawn(move || {
+            let read_result: Result<Vec<Candle>, String> = (|| {
+                eprintln!(
+                    "kline_read request_id={request_id} phase=thread_started symbol={inst_id} interval={bar}"
+                );
+                let database_open_started = Instant::now();
+                let conn = open_read_database(&app)?;
+                let database_open_ms = database_open_started.elapsed().as_millis();
+                eprintln!(
+                    "kline_read request_id={request_id} phase=database_opened symbol={inst_id} interval={bar} \
+                     database_open_ms={database_open_ms}"
+                );
+                let load_started = Instant::now();
+                eprintln!(
+                    "kline_read request_id={request_id} phase=aggregate_started symbol={inst_id} interval={bar} \
+                     start_time={start_open} end_time={source_end_open}"
+                );
+                let loaded = load_ai_candle_window(
+                    &conn,
+                    &inst_id,
+                    &AiCandleReadWindow {
+                        bar: bar.clone(),
+                        step,
+                        start_open,
+                        source_end_open,
+                    },
+                    bounded_limit,
+                    false,
+                    &[],
+                )?;
+                let total_blocking_ms = load_started.elapsed().as_millis();
+                eprintln!(
+                    "kline_read request_id={request_id} phase=complete symbol={inst_id} interval={bar} \
+                     start_time={start_open} end_time={source_end_open} limit={bounded_limit} \
+                     database=true database_open_ms={database_open_ms} sql_ms={} sql_rows={} \
+                     aggregate_ms={} result_rows={} blocking_ms={total_blocking_ms} \
+                     mutex_wait_ms=0 semaphore_wait_ms=0 sqlite_busy=false empty_without_error={}",
+                    loaded.database_read_ms,
+                    loaded.database_rows,
+                    loaded.aggregate_ms,
+                    loaded.merged_rows,
+                    loaded.merged_rows == 0,
+                );
+                Ok(loaded.candles)
+            })();
+            let _ = sender.send(read_result);
+        });
+    if let Err(error) = spawn_result {
+        let error = format!("无法启动图表 K 线读取线程：{error}");
+        finish_local_candle_read(&flight_key, &flight, Err(error.clone())).await;
+        return Err(error);
+    }
+    let result = timeout(Duration::from_secs(10), receiver)
+        .await
+        .map_err(|_| "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。".to_string())
+        .and_then(|result| {
+            result.map_err(|_| "图表 K 线读取线程提前结束。".to_string())
+        })
+        .and_then(|result| result);
+    let completed = match result {
+        Ok(candles) => Ok(candles),
+        Err(error) => {
+            let detail = error.to_string().to_lowercase();
+            eprintln!(
+                "kline_read request_id={request_id} phase=error symbol={error_symbol} interval={error_bar} \
+                 elapsed_ms={} sqlite_busy={} error={error}",
+                request_started.elapsed().as_millis(),
+                detail.contains("busy") || detail.contains("locked") || detail.contains("timeout"),
+            );
+            Err(error)
+        }
+    };
+    finish_local_candle_read(&flight_key, &flight, completed.clone()).await;
+    completed
 }
 
 #[tauri::command]
@@ -19852,17 +20018,9 @@ fn aggregate_candles_from_1m_with_overlay(
     let start_open = start_time
         .map(|value| align_open_time(value.saturating_mul(1000), bar, step))
         .unwrap_or_else(|| {
-            let source_step: i64 = 60_000;
-            if bar == "1m" {
-                end_open.saturating_sub(
-                    source_step.saturating_mul((bounded_limit as i64).saturating_sub(1)),
-                )
-            } else {
-                end_open.saturating_sub(
-                    step.saturating_mul(bounded_limit as i64)
-                        .saturating_sub(source_step),
-                )
-            }
+            end_open.saturating_sub(
+                step.saturating_mul((bounded_limit as i64).saturating_sub(1)),
+            )
         });
     let source_end_open = if bar == "1m" {
         end_open
@@ -19923,15 +20081,19 @@ fn load_ai_candle_window(
         merged
     } else {
         let started = Instant::now();
-        let mut aggregated = local_aggregated_one_minute_candles(
+        let one_minute = local_candles_between(
             conn,
             symbol,
-            window.step,
+            "1m",
             window.start_open,
             window.source_end_open,
         )?;
         database_read_ms += started.elapsed().as_millis();
-        database_rows += aggregated.len();
+        database_rows += one_minute.len();
+        let started = Instant::now();
+        let mut aggregated =
+            aggregate_one_minute_candles(&one_minute, window.step, window.source_end_open);
+        aggregate_ms += started.elapsed().as_millis();
 
         if let Some(first_memory_open) = memory
             .iter()
@@ -19980,80 +20142,6 @@ fn load_ai_candle_window(
         memory_rows,
         merged_rows,
     })
-}
-
-fn local_aggregated_one_minute_candles(
-    conn: &Connection,
-    symbol: &str,
-    target_step_ms: i64,
-    start_open_ms: i64,
-    source_end_open_ms: i64,
-) -> Result<Vec<Candle>, String> {
-    let expected_count = (target_step_ms / 60_000).max(1);
-    let mut stmt = conn
-        .prepare(
-            "WITH grouped AS (
-               SELECT
-                 CAST(open_time / ?2 AS INTEGER) * ?2 AS bucket_open,
-                 MIN(open_time) AS first_open,
-                 MAX(open_time) AS last_open,
-                 MAX(CAST(high AS REAL)) AS high_value,
-                 MIN(CAST(low AS REAL)) AS low_value,
-                 SUM(CAST(volume AS REAL)) AS volume_value,
-                 COUNT(*) AS sample_count,
-                 SUM(CASE WHEN confirm = 1 THEN 1 ELSE 0 END) AS confirmed_count
-               FROM candles
-               WHERE symbol = ?1 AND interval = '1m'
-                 AND open_time >= ?3 AND open_time <= ?4
-               GROUP BY bucket_open
-             )
-             SELECT
-               grouped.bucket_open,
-               first_row.open,
-               grouped.high_value,
-               grouped.low_value,
-               last_row.close,
-               grouped.volume_value,
-               grouped.sample_count,
-               grouped.first_open,
-               grouped.last_open,
-               grouped.confirmed_count
-             FROM grouped
-             JOIN candles AS first_row
-               ON first_row.symbol = ?1 AND first_row.interval = '1m'
-              AND first_row.open_time = grouped.first_open
-             JOIN candles AS last_row
-               ON last_row.symbol = ?1 AND last_row.interval = '1m'
-              AND last_row.open_time = grouped.last_open
-             ORDER BY grouped.bucket_open ASC",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = stmt
-        .query_map(
-            params![symbol, target_step_ms, start_open_ms, source_end_open_ms],
-            |row| {
-                let bucket_open = row.get::<_, i64>(0)?;
-                let sample_count = row.get::<_, i64>(6)?;
-                let first_open = row.get::<_, i64>(7)?;
-                let last_open = row.get::<_, i64>(8)?;
-                let confirmed_count = row.get::<_, i64>(9)?;
-                let complete = sample_count == expected_count
-                    && first_open == bucket_open
-                    && last_open == bucket_open + target_step_ms - 60_000;
-                Ok(Candle {
-                    time: bucket_open / 1000,
-                    open: row.get::<_, String>(1)?.parse::<f64>().unwrap_or_default(),
-                    high: row.get::<_, f64>(2)?,
-                    low: row.get::<_, f64>(3)?,
-                    close: row.get::<_, String>(4)?.parse::<f64>().unwrap_or_default(),
-                    volume: row.get::<_, f64>(5)?,
-                    confirm: complete && confirmed_count == sample_count,
-                })
-            },
-        )
-        .map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|error| error.to_string())
 }
 
 fn merge_candle_series<'a>(
@@ -24802,7 +24890,7 @@ mod tests {
     }
 
     #[test]
-    fn sqlite_one_minute_aggregation_matches_domain_aggregation() {
+    fn chart_window_aggregation_matches_domain_aggregation() {
         let conn = test_conn();
         let bucket_open_ms = 1_800_000_000_000_i64;
         for index in 0..10_i64 {
@@ -24834,14 +24922,21 @@ mod tests {
         )
         .expect("load raw candles");
         let expected = aggregate_one_minute_candles(&raw, 300_000, bucket_open_ms + 9 * 60_000);
-        let actual = local_aggregated_one_minute_candles(
+        let actual = load_ai_candle_window(
             &conn,
             "BTC-USDT-SWAP",
-            300_000,
-            bucket_open_ms,
-            bucket_open_ms + 9 * 60_000,
+            &AiCandleReadWindow {
+                bar: "5m".to_string(),
+                step: 300_000,
+                start_open: bucket_open_ms,
+                source_end_open: bucket_open_ms + 9 * 60_000,
+            },
+            10,
+            false,
+            &[],
         )
-        .expect("aggregate candles in sqlite");
+        .expect("aggregate chart window")
+        .candles;
         assert_eq!(actual.len(), expected.len());
         for (actual, expected) in actual.iter().zip(expected.iter()) {
             assert_eq!(actual.time, expected.time);
@@ -24851,6 +24946,43 @@ mod tests {
             assert_eq!(actual.close, expected.close);
             assert_eq!(actual.volume, expected.volume);
             assert_eq!(actual.confirm, expected.confirm);
+        }
+    }
+
+    #[test]
+    fn one_minute_aggregation_returns_recent_three_hundred_high_timeframe_candles() {
+        let first_open_ms = 1_800_000_000_000_i64;
+        let one_minute = (0..18_000_i64)
+            .map(|index| Candle {
+                time: (first_open_ms + index * 60_000) / 1_000,
+                open: 100.0 + index as f64,
+                high: 102.0 + index as f64,
+                low: 99.0 + index as f64,
+                close: 101.0 + index as f64,
+                volume: 10.0,
+                confirm: true,
+            })
+            .collect::<Vec<_>>();
+
+        for (bar, step_ms) in [("15m", 900_000_i64), ("30m", 1_800_000_i64)] {
+            let all_candles = aggregate_one_minute_candles(
+                &one_minute,
+                step_ms,
+                first_open_ms + 18_000 * 60_000 - 60_000,
+            );
+            let candles = &all_candles[all_candles.len() - 300..];
+            let end_open_ms = all_candles
+                .last()
+                .expect("high timeframe fixture has candles")
+                .time
+                * 1_000;
+            assert_eq!(candles.len(), 300, "{bar} must return the requested recent window");
+            assert_eq!(
+                candles.first().map(|candle| candle.time),
+                Some((end_open_ms - step_ms * 299) / 1_000),
+            );
+            assert_eq!(candles.last().map(|candle| candle.time), Some(end_open_ms / 1_000));
+            assert!(candles.iter().all(|candle| candle.confirm), "{bar} fixture buckets are complete");
         }
     }
 
