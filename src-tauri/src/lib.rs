@@ -8438,6 +8438,124 @@ fn required_days_for_interval(required_days: &HashMap<String, i64>, interval: &s
         .unwrap_or_else(|| retention_days(interval))
 }
 
+#[derive(Debug)]
+struct KlineDatabaseScan {
+    existing: Vec<i64>,
+    invalid_reasons: Vec<String>,
+}
+
+async fn run_kline_database_blocking<T, F>(
+    app: &tauri::AppHandle,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+{
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut conn = open_database(&app)?;
+        operation(&mut conn)
+    })
+    .await
+    .map_err(|error| format!("K 线数据库任务失败：{error}"))?
+}
+
+async fn run_kline_read_database_blocking<T, F>(
+    app: &tauri::AppHandle,
+    operation: F,
+) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce(&Connection) -> Result<T, String> + Send + 'static,
+{
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let conn = open_read_database(&app)?;
+        operation(&conn)
+    })
+    .await
+    .map_err(|error| format!("K 线只读数据库任务失败：{error}"))?
+}
+
+async fn scan_kline_window(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    start_open: i64,
+    end_open: i64,
+    strict_confirm_before: i64,
+) -> Result<KlineDatabaseScan, String> {
+    let symbol = symbol.to_string();
+    let interval = interval.to_string();
+    run_kline_read_database_blocking(app, move |conn| {
+        Ok(KlineDatabaseScan {
+            existing: existing_open_times(conn, &symbol, &interval, start_open, end_open)?,
+            invalid_reasons: existing_invalid_candle_reasons(
+                conn,
+                &symbol,
+                &interval,
+                start_open,
+                end_open,
+                strict_confirm_before,
+            )?,
+        })
+    })
+    .await
+}
+
+async fn write_kline_candles(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    candles: Vec<RawCandle>,
+    source: &str,
+) -> Result<usize, String> {
+    let symbol = symbol.to_string();
+    let interval = interval.to_string();
+    let source = source.to_string();
+    run_kline_database_blocking(app, move |conn| {
+        upsert_raw_candles(conn, &symbol, &interval, &candles, &source)
+    })
+    .await
+}
+
+async fn confirm_kline_candles(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    open_times: Vec<i64>,
+    strict_confirm_before: i64,
+) -> Result<usize, String> {
+    if open_times.is_empty() {
+        return Ok(0);
+    }
+    let symbol = symbol.to_string();
+    let interval = interval.to_string();
+    run_kline_database_blocking(app, move |conn| {
+        confirm_stale_unconfirmed_candles(
+            conn,
+            &symbol,
+            &interval,
+            &open_times,
+            strict_confirm_before,
+        )
+    })
+    .await
+}
+
+async fn persist_kline_sync_report(
+    app: &tauri::AppHandle,
+    mut report: KlineSyncReport,
+) -> Result<KlineSyncReport, String> {
+    run_kline_database_blocking(app, move |conn| {
+        apply_kline_retry_state(conn, &mut report);
+        insert_kline_sync_run(conn, &report)?;
+        Ok(report)
+    })
+    .await
+}
+
 async fn sync_kline_set(
     app: tauri::AppHandle,
     symbols: Vec<String>,
@@ -8467,7 +8585,7 @@ async fn sync_kline_set(
             {
                 Ok(report) => report,
                 Err(message) => {
-                    let mut report = KlineSyncReport {
+                    let report = KlineSyncReport {
                         symbol: symbol.clone(),
                         interval: interval.clone(),
                         status: "failed".to_string(),
@@ -8486,11 +8604,9 @@ async fn sync_kline_set(
                         message,
                         progress_detail: None,
                     };
-                    if let Ok(conn) = open_database(&app) {
-                        apply_kline_retry_state(&conn, &mut report);
-                        let _ = insert_kline_sync_run(&conn, &report);
-                    }
-                    report
+                    persist_kline_sync_report(&app, report.clone())
+                        .await
+                        .unwrap_or(report)
                 }
             };
             emit_kline_sync(&app, &report);
@@ -8557,18 +8673,19 @@ async fn sync_kline_window(
     };
     emit_kline_sync(app, &report);
 
-    let mut conn = open_database(app)?;
-    let existing = existing_open_times(&conn, symbol, interval, start_open, end_open)?;
-    report.existing = existing.len();
     let strict_confirm_before = end_open - step;
-    report.invalid_reasons = existing_invalid_candle_reasons(
-        &conn,
+    let initial_scan = scan_kline_window(
+        app,
         symbol,
         interval,
         start_open,
         end_open,
         strict_confirm_before,
-    )?;
+    )
+    .await?;
+    let existing = initial_scan.existing;
+    report.existing = existing.len();
+    report.invalid_reasons = initial_scan.invalid_reasons;
     report.invalid = report.invalid_reasons.len();
     let missing = expected
         .iter()
@@ -8601,28 +8718,35 @@ async fn sync_kline_window(
                     )
                     .await?;
                     report.fetched += raw.len();
-                    report.inserted +=
-                        upsert_raw_candles(&mut conn, symbol, interval, &raw, "history-repair")?;
+                    report.inserted += write_kline_candles(
+                        app,
+                        symbol,
+                        interval,
+                        raw,
+                        "history-repair",
+                    )
+                    .await?;
                 }
                 let stale_unconfirmed =
                     stale_unconfirmed_reason_open_times(&report.invalid_reasons);
-                if !stale_unconfirmed.is_empty() {
-                    report.inserted += confirm_stale_unconfirmed_candles(
-                        &conn,
-                        symbol,
-                        interval,
-                        &stale_unconfirmed,
-                        strict_confirm_before,
-                    )?;
-                }
-                report.invalid_reasons = existing_invalid_candle_reasons(
-                    &conn,
+                report.inserted += confirm_kline_candles(
+                    app,
+                    symbol,
+                    interval,
+                    stale_unconfirmed,
+                    strict_confirm_before,
+                )
+                .await?;
+                let rechecked = scan_kline_window(
+                    app,
                     symbol,
                     interval,
                     start_open,
                     end_open,
                     strict_confirm_before,
-                )?;
+                )
+                .await?;
+                report.invalid_reasons = rechecked.invalid_reasons;
                 report.invalid = report.invalid_reasons.len();
                 report.message = if report.invalid == 0 {
                     "异常 K 线已重新拉取并确认".to_string()
@@ -8646,9 +8770,7 @@ async fn sync_kline_window(
                 format!("K 线无缺口，但发现 {} 条异常数据", report.invalid)
             };
         }
-        apply_kline_retry_state(&conn, &mut report);
-        insert_kline_sync_run(&conn, &report)?;
-        return Ok(report);
+        return persist_kline_sync_report(app, report).await;
     }
 
     report.status = "backfilling".to_string();
@@ -8667,38 +8789,38 @@ async fn sync_kline_window(
         }
         report.invalid = report.invalid_reasons.len();
         report.fetched += raw.len();
-        report.inserted += upsert_raw_candles(&mut conn, symbol, interval, &raw, "history")?;
+        report.inserted += write_kline_candles(app, symbol, interval, raw, "history").await?;
         report.message = format!("补齐中：已写入 {} 根", report.inserted);
         emit_kline_sync(app, &report);
     }
 
     let stale_unconfirmed = stale_unconfirmed_reason_open_times(&report.invalid_reasons);
-    if !stale_unconfirmed.is_empty() {
-        report.inserted += confirm_stale_unconfirmed_candles(
-            &conn,
-            symbol,
-            interval,
-            &stale_unconfirmed,
-            strict_confirm_before,
-        )?;
-    }
+    report.inserted += confirm_kline_candles(
+        app,
+        symbol,
+        interval,
+        stale_unconfirmed,
+        strict_confirm_before,
+    )
+    .await?;
 
-    let existing_after = existing_open_times(&conn, symbol, interval, start_open, end_open)?;
-    let existing_invalid_after = existing_invalid_candle_reasons(
-        &conn,
+    let final_scan = scan_kline_window(
+        app,
         symbol,
         interval,
         start_open,
         end_open,
         strict_confirm_before,
-    )?;
+    )
+    .await?;
+    let existing_after = final_scan.existing;
     let remaining = expected
         .iter()
         .filter(|open_time| !existing_after.binary_search(open_time).is_ok())
         .count();
     report.existing = existing_after.len();
     report.missing = remaining;
-    report.invalid_reasons = existing_invalid_after;
+    report.invalid_reasons = final_scan.invalid_reasons;
     report.invalid = report.invalid_reasons.len();
     report.progress_detail = None;
     report.status = if remaining == 0 && report.invalid == 0 {
@@ -8715,9 +8837,7 @@ async fn sync_kline_window(
     } else {
         format!("仍有 {} 根 K 线缺失，等待下次补齐", remaining)
     };
-    apply_kline_retry_state(&conn, &mut report);
-    insert_kline_sync_run(&conn, &report)?;
-    Ok(report)
+    persist_kline_sync_report(app, report).await
 }
 
 fn kline_open_offset_ms(bar: &str, step_ms: i64) -> i64 {
@@ -22158,6 +22278,259 @@ pub fn run() {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    struct TemporarySqlitePath {
+        path: PathBuf,
+    }
+
+    impl TemporarySqlitePath {
+        fn new(label: &str) -> Self {
+            let nonce = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("read test clock")
+                .as_nanos();
+            let path = std::env::temp_dir().join(format!(
+                "desic-terminal-{label}-{}-{nonce}.sqlite3",
+                std::process::id()
+            ));
+            remove_temporary_sqlite_files(&path);
+            Self { path }
+        }
+
+        fn path(&self) -> &Path {
+            &self.path
+        }
+    }
+
+    impl Drop for TemporarySqlitePath {
+        fn drop(&mut self) {
+            remove_temporary_sqlite_files(&self.path);
+        }
+    }
+
+    fn remove_temporary_sqlite_files(path: &Path) {
+        for suffix in ["", "-wal", "-shm"] {
+            let candidate = if suffix.is_empty() {
+                path.to_path_buf()
+            } else {
+                PathBuf::from(format!("{}{}", path.display(), suffix))
+            };
+            let _ = fs::remove_file(candidate);
+        }
+    }
+
+    #[test]
+    fn sqlite_wal_allows_chart_reads_during_kline_write_transaction() {
+        let database = TemporarySqlitePath::new("wal-read-write");
+        let conn = Connection::open(database.path()).expect("open temporary sqlite");
+        conn.busy_timeout(std::time::Duration::from_secs(2))
+            .expect("configure sqlite busy timeout");
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             CREATE TABLE candles (
+               symbol TEXT NOT NULL,
+               interval TEXT NOT NULL,
+               open_time INTEGER NOT NULL,
+               close REAL NOT NULL,
+               PRIMARY KEY(symbol, interval, open_time)
+             );
+             INSERT INTO candles(symbol, interval, open_time, close)
+             VALUES('BTC-USDT-SWAP', '1m', 0, 100.0);",
+        )
+        .expect("initialize WAL test database");
+        drop(conn);
+
+        let writer_ready = Arc::new(std::sync::Barrier::new(2));
+        let release_writer = Arc::new(std::sync::Barrier::new(2));
+        let writer_path = database.path().to_path_buf();
+        let writer_ready_for_thread = writer_ready.clone();
+        let release_writer_for_thread = release_writer.clone();
+        let writer = std::thread::spawn(move || {
+            let conn = Connection::open(writer_path).expect("open WAL writer");
+            conn.busy_timeout(std::time::Duration::from_secs(2))
+                .expect("configure WAL writer timeout");
+            conn.execute_batch("BEGIN IMMEDIATE")
+                .expect("begin WAL write transaction");
+            for index in 1..=2_000_i64 {
+                conn.execute(
+                    "INSERT INTO candles(symbol, interval, open_time, close) VALUES(?1, '1m', ?2, ?3)",
+                    params!["BTC-USDT-SWAP", index * 60_000, 100.0 + index as f64],
+                )
+                .expect("insert WAL write row");
+            }
+            writer_ready_for_thread.wait();
+            release_writer_for_thread.wait();
+            conn.execute_batch("COMMIT")
+                .expect("commit WAL write transaction");
+        });
+
+        writer_ready.wait();
+        let reader = Connection::open_with_flags(
+            database.path(),
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )
+        .expect("open WAL chart reader");
+        reader
+            .busy_timeout(std::time::Duration::from_secs(2))
+            .expect("configure WAL reader timeout");
+        reader
+            .pragma_update(None, "query_only", true)
+            .expect("configure read-only chart query");
+        for _ in 0..20 {
+            let visible_rows = reader
+                .query_row(
+                    "SELECT COUNT(*) FROM candles WHERE symbol = 'BTC-USDT-SWAP' AND interval = '1m'",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .expect("read chart snapshot during WAL write");
+            assert_eq!(visible_rows, 1, "uncommitted K-line rows must stay out of the chart snapshot");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        drop(reader);
+        release_writer.wait();
+        writer.join().expect("join WAL writer");
+
+        let conn = Connection::open(database.path()).expect("reopen WAL database");
+        let total_rows = conn
+            .query_row("SELECT COUNT(*) FROM candles", [], |row| row.get::<_, i64>(0))
+            .expect("count committed WAL rows");
+        assert_eq!(total_rows, 2_001);
+    }
+
+    #[test]
+    #[ignore = "downloads one year of real OKX public 1m candles into a temporary database"]
+    fn real_okx_btc_usdt_swap_one_minute_year_temp_db_benchmark() {
+        let database = TemporarySqlitePath::new("okx-year-benchmark");
+        let mut conn = Connection::open(database.path()).expect("open benchmark sqlite");
+        conn.busy_timeout(std::time::Duration::from_secs(5))
+            .expect("configure benchmark sqlite timeout");
+        conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=NORMAL;")
+            .expect("configure benchmark WAL");
+        migrate_database(&conn).expect("create benchmark schema");
+
+        let symbol = "BTC-USDT-SWAP";
+        let interval = "1m";
+        let step = bar_ms(interval).expect("one-minute step");
+        let now = now_ms();
+        // Leave the latest two UTC days out because OKX can publish the most
+        // recent daily archive with an eight-hour delay.
+        let day_ms = 86_400_000;
+        let today_start = utc_day_start_ms(now);
+        let end_open = today_start
+            .saturating_sub(2 * day_ms)
+            .saturating_sub(step);
+        let start_open = end_open
+            .saturating_sub(365 * 86_400_000)
+            .saturating_add(step);
+        let expected = ((end_open - start_open) / step + 1) as usize;
+        let network_started = Instant::now();
+        let candles = tauri::async_runtime::block_on(async {
+            let client = reqwest_client()?;
+            let mut rows = HashMap::new();
+            // OKX labels these daily archives in UTC+8, so the next label is
+            // needed to cover the final eight UTC hours of the benchmark.
+            let static_end = end_open.saturating_add(day_ms);
+            let mut day = utc_day_start_ms(start_open);
+            let mut days = 0usize;
+            while day <= static_end {
+                let daily = fetch_static_daily_candles_for_day(&client, symbol, day).await?;
+                for raw in daily
+                    .into_iter()
+                    .filter(|raw| raw.open_time_ms >= start_open && raw.open_time_ms <= end_open)
+                {
+                    rows.insert(raw.open_time_ms, raw);
+                }
+                days += 1;
+                if days % 30 == 0 {
+                    eprintln!("OKX benchmark fetched {days} static days");
+                }
+                day = day.saturating_add(86_400_000);
+            }
+            let mut values = rows.into_values().collect::<Vec<_>>();
+            values.sort_by_key(|raw| raw.open_time_ms);
+            Ok::<_, String>(values)
+        })
+        .unwrap_or_else(|error| panic!("fetch real OKX benchmark data: {error}"));
+        let network_ms = network_started.elapsed().as_millis();
+
+        let reader_started = Arc::new(std::sync::Barrier::new(2));
+        let reader_path = database.path().to_path_buf();
+        let reader_started_for_thread = reader_started.clone();
+        let reader = std::thread::spawn(move || -> Result<(usize, u128), String> {
+            let reader = Connection::open_with_flags(
+                reader_path,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )
+            .map_err(|error| error.to_string())?;
+            reader
+                .busy_timeout(std::time::Duration::from_secs(2))
+                .map_err(|error| error.to_string())?;
+            reader
+                .pragma_update(None, "query_only", true)
+                .map_err(|error| error.to_string())?;
+            reader_started_for_thread.wait();
+            let started = Instant::now();
+            let mut samples = 0usize;
+            let mut max_query_us = 0u128;
+            while started.elapsed() < std::time::Duration::from_secs(1) {
+                let query_started = Instant::now();
+                reader
+                    .query_row(
+                        "SELECT COUNT(*) FROM candles WHERE symbol = 'BTC-USDT-SWAP' AND interval = '1m'",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())?;
+                max_query_us = max_query_us.max(query_started.elapsed().as_micros());
+                samples += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+            Ok((samples, max_query_us))
+        });
+        reader_started.wait();
+        let write_started = Instant::now();
+        let inserted = upsert_raw_candles(&mut conn, symbol, interval, &candles, "benchmark")
+            .expect("write real OKX benchmark data");
+        let write_ms = write_started.elapsed().as_millis();
+        let (reader_samples, reader_max_query_us) = reader
+            .join()
+            .expect("join benchmark chart reader")
+            .expect("read benchmark database during write");
+        let (stored, first_open, last_open) = conn
+            .query_row(
+                "SELECT COUNT(*), MIN(open_time), MAX(open_time)
+                 FROM candles WHERE symbol = ?1 AND interval = ?2",
+                params![symbol, interval],
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, Option<i64>>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                },
+            )
+            .expect("summarize benchmark database");
+        eprintln!(
+            "OKX temp DB benchmark: fetched={} expected={} inserted={} stored={} first={:?} last={:?} network_ms={} write_ms={} reader_samples={} reader_max_query_us={}",
+            candles.len(),
+            expected,
+            inserted,
+            stored,
+            first_open,
+            last_open,
+            network_ms,
+            write_ms,
+            reader_samples,
+            reader_max_query_us,
+        );
+        assert_eq!(candles.len(), expected, "real OKX year data contains gaps");
+        assert_eq!(stored as usize, expected);
+        assert_eq!(inserted, expected);
+        assert_eq!(first_open, Some(start_open));
+        assert_eq!(last_open, Some(end_open));
+    }
 
     #[test]
     fn kline_sync_runtime_reserves_each_symbol_interval_once() {

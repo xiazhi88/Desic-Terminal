@@ -7380,10 +7380,15 @@ function SettingsWorkspacePage({
       setStorageSnapshot(null);
       setStatus(t("settings:storageMaintenanceCompleted"));
       if (!silent) {
+        const deletedIntelligence = Object.values(result.deletedIntelligenceRows).reduce((sum, count) => sum + count, 0);
         onNotify({
           kind: "success",
           title: t("settings:storageMaintenanceCompleted"),
-          message: t("settings:storageMaintenanceSummary", { kline: result.deletedKlineSyncRuns, messages: result.deletedAiMessages })
+          message: t("settings:storageMaintenanceSummary", {
+            kline: result.deletedKlineSyncRuns,
+            messages: result.deletedAiMessages,
+            intelligence: deletedIntelligence
+          })
         });
       }
     } catch (error) {
@@ -7417,6 +7422,27 @@ function SettingsWorkspacePage({
   }, [onNotify, t]);
 
   useEffect(() => {
+    if (activeTab !== "storage") return;
+    let mounted = true;
+    let refreshTimer: number | null = null;
+    const listenerCleanup = createDeferredCleanupSlot();
+    void listenKlineSync((report) => {
+      if (!mounted || !["complete", "partial", "failed"].includes(report.status)) return;
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      refreshTimer = window.setTimeout(() => {
+        if (!mounted) return;
+        setMaintenance(null);
+        void loadStorageStatus();
+      }, 250);
+    }).then((unlisten) => listenerCleanup.settle(unlisten));
+    return () => {
+      mounted = false;
+      if (refreshTimer !== null) window.clearTimeout(refreshTimer);
+      listenerCleanup.dispose();
+    };
+  }, [activeTab, loadStorageStatus]);
+
+  useEffect(() => {
     if (activeTab !== "storage" || maintenance || storageSnapshot || statusBusy) return;
     void loadStorageStatus();
   }, [activeTab, loadStorageStatus, maintenance, statusBusy, storageSnapshot]);
@@ -7438,6 +7464,8 @@ function SettingsWorkspacePage({
   const marketAssetCacheDir = marketAssets?.cacheDir;
   const runWatchlistIntegrity = useCallback(async () => {
     setWatchBusy(true);
+    setMaintenance(null);
+    setStatus(t("settings:watchlistCheckStarted"));
     try {
       await syncKlineIntegrity(watchlist, KLINE_INTEGRITY_INTERVALS, false, undefined, KLINE_REQUIRED_DAYS);
       onNotify({
@@ -7504,6 +7532,7 @@ function SettingsWorkspacePage({
                 <div>
                   <strong>{t("settings:localStorage")}</strong>
                   <span>{status}</span>
+                  <small>{t("settings:storageMaintenanceDescription")}</small>
                 </div>
                 <button className="primary-action" onClick={() => void runMaintenance(false)} disabled={busy}>
                   {busy ? t("settings:maintenanceInProgress") : t("settings:runMaintenance")}
@@ -7517,6 +7546,7 @@ function SettingsWorkspacePage({
                     {marketAssets?.cacheVersion ? ` · v${marketAssets.cacheVersion}` : ""}
                     {marketAssets?.iconFailed ? ` · ${t("common:failed")} ${marketAssets.iconFailed}` : ""}
                   </span>
+                  <small>{t("settings:checkCandlesDescription")}</small>
                 </div>
                 <button className="primary-action" onClick={() => void runWatchlistIntegrity()} disabled={watchBusy || watchlist.length === 0}>
                   {watchBusy ? t("common:checking") : t("settings:checkCandles")}
@@ -7529,11 +7559,13 @@ function SettingsWorkspacePage({
                   const range = klineRangeMap.get(item);
                   const rangeShort = formatKlineRangeText(range, "short");
                   const rangeFull = formatKlineRangeText(range, "full");
+                  const syncStatus = symbolSyncStatus[item];
+                  const displayedRange = syncStatus && syncStatus !== "已同步" ? syncStatus : rangeShort || syncStatus || t("settings:waitingForCheck");
                   return (
                     <div className="settings-watchlist-card" key={item} title={rangeFull ? `${item}\n${rangeFull}` : item}>
                       <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssetCacheDir} />
                       <span>{base}</span>
-                      <small>{rangeShort || symbolSyncStatus[item] || t("settings:waitingForCheck")}</small>
+                      <small>{displayedRange}</small>
                       {rangeFull && (
                         <div className="settings-watchlist-tip" role="tooltip">
                           <strong>{item}</strong>

@@ -509,9 +509,10 @@ Object.assign(enUS.settings, {
   feishuEvent_review_completed: "Trade review completed", feishuEvent_daily_review_completed: "Daily review completed", feishuEvent_suggestion_created: "Optimization suggestion created", feishuEvent_strategy_signal: "Strategy trade signal",
   readingStorageStatus: "Reading storage status", storageReadDesktopOnly: "Storage status is available in the desktop app only", databaseStatusUpdated: "Database status updated",
   storageStatusReadFailed: "Could not read storage status", maintainingStorage: "Maintaining storage", storageMaintenanceDesktopOnly: "Storage maintenance is available in the desktop app only",
-  storageMaintenanceCompleted: "Storage maintenance completed", storageMaintenanceSummary: "Checkpointed {{checkpointed}} pages · Reusable {{reusable}} pages",
+  storageMaintenanceCompleted: "Storage maintenance completed", storageMaintenanceSummary: "Removed {{kline}} sync logs · {{messages}} AI messages · {{intelligence}} intelligence rows",
+  storageMaintenanceDescription: "Cleans expired logs and retained analysis data; candle history is not deleted.",
   storageMaintenanceFailed: "Storage maintenance failed", localStorage: "Local storage", maintenanceInProgress: "Maintenance in progress", runMaintenance: "Run maintenance",
-  watchMarkets: "Watched markets", resources: "Resources", checkCandles: "Check candles", waitingForCheck: "Waiting for check", database: "Database",
+  watchMarkets: "Watched markets", resources: "Resources", checkCandles: "Check and repair candles", checkCandlesDescription: "Checks and repairs watched-market 1m candles in the background; up to 365 days may be synchronized.", waitingForCheck: "Waiting for check", database: "Database",
   reusableSpace: "Reusable space", schemaVersion: "Schema version", watchlistCheckStarted: "Watchlist check started", watchlistCheckStartedMessage_one: "Checking {{count}} market", watchlistCheckStartedMessage_other: "Checking {{count}} markets", watchlistCheckFailed: "Watchlist check failed",
   startupProxy: "Startup proxy", startupProxyDescription: "Update the proxy, reconnect, and run startup checks again."
 });
@@ -1165,9 +1166,10 @@ Object.assign(zhCN.settings, {
   feishuEvent_suggestion_created: "生成优化建议", feishuEvent_strategy_signal: "策略交易信号", readingStorageStatus: "正在读取存储状态", storageReadDesktopOnly: "仅桌面端可读取存储状态",
   databaseStatusUpdated: "数据库状态已更新", storageStatusReadFailed: "存储状态读取失败", maintainingStorage: "正在维护存储",
   storageMaintenanceDesktopOnly: "仅桌面端可运行存储维护", storageMaintenanceCompleted: "存储维护已完成",
-  storageMaintenanceSummary: "已检查点 {{checkpointed}} 页 · 可复用 {{reusable}} 页", storageMaintenanceFailed: "存储维护失败",
+  storageMaintenanceSummary: "已清理同步日志 {{kline}} 条 · AI 消息 {{messages}} 条 · 情报记录 {{intelligence}} 条",
+  storageMaintenanceDescription: "清理过期日志和保留期外的分析数据，不删除 K 线历史。", storageMaintenanceFailed: "存储维护失败",
   localStorage: "本地存储", maintenanceInProgress: "维护中", runMaintenance: "运行维护", watchMarkets: "观察交易对", resources: "资源",
-  checkCandles: "检查 K 线", waitingForCheck: "等待检查", database: "数据库", reusableSpace: "可复用空间", schemaVersion: "结构版本",
+  checkCandles: "检查并补齐 K 线", checkCandlesDescription: "后台检查并补齐观察交易对的 1m K 线，最多可能同步全年数据。", waitingForCheck: "等待检查", database: "数据库", reusableSpace: "可复用空间", schemaVersion: "结构版本",
   watchlistCheckStarted: "观察交易对检查已启动", watchlistCheckStartedMessage_one: "正在检查 {{count}} 个交易对",
   watchlistCheckStartedMessage_other: "正在检查 {{count}} 个交易对", watchlistCheckFailed: "观察交易对检查失败",
   startupProxy: "启动代理", startupProxyDescription: "更新代理、重新连接，并再次执行启动检查。"

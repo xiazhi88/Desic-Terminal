@@ -9594,8 +9594,13 @@ button {
 }
 
 .settings-section strong,
-.settings-section span {
+.settings-section span,
+.settings-section small {
   display: block;
+}
+
+.settings-section > div:first-child {
+  min-width: 0;
 }
 
 .settings-section strong {
@@ -9606,6 +9611,13 @@ button {
   margin-top: 5px;
   color: var(--muted);
   font-size: 12px;
+}
+
+.settings-section small {
+  margin-top: 4px;
+  color: var(--weak);
+  font-size: 11px;
+  line-height: 1.4;
 }
 
 .settings-section button,
