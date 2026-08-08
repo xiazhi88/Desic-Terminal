@@ -313,6 +313,7 @@ const KLINE_REQUIRED_DAYS: Record<string, number> = {
   "1m": 365
 };
 const KLINE_STARTUP_RECENT_CHECK_HOURS = 24 * 30;
+const COMPACT_TERMINAL_MEDIA_QUERY = "(max-width: 1100px)";
 const KLINE_RECENT_CHECK_HOURS = 2;
 const PRIVATE_WS_DELAY_WARNING_MS = 10_000;
 const EMPTY_PREVIEW_ACCOUNTS: AccountSummary[] = [];
@@ -1245,6 +1246,8 @@ function TradingTerminal({
   const [ticketPriceFill, setTicketPriceFill] = useState<{ symbol: string; price: string; nonce: number } | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>(() => loadWatchlist());
   const [watchlistCollapsed, setWatchlistCollapsed] = useState(() => loadWatchlistCollapsed());
+  const [compactTerminalLayout, setCompactTerminalLayout] = useState(() => window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY).matches);
+  const [compactWatchlistOpen, setCompactWatchlistOpen] = useState(false);
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(initialMarketAssets);
   const [draggedSymbol, setDraggedSymbol] = useState<string | null>(null);
   const [symbolSearch, setSymbolSearch] = useState("");
@@ -1304,6 +1307,20 @@ function TradingTerminal({
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
   const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "data" | "config">("terminal");
   const [isMaximized, setIsMaximized] = useState(false);
+
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY);
+    const updateCompactTerminalLayout = () => setCompactTerminalLayout(media.matches);
+    updateCompactTerminalLayout();
+    media.addEventListener("change", updateCompactTerminalLayout);
+    return () => media.removeEventListener("change", updateCompactTerminalLayout);
+  }, []);
+
+  useEffect(() => {
+    if (!compactTerminalLayout) setCompactWatchlistOpen(false);
+  }, [compactTerminalLayout]);
+
+  const effectiveWatchlistCollapsed = compactTerminalLayout ? !compactWatchlistOpen : watchlistCollapsed;
 
   useEffect(() => {
     const idleWindow = window as Window & {
@@ -3386,8 +3403,12 @@ function TradingTerminal({
   }, []);
   const toggleWatchlist = useCallback(() => {
     setSymbolPickerOpen(false);
+    if (compactTerminalLayout) {
+      setCompactWatchlistOpen((open) => !open);
+      return;
+    }
     setWatchlistCollapsed((current) => persistWatchlistCollapsed(!current));
-  }, []);
+  }, [compactTerminalLayout]);
   const handleWindowAction = useCallback(async (action: "minimize" | "maximize" | "close") => {
     const handled = await invokeOptional<boolean>("window_action", { action });
     if (handled !== null) {
@@ -3792,22 +3813,22 @@ function TradingTerminal({
             onAiValidated={() => firstLaunchOnboarding.completeStep("ai")}
           />
         ) : (
-        <div className={clsx("content-grid", watchlistCollapsed && "watchlist-collapsed")} ref={contentGridRef}>
-          <aside className={clsx("watchlist", watchlistCollapsed && "collapsed")}>
+        <div className={clsx("content-grid", effectiveWatchlistCollapsed && "watchlist-collapsed", compactTerminalLayout && "compact-layout")} ref={contentGridRef}>
+          <aside className={clsx("watchlist", effectiveWatchlistCollapsed && "collapsed")}>
             <div className="watch-title">
-              {!watchlistCollapsed && <span>{t("trading:watchlist")}</span>}
+              {!effectiveWatchlistCollapsed && <span>{t("trading:watchlist")}</span>}
               <button
                 type="button"
                 className="watchlist-toggle"
                 onClick={toggleWatchlist}
-                title={watchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-label={watchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-expanded={!watchlistCollapsed}
+                title={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
+                aria-label={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
+                aria-expanded={!effectiveWatchlistCollapsed}
               >
-                {watchlistCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={15} />}
+                {effectiveWatchlistCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={15} />}
               </button>
             </div>
-            {!watchlistCollapsed && <>
+            {!effectiveWatchlistCollapsed && <>
             <div className="watch-search" ref={watchSearchRef}>
               <div className={clsx("search-box", symbolPickerOpen && "active")}>
                 <Search size={16} />
@@ -3897,7 +3918,10 @@ function TradingTerminal({
                     <button className="drag-symbol" title={uiText("拖拽排序", "Drag to reorder")} aria-label={uiText(`拖拽排序 ${item}`, `Drag to reorder ${item}`)}>
                       <GripVertical size={14} />
                     </button>
-                    <button className="symbol-row" onClick={() => setSymbol(item)}>
+                    <button className="symbol-row" onClick={() => {
+                      setSymbol(item);
+                      if (compactTerminalLayout) setCompactWatchlistOpen(false);
+                    }}>
                       <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssetCacheDir} />
                       <span className="symbol-main">
                         <span className="symbol-name">{base}</span>

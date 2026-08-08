@@ -582,6 +582,11 @@
     }
 
     @media (max-width: 979px) {
+      .startup-original {
+        min-width: 100vw;
+        min-height: 100vh;
+      }
+
       .startup-original .stage {
         min-width: 100vw;
         min-height: 100vh;

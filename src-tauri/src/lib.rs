@@ -6054,6 +6054,60 @@ async fn trade_precheck(
 }
 */
 
+const SPLASH_WINDOW_WIDTH: f64 = 1180.0;
+const SPLASH_WINDOW_HEIGHT: f64 = 580.0;
+const SPLASH_WINDOW_MARGIN: f64 = 24.0;
+const MAIN_WINDOW_WIDTH: f64 = 1440.0;
+const MAIN_WINDOW_HEIGHT: f64 = 900.0;
+
+#[derive(Clone, Copy)]
+enum AppWindowKind {
+    Splash,
+    Main,
+}
+
+fn fitted_window_size(
+    kind: AppWindowKind,
+    work_area: Option<tauri::LogicalSize<f64>>,
+) -> tauri::LogicalSize<f64> {
+    let (width, height, margin) = match kind {
+        AppWindowKind::Splash => (
+            SPLASH_WINDOW_WIDTH,
+            SPLASH_WINDOW_HEIGHT,
+            SPLASH_WINDOW_MARGIN,
+        ),
+        AppWindowKind::Main => (MAIN_WINDOW_WIDTH, MAIN_WINDOW_HEIGHT, 0.0),
+    };
+    let Some(work_area) = work_area else {
+        return tauri::LogicalSize { width, height };
+    };
+    tauri::LogicalSize {
+        width: width.min((work_area.width - margin).max(1.0)),
+        height: height.min((work_area.height - margin).max(1.0)),
+    }
+}
+
+fn resize_window_to_work_area(
+    window: &tauri::WebviewWindow,
+    kind: AppWindowKind,
+) -> Result<(), String> {
+    let work_area = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+        .map(|monitor| {
+            monitor
+                .work_area()
+                .size
+                .to_logical::<f64>(monitor.scale_factor())
+        });
+    window
+        .set_size(tauri::Size::Logical(fitted_window_size(kind, work_area)))
+        .map_err(|error| error.to_string())?;
+    window.center().map_err(|error| error.to_string())
+}
+
 #[tauri::command]
 fn enter_main_window(app: tauri::AppHandle) -> Result<(), String> {
     let main = app
@@ -6061,12 +6115,7 @@ fn enter_main_window(app: tauri::AppHandle) -> Result<(), String> {
         .ok_or_else(|| "main window not found".to_string())?;
     let _ = main.set_resizable(true);
     let _ = main.set_shadow(true);
-    main.set_size(tauri::Size::Logical(tauri::LogicalSize {
-        width: 1440.0,
-        height: 900.0,
-    }))
-    .map_err(|err| err.to_string())?;
-    main.center().map_err(|err| err.to_string())?;
+    resize_window_to_work_area(&main, AppWindowKind::Main)?;
     main.emit("app:enter-main", json!({ "ready": true }))
         .map_err(|err| err.to_string())?;
     main.show().map_err(|err| err.to_string())?;
@@ -21107,6 +21156,12 @@ pub fn run() {
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
+            let splash = app
+                .get_webview_window("splash")
+                .ok_or_else(|| std::io::Error::other("splash window not found"))?;
+            resize_window_to_work_area(&splash, AppWindowKind::Splash)
+                .map_err(std::io::Error::other)?;
+            splash.show().map_err(std::io::Error::other)?;
             let app_handle = app.handle().clone();
             let database_runtime = app.state::<DatabaseRuntime>().inner().clone();
             tauri::async_runtime::spawn(async move {
@@ -21331,6 +21386,41 @@ mod tests {
             tauri::async_runtime::block_on(runtime.reserve(&symbols, &intervals)).len(),
             4
         );
+    }
+
+    #[test]
+    fn window_sizes_fit_the_available_work_area() {
+        let work_area = tauri::LogicalSize {
+            width: 1024.0,
+            height: 728.0,
+        };
+        let splash = fitted_window_size(AppWindowKind::Splash, Some(work_area));
+        assert_eq!(splash.width, 1000.0);
+        assert_eq!(splash.height, 580.0);
+
+        let main = fitted_window_size(AppWindowKind::Main, Some(work_area));
+        assert_eq!(main.width, 1024.0);
+        assert_eq!(main.height, 728.0);
+
+        let scaled_main = fitted_window_size(
+            AppWindowKind::Main,
+            Some(tauri::LogicalSize {
+                width: 819.0,
+                height: 582.0,
+            }),
+        );
+        assert_eq!(scaled_main.width, 819.0);
+        assert_eq!(scaled_main.height, 582.0);
+
+        let desktop = fitted_window_size(
+            AppWindowKind::Main,
+            Some(tauri::LogicalSize {
+                width: 1920.0,
+                height: 1040.0,
+            }),
+        );
+        assert_eq!(desktop.width, MAIN_WINDOW_WIDTH);
+        assert_eq!(desktop.height, MAIN_WINDOW_HEIGHT);
     }
 
     #[test]

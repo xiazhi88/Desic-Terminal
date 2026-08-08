@@ -20,15 +20,16 @@
         "resizable": false,
         "shadow": true,
         "transparent": true,
-        "center": true
+        "center": true,
+        "visible": false
       },
       {
         "label": "main",
         "title": "Desic Terminal",
         "width": 1440,
         "height": 900,
-        "minWidth": 1180,
-        "minHeight": 720,
+        "minWidth": 720,
+        "minHeight": 540,
         "decorations": false,
         "resizable": true,
         "shadow": true,
