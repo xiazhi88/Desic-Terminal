@@ -18,6 +18,8 @@ use std::{
     },
     time::Instant,
 };
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use desic_systematic::{
     recommended_backtest_workers, score_kline_blend, BacktestEngine, BacktestJobControl,
@@ -101,6 +103,8 @@ const SYSTEMATIC_PROFILE_COOLDOWN_BLOCK_ERROR: &str = "Profile entry cooldown is
 const SYSTEMATIC_PROFILE_NOTIFICATION_EVENT: &str = "ai:automation-event";
 const SYSTEMATIC_LIVE_MARKET_SETTLE_ATTEMPTS: usize = 8;
 const SYSTEMATIC_LIVE_MARKET_SETTLE_DELAY: Duration = Duration::from_millis(250);
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SYSTEMATIC_PYTHON_RUNTIME_BOOTSTRAP: &str =
     include_str!("../../scripts/systematic/python-strategy-runtime.py");
 const SYSTEMATIC_PYTHON_SAMPLE_SOURCE: &str =
@@ -8153,6 +8157,7 @@ async fn detect_local_python_interpreter() -> Result<Option<LocalPythonInterpret
     for (program, leading_args) in candidates {
         let mut command = Command::new(program);
         command.args(&leading_args).arg("--version");
+        hide_local_python_command_window(&mut command);
         let output = match timeout(SYSTEMATIC_PYTHON_COMMAND_TIMEOUT, command.output()).await {
             Ok(Ok(output)) if output.status.success() => output,
             Ok(Ok(_)) | Ok(Err(_)) | Err(_) => continue,
@@ -8281,7 +8286,24 @@ fn write_local_python_environment_manifest(venv_path: &Path, version: &str) -> R
         .map_err(|error| format!("Could not record the local Python environment: {error}"))
 }
 
+#[cfg(windows)]
+fn hide_local_python_command_window(command: &mut Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_local_python_command_window(_command: &mut Command) {}
+
+#[cfg(windows)]
+fn hide_local_python_std_command_window(command: &mut StdCommand) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_local_python_std_command_window(_command: &mut StdCommand) {}
+
 fn configure_local_python_execution_command(command: &mut Command) {
+    hide_local_python_command_window(command);
     command.env_clear();
     command
         .env("PYTHONHASHSEED", "0")
@@ -8298,6 +8320,7 @@ fn configure_local_python_execution_command(command: &mut Command) {
 }
 
 fn configure_local_python_execution_std_command(command: &mut StdCommand) {
+    hide_local_python_std_command_window(command);
     command.env_clear();
     command
         .env("PYTHONHASHSEED", "0")
@@ -8318,6 +8341,7 @@ async fn run_local_python_command(
     action: &str,
     duration: Duration,
 ) -> Result<String, String> {
+    hide_local_python_command_window(command);
     let output = timeout(duration, command.output())
         .await
         .map_err(|_| format!("Timed out while trying to {action}"))?
@@ -9531,6 +9555,7 @@ async fn run_embedded_python_sample_in_dir(
 }
 
 fn configure_python_sample_command(command: &mut Command) {
+    hide_local_python_command_window(command);
     command
         .env_clear()
         .env("PYTHONHASHSEED", "0")
