@@ -32,6 +32,8 @@ src-tauri/resources/ai-sidecar/*
 !src-tauri/resources/ai-sidecar/.gitkeep
 src-tauri/resources/systematic-python/*
 !src-tauri/resources/systematic-python/.gitkeep
+!src-tauri/resources/systematic-python/templates/
+!src-tauri/resources/systematic-python/templates/*.py
 *-setup.exe
 *.msi
 *.dmg

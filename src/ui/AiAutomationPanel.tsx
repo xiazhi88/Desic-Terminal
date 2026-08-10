@@ -1402,7 +1402,7 @@ function RunsView({
   }, [loadRunDetail, loadingId, selectedDetail, selectedRun]);
 
   return (
-    <>
+    <div className="automation-runs-view">
       <div className="automation-run-audit-head">
         <div className="automation-run-stat-strip">
           <div><span>{automationText("runCurrentRange", "Current range", "当前范围")}</span><strong>{stats.total}</strong><small>{i18n.t("automation:runs")}</small></div>
@@ -1437,11 +1437,8 @@ function RunsView({
           </div>
         </div>
       </div>
-      {limitedItems.length === 0 ? (
-        <SectionState icon={<Activity size={22} />} title={emptyTitle} detail={emptyDetail} />
-      ) : null}
       <div className="automation-list automation-run-list">
-        {limitedItems.map((item) => {
+        {limitedItems.length === 0 ? <SectionState icon={<Activity size={22} />} title={emptyTitle} detail={emptyDetail} /> : limitedItems.map((item) => {
           const counts = runCounts.get(item.id) ?? runActionCounts(item, details[item.id], deliveries);
           const duration = item.finishedAt ? Math.max(0, item.finishedAt - item.startedAt) : null;
           const hasOpportunity = counts.opportunity > 0;
@@ -1491,7 +1488,7 @@ function RunsView({
           onClose={closeRun}
         />
       ) : null}
-    </>
+    </div>
   );
 }
 
@@ -2623,7 +2620,7 @@ function DailyMarketReviewsView({ items, focusId }: { items: AiDailyMarketReview
     <div className="automation-daily-review-layout">
       <aside className="automation-daily-review-list">
         <div className="automation-subhead"><div><strong>{automationText("dailyReviews", "Daily reviews", "每日复盘")}</strong><span>{automationText("utcDate", "UTC date", "UTC 日期")}</span></div><span>{automationText("recordCount", "{{count}} records", "{{count}} 条", { count: sorted.length })}</span></div>
-        <div>
+        <div className="automation-daily-review-items">
           {sorted.map((item) => (
             <button type="button" className={clsx(item.id === selected.id && "active")} onClick={() => setSelectedId(item.id)} key={item.id}>
               <span><strong>{item.reviewDate}</strong><StatusBadge status={item.status} /></span>
@@ -4363,7 +4360,7 @@ function AiAutomationPanelComponent({
         </div>
       ) : null}
 
-      <section className="automation-content" data-onboarding-target={onboardingActive ? "profile" : undefined}>
+      <section className={clsx("automation-content", activeTab === "runs" && "automation-content--runs")} data-onboarding-target={onboardingActive ? "profile" : undefined}>
         {sectionLoading === activeTab && summary ? (
           <div className={clsx("automation-section-loading", !activeSectionLoaded && "initial")} role="status" aria-live="polite">
             <Loader2 className="spin" size={15} />

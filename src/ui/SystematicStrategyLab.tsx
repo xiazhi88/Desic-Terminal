@@ -31,7 +31,7 @@ import {
   X
 } from "lucide-react";
 import {
-  createDefaultSystematicPythonStrategy,
+  createSystematicPythonStrategy,
   deleteSystematicBacktest,
   deleteSystematicStrategy,
   deleteSystematicProfile,
@@ -53,6 +53,7 @@ import {
   type SystematicEquityPoint,
   type SystematicBacktestFill,
   type SystematicBacktestStatistics,
+  type SystematicBacktestTiming,
   type SystematicBacktestView,
   type SystematicClosedBar,
   type SystematicClosedTrade,
@@ -142,6 +143,15 @@ type SystematicConfirmation =
 type StrategyAiStatus = "idle" | "connecting" | "streaming" | "tooling" | "typing" | "failed";
 
 type StrategyGuideTab = "lifecycle" | "context" | "actions" | "examples";
+type PythonStrategyTemplateId = "blank" | "emaTrend" | "macdVolumeAtr" | "bollingerReversion";
+
+type PythonStrategyTemplateOption = {
+  id: PythonStrategyTemplateId;
+  name: string;
+  title: string;
+  detail: string;
+  icon: ReactNode;
+};
 
 type ReplayFillMarkerCandidate = {
   fillIndex: number;
@@ -182,6 +192,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [draft, setDraft] = useState<PythonDraft>(EMPTY_PYTHON_DRAFT);
   const [saving, setSaving] = useState(false);
   const [creating, setCreating] = useState(false);
+  const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [startingBacktest, setStartingBacktest] = useState(false);
   const [startingOptimization, setStartingOptimization] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -217,6 +228,12 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const replayRangeDraggingRef = useRef(false);
 
   const text = copy(chinese);
+  const strategyTemplateOptions = useMemo<PythonStrategyTemplateOption[]>(() => [
+    { id: "blank", name: text.templateBlankName, title: text.templateBlankTitle, detail: text.templateBlankDetail, icon: <Code2 size={17} /> },
+    { id: "emaTrend", name: text.templateEmaTrendName, title: text.templateEmaTrendTitle, detail: text.templateEmaTrendDetail, icon: <Activity size={17} /> },
+    { id: "macdVolumeAtr", name: text.templateMacdVolumeAtrName, title: text.templateMacdVolumeAtrTitle, detail: text.templateMacdVolumeAtrDetail, icon: <BarChart3 size={17} /> },
+    { id: "bollingerReversion", name: text.templateBollingerName, title: text.templateBollingerTitle, detail: text.templateBollingerDetail, icon: <SlidersHorizontal size={17} /> },
+  ], [text]);
   const strategies = useMemo(
     () => (overview?.strategies ?? []).filter((strategy) => strategy.kind === "python"),
     [overview?.strategies],
@@ -421,14 +438,14 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     else void deleteBacktest(action.item);
   }, [confirmation, deleteBacktest, deleteStrategy]);
 
-  const createPython = useCallback(async () => {
+  const createPython = useCallback(async (template: PythonStrategyTemplateOption) => {
     if (!desktop) {
       onNotify({ kind: "info", title: text.desktopOnly, message: text.desktopOnlyDetail });
       return;
     }
     setCreating(true);
     try {
-      const created = await createDefaultSystematicPythonStrategy(nextAvailableStrategyName(strategies, text.defaultStrategyName));
+      const created = await createSystematicPythonStrategy(nextAvailableStrategyName(strategies, template.name), template.id);
       if (!created) throw new Error(text.desktopOnlyDetail);
       await refresh();
       setSelectedStrategyId(created.id);
@@ -440,6 +457,11 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       setCreating(false);
     }
   }, [desktop, onNotify, refresh, strategies, text]);
+
+  const choosePythonTemplate = useCallback((template: PythonStrategyTemplateOption) => {
+    setTemplatePickerOpen(false);
+    void createPython(template);
+  }, [createPython]);
 
   const savePython = useCallback(async () => {
     if (!desktop || !selectedPython) return;
@@ -804,7 +826,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
             desktop={desktop}
             chinese={chinese}
             onChoose={chooseStrategy}
-            onCreate={() => void createPython()}
+            onCreate={() => setTemplatePickerOpen(true)}
             onDelete={(strategy) => setConfirmation({ kind: "strategy", item: strategy })}
             deletingId={deletingId}
             onSave={() => void savePython()}
@@ -911,6 +933,12 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         confirmText={text.confirmDelete}
         onCancel={() => setConfirmation(null)}
         onConfirm={confirmDelete}
+      /> : null}
+      {templatePickerOpen ? <SystematicPythonTemplateDialog
+        text={text}
+        options={strategyTemplateOptions}
+        onCancel={() => setTemplatePickerOpen(false)}
+        onChoose={choosePythonTemplate}
       /> : null}
     </section>
   );
@@ -2643,7 +2671,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 <span className={clsx("systematic-lab-run-row__state", `is-${run.status}`)} />
                 <span>
                   <strong>{run.strategyName}</strong>
-                  <small className="systematic-lab-run-row__instrument"><SymbolIcon base={symbolBase(run.instId)} /><span>{run.instId}</span><b>v{run.strategyVersion}</b><i>·</i>{formatRunTime(run.finishedAt ?? run.createdAt)}</small>
+                  <small className="systematic-lab-run-row__instrument"><SymbolIcon base={symbolBase(run.instId)} /><span>{run.instId}</span><b>v{run.strategyVersion}</b><i>·</i>{formatRunTime(run.finishedAt ?? run.createdAt)}<i>·</i><span className="systematic-lab-run-row__duration" title={formatBacktestTimingTitle(run.timing) ?? text.backtestDuration}>{formatBacktestDuration(run.startedAt, run.finishedAt)}</span></small>
                 </span>
                 <em className={clsx(
                   "systematic-lab-run-row__return",
@@ -2663,6 +2691,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
             <div className="systematic-lab-review-main__head">
               <div><span className="systematic-lab__eyebrow">{selectedRun.instId} · 1m{detail?.preloadBarCount ? ` · ${formatLocalizedNumber(detail.preloadBarCount)} ${text.preloadHistory}` : ""}</span><h2>{selectedRun.strategyName}</h2></div>
               {detail ? <div className="systematic-lab-review-main__date-range" title={evaluationRange}><span>{text.evaluationRange}</span><strong>{evaluationRange}</strong></div> : null}
+              {selectedRun.startedAt ? <div className="systematic-lab-review-main__date-range systematic-lab-review-main__duration" title={formatBacktestTimingTitle(selectedRun.timing) ?? text.backtestDuration}><span>{text.backtestDuration}</span><strong>{formatBacktestDuration(selectedRun.startedAt, selectedRun.finishedAt)}</strong></div> : null}
               <RunStatus run={selectedRun} text={text} />
             </div>
             {loading ? <div className="systematic-lab-loading"><LoaderCircle size={18} className="is-spinning" /> {text.loadingResult}</div> : null}
@@ -3532,6 +3561,59 @@ function EmptyState({ icon, title, detail }: Readonly<{ icon: ReactNode; title: 
   return <div className="systematic-lab-empty-state"><span>{icon}</span><strong>{title}</strong><p>{detail}</p></div>;
 }
 
+function SystematicPythonTemplateDialog({ text, options, onCancel, onChoose }: Readonly<{
+  text: Copy;
+  options: PythonStrategyTemplateOption[];
+  onCancel: () => void;
+  onChoose: (template: PythonStrategyTemplateOption) => void;
+}>) {
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onCancel();
+    };
+    document.addEventListener("keydown", closeOnEscape);
+    return () => document.removeEventListener("keydown", closeOnEscape);
+  }, [onCancel]);
+
+  return (
+    <div className="systematic-lab-template-picker" role="presentation" onMouseDown={onCancel}>
+      <section
+        className="systematic-lab-template-picker__dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="systematic-lab-template-picker-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header>
+          <div>
+            <span className="systematic-lab__eyebrow">PYTHON</span>
+            <strong id="systematic-lab-template-picker-title">{text.chooseStrategyTemplate}</strong>
+            <p>{text.chooseStrategyTemplateDetail}</p>
+          </div>
+          <button ref={closeButtonRef} className="systematic-lab__icon-button" type="button" onClick={onCancel} title={text.cancel} aria-label={text.cancel}>
+            <X size={14} />
+          </button>
+        </header>
+        <div className="systematic-lab-template-picker__options">
+          {options.map((option) => (
+            <button key={option.id} type="button" onClick={() => onChoose(option)}>
+              <span className="systematic-lab-template-picker__icon">{option.icon}</span>
+              <span>
+                <strong>{option.title}</strong>
+                <small>{option.detail}</small>
+              </span>
+              <ChevronRight size={15} />
+            </button>
+          ))}
+        </div>
+        <p className="systematic-lab-template-picker__note">{text.chooseStrategyTemplateNote}</p>
+      </section>
+    </div>
+  );
+}
+
 function SystematicConfirmDialog({ title, detail, cancelText, confirmText, onCancel, onConfirm }: Readonly<{
   title: string;
   detail: string;
@@ -4084,6 +4166,31 @@ function formatBacktestDays(barCount?: number | null) {
   return formatLocalizedNumber(days, { maximumFractionDigits: days < 10 ? 1 : 0 });
 }
 
+function formatBacktestDuration(startedAt?: number | null, finishedAt?: number | null) {
+  const start = Number(startedAt);
+  const end = finishedAt === null || finishedAt === undefined ? Date.now() : Number(finishedAt);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "--";
+  const totalSeconds = Math.max(0, Math.round((end - start) / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+function formatBacktestTimingTitle(timing?: SystematicBacktestTiming | null) {
+  if (!timing) return null;
+  const seconds = (value: number) => `${(Math.max(0, value) / 1_000_000).toFixed(2)}s`;
+  return [
+    `Python IPC ${seconds(timing.pythonRequestRoundTripUs)}`,
+    `event ${seconds(timing.pythonEventBuildUs)}`,
+    `engine ${seconds(timing.simulationLoopUs)}`,
+    `report ${seconds(timing.reportBuildUs)}`,
+    `callbacks ${formatLocalizedNumber(timing.strategyCallbackCount)}`,
+  ].join(" · ");
+}
+
 function formatBacktestDateRange(startAt?: number | null, endAt?: number | null) {
   const start = Number(startAt);
   const end = Number(endAt);
@@ -4191,7 +4298,7 @@ function copy(chinese: boolean) {
       actionOutput: "输出动作", actions: "开多、开空、平多、平空、修改/撤销保护或不交易", execution: "执行", hostOwned: "宿主负责下一根成交、虚拟保证金与账本",
       runtimeUnavailable: "Python 运行时不可用", runtimeUnavailableDetail: "本地 Python 环境尚未准备完成。",
       desktopOnly: "仅桌面端", desktopOnlyDetail: "策略本地数据库、回测任务和本地 Python 环境只在桌面应用内运行。",
-      defaultStrategyName: "收线 Python 策略", strategyCreated: "Python 策略已创建", strategyCreatedDetail: "源码已作为本地版本保存；先检查输入和动作，再运行回测。",
+      chooseStrategyTemplate: "选择策略模板", chooseStrategyTemplateDetail: "先选择一个起点，创建后仍可直接编辑源码。", chooseStrategyTemplateNote: "内置策略只作为可审阅的研究起点；创建后请先检查参数、动作和保护逻辑。", templateBlankName: "空白 Python 策略", templateBlankTitle: "空白模板", templateBlankDetail: "只保留 on_bar 入口，固定返回不交易。", templateEmaTrendName: "30m EMA 趋势策略", templateEmaTrendTitle: "多周期 EMA 趋势", templateEmaTrendDetail: "确认 30m 快慢 EMA 交叉，并用 ATR 设置入场保护。", templateMacdVolumeAtrName: "30m MACD 成交量策略", templateMacdVolumeAtrTitle: "MACD + 成交量确认", templateMacdVolumeAtrDetail: "确认 30m MACD 交叉和成交量放大，并用 ATR 设置保护。", templateBollingerName: "30m 布林带策略", templateBollingerTitle: "布林带均值回归", templateBollingerDetail: "价格突破布林带后回归中轨，并用波动率设置止损。", strategyCreated: "Python 策略已创建", strategyCreatedDetail: "源码已作为本地版本保存；先检查输入和动作，再运行回测。",
       strategyCreateFailed: "无法创建策略", strategySaved: "策略版本已保存", strategySavedDetail: "回测将固定这个版本、数据快照和成交假设。", cancel: "取消", confirmDelete: "删除",
       strategySaveFailed: "无法保存策略", strategyNameInUse: "策略名称已存在", strategyNameInUseDetail: "请为策略使用一个不同的名称。", invalidParameters: "参数 JSON 无效", parametersObject: "参数必须是 JSON 对象。", parameterTuningObject: "参数调优范围必须是对象，且每项包含有限的 min、max 和 step。",
       noStrategy: "没有可回测策略", noStrategyDetail: "先创建或选择一个策略。", backtestUnavailable: "当前策略无法回测", backtestUnavailableDetail: "当前策略不符合回测合同。",
@@ -4203,7 +4310,7 @@ function copy(chinese: boolean) {
       timeline: "时间线", replayContract: "虚拟账户回放", preloadHistoryDetail: "只加载正式评估开始前的已确认 1 分钟 K 线，不进入权益、回放或统计。", barCloses: "K 线收线", barClosesDetail: "正式评估中，策略只能读取当前及过去数据；高周期末根会明确标记是否已收线。",
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
-      backtestRuns: "回测记录", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
+      backtestRuns: "回测记录", backtestDuration: "耗时", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
       result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线",
       previousBar: "上一根 K 线", nextBar: "下一根 K 线", replay: "回放进度", replayActionLegend: "成交动作", limitFillEstimate: "限价：K 线保守估计", limitFillEstimateDetail: "限价单只依据后续 1 分钟 K 线的价格穿越与成交量参与上限模拟，不能代表历史订单簿队列成交。", resultUnavailable: "回放数据不可用", resultUnavailableDetail: "该回测没有可读取的本地快照。",
       replayAccount: "回放账户", tradeLedger: "成交账本", position: "仓位", positionHistory: "历史仓位", noTrades: "没有已平仓交易", noTradesDetail: "动作、成交和权益仍会保留在回测报告中。", noReplayTrades: "当前时点没有已平仓交易", noReplayTradesDetail: "继续回放以查看后续记账结果。", noReplayFills: "当前时点没有成交", noReplayFillsDetail: "继续回放以查看下一根开盘成交和保护性退出。", noPosition: "当前时点没有持仓", noPositionDetail: "仓位将在下一根开盘成交后显示。", contracts: "张", contractValue: "每张面值", notional: "名义价值", entryPrice: "开仓均价", exitPrice: "平仓均价", markPrice: "标记价格", funding: "资金费用", stopLoss: "止损", takeProfit: "止盈", holdingTime: "持有时长", fillPrice: "成交价", marginChange: "保证金变动", entryNotional: "开仓名义价值", exitNotional: "平仓名义价值", fee: "手续费", buy: "买入", sell: "卖出", long: "多", short: "空",
@@ -4237,7 +4344,7 @@ function copy(chinese: boolean) {
     actionOutput: "Action output", actions: "Open, close, set/cancel protection, or no action", execution: "Execution", hostOwned: "Host owns next-open fills, virtual margin, and ledger",
     runtimeUnavailable: "Python runtime unavailable", runtimeUnavailableDetail: "The local Python environment is not ready yet.",
     desktopOnly: "Desktop app only", desktopOnlyDetail: "Local strategy storage, backtest jobs, and the local Python environment run only in the desktop application.",
-    defaultStrategyName: "Closed-bar Python strategy", strategyCreated: "Python strategy created", strategyCreatedDetail: "Source is saved locally as a version. Review its inputs and actions before backtesting.",
+    chooseStrategyTemplate: "Choose a strategy template", chooseStrategyTemplateDetail: "Choose a starting point; you can edit the source after creation.", chooseStrategyTemplateNote: "Built-in strategies are reviewable research starting points. Inspect their parameters, actions, and protection before running them.", templateBlankName: "Blank Python strategy", templateBlankTitle: "Blank template", templateBlankDetail: "Only the on_bar entry point; it always returns no_action.", templateEmaTrendName: "30m EMA trend strategy", templateEmaTrendTitle: "Multi-timeframe EMA trend", templateEmaTrendDetail: "Uses confirmed 30m EMA crosses with ATR-based entry protection.", templateMacdVolumeAtrName: "30m MACD volume strategy", templateMacdVolumeAtrTitle: "MACD + volume confirmation", templateMacdVolumeAtrDetail: "Confirms 30m MACD crosses with volume expansion and ATR protection.", templateBollingerName: "30m Bollinger strategy", templateBollingerTitle: "Bollinger mean reversion", templateBollingerDetail: "Trades a return toward the middle band with volatility-aware protection.", strategyCreated: "Python strategy created", strategyCreatedDetail: "Source is saved locally as a version. Review its inputs and actions before backtesting.",
     strategyCreateFailed: "Could not create strategy", strategySaved: "Strategy version saved", strategySavedDetail: "A backtest pins this version, its data snapshot, and execution assumptions.", cancel: "Cancel", confirmDelete: "Delete",
     strategySaveFailed: "Could not save strategy", strategyNameInUse: "Strategy name already exists", strategyNameInUseDetail: "Choose a different name for this strategy.", invalidParameters: "Invalid parameters JSON", parametersObject: "Parameters must be a JSON object.", parameterTuningObject: "Parameter tuning must be an object whose entries contain finite min, max, and step values.",
     noStrategy: "No backtestable strategy", noStrategyDetail: "Create or select a strategy first.", backtestUnavailable: "Strategy cannot backtest", backtestUnavailableDetail: "This strategy does not meet the backtest contract.",
@@ -4249,7 +4356,7 @@ function copy(chinese: boolean) {
     timeline: "TIMELINE", replayContract: "Virtual-account replay", preloadHistoryDetail: "Confirmed 1-minute history before evaluation start is context only, never equity, replay, or statistics.", barCloses: "Bar closes", barClosesDetail: "The host exposes only current and earlier data; the final higher-timeframe bar states whether it is confirmed.",
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",
-    backtestRuns: "Backtest runs", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
+    backtestRuns: "Backtest runs", backtestDuration: "Elapsed", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
     result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve",
     previousBar: "Previous bar", nextBar: "Next bar", replay: "Replay progress", replayActionLegend: "Filled actions", limitFillEstimate: "Limit: conservative K-line estimate", limitFillEstimateDetail: "Limit fills use only later 1m price traversal and a volume-participation cap. They do not represent historical order-book queue fills.", resultUnavailable: "Replay data unavailable", resultUnavailableDetail: "This run has no readable local snapshot.",
     replayAccount: "Replay account", tradeLedger: "Fill ledger", position: "Position", positionHistory: "Position history", noTrades: "No closed trades", noTradesDetail: "Actions, fills, and equity remain in the full backtest report.", noReplayTrades: "No closed trade at this time", noReplayTradesDetail: "Continue the replay to view later ledger entries.", noReplayFills: "No fill at this time", noReplayFillsDetail: "Continue the replay to view next-open fills and protective exits.", noPosition: "No position at this time", noPositionDetail: "A position appears after its next-open fill.", contracts: "contracts", contractValue: "Contract value", notional: "Notional", entryPrice: "Average entry", exitPrice: "Exit price", markPrice: "Mark price", funding: "Funding", stopLoss: "Stop loss", takeProfit: "Take profit", holdingTime: "Holding time", fillPrice: "Fill price", marginChange: "Margin change", entryNotional: "Entry notional", exitNotional: "Exit notional", fee: "Fee", buy: "Buy", sell: "Sell", long: "Long", short: "Short",

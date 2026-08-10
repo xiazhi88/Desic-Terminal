@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc, time::Instant};
+use std::{collections::{BTreeMap, VecDeque}, sync::Arc, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -118,6 +118,17 @@ pub struct PositionSizingResolution {
     pub current_same_side_margin_usdt: f64,
 }
 
+/// The outcome of resolving an opening size for a historical simulation.
+///
+/// A budget or lot-size shortfall is a normal no-trade condition in a
+/// backtest: the strategy can keep evaluating later bars after it is unable to
+/// open on this one. Invalid sizing inputs remain errors.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BacktestPositionSizingOutcome {
+    Sized(PositionSizingResolution),
+    Skipped { reason: String },
+}
+
 impl PositionSizing {
     pub fn validate(&self) -> Result<(), SystematicError> {
         let maximum = match self.mode {
@@ -226,6 +237,37 @@ pub fn resolve_position_sizing(
         same_side_total_budget_usdt,
         current_same_side_margin_usdt,
     })
+}
+
+/// Resolves an opening size for a historical backtest.
+///
+/// Insufficient remaining margin or a budget below the instrument minimum do
+/// not invalidate the simulation. They are returned as `Skipped` so callers
+/// can retain an auditable no-action event and continue processing later bars.
+/// The stricter [`resolve_position_sizing`] API remains available to live
+/// Profile execution, where the host records a blocked action instead.
+pub fn resolve_backtest_position_sizing(
+    sizing: PositionSizing,
+    contract: InstrumentContract,
+    leverage: f64,
+    equity_usdt: f64,
+    current_same_side_contracts: f64,
+    execution_price: f64,
+) -> Result<BacktestPositionSizingOutcome, SystematicError> {
+    match resolve_position_sizing(
+        sizing,
+        contract,
+        leverage,
+        equity_usdt,
+        current_same_side_contracts,
+        execution_price,
+    ) {
+        Ok(resolution) => Ok(BacktestPositionSizingOutcome::Sized(resolution)),
+        Err(SystematicError::InvalidState { reason }) => {
+            Ok(BacktestPositionSizingOutcome::Skipped { reason })
+        }
+        Err(error) => Err(error),
+    }
 }
 
 fn legacy_default_leverage() -> f64 {
@@ -845,6 +887,9 @@ impl BacktestEngine {
         S: StatefulEventDrivenStrategy,
         F: FnMut(u64, u64),
     {
+        let incremental_ledger_batch = strategy.uses_incremental_ledger_batch();
+        let inst_id: Arc<str> = request.inst_id.as_str().into();
+        let mut queued_actions = VecDeque::<(i64, StrategyAction)>::new();
         Self::run_with_progress_internal(
             request,
             cancellation,
@@ -858,7 +903,87 @@ impl BacktestEngine {
                     &state.closed_trades,
                     &state.funding_payments,
                 );
-                let action = strategy.on_bar(&context)?;
+                let action = if let Some((as_of_ms, action)) = queued_actions.pop_front() {
+                    if as_of_ms != context.market().as_of_ms() {
+                        return Err(SystematicError::InvalidState {
+                            reason: "strategy batch output was out of order".to_string(),
+                        });
+                    }
+                    if !matches!(action, StrategyAction::NoAction { .. }) {
+                        queued_actions.clear();
+                    }
+                    action
+                } else {
+                    let current_index = request
+                        .bars
+                        .partition_point(|bar| bar.close_time_ms <= context.market().as_of_ms())
+                        .checked_sub(1);
+                    // A managed runtime may shrink its next batch after an
+                    // early action, avoiding speculative event construction
+                    // and IPC payloads it knows will be discarded.
+                    let batch_size = strategy.no_action_batch_size().clamp(1, 64);
+                    let can_batch = batch_size > 1
+                        && current_index.is_some_and(|index| index >= request.preload_bars)
+                        && state.position.is_none()
+                        && state.open_orders.is_empty();
+                    if can_batch {
+                        let current_index = current_index.expect("batch index was checked");
+                        let end = (current_index + batch_size).min(request.bars.len());
+                        let mut snapshots = Vec::with_capacity(end - current_index);
+                        // Each batch event only needs the bars new since the
+                        // previous dispatch. The engine cursor already
+                        // validated the full window once; snapshotting the
+                        // whole visible window per event would re-copy the
+                        // entire evaluation range on every batch (O(n) per
+                        // event) and dominate the IPC round-trip savings.
+                        let mut incremental_bars: Vec<ClosedBar> =
+                            Vec::with_capacity(end - current_index);
+                        for index in current_index..end {
+                            let bar = &request.bars[index];
+                            let include_ledger = index == current_index || !incremental_ledger_batch;
+                            incremental_bars.push(bar.clone());
+                            snapshots.push(StrategyContextSnapshot {
+                                market: CurrentDataSnapshot {
+                                    inst_id: inst_id.to_string(),
+                                    as_of_ms: bar.close_time_ms,
+                                    interval_ms: ONE_MINUTE_MS,
+                                    bars: incremental_bars.clone(),
+                                    features: BTreeMap::new(),
+                                },
+                                portfolio: virtual_portfolio(request, state, bar.close),
+                                fills: if include_ledger { state.fills.clone() } else { Vec::new() },
+                                closed_trades: if include_ledger { state.closed_trades.clone() } else { Vec::new() },
+                                funding_payments: if include_ledger { state.funding_payments.clone() } else { Vec::new() },
+                            });
+                        }
+                        let outputs = strategy.on_bar_batch(&snapshots)?;
+                        if outputs.is_empty() || outputs.len() > snapshots.len() {
+                            return Err(SystematicError::InvalidState {
+                                reason: "strategy batch returned an invalid output count".to_string(),
+                            });
+                        }
+                        let mut first_action_index = None;
+                        for (index, output) in outputs.iter().enumerate() {
+                            if !matches!(output, StrategyAction::NoAction { .. }) {
+                                first_action_index = Some(index);
+                                break;
+                            }
+                        }
+                        let retained = first_action_index.map_or(outputs.len(), |index| index + 1);
+                        for index in 0..retained {
+                            queued_actions.push_back((
+                                snapshots[index].market.as_of_ms,
+                                outputs[index].clone(),
+                            ));
+                        }
+                        queued_actions
+                            .pop_front()
+                            .map(|(_, action)| action)
+                            .expect("a non-empty strategy batch must queue its first output")
+                    } else {
+                        strategy.on_bar(&context)?
+                    }
+                };
                 let decision = decision_for_action(request, &context, &action)?;
                 Ok(CallbackOutcome {
                     decision,
@@ -2990,6 +3115,51 @@ mod tests {
     }
 
     #[test]
+    fn backtest_position_sizing_skips_minimum_order_shortfall() {
+        let outcome = resolve_backtest_position_sizing(
+            PositionSizing {
+                mode: PositionSizingMode::FixedUsdt,
+                per_entry_budget: 1.0,
+                same_side_total_budget: 1.0,
+            },
+            InstrumentContract {
+                contract_value: 1.0,
+                min_size: 2.0,
+                lot_size: 2.0,
+            },
+            10.0,
+            10_000.0,
+            0.0,
+            10.0,
+        )
+        .expect("a valid capacity shortfall must not fail the backtest");
+
+        assert!(matches!(
+            outcome,
+            BacktestPositionSizingOutcome::Skipped { reason }
+                if reason.contains("entry budget is below this contract's minimum order")
+        ));
+    }
+
+    #[test]
+    fn backtest_position_sizing_keeps_invalid_inputs_as_errors() {
+        let outcome = resolve_backtest_position_sizing(
+            PositionSizing::default(),
+            InstrumentContract {
+                contract_value: 1.0,
+                min_size: 1.0,
+                lot_size: 1.0,
+            },
+            0.0,
+            10_000.0,
+            0.0,
+            10.0,
+        );
+
+        assert!(outcome.is_err());
+    }
+
+    #[test]
     fn position_sizing_caps_same_side_pyramiding() {
         let result = resolve_position_sizing(
             PositionSizing {
@@ -3263,6 +3433,152 @@ mod tests {
         );
         assert!((report.closed_trades[0].net_pnl_usdt - 9.54001).abs() < 1e-10);
         assert!(report.has_valid_hash().unwrap());
+    }
+
+    struct BatchedNoActionStrategy {
+        batch_sizes: Vec<usize>,
+        fallback_calls: usize,
+    }
+
+    impl StatefulEventDrivenStrategy for BatchedNoActionStrategy {
+        fn on_bar(
+            &mut self,
+            _context: &StrategyContext<'_>,
+        ) -> Result<StrategyAction, SystematicError> {
+            self.fallback_calls += 1;
+            Ok(StrategyAction::NoAction {
+                reason: Some("post-entry minute".to_string()),
+            })
+        }
+
+        fn no_action_batch_size(&self) -> usize {
+            4
+        }
+
+        fn on_bar_batch(
+            &mut self,
+            contexts: &[StrategyContextSnapshot],
+        ) -> Result<Vec<StrategyAction>, SystematicError> {
+            self.batch_sizes.push(contexts.len());
+            assert!(contexts.iter().all(|context| {
+                context.portfolio.position.is_none()
+                    && context.portfolio.open_orders.is_empty()
+                    && context.fills.is_empty()
+                    && context.closed_trades.is_empty()
+            }));
+            Ok(contexts
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    if index == 2 {
+                        StrategyAction::OpenLong {
+                            quantity: 1.0,
+                            execution: StrategyExecution::default(),
+                            stop_loss: None,
+                            take_profit: None,
+                            reason: "batched entry".to_string(),
+                            diagnostics: BTreeMap::new(),
+                        }
+                    } else {
+                        StrategyAction::NoAction {
+                            reason: Some("batched wait".to_string()),
+                        }
+                    }
+                })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn stateful_no_action_batches_stop_before_the_first_action() {
+        let data = (0..6)
+            .map(|index| {
+                let price = 100.0 + index as f64;
+                bar(index * ONE_MINUTE_MS, price, price + 1.0, price - 1.0, price)
+            })
+            .collect();
+        let mut strategy = BatchedNoActionStrategy {
+            batch_sizes: Vec::new(),
+            fallback_calls: 0,
+        };
+
+        let report = BacktestEngine::run_stateful(
+            &request(data),
+            &mut strategy,
+            &CancellationToken::default(),
+        )
+        .expect("batched stateful backtest")
+        .report;
+
+        assert_eq!(strategy.batch_sizes, vec![4]);
+        assert_eq!(strategy.fallback_calls, 3);
+        assert_eq!(report.strategy_actions.len(), 6);
+        assert!(matches!(
+            report.strategy_actions[2].action,
+            StrategyAction::OpenLong { .. }
+        ));
+        assert_eq!(report.fills.len(), 1);
+        assert_eq!(report.fills[0].time_ms, 3 * ONE_MINUTE_MS);
+        assert!(report.has_valid_hash().expect("report hash"));
+    }
+
+    struct AdaptiveNoActionBatchStrategy {
+        next_batch_size: usize,
+        batch_sizes: Vec<usize>,
+    }
+
+    impl StatefulEventDrivenStrategy for AdaptiveNoActionBatchStrategy {
+        fn on_bar(
+            &mut self,
+            _context: &StrategyContext<'_>,
+        ) -> Result<StrategyAction, SystematicError> {
+            Ok(StrategyAction::NoAction { reason: None })
+        }
+
+        fn no_action_batch_size(&self) -> usize {
+            self.next_batch_size
+        }
+
+        fn on_bar_batch(
+            &mut self,
+            contexts: &[StrategyContextSnapshot],
+        ) -> Result<Vec<StrategyAction>, SystematicError> {
+            self.batch_sizes.push(contexts.len());
+            self.next_batch_size = 2;
+            Ok(contexts
+                .iter()
+                .map(|_| StrategyAction::NoAction { reason: None })
+                .collect())
+        }
+    }
+
+    #[test]
+    fn stateful_batch_size_is_read_again_after_each_processed_batch() {
+        let data = (0..7)
+            .map(|index| {
+                let price = 100.0 + index as f64;
+                bar(index * ONE_MINUTE_MS, price, price + 1.0, price - 1.0, price)
+            })
+            .collect();
+        let mut strategy = AdaptiveNoActionBatchStrategy {
+            next_batch_size: 4,
+            batch_sizes: Vec::new(),
+        };
+
+        let report = BacktestEngine::run_stateful(
+            &request(data),
+            &mut strategy,
+            &CancellationToken::default(),
+        )
+        .expect("adaptive batched stateful backtest")
+        .report;
+
+        // The first batch uses 4; after its callback changes the runtime's
+        // preference, the next eligible batch is constructed with 2 instead
+        // of the start-of-run value.
+        assert_eq!(strategy.batch_sizes, vec![4, 2, 1]);
+        assert_eq!(report.strategy_actions.len(), 7);
+        assert!(report.has_valid_hash().expect("report hash"));
     }
 
     struct ShortThenClose {

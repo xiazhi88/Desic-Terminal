@@ -54,6 +54,7 @@ export const ANALYSIS_TOOLS = new Set([
   "intelligence.smartMoney.readConsensusDivergence",
   "trade.evaluatePlan",
   "trade.precheck",
+  "strategy.readDevelopmentDocs",
   "strategy.readCurrentSource",
   "strategy.testCurrentSource",
   "skills"
@@ -241,7 +242,7 @@ export function resolveToolPolicy(name, config = {}) {
   }
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
-      (canonicalName === "strategy.readCurrentSource" || canonicalName === "strategy.testCurrentSource")
+      (canonicalName === "strategy.readDevelopmentDocs" || canonicalName === "strategy.readCurrentSource" || canonicalName === "strategy.testCurrentSource")
       && role !== "main"
     ) {
       return disabledPolicy("disabled:strategy-editor-main-session-only");

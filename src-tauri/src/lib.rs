@@ -14518,6 +14518,7 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
                 | "alert.listPriceAlerts"
                 | "script.list"
                 | "skills"
+                | "strategy.readDevelopmentDocs"
                 | "strategy.readCurrentSource"
                 | "strategy.testCurrentSource"
         )
@@ -14733,7 +14734,13 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     {
         return Err("market.readDecisionContext 仅允许绑定后台 Run 的主 Agent 调用".to_string());
     }
-    if matches!(canonical, "strategy.readCurrentSource" | "strategy.testCurrentSource") && !is_main {
+    if matches!(
+        canonical,
+        "strategy.readDevelopmentDocs"
+            | "strategy.readCurrentSource"
+            | "strategy.testCurrentSource"
+    ) && !is_main
+    {
         return Err("策略编辑器源码和受控测试仅可由主 AI 会话使用".to_string());
     }
     let is_read = matches!(
@@ -14793,6 +14800,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "trade.precheck"
             | "tradeOpportunity.list"
             | "tradeOpportunity.get"
+            | "strategy.readDevelopmentDocs"
             | "strategy.readCurrentSource"
             | "strategy.testCurrentSource"
     );
@@ -15359,7 +15367,10 @@ async fn execute_ai_tool(
     let session_id = context.session_id.as_str();
     if matches!(
         canonical_name,
-        "strategy.readCurrentSource" | "strategy.testCurrentSource" | "strategy.applySource"
+        "strategy.readDevelopmentDocs"
+            | "strategy.readCurrentSource"
+            | "strategy.testCurrentSource"
+            | "strategy.applySource"
     ) {
         ensure_ai_run_is_active(&app, context).await?;
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
@@ -23249,6 +23260,7 @@ mod tests {
             "account.readOpenOrders",
             "intelligence.news.list",
             "trade.precheck",
+            "strategy.readDevelopmentDocs",
             "strategy.readCurrentSource",
             "strategy.testCurrentSource",
         ] {

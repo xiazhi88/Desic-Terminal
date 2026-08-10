@@ -276,6 +276,39 @@ impl TimeframeAggregator {
     pub fn latest(&self) -> Option<&MarketBar> {
         self.current.as_ref()
     }
+
+    pub fn completed_len(&self) -> usize {
+        self.completed.len()
+    }
+
+    /// Rebuilds this aggregator from an earlier [`TimeframeAggregator::snapshot`].
+    ///
+    /// A speculative batch can push aggregates past the last event a remote
+    /// runtime actually processed; `restore` rewinds to a previously captured
+    /// snapshot and the caller replays only the processed prefix. The supplied
+    /// bars must be a value previously returned by `snapshot()` (already
+    /// bounded by `maximum_bars`).
+    pub fn restore(&mut self, bars: Vec<MarketBar>) {
+        self.completed.clear();
+        self.current = None;
+        self.started = false;
+        if let Some((last, rest)) = bars.split_last() {
+            self.completed.extend(rest.iter().cloned());
+            self.current = Some(last.clone());
+            self.started = true;
+        }
+    }
+
+    /// Cheap rewind for a speculative batch: keeps the completed prefix
+    /// (truncated to its pre-batch length; a bucket eviction at the
+    /// `maximum_bars` cap is acceptable because batch events only emit the
+    /// latest aggregate) and restores the single in-progress aggregate.
+    /// The caller replays the bars the processed events contributed.
+    pub fn restore_prefix(&mut self, completed_len: usize, current: Option<MarketBar>) {
+        self.completed.truncate(completed_len.min(self.completed.len()));
+        self.current = current;
+        self.started = !self.completed.is_empty() || self.current.is_some();
+    }
 }
 
 /// Serializable current-time input for a managed runner. It intentionally
@@ -544,6 +577,63 @@ mod tests {
             error,
             SystematicError::DataContractViolation { .. }
         ));
+    }
+
+    #[test]
+    fn aggregator_restore_rebuilds_a_previous_snapshot() {
+        let mut aggregator = TimeframeAggregator::new(3 * ONE_MINUTE_MS, 20).unwrap();
+        for index in 0..4 {
+            let price = 100.0 + index as f64;
+            aggregator
+                .push(&bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 2.0,
+                    price - 1.0,
+                    price + 1.0,
+                ))
+                .expect("push fixture bar");
+        }
+        let snapshot = aggregator.snapshot();
+        assert_eq!(snapshot.len(), 2);
+
+        let mut restored = TimeframeAggregator::new(3 * ONE_MINUTE_MS, 20).unwrap();
+        restored.restore(snapshot.clone());
+        assert_eq!(restored.snapshot(), snapshot);
+
+        // A restored aggregator keeps aggregating from the restored bar.
+        restored
+            .push(&bar(4 * ONE_MINUTE_MS, 102.0, 104.0, 101.0, 103.0))
+            .expect("push after restore");
+        let continued = restored.snapshot();
+        assert_eq!(continued.len(), 2);
+        assert_eq!(continued[1].open_time_ms, 3 * ONE_MINUTE_MS);
+        assert_eq!(continued[1].close_time_ms, 6 * ONE_MINUTE_MS);
+        assert!(!continued[1].confirmed);
+        restored
+            .push(&bar(5 * ONE_MINUTE_MS, 103.0, 105.0, 102.0, 104.0))
+            .expect("push after restore");
+        let finished = restored.snapshot();
+        assert_eq!(finished.len(), 2);
+        assert!(finished[1].confirmed);
+    }
+
+    #[test]
+    fn aggregator_restore_empty_acts_like_a_fresh_aggregator() {
+        let mut aggregator = TimeframeAggregator::new(ONE_MINUTE_MS, 20).unwrap();
+        aggregator
+            .push(&bar(0, 100.0, 101.0, 99.0, 100.5))
+            .expect("push fixture bar");
+        aggregator.restore(Vec::new());
+        assert!(aggregator.latest().is_none());
+        assert!(aggregator.snapshot().is_empty());
+
+        // Mid-bucket prefix skipping still applies after an empty restore.
+        let mut fresh = TimeframeAggregator::new(5 * ONE_MINUTE_MS, 20).unwrap();
+        fresh
+            .push(&bar(2 * ONE_MINUTE_MS, 100.0, 101.0, 99.0, 100.5))
+            .expect("push mid-bucket prefix");
+        assert!(fresh.snapshot().is_empty());
     }
 
     #[test]

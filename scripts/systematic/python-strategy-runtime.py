@@ -42,6 +42,7 @@ TIMESTAMP_FIELDS = {
 MAX_SAFE_INTEGER = 9_007_199_254_740_991
 INSTRUMENT_ID_PATTERN = re.compile(r"^[A-Z0-9][A-Z0-9-]{1,62}[A-Z0-9]$")
 INTERVAL_PATTERN = re.compile(r"^[1-9]\d*(?:m|H|D|W)$")
+MARKET_INTERVALS = ("1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D")
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 STRATEGY_ACTIONS = {
     "open_long", "open_short", "close_long", "close_short", "set_protection",
@@ -1080,6 +1081,8 @@ SAFE_BUILTINS = {
 class SourcePolicyVisitor(ast.NodeVisitor):
     def __init__(self):
         self.action_sites = []
+        self.market_intervals = set()
+        self.dynamic_market_interval = False
 
     def _forbidden(self, code, message, node=None):
         if node is not None and node.lineno > 0:
@@ -1115,10 +1118,49 @@ class SourcePolicyVisitor(ast.NodeVisitor):
     def visit_Attribute(self, node):
         if node.attr.startswith("__"):
             self._forbidden("forbidden_syntax", "strategy source must not access dunder attributes", node)
+        if node.attr == "contracts":
+            self._forbidden(
+                "invalid_strategy_api",
+                "Position has no contracts field; use position.quantity. The host owns contract sizing.",
+                node,
+            )
         self.generic_visit(node)
+
+    def _record_market_interval(self, node):
+        interval = node.args[1] if len(node.args) >= 2 else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "interval"),
+            None,
+        )
+        if isinstance(interval, ast.Constant) and isinstance(interval.value, str) and interval.value in MARKET_INTERVALS:
+            self.market_intervals.add(interval.value)
+        else:
+            # A dynamic expression may resolve to any protocol-supported
+            # interval at runtime, so the host must retain the full series set.
+            self.dynamic_market_interval = True
+
+    def selected_market_intervals(self):
+        if self.dynamic_market_interval:
+            return list(MARKET_INTERVALS)
+        # The active bar contract always requires 1m, even for a strategy that
+        # only reads a higher timeframe or does not call market.bars at all.
+        return [interval for interval in MARKET_INTERVALS if interval == "1m" or interval in self.market_intervals]
 
     def visit_Call(self, node):
         function = node.func
+        if isinstance(function, ast.Attribute) and function.attr == "bars":
+            if (
+                isinstance(function.value, ast.Attribute)
+                and function.value.attr == "market"
+                and isinstance(function.value.value, ast.Name)
+                and function.value.value.id == "ctx"
+            ):
+                self._record_market_interval(node)
+            else:
+                # A market view can be assigned to a local or passed through a
+                # helper. Its interval cannot be safely proven here, so retain
+                # every host-supported series rather than risk an unavailable
+                # live or backtest lookup.
+                self.dynamic_market_interval = True
         if isinstance(function, ast.Attribute) and isinstance(function.value, ast.Name) and function.value.id == "ctx":
             if function.attr in {
                 "open_long", "open_short", "close_long", "close_short",
@@ -1299,11 +1341,11 @@ def source_is_safe(source):
         raise ProtocolFailure("invalid_source", f"strategy source has invalid syntax at line {error.lineno or 0}") from error
     visitor = SourcePolicyVisitor()
     visitor.visit(tree)
-    return source, visitor.action_sites
+    return source, visitor.action_sites, visitor.selected_market_intervals()
 
 
 def load_strategy(source):
-    source, action_sites = source_is_safe(source)
+    source, action_sites, market_intervals = source_is_safe(source)
     namespace = {"__name__": "__desic_strategy__", "__builtins__": SAFE_BUILTINS}
     try:
         compiled = builtins.compile(source, "<desic-strategy>", "exec")
@@ -1315,7 +1357,7 @@ def load_strategy(source):
     handlers = sorted(name for name in ("on_start", "on_bar", "on_fill", "on_rebalance") if callable(namespace.get(name)))
     if not handlers:
         raise ProtocolFailure("missing_handler", "strategy source must define on_start(ctx), on_bar(ctx), and/or on_rebalance(ctx)")
-    return namespace, handlers, action_sites
+    return namespace, handlers, action_sites, market_intervals
 
 
 def emit(message):
@@ -1385,7 +1427,7 @@ def main():
                 reject_unknown_fields(message, {"protocol", "type", "requestId", "source", "params"}, "load")
                 strategy_params = plain_dict(message.get("params", {}), "load.params")
                 ensure_json_value(strategy_params, "load.params")
-                namespace, handlers, action_sites = load_strategy(message.get("source"))
+                namespace, handlers, action_sites, market_intervals = load_strategy(message.get("source"))
                 strategy_started = False
                 last_event_as_of_ms = None
                 market_cache = {}
@@ -1395,6 +1437,7 @@ def main():
                     "requestId": request_id,
                     "handlers": handlers,
                     "actionSites": action_sites,
+                    "marketIntervals": market_intervals,
                 })
             elif message_type == "invoke":
                 if namespace is None:
@@ -1430,11 +1473,54 @@ def main():
                     strategy_started = True
                 last_event_as_of_ms = event["asOfMs"]
                 emit({"type": "result", "requestId": request_id, "output": output})
+            elif message_type == "invoke_batch":
+                if namespace is None:
+                    raise ProtocolFailure("strategy_not_loaded", "load strategy source before invoking it")
+                reject_unknown_fields(message, {"protocol", "type", "requestId", "events"}, "invoke_batch")
+                events = message.get("events")
+                if not isinstance(events, list) or not events or len(events) > 64:
+                    raise ProtocolFailure("invalid_batch", "invoke_batch.events must contain 1 to 64 events")
+                outputs = []
+                for event in events:
+                    event = validate_event(event)
+                    if last_event_as_of_ms is not None and event["asOfMs"] < last_event_as_of_ms:
+                        raise ProtocolFailure("out_of_order_event", "strategy events must not move backward in time")
+                    handler_name = {
+                        "start": "on_start",
+                        "bar": "on_bar",
+                        "rebalance": "on_rebalance",
+                    }[event["kind"]]
+                    if event["kind"] == "start" and strategy_started:
+                        raise ProtocolFailure("invalid_lifecycle", "on_start may be invoked only once after each strategy load")
+                    if event["kind"] != "start" and "on_start" in handlers and not strategy_started:
+                        raise ProtocolFailure("invalid_lifecycle", "invoke on_start before dispatching bar or rebalance events")
+                    handler = namespace.get(handler_name)
+                    if not callable(handler):
+                        if event["kind"] != "start":
+                            raise ProtocolFailure("missing_handler", f"strategy does not implement {handler_name}(ctx)")
+                        if event["kind"] == "start":
+                            strategy_started = True
+                        last_event_as_of_ms = event["asOfMs"]
+                        output = {"kind": "no_action", "asOfMs": event["asOfMs"], "reason": f"{handler_name} is not defined"}
+                    else:
+                        market = merge_market_snapshot(market_cache, event["market"])
+                        portfolio = portfolio_cache.snapshot(event.get("portfolio"))
+                        context = StrategyContext(event, market, portfolio, strategy_params)
+                        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                            output = handler(context)
+                        output = validate_output(output, event)
+                        if event["kind"] == "start":
+                            strategy_started = True
+                        last_event_as_of_ms = event["asOfMs"]
+                    outputs.append(output)
+                    if output.get("kind") != "no_action":
+                        break
+                emit({"type": "result", "requestId": request_id, "outputs": outputs})
             elif message_type == "shutdown":
                 emit({"type": "shutdown", "requestId": request_id})
                 return
             else:
-                raise ProtocolFailure("invalid_message_type", "message.type must be load, invoke, or shutdown")
+                raise ProtocolFailure("invalid_message_type", "message.type must be load, invoke, invoke_batch, or shutdown")
         except Exception as error:
             request_id = message.get("requestId") if isinstance(locals().get("message"), dict) else None
             emit(error_message(request_id, error))

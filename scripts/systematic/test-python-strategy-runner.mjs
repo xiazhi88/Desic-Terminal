@@ -25,6 +25,10 @@ async function fixture(name) {
   return readFile(path.join(fixtures, name), "utf8");
 }
 
+async function builtinTemplate(name) {
+  return readFile(path.join(root, "src-tauri", "resources", "systematic-python", "templates", name), "utf8");
+}
+
 function bar(openTimeMs, closeTimeMs, open, high, low, close, volume) {
   return { openTimeMs, closeTimeMs, open, high, low, close, volume, confirmed: true };
 }
@@ -211,6 +215,13 @@ assert.deepEqual(validateStrategySource(validBarSource).handlers, ["on_bar"]);
 assert.deepEqual(validateStrategySource(validFactorSource).handlers, ["on_rebalance"]);
 assert.deepEqual(validateStrategySource(validStatefulSource).handlers, ["on_bar", "on_start"]);
 assert.deepEqual(validateStrategySource(validThirtyMinuteMacdProtectionSource).handlers, ["on_bar"]);
+for (const name of ["blank.py", "ema-trend.py", "macd-volume-atr.py", "bollinger-reversion.py"]) {
+  const source = await builtinTemplate(name);
+  assert.deepEqual(validateStrategySource(source).handlers, ["on_bar"], `built-in template ${name}`);
+}
+const blankTemplateSource = await builtinTemplate("blank.py");
+assert.match(blankTemplateSource, /ctx\.no_action/);
+assert.doesNotMatch(blankTemplateSource, /ctx\.(open|close)_/);
 assert.deepEqual(
   validateStrategySource("def on_bar(ctx):\n    return ctx.no_action()\n\ndef on_fill(ctx, fill):\n    return ctx.no_action()\n").handlers,
   ["on_bar", "on_fill"],
@@ -588,6 +599,33 @@ if (testPython) {
   assert.match(staticContractOutput[3].message, /^line 2: ctx\.open_long_limit is not part of the documented strategy API$/);
   assert.equal(staticContractOutput[4].type, "shutdown");
 
+  const batchOutput = await runRawRuntime(path.resolve(testPython), [
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "load",
+      requestId: "raw-load-batch",
+      source: blankTemplateSource
+    },
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "invoke_batch",
+      requestId: "raw-batch-no-action",
+      events: [strategyEvent("bar").event, strategyEvent("bar").event]
+    },
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "shutdown",
+      requestId: "raw-shutdown-batch"
+    }
+  ]);
+  assert.equal(batchOutput[0].type, "ready");
+  assert.equal(batchOutput[1].type, "loaded");
+  assert.deepEqual(batchOutput[1].marketIntervals, ["1m"]);
+  assert.equal(batchOutput[2].type, "result");
+  assert.equal(batchOutput[2].outputs.length, 2);
+  assert.deepEqual(batchOutput[2].outputs.map((output) => output.kind), ["no_action", "no_action"]);
+  assert.equal(batchOutput[3].type, "shutdown");
+
   const runner = new ManagedPythonStrategyRunner({
     pythonPath: path.resolve(testPython),
     expectedRuntimeSha256: await sha256File(path.resolve(testPython)),
@@ -653,6 +691,16 @@ if (testPython) {
       requestId: "limit-execution-output"
     }));
     assert.deepEqual(limitExecutionOutput.execution, { orderType: "limit", limitPrice: 101 });
+
+    const unsupportedPositionFieldSource = [
+      "def on_bar(ctx):",
+      "    position = ctx.portfolio.position(ctx.instrument_id, 'long')",
+      "    return ctx.no_action(str(position.contracts))"
+    ].join("\n");
+    await assert.rejects(
+      () => runner.load(unsupportedPositionFieldSource),
+      (error) => error?.code === "invalid_strategy_api" && /position\.quantity/.test(error.message)
+    );
 
     const unsupportedLimitShortcutSource = [
       "def on_bar(ctx):",

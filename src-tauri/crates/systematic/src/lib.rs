@@ -19,7 +19,7 @@ mod output;
 mod rules;
 
 pub use backtest::{
-    recommended_backtest_workers, BacktestEngine, BacktestMetrics, BacktestReport, BacktestRequest,
+    recommended_backtest_workers, resolve_backtest_position_sizing, BacktestEngine, BacktestMetrics, BacktestPositionSizingOutcome, BacktestReport, BacktestRequest,
     BacktestRunResult, BacktestStatistics, BacktestStatus, BacktestTiming, ClosedTrade,
     EndOfRunPolicy,
     EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide, FundingEvent, FundingPayment,
@@ -65,4 +65,38 @@ pub trait EventDrivenStrategy {
 /// Reversal is explicit: a strategy must first emit the matching close action.
 pub trait StatefulEventDrivenStrategy {
     fn on_bar(&mut self, context: &StrategyContext<'_>) -> Result<StrategyAction, SystematicError>;
+
+    /// Returns the maximum number of empty-account no-action events this
+    /// strategy can evaluate in one host round trip. The engine only uses
+    /// this path before any fill or position exists, so an implementation
+    /// must return 1 whenever its output can depend on host-side account
+    /// changes between bars.
+    fn no_action_batch_size(&self) -> usize {
+        1
+    }
+
+    /// Allows the engine to represent unchanged fill and trade ledgers as
+    /// append-only deltas after the first context in a batch. Runtimes that
+    /// expose each snapshot directly must keep the default `false` value.
+    fn uses_incremental_ledger_batch(&self) -> bool {
+        false
+    }
+
+    /// Evaluates a speculative sequence of contexts. The engine commits only
+    /// the prefix through the first non-no-action result; later results are
+    /// discarded. Implementations should therefore stop producing results
+    /// after the first action when they can do so efficiently.
+    fn on_bar_batch(
+        &mut self,
+        contexts: &[StrategyContextSnapshot],
+    ) -> Result<Vec<StrategyAction>, SystematicError> {
+        if contexts.len() == 1 {
+            return Err(SystematicError::InvalidState {
+                reason: "strategy did not implement single-event batch dispatch".to_string(),
+            });
+        }
+        Err(SystematicError::InvalidState {
+            reason: "strategy did not implement batch dispatch".to_string(),
+        })
+    }
 }

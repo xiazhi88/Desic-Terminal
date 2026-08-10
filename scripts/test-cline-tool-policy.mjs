@@ -181,27 +181,37 @@ expectPolicy(
   disabled
 );
 expectPolicy(
-  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  "strategy.readDevelopmentDocs",
+  enabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
   "strategy.readCurrentSource",
   enabled
 );
 expectPolicy(
-  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
   "strategy.testCurrentSource",
   enabled
 );
 expectPolicy(
-  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"] },
   "strategy.applySource",
   enabled
 );
 expectPolicy(
-  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource"] },
+  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource"] },
+  "strategy.readDevelopmentDocs",
+  disabled
+);
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource"] },
   "strategy.readCurrentSource",
   disabled
 );
 expectPolicy(
-  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readCurrentSource", "strategy.testCurrentSource"] },
+  { permissionMode: "advisor", agentRole: "subagent", toolAllowlist: ["strategy.readDevelopmentDocs", "strategy.readCurrentSource", "strategy.testCurrentSource"] },
   "strategy.testCurrentSource",
   disabled
 );

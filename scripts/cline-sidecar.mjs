@@ -1309,6 +1309,13 @@ const STRATEGY_READ_CURRENT_SOURCE_SCHEMA = {
   required: []
 };
 
+const STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {},
+  required: []
+};
+
 const STRATEGY_TEST_CURRENT_SOURCE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1735,9 +1742,10 @@ function createDesicTools(sessionId, options = {}) {
     tool("script.enable", "Enable or disable a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.delete", "Delete a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.list", "List local chart scripts.", SCRIPT_TOOL_SCHEMA),
+    tool("strategy.readDevelopmentDocs", "Read the complete versioned Desic Python strategy development document. Call this before creating or changing source. It returns only the built-in read-only protocol document and never reads an arbitrary file, market data, account, credential, or another strategy.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
     tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing source. It reads only the selected unsaved editor buffer and cannot read another strategy, a file, market data, an account, or credentials.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
-    tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, report its line and contract diagnostics, then run the source once in a natural deterministic fixture. The fixture uses simulated K-line series, saved parameters, and an empty virtual portfolio; it never changes conditions to force a trading action. It validates the action actually returned by the run, but a statically checked call site may remain runtime-unreached. This is not a historical backtest, live-market check, fill simulation, or strategy-quality judgment. It cannot access files, networks, accounts, credentials, or another strategy, and it never submits an order.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
-    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call only after strategy.readCurrentSource in this same turn, and send the read revision as expectedRevision. This does not save a strategy, run a backtest, or place any order. The user must review and save manually.", STRATEGY_APPLY_SOURCE_SCHEMA)
+    tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, report its line and contract diagnostics, then run the source against bounded deterministic fixtures. The fixtures use simulated K-line series, saved parameters, and empty, synthetic-long, and synthetic-short portfolio snapshots; they never force a trading signal. They validate only the actions returned by those fixtures, while a statically checked call site may remain runtime-unreached. This is not a historical backtest, live-market check, fill simulation, or strategy-quality judgment. It cannot access files, networks, accounts, credentials, or another strategy, and it never submits an order.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
+    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call only after strategy.readCurrentSource and strategy.readDevelopmentDocs in this same turn, and send the read revision as expectedRevision. This does not save a strategy, run a backtest, or place any order. The user must review and save manually.", STRATEGY_APPLY_SOURCE_SCHEMA)
   ].filter(Boolean);
 
   return tools.filter(Boolean);

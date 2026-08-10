@@ -302,6 +302,7 @@ export type SystematicBacktestView = {
   error?: string | null;
   metrics?: SystematicBacktestMetrics | null;
   equityPreview: number[];
+  timing?: SystematicBacktestTiming | null;
 };
 
 export type SystematicBacktestDetail = {
@@ -330,6 +331,8 @@ export type SystematicBacktestTiming = {
   pythonActionDecodeUs: number;
   pythonActionResolutionUs: number;
   pythonInvocationCount: number;
+  pythonBatchRequestCount: number;
+  pythonBatchedEventCount: number;
   persistenceUs: number;
   workerAndPersistenceUs: number;
   engineOverheadUs: number;
@@ -514,9 +517,9 @@ export function prepareSystematicPythonEnvironment() {
   return invokeDesktop<SystematicPythonRuntimeView>("systematic_python_prepare_environment");
 }
 
-export function createDefaultSystematicPythonStrategy(name?: string) {
+export function createSystematicPythonStrategy(name?: string, template?: string) {
   return invokeDesktop<SystematicStrategyView>("systematic_strategy_create_python", {
-    request: { name }
+    request: { name, template }
   });
 }
 
@@ -551,7 +554,7 @@ export type SystematicStrategyAiEditorToolRequest = {
   requestId: string;
   sessionId: string;
   strategyId: string;
-  toolName: "strategy.readCurrentSource" | "strategy.testCurrentSource" | "strategy.applySource" | string;
+  toolName: "strategy.readDevelopmentDocs" | "strategy.readCurrentSource" | "strategy.testCurrentSource" | "strategy.applySource" | string;
   input: Record<string, unknown>;
 };
 
