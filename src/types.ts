@@ -349,6 +349,9 @@ export type AccountPerformanceCoverage = {
   billsCount: number;
   fillsCount: number;
   episodesCount: number;
+  attributionComplete: boolean;
+  attributionGapNetPnl: number;
+  attributionGapFees: number;
   oldestPoint?: number | null;
   newestPoint?: number | null;
   warnings: string[];

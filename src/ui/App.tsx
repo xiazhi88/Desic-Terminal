@@ -6720,7 +6720,7 @@ function DataDashboardPage({
       )}
 
       <section className="data-metric-grid">
-        <DataMetric label={t("common:accountEquity")} value={formatPerformanceUsdt(totals?.currentEquity)} />
+        <DataMetric label={t("common:currentAccountEquity")} value={formatPerformanceUsdt(totals?.currentEquity)} />
         <DataMetric label={t("common:cumulativeReturn")} value={formatSignedPercent(totals?.returnPct)} tone={toneByNumber(totals?.returnPct)} />
         <DataMetric label={t("common:maximumDrawdown")} value={formatPercent(totals?.maxDrawdownPct)} tone={totals?.maxDrawdownPct ? "warning" : "neutral"} />
         <DataMetric label={t("trading:netPnl")} value={formatSignedUsdt(totals?.netPnl)} tone={toneByNumber(totals?.netPnl)} />
@@ -7061,11 +7061,14 @@ function SourcePerformanceTable({
     { label: t("common:manualOperator"), item: attribution.find((item) => item.operator === "user") },
     { label: t("common:unattributed"), item: attribution.find((item) => item.operator === "unknown") }
   ];
+  const totalNetReturnPct = summary?.totals.startEquity && Math.abs(summary.totals.startEquity) > Number.EPSILON
+    ? summary.totals.netPnl / summary.totals.startEquity * 100
+    : null;
   const totalRow = summary?.totals
     ? {
         label: t("common:total"),
         netPnl: summary.totals.netPnl,
-        returnPct: summary.totals.returnPct,
+        returnPct: totalNetReturnPct,
         winRatePct: summary.totals.winRatePct,
         tradeCount: summary.totals.tradeCount,
         fees: summary.totals.fees
@@ -7076,14 +7079,18 @@ function SourcePerformanceTable({
     <div className="data-panel data-source-panel">
       <div className="data-panel-head">
         <strong>{t("common:performanceBySource")}</strong>
-        <span>{t("common:attributedByOperator")}</span>
+        <span
+          title={summary?.coverage.attributionComplete ? undefined : t("common:attributionCoveragePartialDescription")}
+        >
+          {summary?.coverage.attributionComplete ? t("common:attributionCoverageComplete") : t("common:attributionCoveragePartial")}
+        </span>
       </div>
       <table className="data-table">
         <thead>
           <tr>
             <th>{t("common:source")}</th>
             <th>{t("trading:netPnl")}</th>
-            <th>{t("common:returnRate")}</th>
+            <th>{t("common:netReturnRate")}</th>
             <th>{t("common:winRate")}</th>
             <th>{t("common:tradeCount")}</th>
             <th>{t("trading:fees")}</th>

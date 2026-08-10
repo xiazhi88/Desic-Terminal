@@ -1298,6 +1298,9 @@ struct AccountPerformanceCoverage {
     bills_count: usize,
     fills_count: usize,
     episodes_count: usize,
+    attribution_complete: bool,
+    attribution_gap_net_pnl: f64,
+    attribution_gap_fees: f64,
     oldest_point: Option<i64>,
     newest_point: Option<i64>,
     warnings: Vec<String>,
@@ -11473,10 +11476,15 @@ fn load_account_bills(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Default, Clone)]
 struct PerformanceBillRow {
+    inst_id: Option<String>,
     ccy: Option<String>,
     bal: Option<String>,
+    bill_type: Option<String>,
+    bal_chg: Option<String>,
+    pnl: Option<String>,
+    fee: Option<String>,
     time: i64,
 }
 
@@ -11524,6 +11532,120 @@ struct DailyPerformanceBucket {
     trade_count: usize,
 }
 
+#[derive(Debug, Default, Clone, Copy)]
+struct PerformanceLedger {
+    net_pnl: f64,
+    fees: f64,
+    funding_fee: f64,
+    gross_profit: f64,
+    gross_loss: f64,
+    balance_change: f64,
+    external_flow: f64,
+}
+
+fn performance_bill_is_usdt(bill: &PerformanceBillRow) -> bool {
+    bill.ccy
+        .as_deref()
+        .map(|value| value.eq_ignore_ascii_case("USDT"))
+        .unwrap_or(true)
+}
+
+fn performance_bill_net_pnl(bill: &PerformanceBillRow) -> f64 {
+    money_value(bill.pnl.as_deref()) + money_value(bill.fee.as_deref())
+}
+
+fn performance_bill_external_flow(bill: &PerformanceBillRow) -> f64 {
+    bill.bal_chg
+        .as_deref()
+        .and_then(parse_optional_f64)
+        .map(|balance_change| balance_change - performance_bill_net_pnl(bill))
+        .unwrap_or(0.0)
+}
+
+fn performance_bill_matches_instrument(bill: &PerformanceBillRow, inst_id: Option<&str>) -> bool {
+    inst_id
+        .map(|value| bill.inst_id.as_deref() == Some(value))
+        .unwrap_or(true)
+}
+
+fn build_performance_ledger(
+    bills: &[PerformanceBillRow],
+    inst_id: Option<&str>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) -> PerformanceLedger {
+    let mut ledger = PerformanceLedger::default();
+    for bill in bills {
+        if !performance_bill_is_usdt(bill)
+            || !performance_bill_matches_instrument(bill, inst_id)
+            || start_time.is_some_and(|start| bill.time < start)
+            || end_time.is_some_and(|end| bill.time > end)
+        {
+            continue;
+        }
+        let net_pnl = performance_bill_net_pnl(bill);
+        let balance_change = money_value(bill.bal_chg.as_deref());
+        ledger.net_pnl += net_pnl;
+        ledger.fees += money_abs(bill.fee.as_deref());
+        ledger.balance_change += balance_change;
+        ledger.external_flow += performance_bill_external_flow(bill);
+        if bill.bill_type.as_deref() == Some("8") {
+            ledger.funding_fee += money_value(bill.pnl.as_deref());
+        }
+        if net_pnl > 0.0 {
+            ledger.gross_profit += net_pnl;
+        } else if net_pnl < 0.0 {
+            ledger.gross_loss += net_pnl.abs();
+        }
+    }
+    ledger
+}
+
+fn build_performance_fill_ledger(fills: &[PerformanceFillRow]) -> PerformanceLedger {
+    let mut ledger = PerformanceLedger::default();
+    for fill in fills {
+        let net_pnl = money_value(fill.fill_pnl.as_deref()) + money_value(fill.fee.as_deref());
+        ledger.net_pnl += net_pnl;
+        ledger.fees += money_abs(fill.fee.as_deref());
+        if net_pnl > 0.0 {
+            ledger.gross_profit += net_pnl;
+        } else if net_pnl < 0.0 {
+            ledger.gross_loss += net_pnl.abs();
+        }
+    }
+    ledger
+}
+
+fn reconcile_performance_symbol_buckets(
+    symbols: &mut BTreeMap<String, PerformanceBucket>,
+    bills: &[PerformanceBillRow],
+    inst_id: Option<&str>,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+) {
+    let mut ledger_symbols: BTreeMap<String, (f64, f64)> = BTreeMap::new();
+    for bill in bills {
+        if !performance_bill_is_usdt(bill)
+            || !performance_bill_matches_instrument(bill, inst_id)
+            || start_time.is_some_and(|start| bill.time < start)
+            || end_time.is_some_and(|end| bill.time > end)
+        {
+            continue;
+        }
+        let Some(symbol) = bill.inst_id.as_deref() else {
+            continue;
+        };
+        let entry = ledger_symbols.entry(symbol.to_string()).or_default();
+        entry.0 += performance_bill_net_pnl(bill);
+        entry.1 += money_abs(bill.fee.as_deref());
+    }
+    for (symbol, (net_pnl, fees)) in ledger_symbols {
+        let bucket = symbols.entry(symbol).or_default();
+        bucket.net_pnl = net_pnl;
+        bucket.fees = fees;
+    }
+}
+
 fn account_performance_summary_impl(
     conn: &Connection,
     runtime: &MarketRuntime,
@@ -11556,29 +11678,34 @@ fn load_performance_bills(
     conn: &Connection,
     account_id: &str,
     environment: &str,
-    inst_id: Option<&str>,
+    _inst_id: Option<&str>,
     start_time: Option<i64>,
     end_time: Option<i64>,
 ) -> Result<Vec<PerformanceBillRow>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT ccy, bal, COALESCE(okx_ts, synced_at) AS event_time
+            "SELECT inst_id, ccy, bal, bill_type, bal_chg, pnl, fee,
+                    COALESCE(okx_ts, synced_at) AS event_time
              FROM okx_account_bills
              WHERE account_id=?1 AND environment=?2
-               AND (?3 IS NULL OR inst_id=?3)
-               AND (?4 IS NULL OR COALESCE(okx_ts, synced_at) >= ?4)
-               AND (?5 IS NULL OR COALESCE(okx_ts, synced_at) <= ?5)
+               AND (?3 IS NULL OR COALESCE(okx_ts, synced_at) >= ?3)
+               AND (?4 IS NULL OR COALESCE(okx_ts, synced_at) <= ?4)
              ORDER BY event_time ASC, bill_id ASC",
         )
         .map_err(|err| err.to_string())?;
     let mut rows = stmt
         .query_map(
-            params![account_id, environment, inst_id, start_time, end_time],
+            params![account_id, environment, start_time, end_time],
             |row| {
                 Ok(PerformanceBillRow {
-                    ccy: row.get(0)?,
-                    bal: row.get(1)?,
-                    time: row.get(2)?,
+                    inst_id: row.get(0)?,
+                    ccy: row.get(1)?,
+                    bal: row.get(2)?,
+                    bill_type: row.get(3)?,
+                    bal_chg: row.get(4)?,
+                    pnl: row.get(5)?,
+                    fee: row.get(6)?,
+                    time: row.get(7)?,
                 })
             },
         )
@@ -11588,20 +11715,25 @@ fn load_performance_bills(
     if let Some(start) = start_time {
         let carry_forward = conn
             .query_row(
-                "SELECT ccy, bal, COALESCE(okx_ts, synced_at) AS event_time
+                "SELECT inst_id, ccy, bal, bill_type, bal_chg, pnl, fee,
+                        COALESCE(okx_ts, synced_at) AS event_time
                  FROM okx_account_bills
                  WHERE account_id=?1 AND environment=?2
-                   AND (?3 IS NULL OR inst_id=?3)
-                   AND COALESCE(okx_ts, synced_at) < ?4
+                   AND COALESCE(okx_ts, synced_at) < ?3
                    AND (ccy IS NULL OR ccy='' OR ccy='USDT')
                  ORDER BY event_time DESC, bill_id DESC
                  LIMIT 1",
-                params![account_id, environment, inst_id, start],
+                params![account_id, environment, start],
                 |row| {
                     Ok(PerformanceBillRow {
-                        ccy: row.get(0)?,
-                        bal: row.get(1)?,
-                        time: row.get(2)?,
+                        inst_id: row.get(0)?,
+                        ccy: row.get(1)?,
+                        bal: row.get(2)?,
+                        bill_type: row.get(3)?,
+                        bal_chg: row.get(4)?,
+                        pnl: row.get(5)?,
+                        fee: row.get(6)?,
+                        time: row.get(7)?,
                     })
                 },
             )
@@ -11727,7 +11859,7 @@ fn build_account_performance_summary(
             .map(|ccy| ccy != "USDT")
             .unwrap_or(false)
     }) {
-        warnings.push("检测到非 USDT 账单，第一版暂不做币种换算。".to_string());
+        warnings.push("检测到非 USDT 账单，账户绩效仅按 USDT 账单计算。".to_string());
     }
 
     let current_equity = snapshot
@@ -11738,6 +11870,17 @@ fn build_account_performance_summary(
     let mut equity_curve = build_equity_curve(&bills, current_equity, start_time, end_time);
     let equity_oldest = equity_curve.first().map(|item| item.time);
     let equity_newest = equity_curve.last().map(|item| item.time);
+    let mut ledger = build_performance_ledger(&bills, inst_id, start_time, end_time);
+    let has_window_bills = bills.iter().any(|item| {
+        performance_bill_is_usdt(item)
+            && performance_bill_matches_instrument(item, inst_id)
+            && !start_time.is_some_and(|start| item.time < start)
+            && !end_time.is_some_and(|end| item.time > end)
+    });
+    if !has_window_bills && !fills.is_empty() {
+        warnings.push("当前区间缺少账户账单，账户级收益暂以成交记录估算。".to_string());
+        ledger = build_performance_fill_ledger(&fills);
+    }
 
     let mut totals = AccountPerformanceTotals {
         current_equity: equity_curve
@@ -11749,6 +11892,11 @@ fn build_account_performance_summary(
             .iter()
             .map(|item| item.drawdown_pct)
             .fold(0.0, f64::max),
+        net_pnl: ledger.net_pnl,
+        gross_profit: ledger.gross_profit,
+        gross_loss: ledger.gross_loss,
+        fees: ledger.fees,
+        funding_fee: ledger.funding_fee,
         fill_count: fills.len(),
         ..AccountPerformanceTotals::default()
     };
@@ -11756,22 +11904,33 @@ fn build_account_performance_summary(
     let mut attribution: BTreeMap<String, PerformanceBucket> = BTreeMap::new();
     let mut symbols: BTreeMap<String, PerformanceBucket> = BTreeMap::new();
     let mut daily: BTreeMap<String, DailyPerformanceBucket> = BTreeMap::new();
+    for bill in bills.iter().filter(|item| {
+        performance_bill_is_usdt(item)
+            && performance_bill_matches_instrument(item, inst_id)
+            && !start_time.is_some_and(|start| item.time < start)
+            && !end_time.is_some_and(|end| item.time > end)
+    }) {
+        let pnl = performance_bill_net_pnl(bill);
+        let fees = money_abs(bill.fee.as_deref());
+        if pnl.abs() <= f64::EPSILON && fees <= f64::EPSILON {
+            continue;
+        }
+        let bucket = daily.entry(performance_date(bill.time)).or_default();
+        bucket.net_pnl += pnl;
+        bucket.fees += fees;
+        bucket.trade_count += 1;
+    }
 
+    let mut attributed_net_pnl = 0.0;
+    let mut attributed_fees = 0.0;
     if !episodes.is_empty() {
         for episode in &episodes {
             let pnl = episode_net_pnl(episode);
             let fees = money_abs(episode.fees.as_deref());
-            let funding = money_value(episode.funding_fee.as_deref());
-            totals.net_pnl += pnl;
-            totals.fees += fees;
-            totals.funding_fee += funding;
+            attributed_net_pnl += pnl;
+            attributed_fees += fees;
             totals.episode_count += 1;
             totals.trade_count += 1;
-            if pnl > 0.0 {
-                totals.gross_profit += pnl;
-            } else if pnl < 0.0 {
-                totals.gross_loss += pnl.abs();
-            }
             let operator = normalize_performance_operator(&episode.primary_origin);
             update_performance_bucket(attribution.entry(operator).or_default(), pnl, fees, 1, 1);
             update_performance_bucket(
@@ -11781,25 +11940,15 @@ fn build_account_performance_summary(
                 1,
                 1,
             );
-            let date = performance_date(episode.close_time.unwrap_or(episode.open_time));
-            let bucket = daily.entry(date).or_default();
-            bucket.net_pnl += pnl;
-            bucket.fees += fees;
-            bucket.trade_count += 1;
         }
     } else {
         warnings.push("暂无 PositionEpisode，收益归因暂以成交记录估算。".to_string());
         for fill in &fills {
             let pnl = money_value(fill.fill_pnl.as_deref()) + money_value(fill.fee.as_deref());
             let fees = money_abs(fill.fee.as_deref());
-            totals.net_pnl += pnl;
-            totals.fees += fees;
+            attributed_net_pnl += pnl;
+            attributed_fees += fees;
             totals.trade_count += 1;
-            if pnl > 0.0 {
-                totals.gross_profit += pnl;
-            } else if pnl < 0.0 {
-                totals.gross_loss += pnl.abs();
-            }
             let operator = normalize_performance_operator(&fill.operator);
             update_performance_bucket(attribution.entry(operator).or_default(), pnl, fees, 1, 0);
             update_performance_bucket(
@@ -11809,11 +11958,18 @@ fn build_account_performance_summary(
                 1,
                 0,
             );
-            let bucket = daily.entry(performance_date(fill.time)).or_default();
-            bucket.net_pnl += pnl;
-            bucket.fees += fees;
-            bucket.trade_count += 1;
         }
+    }
+
+    reconcile_performance_symbol_buckets(&mut symbols, &bills, inst_id, start_time, end_time);
+
+    let unattributed_net_pnl = ledger.net_pnl - attributed_net_pnl;
+    let unattributed_fees = ledger.fees - attributed_fees;
+    if unattributed_net_pnl.abs() > 1e-8 || unattributed_fees.abs() > 1e-8 {
+        warnings.push("部分账户账单未匹配到交易归因，已计入未归因；来源统计覆盖不完整。".to_string());
+        let bucket = attribution.entry("unknown".to_string()).or_default();
+        bucket.net_pnl += unattributed_net_pnl;
+        bucket.fees += unattributed_fees.max(0.0);
     }
 
     let wins = if !episodes.is_empty() {
@@ -11840,17 +11996,18 @@ fn build_account_performance_summary(
     } else {
         None
     };
-    if let Some(start) = totals
-        .start_equity
-        .filter(|value| value.abs() > f64::EPSILON)
-    {
-        totals.return_pct = Some((totals.current_equity - start) / start * 100.0);
+    if let Some(last) = equity_curve.last() {
+        totals.return_pct = Some(last.cumulative_return_pct);
     } else if totals.net_pnl.abs() > f64::EPSILON
         && totals.current_equity.abs() > totals.net_pnl.abs()
     {
         let estimated_start = totals.current_equity - totals.net_pnl;
         totals.start_equity = Some(estimated_start);
         totals.return_pct = Some(totals.net_pnl / estimated_start * 100.0);
+    }
+
+    if ledger.external_flow.abs() > 1e-8 {
+        warnings.push("检测到账户资金流入或流出，累计收益率已排除外部资金变动。".to_string());
     }
 
     let oldest = [
@@ -11880,6 +12037,8 @@ fn build_account_performance_summary(
     }
 
     let start_equity = totals.start_equity;
+    let attribution_complete = unattributed_net_pnl.abs() <= 1e-8
+        && unattributed_fees.abs() <= 1e-8;
     let mut summary = AccountPerformanceSummary {
         account_id: account_id.to_string(),
         environment: environment.to_string(),
@@ -11893,6 +12052,9 @@ fn build_account_performance_summary(
             bills_count: bills.len(),
             fills_count: fills.len(),
             episodes_count: episodes.len(),
+            attribution_complete,
+            attribution_gap_net_pnl: unattributed_net_pnl,
+            attribution_gap_fees: unattributed_fees,
             oldest_point: oldest,
             newest_point: newest,
             warnings,
@@ -11927,6 +12089,20 @@ fn build_account_performance_summary(
     summary
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PerformanceEquityRow {
+    time: i64,
+    equity: f64,
+    external_flow: f64,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct SampledPerformanceEquityRow {
+    time: i64,
+    equity: f64,
+    performance_equity: f64,
+}
+
 fn build_equity_curve(
     bills: &[PerformanceBillRow],
     current_equity: f64,
@@ -11934,35 +12110,46 @@ fn build_equity_curve(
     end_time: Option<i64>,
 ) -> Vec<AccountPerformancePoint> {
     const EQUITY_SAMPLE_STEP_MS: i64 = 3 * 60 * 60 * 1000;
-    let mut equity_rows: Vec<(i64, f64)> = bills
+    const CURRENT_WINDOW_TOLERANCE_MS: i64 = 60 * 1000;
+    let mut equity_rows: Vec<PerformanceEquityRow> = bills
         .iter()
-        .filter(|item| item.ccy.as_deref().map(|ccy| ccy == "USDT").unwrap_or(true))
+        .filter(|item| performance_bill_is_usdt(item))
         .filter_map(|item| {
             item.bal
                 .as_deref()
                 .and_then(parse_optional_f64)
-                .map(|equity| (item.time, equity))
+                .map(|equity| PerformanceEquityRow {
+                    time: item.time,
+                    equity,
+                    external_flow: performance_bill_external_flow(item),
+                })
         })
         .collect();
     if current_equity > 0.0 {
         let now = now_ms();
-        let within_requested_end = end_time.map(|end| now <= end).unwrap_or(true);
+        let within_requested_end = end_time
+            .map(|end| end.saturating_add(CURRENT_WINDOW_TOLERANCE_MS) >= now)
+            .unwrap_or(true);
         if within_requested_end
             && equity_rows
                 .last()
-                .map(|(time, equity)| *time < now && (*equity - current_equity).abs() > 1e-8)
+                .map(|row| row.time < now && (row.equity - current_equity).abs() > 1e-8)
                 .unwrap_or(true)
         {
-            equity_rows.push((now, current_equity));
+            equity_rows.push(PerformanceEquityRow {
+                time: now,
+                equity: current_equity,
+                external_flow: 0.0,
+            });
         }
     }
-    equity_rows.sort_by_key(|item| item.0);
-    equity_rows.dedup_by_key(|item| item.0);
+    equity_rows.sort_by_key(|item| item.time);
+    equity_rows.dedup_by_key(|item| item.time);
     if equity_rows.is_empty() {
         return Vec::new();
     }
-    let first_time = equity_rows.first().map(|item| item.0).unwrap_or_default();
-    let last_time = equity_rows.last().map(|item| item.0).unwrap_or(first_time);
+    let first_time = equity_rows.first().map(|item| item.time).unwrap_or_default();
+    let last_time = equity_rows.last().map(|item| item.time).unwrap_or(first_time);
     let sample_start = start_time.unwrap_or(first_time).max(first_time);
     let sample_end = end_time.unwrap_or(last_time).max(last_time);
     let needs_window_sampling = sample_start > first_time || sample_end > last_time;
@@ -11976,27 +12163,30 @@ fn build_equity_curve(
             EQUITY_SAMPLE_STEP_MS,
         )
     } else {
-        equity_rows
+        normalize_equity_rows(&equity_rows, sample_start, sample_end)
     };
-    let start = sampled_rows.first().map(|item| item.1).unwrap_or_default();
+    let start = sampled_rows
+        .first()
+        .map(|item| item.performance_equity)
+        .unwrap_or_default();
     let mut peak = start.max(0.0);
     sampled_rows
         .into_iter()
-        .map(|(time, equity)| {
-            peak = peak.max(equity);
+        .map(|row| {
+            peak = peak.max(row.performance_equity);
             let cumulative_return_pct = if start.abs() > f64::EPSILON {
-                (equity - start) / start * 100.0
+                (row.performance_equity - start) / start * 100.0
             } else {
                 0.0
             };
             let drawdown_pct = if peak.abs() > f64::EPSILON {
-                ((peak - equity) / peak * 100.0).max(0.0)
+                ((peak - row.performance_equity) / peak * 100.0).max(0.0)
             } else {
                 0.0
             };
             AccountPerformancePoint {
-                time,
-                equity,
+                time: row.time,
+                equity: row.equity,
                 cumulative_return_pct,
                 drawdown_pct,
             }
@@ -12005,33 +12195,84 @@ fn build_equity_curve(
 }
 
 fn sample_equity_rows(
-    rows: &[(i64, f64)],
+    rows: &[PerformanceEquityRow],
     sample_start: i64,
     sample_end: i64,
     step_ms: i64,
-) -> Vec<(i64, f64)> {
+) -> Vec<SampledPerformanceEquityRow> {
     if rows.is_empty() || step_ms <= 0 {
-        return rows.to_vec();
+        return normalize_equity_rows(rows, sample_start, sample_end);
     }
     let mut result = Vec::new();
     let mut row_index = 0usize;
-    let mut current_equity = rows[0].1;
+    let mut current_equity = rows[0].equity;
+    let mut flow_index = 0usize;
+    let mut cumulative_external_flow = 0.0;
+    while row_index + 1 < rows.len() && rows[row_index + 1].time <= sample_start {
+        row_index += 1;
+        current_equity = rows[row_index].equity;
+    }
+    while flow_index < rows.len() && rows[flow_index].time <= sample_start {
+        flow_index += 1;
+    }
     let mut sample_time = sample_start;
     loop {
-        while row_index + 1 < rows.len() && rows[row_index + 1].0 <= sample_time {
+        while row_index + 1 < rows.len() && rows[row_index + 1].time <= sample_time {
             row_index += 1;
-            current_equity = rows[row_index].1;
+            current_equity = rows[row_index].equity;
         }
-        if rows[row_index].0 <= sample_time {
-            current_equity = rows[row_index].1;
+        while flow_index < rows.len() && rows[flow_index].time <= sample_time {
+            if rows[flow_index].time > sample_start {
+                cumulative_external_flow += rows[flow_index].external_flow;
+            }
+            flow_index += 1;
         }
-        result.push((sample_time, current_equity));
+        result.push(SampledPerformanceEquityRow {
+            time: sample_time,
+            equity: current_equity,
+            performance_equity: current_equity - cumulative_external_flow,
+        });
         if sample_time >= sample_end {
             break;
         }
         sample_time = (sample_time + step_ms).min(sample_end);
     }
-    result.dedup_by_key(|item| item.0);
+    result.dedup_by_key(|item| item.time);
+    result
+}
+
+fn normalize_equity_rows(
+    rows: &[PerformanceEquityRow],
+    sample_start: i64,
+    sample_end: i64,
+) -> Vec<SampledPerformanceEquityRow> {
+    let mut result = Vec::new();
+    let mut cumulative_external_flow = 0.0;
+    let mut current_equity = rows.first().map(|row| row.equity).unwrap_or_default();
+    for row in rows {
+        if row.time < sample_start {
+            continue;
+        }
+        if row.time > sample_end {
+            break;
+        }
+        if row.time > sample_start {
+            cumulative_external_flow += row.external_flow;
+        }
+        current_equity = row.equity;
+        result.push(SampledPerformanceEquityRow {
+            time: row.time,
+            equity: current_equity,
+            performance_equity: current_equity - cumulative_external_flow,
+        });
+    }
+    if result.is_empty() && !rows.is_empty() {
+        result.push(SampledPerformanceEquityRow {
+            time: sample_start,
+            equity: current_equity,
+            performance_equity: current_equity,
+        });
+    }
     result
 }
 
@@ -12039,6 +12280,7 @@ fn snapshot_equity(snapshot: &PrivateAccountSnapshot) -> Option<f64> {
     let total = snapshot
         .balances
         .iter()
+        .filter(|item| item.ccy.eq_ignore_ascii_case("USDT"))
         .filter_map(|item| parse_optional_f64(&item.eq))
         .sum::<f64>();
     if total > 0.0 {
@@ -23789,16 +24031,23 @@ mod tests {
                 ccy: Some("USDT".to_string()),
                 bal: Some("1000".to_string()),
                 time: 1_000,
+                ..Default::default()
             },
             PerformanceBillRow {
                 ccy: Some("USDT".to_string()),
                 bal: Some("1100".to_string()),
+                pnl: Some("0".to_string()),
+                fee: Some("-2".to_string()),
                 time: 2_000,
+                ..Default::default()
             },
             PerformanceBillRow {
                 ccy: Some("USDT".to_string()),
                 bal: Some("990".to_string()),
+                pnl: Some("0".to_string()),
+                fee: Some("-0.5".to_string()),
                 time: 3_000,
+                ..Default::default()
             },
         ];
         let episodes = vec![
@@ -23931,11 +24180,13 @@ mod tests {
                 ccy: Some("USDT".to_string()),
                 bal: Some("100".to_string()),
                 time: 0,
+                ..Default::default()
             },
             PerformanceBillRow {
                 ccy: Some("USDT".to_string()),
                 bal: Some("130".to_string()),
                 time: 7 * hour,
+                ..Default::default()
             },
         ];
         let curve = build_equity_curve(&bills, 0.0, Some(0), Some(9 * hour));
@@ -23960,6 +24211,7 @@ mod tests {
             ccy: Some("USDT".to_string()),
             bal: Some("1584".to_string()),
             time: 0,
+            ..Default::default()
         }];
         let curve = build_equity_curve(&bills, 0.0, Some(hour), Some(4 * hour));
         assert_eq!(
@@ -23976,6 +24228,120 @@ mod tests {
         assert!(curve
             .iter()
             .all(|item| item.cumulative_return_pct.abs() < 1e-8));
+    }
+
+    #[test]
+    fn account_performance_equity_curve_uses_live_snapshot_for_current_window() {
+        let now = now_ms();
+        let bills = vec![PerformanceBillRow {
+            ccy: Some("USDT".to_string()),
+            bal: Some("100".to_string()),
+            time: now.saturating_sub(10 * 60 * 1000),
+            ..Default::default()
+        }];
+        let curve = build_equity_curve(
+            &bills,
+            120.0,
+            Some(now.saturating_sub(2_000)),
+            Some(now.saturating_sub(1_000)),
+        );
+        assert_eq!(curve.last().map(|item| item.equity), Some(120.0));
+    }
+
+    #[test]
+    fn account_performance_equity_curve_excludes_external_flow_from_return() {
+        let hour = 60 * 60 * 1000;
+        let bills = vec![
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("100".to_string()),
+                time: 0,
+                ..Default::default()
+            },
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("150".to_string()),
+                bal_chg: Some("50".to_string()),
+                time: hour,
+                ..Default::default()
+            },
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("159".to_string()),
+                bal_chg: Some("9".to_string()),
+                pnl: Some("10".to_string()),
+                fee: Some("-1".to_string()),
+                time: 2 * hour,
+                ..Default::default()
+            },
+        ];
+        let curve = build_equity_curve(&bills, 0.0, Some(0), Some(2 * hour));
+        assert!((curve.last().unwrap().cumulative_return_pct - 9.0).abs() < 1e-8);
+    }
+
+    #[test]
+    fn account_performance_ledger_keeps_unmatched_history_in_unattributed() {
+        let hour = 60 * 60 * 1000;
+        let bills = vec![
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("100".to_string()),
+                time: 0,
+                ..Default::default()
+            },
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("105".to_string()),
+                bal_chg: Some("5".to_string()),
+                pnl: Some("5".to_string()),
+                time: hour,
+                ..Default::default()
+            },
+            PerformanceBillRow {
+                ccy: Some("USDT".to_string()),
+                bal: Some("103".to_string()),
+                bal_chg: Some("-2".to_string()),
+                pnl: Some("-2".to_string()),
+                time: 2 * hour,
+                ..Default::default()
+            },
+        ];
+        let episodes = vec![PerformanceEpisodeRow {
+            id: "ep-known".to_string(),
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            episode_side: "long".to_string(),
+            status: "closed".to_string(),
+            primary_origin: "ai".to_string(),
+            open_time: hour,
+            close_time: Some(2 * hour),
+            max_qty: "1".to_string(),
+            avg_open_px: Some("100".to_string()),
+            realized_pnl: Some("-2".to_string()),
+            fees: Some("0".to_string()),
+            funding_fee: Some("0".to_string()),
+            liq_penalty: None,
+            net_pnl: Some("-2".to_string()),
+        }];
+        let summary = build_account_performance_summary(
+            "acc",
+            "live",
+            None,
+            Some(0),
+            Some(2 * hour),
+            bills,
+            Vec::new(),
+            episodes,
+            None,
+        );
+        assert!((summary.totals.net_pnl - 3.0).abs() < 1e-8);
+        assert!(!summary.coverage.attribution_complete);
+        assert!((summary.coverage.attribution_gap_net_pnl - 5.0).abs() < 1e-8);
+        let unattributed = summary
+            .attribution
+            .iter()
+            .find(|item| item.operator == "unknown")
+            .expect("unattributed result");
+        assert!((unattributed.net_pnl - 5.0).abs() < 1e-8);
     }
 
     fn event_types(conn: &Connection, episode_id: &str) -> Vec<String> {

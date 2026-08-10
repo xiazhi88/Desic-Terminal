@@ -565,7 +565,7 @@ Object.assign(enUS.settings, {
 });
 
 Object.assign(enUS.common, {
-  accountEquity: "Account equity", accountEquityCurve: "Account equity curve", accountEquityLeftAxis: "Account equity (left axis)",
+  accountEquity: "Account equity", currentAccountEquity: "Current account equity", accountEquityCurve: "Account equity curve", accountEquityLeftAxis: "Account equity (left axis)",
   accountPerformance: "Account performance", allMarkets: "All markets", configureAccount: "Configure account",
   cumulativeReturn: "Cumulative return", cumulativeReturnRightAxis: "Cumulative return (right axis)", dataUpdatedAt: "Updated {{time}}",
   drawdownRightAxis: "Drawdown (right axis)", loadingProgress: "Loading {{progress}}%", marketStatus: "Market status",
@@ -662,7 +662,7 @@ Object.assign(enUS.common, {
   statisticsUpdatedAt: "Statistics updated {{time}}", trackedFrom: "Tracked from {{time}}", waitingFirstTokenRecord: "Waiting for the first token record",
   loadingAccountPerformance: "Loading account performance", accountEquityCurveEmpty: "No account equity curve. Sync account bills or wait for an account balance snapshot.",
   drawdown: "Drawdown", manualOperator: "Manual", unattributed: "Unattributed", total: "Total", performanceBySource: "Performance by source",
-  attributedByOperator: "Attributed by operator", returnRate: "Return", tradeCount: "Trades", marketRanking: "Market ranking", sortedByNetPnl: "Sorted by net PnL",
+  attributedByOperator: "Attributed by operator", attributionCoverageComplete: "Complete coverage", attributionCoveragePartial: "Partial coverage", attributionCoveragePartialDescription: "Some account results are not linked to a position episode and are shown as unattributed.", netReturnRate: "Net return", returnRate: "Return", tradeCount: "Trades", marketRanking: "Market ranking", sortedByNetPnl: "Sorted by net PnL",
   marketRankingEmpty: "No market statistics", dailyPnl: "Daily PnL", dailyPnlTooltip: "{{date}}\nNet PnL {{pnl}}\n{{count}} trades",
   profitPositive: "Profit > 0", pnlZero: "PnL = 0", lossNegative: "Loss < 0", dailyPnlEmpty: "No daily PnL",
   largestProfit: "Largest profit", largestLoss: "Largest loss", longestHolding: "Longest holding", shortestHolding: "Shortest holding",
@@ -1028,7 +1028,7 @@ Object.assign(zhCN.common, {
 });
 
 Object.assign(zhCN.common, {
-  accountEquity: "账户权益", accountEquityCurve: "账户权益曲线", accountEquityLeftAxis: "账户权益（左轴）",
+  accountEquity: "账户权益", currentAccountEquity: "当前账户权益", accountEquityCurve: "账户权益曲线", accountEquityLeftAxis: "账户权益（左轴）",
   accountPerformance: "账户绩效", allMarkets: "全部交易对", configureAccount: "配置账户", cumulativeReturn: "累计收益率",
   cumulativeReturnRightAxis: "累计收益率（右轴）", dataUpdatedAt: "更新于 {{time}}", drawdownRightAxis: "回撤（右轴）",
   loadingProgress: "加载 {{progress}}%", marketStatus: "行情状态", marketSymbols: "交易品种", maximumDrawdown: "最大回撤",
@@ -1248,7 +1248,7 @@ Object.assign(zhCN.common, {
   statisticsUpdatedAt: "统计更新时间 {{time}}", trackedFrom: "开始记录于 {{time}}", waitingFirstTokenRecord: "等待首条 Token 记录",
   loadingAccountPerformance: "正在读取账户绩效", accountEquityCurveEmpty: "暂无账户权益曲线。请先同步资金流水，或等待账户余额快照返回。",
   drawdown: "回撤", manualOperator: "人工", unattributed: "未归因", total: "合计", performanceBySource: "交易来源表现",
-  attributedByOperator: "按操作方归因", returnRate: "收益率", tradeCount: "交易笔数", marketRanking: "交易对排行", sortedByNetPnl: "按净收益排序",
+  attributedByOperator: "按操作方归因", attributionCoverageComplete: "归因完整", attributionCoveragePartial: "归因不完整", attributionCoveragePartialDescription: "部分账户收益没有匹配到闭合仓位，已计入未归因。", netReturnRate: "净收益率", returnRate: "收益率", tradeCount: "交易笔数", marketRanking: "交易对排行", sortedByNetPnl: "按净收益排序",
   marketRankingEmpty: "暂无交易对统计", dailyPnl: "每日盈亏", dailyPnlTooltip: "{{date}}\n净收益 {{pnl}}\n交易 {{count}} 笔",
   profitPositive: "盈利 > 0", pnlZero: "盈亏 = 0", lossNegative: "亏损 < 0", dailyPnlEmpty: "暂无每日盈亏",
   largestProfit: "最大盈利", largestLoss: "最大亏损", longestHolding: "最长持仓", shortestHolding: "最短持仓",
