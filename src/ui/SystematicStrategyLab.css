@@ -500,6 +500,10 @@
 .systematic-lab-field > div small { padding: 0 8px 0 0; color: var(--lab-weak); font-size: 9px; }
 .systematic-lab-field__hint { display: grid; gap: 2px; color: var(--lab-weak); font-size: 9px; line-height: 1.35; }
 .systematic-lab-field__hint strong { color: var(--lab-muted); font-weight: 650; }
+.systematic-lab-backtest-range-presets { grid-column: 1 / -1; min-width: 0; display: flex; align-items: center; flex-wrap: wrap; gap: 7px 10px; }
+.systematic-lab-backtest-range-presets > span { color: var(--lab-muted); font-size: 9px; font-weight: 750; }
+.systematic-lab-backtest-range-presets > div { min-width: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+.systematic-lab-backtest-range-presets .systematic-lab__command-button { min-height: 28px; padding: 0 8px; font-size: 10px; }
 .systematic-lab-preload-scope { min-width: 0; display: grid; grid-template-columns: 16px minmax(0,1fr) auto; gap: 8px; align-items: center; margin-top: 14px; padding: 10px 0; border-top: 1px solid var(--lab-line); color: var(--lab-weak); }
 .systematic-lab-preload-scope > svg { color: var(--lab-accent); }
 .systematic-lab-preload-scope > div { min-width: 0; display: grid; gap: 3px; }

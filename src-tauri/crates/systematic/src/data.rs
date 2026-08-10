@@ -177,6 +177,16 @@ impl TimeframeAggregator {
     /// count a minute's volume twice.
     pub fn push(&mut self, bar: &ClosedBar) -> Result<Option<MarketBar>, SystematicError> {
         bar.validate()?;
+        self.push_validated(bar)
+    }
+
+    /// Incorporates a bar which has already passed the full one-minute data
+    /// contract validation. This is used by hot paths that validate the
+    /// complete source window once before dispatching it to every timeframe.
+    pub fn push_validated(
+        &mut self,
+        bar: &ClosedBar,
+    ) -> Result<Option<MarketBar>, SystematicError> {
         if bar.duration_ms() != ONE_MINUTE_MS {
             return Err(SystematicError::data_contract(
                 "timeframe aggregation requires closed one-minute bars",
@@ -290,7 +300,7 @@ pub struct CurrentDataSnapshot {
 /// in-process rules and the Python IPC adapter.
 #[derive(Debug, Clone)]
 pub struct MarketDataWindow {
-    inst_id: String,
+    inst_id: Arc<str>,
     as_of_ms: i64,
     interval_ms: i64,
     bars: Arc<[ClosedBar]>,
@@ -308,7 +318,7 @@ impl MarketDataWindow {
         bars: Vec<ClosedBar>,
         features: BTreeMap<String, f64>,
     ) -> Result<Self, SystematicError> {
-        let inst_id = normalize_inst_id(inst_id.into())?;
+        let inst_id: Arc<str> = normalize_inst_id(inst_id.into())?.into();
         validate_interval(interval_ms)?;
         if bars.is_empty() {
             return Err(SystematicError::data_contract(
@@ -328,13 +338,12 @@ impl MarketDataWindow {
     }
 
     pub(crate) fn for_backtest(
-        inst_id: &str,
+        inst_id: &Arc<str>,
         as_of_ms: i64,
         interval_ms: i64,
         bars: Arc<[ClosedBar]>,
         visible_len: usize,
     ) -> Result<Self, SystematicError> {
-        let inst_id = normalize_inst_id(inst_id.to_string())?;
         validate_interval(interval_ms)?;
         // BacktestRequest validates the complete sequence once before its
         // event loop starts. Re-scanning `0..visible_len` here would turn a
@@ -353,7 +362,7 @@ impl MarketDataWindow {
             )));
         }
         Ok(Self {
-            inst_id,
+            inst_id: Arc::clone(inst_id),
             as_of_ms,
             interval_ms,
             bars,
@@ -363,7 +372,7 @@ impl MarketDataWindow {
     }
 
     pub fn inst_id(&self) -> &str {
-        &self.inst_id
+        self.inst_id.as_ref()
     }
 
     pub fn as_of_ms(&self) -> i64 {
@@ -401,7 +410,7 @@ impl MarketDataWindow {
 
     pub fn snapshot(&self) -> CurrentDataSnapshot {
         CurrentDataSnapshot {
-            inst_id: self.inst_id.clone(),
+            inst_id: self.inst_id.to_string(),
             as_of_ms: self.as_of_ms,
             interval_ms: self.interval_ms,
             bars: self.bars().to_vec(),
@@ -543,9 +552,14 @@ mod tests {
             bar(0, 100.0, 102.0, 99.0, 101.0),
             bar(ONE_MINUTE_MS, 101.0, 103.0, 100.0, 102.0),
         ]);
-        let context =
-            MarketDataWindow::for_backtest("BTC-USDT-SWAP", ONE_MINUTE_MS, ONE_MINUTE_MS, all, 1)
-                .unwrap();
+        let context = MarketDataWindow::for_backtest(
+            &Arc::from("BTC-USDT-SWAP"),
+            ONE_MINUTE_MS,
+            ONE_MINUTE_MS,
+            all,
+            1,
+        )
+        .unwrap();
 
         assert_eq!(context.bars().len(), 1);
         assert_eq!(context.snapshot().bars.len(), 1);

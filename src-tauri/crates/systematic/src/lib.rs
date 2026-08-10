@@ -20,7 +20,8 @@ mod rules;
 
 pub use backtest::{
     recommended_backtest_workers, BacktestEngine, BacktestMetrics, BacktestReport, BacktestRequest,
-    BacktestRunResult, BacktestStatistics, BacktestStatus, ClosedTrade, EndOfRunPolicy,
+    BacktestRunResult, BacktestStatistics, BacktestStatus, BacktestTiming, ClosedTrade,
+    EndOfRunPolicy,
     EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide, FundingEvent, FundingPayment,
     InstrumentContract, MarginAssumptions, OpenPositionSummary, PositionSizing,
     PositionSizingMode, PositionSizingResolution, ReplaySnapshot, resolve_position_sizing,

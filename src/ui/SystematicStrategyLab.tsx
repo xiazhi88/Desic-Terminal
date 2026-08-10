@@ -102,6 +102,7 @@ type Props = Readonly<{
 }>;
 
 type Tab = "strategy" | "backtest" | "review" | "profiles" | "signals";
+type BacktestQuickRange = "recentMonth" | "recentThreeMonths" | "recentYear" | "thisYear" | "lastYear" | "yearBeforeLast";
 
 type PythonDraft = {
   id?: string;
@@ -157,6 +158,7 @@ const EMPTY_PYTHON_DRAFT: PythonDraft = {
 
 const REPLAY_PAGE_BAR_LIMIT = 1_500;
 const REPLAY_PAGE_LOAD_DELAY_MS = 80;
+const MAX_BACKTEST_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
 // Keep AI source writes visible without letting a long editor animation hold
 // the AI tool bridge open indefinitely.
 const AI_SOURCE_TYPEWRITER_MIN_DURATION_MS = 450;
@@ -506,13 +508,14 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     const start = dateTimeInput(startAt);
     const end = dateTimeInput(endAt);
     const latestAllowedEnd = dateTimeInput(backtestEndLimitAt);
+    const dateRangeMessage = backtestDateRangeMessage(start, end, latestAllowedEnd, text);
     if (!execution || !equity || !preload
       || !selectedLeverage || selectedLeverage < 1 || selectedLeverage > 50
       || !selectedMarginSafetyMultiplier || selectedMarginSafetyMultiplier < 1 || selectedMarginSafetyMultiplier > 20
       || !perEntryBudget || !sameSideTotalBudget || perEntryBudget > sameSideTotalBudget
       || (backtestPositionSizingMode === "equityPercent" && sameSideTotalBudget > 100)
-      || (startAt && !start) || (endAt && !end) || (end !== null && latestAllowedEnd !== null && end > latestAllowedEnd)) {
-      onNotify({ kind: "warning", title: text.invalidBacktest, message: end !== null && latestAllowedEnd !== null && end > latestAllowedEnd ? text.backtestEndDelay : text.invalidBacktestDetail });
+      || (startAt && !start) || (endAt && !end) || dateRangeMessage) {
+      onNotify({ kind: "warning", title: text.invalidBacktest, message: dateRangeMessage ?? text.invalidBacktestDetail });
       return;
     }
     setStartingBacktest(true);
@@ -545,14 +548,49 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
 
   const startOptimization = useCallback(async () => {
     if (!desktop || !selectedPython || !pythonRuntime?.available) { onNotify({ kind: "warning", title: text.optimizeUnavailable, message: text.pythonBacktestGuard }); return; }
-    const execution = parseExecution({ entrySlippage, exitSlippage, entryFee, exitFee }); const equity = numberInput(initialEquity); const preload = integerInput(preloadBars); const selectedLeverage = numberInput(leverage); const safety = numberInput(marginSafetyMultiplier); const perEntryBudget = numberInput(backtestPerEntryBudget); const sameSideTotalBudget = numberInput(backtestSameSideTotalBudget); const start = dateTimeInput(startAt); const end = dateTimeInput(endAt); const latestAllowedEnd = dateTimeInput(backtestEndLimitAt);
-    if (!execution || !equity || !preload || !selectedLeverage || !safety || !perEntryBudget || !sameSideTotalBudget || perEntryBudget > sameSideTotalBudget || (backtestPositionSizingMode === "equityPercent" && sameSideTotalBudget > 100) || (startAt && !start) || (endAt && !end) || (end !== null && latestAllowedEnd !== null && end > latestAllowedEnd)) { onNotify({ kind: "warning", title: text.invalidBacktest, message: end !== null && latestAllowedEnd !== null && end > latestAllowedEnd ? text.backtestEndDelay : text.invalidBacktestDetail }); return; }
+    const execution = parseExecution({ entrySlippage, exitSlippage, entryFee, exitFee }); const equity = numberInput(initialEquity); const preload = integerInput(preloadBars); const selectedLeverage = numberInput(leverage); const safety = numberInput(marginSafetyMultiplier); const perEntryBudget = numberInput(backtestPerEntryBudget); const sameSideTotalBudget = numberInput(backtestSameSideTotalBudget); const start = dateTimeInput(startAt); const end = dateTimeInput(endAt); const latestAllowedEnd = dateTimeInput(backtestEndLimitAt); const dateRangeMessage = backtestDateRangeMessage(start, end, latestAllowedEnd, text);
+    if (!execution || !equity || !preload || !selectedLeverage || !safety || !perEntryBudget || !sameSideTotalBudget || perEntryBudget > sameSideTotalBudget || (backtestPositionSizingMode === "equityPercent" && sameSideTotalBudget > 100) || (startAt && !start) || (endAt && !end) || dateRangeMessage) { onNotify({ kind: "warning", title: text.invalidBacktest, message: dateRangeMessage ?? text.invalidBacktestDetail }); return; }
     setStartingOptimization(true);
     try {
       const optimization = await startSystematicOptimization({ strategyId: selectedPython.id, instId: backtestSymbol, startAt: start ?? undefined, endAt: end ?? undefined, initialEquityUsdt: equity, preloadBars: preload, execution, leverage: selectedLeverage, marginSafetyMultiplier: safety, positionSizing: { mode: backtestPositionSizingMode, perEntryBudget, sameSideTotalBudget }, endOfRunPolicy: endPolicy });
       if (!optimization) throw new Error(text.desktopOnlyDetail); await refresh(); onNotify({ kind: "info", title: text.optimizationQueued, message: `${optimization.candidateCount} · ${backtestSymbol}` });
     } catch (error) { onNotify({ kind: "error", title: text.optimizationFailed, message: backtestErrorMessage(error, text) }); } finally { setStartingOptimization(false); }
   }, [backtestEndLimitAt, backtestPositionSizingMode, backtestPerEntryBudget, backtestSameSideTotalBudget, backtestSymbol, desktop, endAt, endPolicy, entryFee, entrySlippage, exitFee, exitSlippage, initialEquity, leverage, marginSafetyMultiplier, onNotify, preloadBars, pythonRuntime?.available, refresh, selectedPython, startAt, text]);
+
+  const applyBacktestQuickRange = useCallback((range: BacktestQuickRange) => {
+    const safeEndMs = dateTimeInput(backtestEndLimitAt) ?? dateTimeInput(endAt);
+    if (safeEndMs === null) return;
+    let endDate = new Date(safeEndMs);
+    let startMs: number;
+    switch (range) {
+      case "recentMonth":
+        startMs = subtractCalendarMonths(safeEndMs, 1);
+        break;
+      case "recentThreeMonths":
+        startMs = subtractCalendarMonths(safeEndMs, 3);
+        break;
+      case "recentYear":
+        startMs = subtractCalendarMonths(safeEndMs, 12);
+        break;
+      case "thisYear":
+        startMs = new Date(endDate.getFullYear(), 0, 1).getTime();
+        break;
+      case "lastYear": {
+        const year = endDate.getFullYear() - 1;
+        startMs = new Date(year, 0, 1).getTime();
+        endDate = new Date(year, 11, 31, 23, 59, 0, 0);
+        break;
+      }
+      case "yearBeforeLast": {
+        const year = endDate.getFullYear() - 2;
+        startMs = new Date(year, 0, 1).getTime();
+        endDate = new Date(year, 11, 31, 23, 59, 0, 0);
+        break;
+      }
+    }
+    setStartAt(toDateTimeLocal(startMs));
+    setEndAt(toDateTimeLocal(endDate.getTime()));
+  }, [backtestEndLimitAt, endAt]);
 
   const loadReplayPage = useCallback(async (requestedIndex: number) => {
     if (!desktop || !selectedRun?.id || !detail || detail.totalBarCount <= 0 || detail.bars.length === 0) return;
@@ -823,6 +861,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
             onSameSideTotalBudget={setBacktestSameSideTotalBudget}
             onStartAt={setStartAt}
             onEndAt={setEndAt}
+            onQuickRange={applyBacktestQuickRange}
             onEndPolicy={setEndPolicy}
             onRun={() => void startBacktest()}
             onOptimize={() => void startOptimization()}
@@ -2357,6 +2396,7 @@ function BacktestView({
   onSameSideTotalBudget,
   onStartAt,
   onEndAt,
+  onQuickRange,
   onEndPolicy,
   onRun,
   onOptimize,
@@ -2404,6 +2444,7 @@ function BacktestView({
   onSameSideTotalBudget: (value: string) => void;
   onStartAt: (value: string) => void;
   onEndAt: (value: string) => void;
+  onQuickRange: (range: BacktestQuickRange) => void;
   onEndPolicy: (value: "markToMarket" | "closeAtLastClose") => void;
   onRun: () => void;
   onOptimize: () => void;
@@ -2466,6 +2507,17 @@ function BacktestView({
             <span>{text.end}</span>
             <input type="datetime-local" value={endAt} max={maximumEndAt || undefined} onChange={(event) => onEndAt(event.target.value)} />
           </label>
+          <div className="systematic-lab-backtest-range-presets" role="group" aria-label={text.backtestRangeQuick}>
+            <span>{text.backtestRangeQuick}</span>
+            <div>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentMonth")}>{text.recentOneMonth}</button>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentThreeMonths")}>{text.recentThreeMonths}</button>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentYear")}>{text.recentOneYear}</button>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("thisYear")}>{text.thisYear}</button>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("lastYear")}>{text.lastYear}</button>
+              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("yearBeforeLast")}>{text.yearBeforeLast}</button>
+            </div>
+          </div>
           <NumericField label={text.preloadHistory} value={preloadBars} onChange={onPreloadBars} suffix="1m" wide />
         </div>
         <PreloadScope text={text} startAt={startAt} preloadBars={preloadBars} />
@@ -2617,10 +2669,10 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
             {report && replayBars.length ? (
               <>
                 <div className="systematic-lab-metrics-strip">
-                  <Metric label={text.netPnl} value={formatUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "positive" : "negative"} />
+                  <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "positive" : "negative"} />
                   <Metric label={text.cashBalance} value={formatUsdt(replaySnapshot?.cashUsdt)} />
                   <Metric label={text.accountEquity} value={formatUsdt(replaySnapshot?.equityUsdt)} />
-                  <Metric label={text.unrealizedPnl} value={formatUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+                  <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
                   <Metric label={text.usedMargin} value={formatUsdt(replaySnapshot?.usedMarginUsdt)} />
                   <Metric label={text.availableMargin} value={formatUsdt(replaySnapshot?.availableMarginUsdt)} />
                   <Metric label={text.closedTrades} value={formatLocalizedNumber(replayClosedTradeCount)} />
@@ -2786,7 +2838,7 @@ function ReplayPositionHistoryRow({ text, trade }: Readonly<{
     <div className="systematic-lab-ledger-row is-virtual-trade">
       <div className="systematic-lab-ledger-row__head">
         <span className={trade.side === "long" ? "positive" : "negative"}>{trade.side === "long" ? text.long : text.short}</span>
-        <strong className={trade.netPnlUsdt >= 0 ? "systematic-lab-pnl--gain" : "systematic-lab-pnl--loss"}>{formatUsdt(trade.netPnlUsdt)}</strong>
+        <strong className={trade.netPnlUsdt >= 0 ? "systematic-lab-pnl--gain" : "systematic-lab-pnl--loss"}>{formatPnlUsdt(trade.netPnlUsdt)}</strong>
       </div>
       <div className="systematic-lab-ledger-row__details">
         <ContractRow label={text.entryPrice} value={formatPrice(trade.entryPrice)} />
@@ -2872,7 +2924,7 @@ function ReplayPositionPanel({ text, position, atTimeMs }: Readonly<{
         <ContractRow label={text.markPrice} value={formatPrice(position.markedPrice)} />
         <ContractRow
           label={text.unrealizedPnl}
-          value={formatUsdt(position.unrealizedPnlUsdt)}
+          value={formatPnlUsdt(position.unrealizedPnlUsdt)}
           tone={position.unrealizedPnlUsdt >= 0 ? "gain" : "loss"}
         />
         <ContractRow label={text.entryFee} value={formatUsdt(position.entryFeeUsdt)} />
@@ -2905,10 +2957,10 @@ function BacktestStatisticsPanel({ text, report }: Readonly<{
         <Statistic label={text.sortino} value={formatRatio(statistics?.annualizedSortino)} />
         <Statistic label={text.volatility} value={formatPercent(statistics?.annualizedVolatilityPct, false)} />
         <Statistic label={text.profitFactor} value={formatRatio(statistics?.profitFactor)} />
-        <Statistic label={text.expectancy} value={formatUsdt(statistics?.expectancyUsdt)} tone={(statistics?.expectancyUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+        <Statistic label={text.expectancy} value={formatPnlUsdt(statistics?.expectancyUsdt)} tone={(statistics?.expectancyUsdt ?? 0) >= 0 ? "positive" : "negative"} />
         <Statistic label={text.averageHolding} value={formatDuration(statistics?.averageHoldingMs)} />
         <Statistic label={text.exposure} value={formatPercent(report.statistics?.exposurePct, false)} />
-        <Statistic label={text.largestWinLoss} value={`${formatUsdt(statistics?.largestWinUsdt)} / ${formatUsdt(statistics?.largestLossUsdt)}`} />
+        <Statistic label={text.largestWinLoss} value={`${formatPnlUsdt(statistics?.largestWinUsdt)} / ${formatPnlUsdt(statistics?.largestLossUsdt)}`} />
         <Statistic label={text.maxStreak} value={`${formatLocalizedNumber(statistics?.maxConsecutiveWins ?? 0)} / ${formatLocalizedNumber(statistics?.maxConsecutiveLosses ?? 0)}`} />
       </div>
     </section>
@@ -3860,6 +3912,22 @@ function toDateTimeLocal(value: number) {
   return new Date(value - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16);
 }
 
+function subtractCalendarMonths(value: number, months: number) {
+  const source = new Date(value);
+  const target = new Date(
+    source.getFullYear(),
+    source.getMonth() - months,
+    1,
+    source.getHours(),
+    source.getMinutes(),
+    0,
+    0,
+  );
+  const targetMonthLastDay = new Date(target.getFullYear(), target.getMonth() + 1, 0).getDate();
+  target.setDate(Math.min(source.getDate(), targetMonthLastDay));
+  return target.getTime();
+}
+
 function parseExecution(input: { entrySlippage: string; exitSlippage: string; entryFee: string; exitFee: string }): SystematicExecutionAssumptions | null {
   const entrySlippageBps = Number(input.entrySlippage);
   const exitSlippageBps = Number(input.exitSlippage);
@@ -3956,6 +4024,12 @@ function isEndOfBarExecution(reason?: string) {
 }
 
 function formatUsdt(value?: number | null) {
+  const formatted = formatLocalizedNumber(Math.abs(value ?? 0), { maximumFractionDigits: 2, minimumFractionDigits: 2 });
+  if (value === undefined || value === null) return "--";
+  return `${value < 0 ? "-" : ""}${formatted} USDT`;
+}
+
+function formatPnlUsdt(value?: number | null) {
   const formatted = formatLocalizedNumber(Math.abs(value ?? 0), { maximumFractionDigits: 2, minimumFractionDigits: 2 });
   if (value === undefined || value === null) return "--";
   return `${value > 0 ? "+" : value < 0 ? "-" : ""}${formatted} USDT`;
@@ -4079,7 +4153,17 @@ function backtestErrorMessage(error: unknown, text: Copy) {
   if (message.includes("must be at least 60 minutes before the current time")) {
     return text.backtestEndDelay;
   }
+  if (message.includes("cannot exceed 366 days")) {
+    return text.backtestRangeTooLong;
+  }
   return message;
+}
+
+function backtestDateRangeMessage(start: number | null, end: number | null, latestAllowedEnd: number | null, text: Copy) {
+  if (start !== null && end !== null && start >= end) return text.invalidBacktestRange;
+  if (end !== null && latestAllowedEnd !== null && end > latestAllowedEnd) return text.backtestEndDelay;
+  if (start !== null && end !== null && end - start > MAX_BACKTEST_RANGE_MS) return text.backtestRangeTooLong;
+  return null;
 }
 
 type Copy = ReturnType<typeof copy>;
@@ -4111,11 +4195,11 @@ function copy(chinese: boolean) {
       strategyCreateFailed: "无法创建策略", strategySaved: "策略版本已保存", strategySavedDetail: "回测将固定这个版本、数据快照和成交假设。", cancel: "取消", confirmDelete: "删除",
       strategySaveFailed: "无法保存策略", strategyNameInUse: "策略名称已存在", strategyNameInUseDetail: "请为策略使用一个不同的名称。", invalidParameters: "参数 JSON 无效", parametersObject: "参数必须是 JSON 对象。", parameterTuningObject: "参数调优范围必须是对象，且每项包含有限的 min、max 和 step。",
       noStrategy: "没有可回测策略", noStrategyDetail: "先创建或选择一个策略。", backtestUnavailable: "当前策略无法回测", backtestUnavailableDetail: "当前策略不符合回测合同。",
-      virtualAccount: "虚拟账户", workers: "并发回测槽位", contract: "合约", initialEquity: "初始权益", leverage: "杠杆", marginSafetyMultiplier: "保证金安全系数", preloadHistory: "预加载历史", preloadScope: "预加载区间", preloadBeforeStart: "回测开始前", preloadExcluded: "不计入权益、回放或统计", start: "正式评估开始", end: "评估结束",
+      virtualAccount: "虚拟账户", workers: "并发回测槽位", contract: "合约", initialEquity: "初始权益", leverage: "杠杆", marginSafetyMultiplier: "保证金安全系数", preloadHistory: "预加载历史", preloadScope: "预加载区间", preloadBeforeStart: "回测开始前", preloadExcluded: "不计入权益、回放或统计", start: "正式评估开始", end: "评估结束", backtestRangeQuick: "快速范围", recentOneMonth: "近1个月", recentThreeMonths: "近3个月", recentOneYear: "近1年", thisYear: "今年", lastYear: "去年", yearBeforeLast: "前年",
       entrySlippage: "开仓滑点", exitSlippage: "平仓滑点", entryFee: "开仓费率", exitFee: "平仓费率", endOfRun: "期末处理",
       markToMarket: "按最后收盘价盯市", forceClose: "按最后收盘价平仓", fillModel: "预加载数据只用于策略上下文；正式评估中，已收线决策在下一根开盘成交。",
       pythonBacktestGuard: "Python 回测需要本地环境准备完成。",
-      runBacktest: "运行回测", queuing: "正在排队", backtestQueued: "回测已排队", backtestFailed: "无法启动回测", optimize: "参数调优", optimizeUnavailable: "无法开始调优", optimizationQueued: "参数调优已排队", optimizationFailed: "无法启动参数调优", optimization: "参数调优", optimizationResults: "调优结果", validationCalmar: "验证 Calmar", applyToDraft: "应用到草稿", optimizationNote: "参数只写入当前未保存草稿；请审阅并保存为新版本后再运行独立回测。", optimizationApplied: "调优参数已应用", optimizationAppliedDetail: "最佳参数已写入当前策略草稿，尚未保存。", invalidBacktest: "回测参数无效", invalidBacktestDetail: "请输入正数的本金、预加载长度和成交假设；杠杆为 1-50x，安全系数为 1-20x，时间范围必须有效。", backtestEndDelay: "评估结束时间必须至少早于当前时间 1 小时，以等待本地 K 线同步完成。",
+      runBacktest: "运行回测", queuing: "正在排队", backtestQueued: "回测已排队", backtestFailed: "无法启动回测", optimize: "参数调优", optimizeUnavailable: "无法开始调优", optimizationQueued: "参数调优已排队", optimizationFailed: "无法启动参数调优", optimization: "参数调优", optimizationResults: "调优结果", validationCalmar: "验证 Calmar", applyToDraft: "应用到草稿", optimizationNote: "参数只写入当前未保存草稿；请审阅并保存为新版本后再运行独立回测。", optimizationApplied: "调优参数已应用", optimizationAppliedDetail: "最佳参数已写入当前策略草稿，尚未保存。", invalidBacktest: "回测参数无效", invalidBacktestDetail: "请输入正数的本金、预加载长度和成交假设；杠杆为 1-50x，安全系数为 1-20x，时间范围必须有效。", invalidBacktestRange: "正式评估开始必须早于评估结束。", backtestRangeTooLong: "正式评估区间最多支持近一年。", backtestEndDelay: "评估结束时间必须至少早于当前时间 1 小时，以等待本地 K 线同步完成。",
       timeline: "时间线", replayContract: "虚拟账户回放", preloadHistoryDetail: "只加载正式评估开始前的已确认 1 分钟 K 线，不进入权益、回放或统计。", barCloses: "K 线收线", barClosesDetail: "正式评估中，策略只能读取当前及过去数据；高周期末根会明确标记是否已收线。",
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
@@ -4157,11 +4241,11 @@ function copy(chinese: boolean) {
     strategyCreateFailed: "Could not create strategy", strategySaved: "Strategy version saved", strategySavedDetail: "A backtest pins this version, its data snapshot, and execution assumptions.", cancel: "Cancel", confirmDelete: "Delete",
     strategySaveFailed: "Could not save strategy", strategyNameInUse: "Strategy name already exists", strategyNameInUseDetail: "Choose a different name for this strategy.", invalidParameters: "Invalid parameters JSON", parametersObject: "Parameters must be a JSON object.", parameterTuningObject: "Parameter tuning must be an object whose entries contain finite min, max, and step values.",
     noStrategy: "No backtestable strategy", noStrategyDetail: "Create or select a strategy first.", backtestUnavailable: "Strategy cannot backtest", backtestUnavailableDetail: "This strategy does not meet the backtest contract.",
-    virtualAccount: "VIRTUAL ACCOUNT", workers: "parallel backtest slots", contract: "Contract", initialEquity: "Initial equity", leverage: "Leverage", marginSafetyMultiplier: "Margin safety multiplier", preloadHistory: "Preloaded history", preloadScope: "Preload range", preloadBeforeStart: "before evaluation start", preloadExcluded: "Excluded from equity, replay, and statistics", start: "Evaluation start", end: "Evaluation end",
+    virtualAccount: "VIRTUAL ACCOUNT", workers: "parallel backtest slots", contract: "Contract", initialEquity: "Initial equity", leverage: "Leverage", marginSafetyMultiplier: "Margin safety multiplier", preloadHistory: "Preloaded history", preloadScope: "Preload range", preloadBeforeStart: "before evaluation start", preloadExcluded: "Excluded from equity, replay, and statistics", start: "Evaluation start", end: "Evaluation end", backtestRangeQuick: "Quick range", recentOneMonth: "1 month", recentThreeMonths: "3 months", recentOneYear: "1 year", thisYear: "This year", lastYear: "Last year", yearBeforeLast: "Year before last",
     entrySlippage: "Entry slippage", exitSlippage: "Exit slippage", entryFee: "Entry fee", exitFee: "Exit fee", endOfRun: "End-of-run treatment",
     markToMarket: "Mark to last close", forceClose: "Close at last close", fillModel: "Preloaded history supplies strategy context only; evaluation decisions fill at the following open.",
     pythonBacktestGuard: "Python backtests need the local environment to finish preparing.",
-    runBacktest: "Run backtest", queuing: "Queuing", backtestQueued: "Backtest queued", backtestFailed: "Could not start backtest", optimize: "Optimize parameters", optimizeUnavailable: "Could not optimize", optimizationQueued: "Parameter optimization queued", optimizationFailed: "Could not start parameter optimization", optimization: "Parameter optimization", optimizationResults: "Optimization results", validationCalmar: "Validation Calmar", applyToDraft: "Apply to draft", optimizationNote: "Best parameters change only the current unsaved draft. Review, save a new version, then run an independent backtest.", optimizationApplied: "Optimization parameters applied", optimizationAppliedDetail: "Best parameters now exist in the current strategy draft and are not saved yet.", invalidBacktest: "Invalid backtest settings", invalidBacktestDetail: "Use positive capital, preload length, and execution assumptions; leverage is 1-50x, safety multiplier 1-20x, and time bounds must be valid.", backtestEndDelay: "The evaluation end must be at least one hour before the current time so local K-line synchronization can complete.",
+    runBacktest: "Run backtest", queuing: "Queuing", backtestQueued: "Backtest queued", backtestFailed: "Could not start backtest", optimize: "Optimize parameters", optimizeUnavailable: "Could not optimize", optimizationQueued: "Parameter optimization queued", optimizationFailed: "Could not start parameter optimization", optimization: "Parameter optimization", optimizationResults: "Optimization results", validationCalmar: "Validation Calmar", applyToDraft: "Apply to draft", optimizationNote: "Best parameters change only the current unsaved draft. Review, save a new version, then run an independent backtest.", optimizationApplied: "Optimization parameters applied", optimizationAppliedDetail: "Best parameters now exist in the current strategy draft and are not saved yet.", invalidBacktest: "Invalid backtest settings", invalidBacktestDetail: "Use positive capital, preload length, and execution assumptions; leverage is 1-50x, safety multiplier 1-20x, and time bounds must be valid.", invalidBacktestRange: "The evaluation start must be before the evaluation end.", backtestRangeTooLong: "The formal evaluation range can cover at most about one year.", backtestEndDelay: "The evaluation end must be at least one hour before the current time so local K-line synchronization can complete.",
     timeline: "TIMELINE", replayContract: "Virtual-account replay", preloadHistoryDetail: "Confirmed 1-minute history before evaluation start is context only, never equity, replay, or statistics.", barCloses: "Bar closes", barClosesDetail: "The host exposes only current and earlier data; the final higher-timeframe bar states whether it is confirmed.",
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",

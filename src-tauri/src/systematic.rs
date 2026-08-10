@@ -60,7 +60,13 @@ const DEFAULT_INITIAL_EQUITY_USDT: f64 = 10_000.0;
 // between protocol parsing and the host sizing step, which replaces it before
 // any backtest fill, Profile risk check, persistence, or exchange order.
 const HOST_SIZED_ACTION_PLACEHOLDER_CONTRACTS: f64 = 1.0;
-const MAX_BACKTEST_BARS: usize = 200_000;
+// A one-minute run can cover a full calendar year, including a leap year.
+// The separate bar cap leaves room for preloaded history without allowing an
+// accidentally unbounded snapshot to enter the local database.
+const MAX_BACKTEST_EVALUATION_DAYS: i64 = 366;
+const MAX_BACKTEST_EVALUATION_DURATION_MS: i64 =
+    MAX_BACKTEST_EVALUATION_DAYS * 24 * 60 * ONE_MINUTE_MS;
+const MAX_BACKTEST_BARS: usize = 550_000;
 const MAX_STRATEGY_NAME_BYTES: usize = 120;
 const MAX_STRATEGY_DESCRIPTION_BYTES: usize = 2_000;
 const MAX_PYTHON_STRATEGY_SOURCE_BYTES: usize = 256 * 1024;
@@ -71,7 +77,7 @@ const MAX_PYTHON_TUNING_CANDIDATES: usize = 300;
 const MAX_FACTOR_CODE_BYTES: usize = 32;
 const MAX_RUN_ID_BYTES: usize = 160;
 const FRESH_UNIVERSE_WINDOW_MS: i64 = 5 * ONE_MINUTE_MS;
-const MAX_BACKTEST_SNAPSHOT_BYTES: usize = 64 * 1024 * 1024;
+const MAX_BACKTEST_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_REPLAY_BAR_LIMIT: usize = 1_500;
 const MAX_REPLAY_BAR_LIMIT: usize = 5_000;
 // The active candle window remains exact. This additional budget preserves an
@@ -3671,6 +3677,14 @@ fn resolve_backtest_data_window(
     if evaluation_start_open >= end_open {
         return Err("Backtest start time must be before its end time".to_string());
     }
+    let evaluation_duration = end_open.checked_sub(evaluation_start_open).ok_or_else(|| {
+        "Requested backtest history is outside the supported time range".to_string()
+    })?;
+    if evaluation_duration > MAX_BACKTEST_EVALUATION_DURATION_MS {
+        return Err(format!(
+            "Backtest evaluation range cannot exceed {MAX_BACKTEST_EVALUATION_DAYS} days"
+        ));
+    }
     let preload_bars = request.preload_bars.unwrap_or(minimum_bars);
     if preload_bars < minimum_bars {
         return Err(format!(
@@ -3807,6 +3821,13 @@ fn prepare_backtest(
     })
 }
 
+struct BacktestWorkerResult {
+    run: desic_systematic::BacktestRunResult,
+    worker_us: u64,
+    python_startup_us: u64,
+    python_timing: PythonRunnerTiming,
+}
+
 fn spawn_backtest_worker(
     app: tauri::AppHandle,
     runtime: SystematicRuntime,
@@ -3852,6 +3873,7 @@ fn spawn_backtest_worker(
         let control_for_run = control.clone();
         let run_id_for_run = run_id.clone();
         let result = tokio::task::spawn_blocking(move || {
+            let worker_started = Instant::now();
             let PreparedBacktest { request, strategy } = prepared;
             let token = control_for_run.cancellation_token();
             let report_progress = |completed_steps: u64, total_steps: u64| {
@@ -3880,6 +3902,7 @@ fn spawn_backtest_worker(
                     );
                 }
             };
+            let python_started = Instant::now();
             let mut strategy = LocalPythonStrategyRunner::launch_with_sizing(
                 strategy.0,
                 &request.data_snapshot_id,
@@ -3889,25 +3912,61 @@ fn spawn_backtest_worker(
                     leverage: request.margin.leverage,
                 }),
             )?;
+            let python_startup_us = elapsed_micros(python_started);
             let result = BacktestEngine::run_stateful_with_progress(
                 &request,
                 &mut strategy,
                 &token,
                 report_progress,
             );
+            let python_timing = strategy.timing();
             strategy.shutdown();
-            result
+            result.map(|run| BacktestWorkerResult {
+                run,
+                worker_us: elapsed_micros(worker_started),
+                python_startup_us,
+                python_timing,
+            })
         })
         .await;
 
         match result {
-            Ok(Ok(run)) => {
+            Ok(Ok(worker)) => {
+                let BacktestWorkerResult {
+                    run,
+                    worker_us,
+                    python_startup_us,
+                    python_timing,
+                } = worker;
                 if run.status == desic_systematic::BacktestStatus::Cancelled {
                     control.cancel_complete();
                 } else {
                     control.complete();
                 }
+                let persist_started = Instant::now();
                 let _ = persist_backtest_result(&app, &run_id, &run.report, run.status);
+                let persistence_us = elapsed_micros(persist_started);
+                let timing = json!({
+                    "unit": "microseconds",
+                    "workerUs": worker_us,
+                    "pythonStartupUs": python_startup_us,
+                    "engineSetupUs": run.timing.setup_us,
+                    "simulationLoopUs": run.timing.simulation_us,
+                    "strategyCallbackUs": run.timing.strategy_callback_us,
+                    "strategyCallbackCount": run.timing.strategy_callback_count,
+                    "reportBuildUs": run.timing.report_build_us,
+                    "pythonEventBuildUs": python_timing.event_build_us,
+                    "pythonRequestRoundTripUs": python_timing.request_round_trip_us,
+                    "pythonActionDecodeUs": python_timing.action_decode_us,
+                    "pythonActionResolutionUs": python_timing.action_resolution_us,
+                    "pythonInvocationCount": python_timing.invocation_count,
+                    "persistenceUs": persistence_us,
+                    "workerAndPersistenceUs": worker_us.saturating_add(persistence_us),
+                    "engineOverheadUs": run
+                        .timing
+                        .simulation_us
+                        .saturating_sub(run.timing.strategy_callback_us),
+                });
                 emit_systematic_event(
                     &app,
                     json!({
@@ -3915,6 +3974,7 @@ fn spawn_backtest_worker(
                         "runId": run_id,
                         "status": if run.status == desic_systematic::BacktestStatus::Completed { "completed" } else { "cancelled" },
                         "progressPct": if run.status == desic_systematic::BacktestStatus::Completed { 100.0 } else { control.progress().completed_steps as f64 / control.progress().total_steps.max(1) as f64 * 100.0 },
+                        "timing": timing,
                         "timestamp": now_ms(),
                     }),
                 );
@@ -8372,6 +8432,7 @@ struct LocalPythonStrategyRunner {
     market_series: PythonMarketSeriesCursor,
     portfolio_ledger: PythonPortfolioLedgerCursor,
     position_sizing: Option<BacktestPositionSizing>,
+    timing: PythonRunnerTiming,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -8379,6 +8440,15 @@ struct BacktestPositionSizing {
     sizing: PositionSizing,
     contract: InstrumentContract,
     leverage: f64,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PythonRunnerTiming {
+    event_build_us: u64,
+    request_round_trip_us: u64,
+    action_decode_us: u64,
+    action_resolution_us: u64,
+    invocation_count: u64,
 }
 
 /// Builds each supported market timeframe once and then emits only the newest
@@ -8422,13 +8492,15 @@ impl PythonMarketSeriesCursor {
         include_history: bool,
     ) -> Result<Vec<Value>, SystematicError> {
         let first_new = self.last_base_close_time_ms.unwrap_or(i64::MIN);
-        for bar in market
-            .bars()
-            .iter()
-            .filter(|bar| bar.close_time_ms > first_new)
-        {
+        let bars = market.bars();
+        // Both historical and live windows are ordered by close time. The
+        // live window is rolling, so an index cursor would become invalid when
+        // old bars are evicted; partition_point keeps the incremental path
+        // correct while reducing each event lookup to O(log n).
+        let first_new_index = bars.partition_point(|bar| bar.close_time_ms <= first_new);
+        for bar in &bars[first_new_index..] {
             for series in &mut self.series {
-                series.aggregator.push(bar).map_err(|error| {
+                series.aggregator.push_validated(bar).map_err(|error| {
                     python_runtime_error(format!("Could not aggregate market timeframe: {error}"))
                 })?;
             }
@@ -8577,6 +8649,7 @@ impl LocalPythonStrategyRunner {
             market_series: PythonMarketSeriesCursor::default(),
             portfolio_ledger: PythonPortfolioLedgerCursor::default(),
             position_sizing,
+            timing: PythonRunnerTiming::default(),
         };
         runner.wait_for_ready()?;
         let loaded = runner.request(
@@ -8699,11 +8772,27 @@ impl LocalPythonStrategyRunner {
             .and_then(Value::as_str)
             .ok_or_else(|| python_runtime_error("Local Python event has no instrument"))?
             .to_string();
+        let request_started = Instant::now();
         let response = self.request("invoke", json!({ "event": event }))?;
+        self.timing.request_round_trip_us = self
+            .timing
+            .request_round_trip_us
+            .saturating_add(elapsed_micros(request_started));
+        self.timing.invocation_count = self.timing.invocation_count.saturating_add(1);
         let output = response.get("output").cloned().ok_or_else(|| {
             python_runtime_error("Local Python runner returned no strategy output")
         })?;
-        strategy_action_from_python_output(output, expected_as_of_ms, &expected_instrument_id)
+        let decode_started = Instant::now();
+        let action = strategy_action_from_python_output(
+            output,
+            expected_as_of_ms,
+            &expected_instrument_id,
+        );
+        self.timing.action_decode_us = self
+            .timing
+            .action_decode_us
+            .saturating_add(elapsed_micros(decode_started));
+        action
     }
 
     fn receive_message(&mut self) -> Result<Value, SystematicError> {
@@ -8734,6 +8823,10 @@ impl LocalPythonStrategyRunner {
     fn abort(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+
+    fn timing(&self) -> PythonRunnerTiming {
+        self.timing
     }
 
     fn shutdown(&mut self) {
@@ -8863,7 +8956,12 @@ impl LocalPythonStrategyRunner {
 impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
     fn on_bar(&mut self, context: &StrategyContext<'_>) -> Result<StrategyAction, SystematicError> {
         if !self.started && self.handlers.iter().any(|handler| handler == "on_start") {
+            let event_started = Instant::now();
             let start_event = self.build_event(context, "start")?;
+            self.timing.event_build_us = self
+                .timing
+                .event_build_us
+                .saturating_add(elapsed_micros(event_started));
             let output = self.invoke(start_event)?;
             if !matches!(output, StrategyAction::NoAction { .. }) {
                 self.abort();
@@ -8874,9 +8972,20 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
             }
         }
         self.started = true;
+        let event_started = Instant::now();
         let bar_event = self.build_event(context, "bar")?;
+        self.timing.event_build_us = self
+            .timing
+            .event_build_us
+            .saturating_add(elapsed_micros(event_started));
         let action = self.invoke(bar_event)?;
-        self.resolve_backtest_action(action, context)
+        let resolution_started = Instant::now();
+        let resolved = self.resolve_backtest_action(action, context);
+        self.timing.action_resolution_us = self
+            .timing
+            .action_resolution_us
+            .saturating_add(elapsed_micros(resolution_started));
+        resolved
     }
 }
 
@@ -8941,6 +9050,10 @@ fn python_runtime_error(reason: impl Into<String>) -> SystematicError {
     SystematicError::InvalidState {
         reason: reason.into(),
     }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn python_event_from_context(
@@ -10402,6 +10515,59 @@ mod tests {
     }
 
     #[test]
+    fn python_market_series_cursor_only_aggregates_new_bars() {
+        let make_bar = |index: i64| {
+            ClosedBar::new(
+                index * ONE_MINUTE_MS,
+                (index + 1) * ONE_MINUTE_MS,
+                100.0 + index as f64,
+                101.0 + index as f64,
+                99.0 + index as f64,
+                100.5 + index as f64,
+                10.0,
+            )
+            .expect("valid cursor fixture bar")
+        };
+        let first_window = MarketDataWindow::from_closed_bars(
+            "BTC-USDT-SWAP",
+            2 * ONE_MINUTE_MS,
+            ONE_MINUTE_MS,
+            vec![make_bar(0), make_bar(1)],
+            Default::default(),
+        )
+        .expect("first cursor window");
+        let rolling_window = MarketDataWindow::from_closed_bars(
+            "BTC-USDT-SWAP",
+            3 * ONE_MINUTE_MS,
+            ONE_MINUTE_MS,
+            vec![make_bar(0), make_bar(1), make_bar(2)],
+            Default::default(),
+        )
+        .expect("rolling cursor window");
+        let mut cursor = PythonMarketSeriesCursor::default();
+
+        let first = cursor
+            .event_series(&first_window, true)
+            .expect("initial market series");
+        let first_minute = first
+            .iter()
+            .find(|series| series["interval"] == "1m")
+            .expect("initial one-minute series");
+        assert_eq!(first_minute["bars"].as_array().unwrap().len(), 2);
+
+        let next = cursor
+            .event_series(&rolling_window, false)
+            .expect("incremental market series");
+        let next_minute = next
+            .iter()
+            .find(|series| series["interval"] == "1m")
+            .expect("incremental one-minute series");
+        let next_bars = next_minute["bars"].as_array().unwrap();
+        assert_eq!(next_bars.len(), 1);
+        assert_eq!(next_bars[0]["closeTimeMs"], 3 * ONE_MINUTE_MS);
+    }
+
+    #[test]
     fn strategy_ai_test_reports_action_sites_when_python_is_available() {
         let Ok(interpreter) = std::env::var("DESIC_SYSTEMATIC_TEST_PYTHON") else {
             return;
@@ -11053,6 +11219,45 @@ mod tests {
     fn backtest_detail_window_defaults_to_a_bounded_recent_replay() {
         assert_eq!(DEFAULT_REPLAY_BAR_LIMIT, 1_500);
         assert_eq!(MAX_REPLAY_BAR_LIMIT, 5_000);
+    }
+
+    #[test]
+    fn backtest_range_allows_a_calendar_year_but_rejects_longer() {
+        let conn = Connection::open_in_memory().expect("database");
+        let strategy = PreparedBacktestStrategy(LocalPythonBacktestSpec {
+            interpreter: PathBuf::from("python"),
+            definition: PythonStrategyDefinition::default_source(),
+        });
+        let end_open = 10 * ONE_MINUTE_MS;
+        let request = SystematicBacktestStartRequest {
+            strategy_id: "backtest-range-test".to_string(),
+            strategy_version: None,
+            inst_id: "BTC-USDT-SWAP".to_string(),
+            start_at: Some(end_open - MAX_BACKTEST_EVALUATION_DURATION_MS),
+            end_at: Some(end_open),
+            initial_equity_usdt: None,
+            preload_bars: Some(60),
+            execution: None,
+            leverage: None,
+            margin_safety_multiplier: None,
+            position_sizing: None,
+            end_of_run_policy: None,
+        };
+
+        let window = resolve_backtest_data_window(&conn, &request, &strategy)
+            .expect("a one-year evaluation range is supported");
+        assert_eq!(window.evaluation_start_open, request.start_at.unwrap());
+        assert_eq!(
+            window.preload_start_open,
+            request.start_at.unwrap() - 60 * ONE_MINUTE_MS
+        );
+        assert!(MAX_BACKTEST_BARS > 366 * 24 * 60);
+
+        let mut oversized = request.clone();
+        oversized.start_at = Some(end_open - MAX_BACKTEST_EVALUATION_DURATION_MS - ONE_MINUTE_MS);
+        let error = resolve_backtest_data_window(&conn, &oversized, &strategy)
+            .expect_err("a range longer than one calendar year must fail");
+        assert!(error.contains("366 days"));
     }
 
     #[test]

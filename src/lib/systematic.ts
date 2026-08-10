@@ -316,6 +316,25 @@ export type SystematicBacktestDetail = {
   evaluationEndAt?: number | null;
 };
 
+export type SystematicBacktestTiming = {
+  unit: "microseconds";
+  workerUs: number;
+  pythonStartupUs: number;
+  engineSetupUs: number;
+  simulationLoopUs: number;
+  strategyCallbackUs: number;
+  strategyCallbackCount: number;
+  reportBuildUs: number;
+  pythonEventBuildUs: number;
+  pythonRequestRoundTripUs: number;
+  pythonActionDecodeUs: number;
+  pythonActionResolutionUs: number;
+  pythonInvocationCount: number;
+  persistenceUs: number;
+  workerAndPersistenceUs: number;
+  engineOverheadUs: number;
+};
+
 export type SystematicBacktestDefaults = {
   startAt: number;
   endAt: number;
@@ -450,6 +469,7 @@ export type SystematicEvent = {
   error?: string;
   inserted?: number;
   progressPct?: number;
+  timing?: SystematicBacktestTiming;
   timestamp?: number;
 };
 

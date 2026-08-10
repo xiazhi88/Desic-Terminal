@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, sync::Arc, time::Instant};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -760,6 +760,23 @@ impl BacktestReport {
 pub struct BacktestRunResult {
     pub status: BacktestStatus,
     pub report: BacktestReport,
+    /// Non-deterministic diagnostics are intentionally excluded from the
+    /// persisted report and its reproducibility hash.
+    #[serde(skip)]
+    pub timing: BacktestTiming,
+}
+
+/// Coarse phase timings for one engine run, expressed in microseconds.
+///
+/// These values are diagnostic only. They are kept outside [`BacktestReport`]
+/// so wall-clock differences cannot change a report's deterministic hash.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BacktestTiming {
+    pub setup_us: u64,
+    pub simulation_us: u64,
+    pub strategy_callback_us: u64,
+    pub report_build_us: u64,
+    pub strategy_callback_count: u64,
 }
 
 /// Stateless deterministic minute-backtest engine.
@@ -862,16 +879,23 @@ impl BacktestEngine {
         F: FnMut(&MarketDataWindow, &SimulationState) -> Result<CallbackOutcome, SystematicError>,
         P: FnMut(u64, u64),
     {
+        let setup_started = Instant::now();
         validate_request(request)?;
         let request_hash = hash_value(request)?;
         let bars: Arc<[ClosedBar]> = Arc::from(request.bars.clone());
+        let inst_id: Arc<str> = request.inst_id.as_str().into();
         let total_steps = request.bars.len() as u64;
-        let mut state = SimulationState::new(request.initial_equity_usdt);
+        let evaluation_steps = request.bars.len().saturating_sub(request.preload_bars);
+        let mut state = SimulationState::new(request.initial_equity_usdt, evaluation_steps);
+        let setup_us = elapsed_micros(setup_started);
         let mut funding_index = 0usize;
         let mut pending_intent: Option<PendingIntent> = None;
         let mut pending_strategy_actions = Vec::<PendingStrategyAction>::new();
         let mut status = BacktestStatus::Completed;
         let mut processed_input_count = 0usize;
+        let simulation_started = Instant::now();
+        let mut strategy_callback_us = 0_u64;
+        let mut strategy_callback_count = 0_u64;
 
         for (index, bar) in request.bars.iter().enumerate() {
             if cancellation.is_cancelled() {
@@ -917,13 +941,17 @@ impl BacktestEngine {
             let should_dispatch = is_evaluation_bar || index + 1 == request.preload_bars;
             if should_dispatch {
                 let context = MarketDataWindow::for_backtest(
-                    &request.inst_id,
+                    &inst_id,
                     bar.close_time_ms,
                     ONE_MINUTE_MS,
                     Arc::clone(&bars),
                     index + 1,
                 )?;
+                let callback_started = Instant::now();
                 let callback = on_bar(&context, &state)?;
+                strategy_callback_us = strategy_callback_us
+                    .saturating_add(elapsed_micros(callback_started));
+                strategy_callback_count = strategy_callback_count.saturating_add(1);
                 let decision = callback.decision;
                 decision.validate_for(&context)?;
                 let mut stateful_action = false;
@@ -965,6 +993,7 @@ impl BacktestEngine {
             }
         }
 
+        let simulation_us = elapsed_micros(simulation_started);
         let processed_count = state.equity_curve.len();
         let last_bar = processed_count
             .checked_sub(1)
@@ -1009,6 +1038,7 @@ impl BacktestEngine {
         }
 
         let marked_price = last_bar.map(|bar| bar.close);
+        let report_started = Instant::now();
         let report = build_report(
             request,
             request_hash,
@@ -1017,9 +1047,24 @@ impl BacktestEngine {
             marked_price,
             schema_version,
         )?;
+        let report_build_us = elapsed_micros(report_started);
         on_progress(processed_input_count as u64, total_steps);
-        Ok(BacktestRunResult { status, report })
+        Ok(BacktestRunResult {
+            status,
+            report,
+            timing: BacktestTiming {
+                setup_us,
+                simulation_us,
+                strategy_callback_us,
+                report_build_us,
+                strategy_callback_count,
+            },
+        })
     }
+}
+
+fn elapsed_micros(started: Instant) -> u64 {
+    started.elapsed().as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 #[derive(Debug)]
@@ -1092,16 +1137,18 @@ struct SimulationState {
 }
 
 impl SimulationState {
-    fn new(initial_equity_usdt: f64) -> Self {
+    fn new(initial_equity_usdt: f64, evaluation_steps: usize) -> Self {
         Self {
             cash_usdt: initial_equity_usdt,
             position: None,
             fills: Vec::new(),
             closed_trades: Vec::new(),
             funding_payments: Vec::new(),
-            equity_curve: Vec::new(),
-            replay_snapshots: Vec::new(),
-            strategy_events: Vec::new(),
+            equity_curve: Vec::with_capacity(evaluation_steps),
+            replay_snapshots: Vec::with_capacity(evaluation_steps),
+            // The final preloaded bar can dispatch one additional strategy
+            // event before the evaluation curve begins.
+            strategy_events: Vec::with_capacity(evaluation_steps.saturating_add(1)),
             strategy_actions: Vec::new(),
             open_orders: Vec::new(),
             order_events: Vec::new(),
@@ -3018,6 +3065,10 @@ mod tests {
 
         assert_eq!(result.status, BacktestStatus::Completed);
         assert_eq!(strategy.seen_lengths, strategy.expected_lengths);
+        assert_eq!(result.timing.strategy_callback_count, 3);
+        assert!(result.timing.simulation_us >= result.timing.strategy_callback_us);
+        let encoded = serde_json::to_value(&result).expect("serialize run result");
+        assert!(encoded.get("timing").is_none());
     }
 
     struct PreloadedHistoryStrategy {
