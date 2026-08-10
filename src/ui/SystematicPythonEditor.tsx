@@ -48,6 +48,8 @@ type SearchLabels = Readonly<{
 const STRATEGY_COMPLETIONS: readonly Completion[] = [
   { label: "def on_bar(ctx):", type: "keyword", apply: "def on_bar(ctx):\n    " },
   { label: "ctx.market.bars", detail: "confirmed K-line window", type: "function", apply: "ctx.market.bars(ctx.instrument_id, ctx.interval, lookback=35)" },
+  { label: "ctx.indicators.ema", detail: "cached confirmed 1m EMA", type: "function", apply: "ctx.indicators.ema(ctx.instrument_id, \"1m\", 20)" },
+  { label: "ctx.indicators.atr", detail: "cached confirmed 1m Wilder ATR", type: "function", apply: "ctx.indicators.atr(ctx.instrument_id, \"1m\", 14)" },
   { label: "ctx.portfolio.position", detail: "current virtual position", type: "function", apply: "ctx.portfolio.position(ctx.instrument_id, \"long\")" },
   { label: "ctx.no_action", detail: "no trade decision", type: "function", apply: "ctx.no_action(\"reason\")" },
   { label: "ctx.open_long", detail: "open a virtual long", type: "function", apply: "ctx.open_long(1, \"reason\")" },

@@ -479,11 +479,18 @@ class FrozenSnapshotSeries(Sequence):
             offset = 0
 
     def _value_at(self, index):
-        remaining = self._start + index
-        for chunk in self._chunks:
-            if remaining < len(chunk):
-                return chunk[remaining]
-            remaining -= len(chunk)
+        if index < self._length // 2:
+            remaining = self._start + index
+            for chunk in self._chunks:
+                if remaining < len(chunk):
+                    return chunk[remaining]
+                remaining -= len(chunk)
+        else:
+            remaining = self._length - 1 - index
+            for chunk in reversed(self._chunks):
+                if remaining < len(chunk):
+                    return chunk[len(chunk) - 1 - remaining]
+                remaining -= len(chunk)
         raise IndexError("index is outside the current protocol snapshot")
 
     def __getitem__(self, index):
@@ -498,8 +505,18 @@ class FrozenSnapshotSeries(Sequence):
         return self._value_at(normalized)
 
     def tail(self, count):
-        first = max(0, self._length - count)
-        return tuple(self._value_at(index) for index in range(first, self._length))
+        remaining_skip = max(0, self._length - count)
+        values = []
+        offset = self._start
+        for chunk in self._chunks:
+            available = len(chunk) - offset
+            if remaining_skip >= available:
+                remaining_skip -= available
+            else:
+                values.extend(chunk[offset + remaining_skip:])
+                remaining_skip = 0
+            offset = 0
+        return tuple(values)
 
 
 class MarketSeriesCache:
@@ -649,6 +666,154 @@ class MarketData(ImmutableObject):
         return values.tail(lookback)
 
 
+class RollingIndicatorCache:
+    """Per-runtime rolling indicator state keyed by visible market series.
+
+    Values are stored by confirmed-bar close time, so a retained older context
+    cannot read a value calculated from a later bar. A cache rebuild occurs
+    only on first use or an unexpected series discontinuity; the ordinary
+    append-one-bar path is O(1) per requested indicator.
+    """
+
+    __slots__ = ("_ema", "_atr")
+
+    def __init__(self):
+        self._ema = {}
+        self._atr = {}
+
+    @staticmethod
+    def _key(instrument_id, interval, period):
+        if not isinstance(period, int) or isinstance(period, bool) or period <= 0 or period > MAX_CACHED_BARS:
+            raise ValueError("indicator period must be a positive integer no greater than the visible bar limit")
+        return instrument_id, interval, period
+
+    @staticmethod
+    def _remember(state, close_time_ms, value):
+        state["values"][close_time_ms] = value
+        while len(state["values"]) > MAX_CACHED_BARS:
+            del state["values"][next(iter(state["values"]))]
+
+    @staticmethod
+    def _ema_rebuild(bars, period):
+        state = {"last": None, "ema": None, "seed": [], "values": {}}
+        alpha = 2.0 / (period + 1.0)
+        for bar in bars:
+            close = bar.close
+            if len(state["seed"]) < period:
+                state["seed"].append(close)
+                if len(state["seed"]) == period:
+                    state["ema"] = sum(state["seed"]) / period
+            else:
+                state["ema"] = close * alpha + state["ema"] * (1.0 - alpha)
+            state["last"] = bar.closeTimeMs
+            RollingIndicatorCache._remember(state, bar.closeTimeMs, state["ema"])
+        return state
+
+    @staticmethod
+    def _atr_rebuild(bars, period):
+        state = {"last": None, "prev_close": None, "atr": None, "seed": [], "values": {}}
+        for bar in bars:
+            if state["prev_close"] is not None:
+                tr = max(bar.high - bar.low, abs(bar.high - state["prev_close"]), abs(bar.low - state["prev_close"]))
+                if len(state["seed"]) < period:
+                    state["seed"].append(tr)
+                    if len(state["seed"]) == period:
+                        state["atr"] = sum(state["seed"]) / period
+                else:
+                    state["atr"] = (state["atr"] * (period - 1) + tr) / period
+            state["prev_close"] = bar.close
+            state["last"] = bar.closeTimeMs
+            RollingIndicatorCache._remember(state, bar.closeTimeMs, state["atr"])
+        return state
+
+    @staticmethod
+    def _update_ema(state, bar, period):
+        if len(state["seed"]) < period:
+            state["seed"].append(bar.close)
+            if len(state["seed"]) == period:
+                state["ema"] = sum(state["seed"]) / period
+        else:
+            alpha = 2.0 / (period + 1.0)
+            state["ema"] = bar.close * alpha + state["ema"] * (1.0 - alpha)
+        state["last"] = bar.closeTimeMs
+        RollingIndicatorCache._remember(state, bar.closeTimeMs, state["ema"])
+
+    @staticmethod
+    def _update_atr(state, bar, period):
+        if state["prev_close"] is not None:
+            tr = max(bar.high - bar.low, abs(bar.high - state["prev_close"]), abs(bar.low - state["prev_close"]))
+            if len(state["seed"]) < period:
+                state["seed"].append(tr)
+                if len(state["seed"]) == period:
+                    state["atr"] = sum(state["seed"]) / period
+            else:
+                state["atr"] = (state["atr"] * (period - 1) + tr) / period
+        state["prev_close"] = bar.close
+        state["last"] = bar.closeTimeMs
+        RollingIndicatorCache._remember(state, bar.closeTimeMs, state["atr"])
+
+    @staticmethod
+    def _target_bar(bars, offset):
+        if not isinstance(offset, int) or isinstance(offset, bool) or offset < 0 or offset >= MAX_CACHED_BARS:
+            raise ValueError("indicator offset must be a non-negative integer below the visible bar limit")
+        if offset >= len(bars):
+            return None
+        return bars[-1 - offset]
+
+    def _value(self, cache, rebuild, update, instrument_id, interval, period, bars, offset):
+        key = self._key(instrument_id, interval, period)
+        target = self._target_bar(bars, offset)
+        if target is None:
+            return None
+        latest = bars[-1]
+        state = cache.get(key)
+        if state is None:
+            state = rebuild(bars, period)
+            cache[key] = state
+            return state["values"].get(target.closeTimeMs)
+        if latest.closeTimeMs in state["values"]:
+            return state["values"].get(target.closeTimeMs)
+        if state["last"] is not None and latest.closeTimeMs < state["last"]:
+            # An older retained context cannot mutate the current rolling
+            # state. Rebuild a short-lived snapshot for that exact cutoff.
+            return rebuild(bars, period)["values"].get(target.closeTimeMs)
+        if state["last"] == latest.closeTimeMs:
+            return state["values"].get(target.closeTimeMs)
+        if len(bars) >= 2 and state["last"] == bars[-2].closeTimeMs:
+            update(state, latest, period)
+            return state["values"].get(target.closeTimeMs)
+        state = rebuild(bars, period)
+        cache[key] = state
+        return state["values"].get(target.closeTimeMs)
+
+    def ema(self, instrument_id, interval, period, bars, offset=0):
+        return self._value(self._ema, self._ema_rebuild, self._update_ema, instrument_id, interval, period, bars, offset)
+
+    def atr(self, instrument_id, interval, period, bars, offset=0):
+        return self._value(self._atr, self._atr_rebuild, self._update_atr, instrument_id, interval, period, bars, offset)
+
+
+class Indicators(ImmutableObject):
+    __slots__ = ("_market", "_cache")
+
+    def __init__(self, market, cache):
+        object.__setattr__(self, "_market", market)
+        object.__setattr__(self, "_cache", cache)
+
+    def _one_minute_bars(self, instrument_id, interval):
+        if interval != "1m":
+            raise ValueError("rolling indicators currently support confirmed 1m bars only")
+        return self._market.bars(instrument_id, interval)
+
+    def ema(self, instrument_id, interval, period, offset=0):
+        bars = self._one_minute_bars(instrument_id, interval)
+        return self._cache.ema(instrument_id, interval, period, bars, offset)
+
+    def atr(self, instrument_id, interval, period, offset=0):
+        bars = self._one_minute_bars(instrument_id, interval)
+        return self._cache.atr(instrument_id, interval, period, bars, offset)
+
+
 class SimulatedPortfolio(ImmutableObject):
     __slots__ = ("cash_usdt", "equity_usdt", "used_margin_usdt", "available_margin_usdt", "positions", "open_orders", "recent_fills", "trades", "_positions")
 
@@ -701,14 +866,16 @@ class SimulatedPortfolio(ImmutableObject):
 
 class StrategyContext(ImmutableObject):
     __slots__ = (
-        "as_of_ms", "kind", "snapshot_id", "market", "portfolio", "params", "instrument_id", "interval", "bar", "universe"
+        "as_of_ms", "kind", "snapshot_id", "market", "indicators", "portfolio", "params", "instrument_id", "interval", "bar", "universe"
     )
 
-    def __init__(self, event, market, portfolio=None, params=None):
+    def __init__(self, event, market, portfolio=None, params=None, indicator_cache=None):
         object.__setattr__(self, "as_of_ms", event["asOfMs"])
         object.__setattr__(self, "kind", event["kind"])
         object.__setattr__(self, "snapshot_id", event["snapshotId"])
-        object.__setattr__(self, "market", MarketData(market))
+        market_view = MarketData(market)
+        object.__setattr__(self, "market", market_view)
+        object.__setattr__(self, "indicators", Indicators(market_view, indicator_cache or RollingIndicatorCache()))
         object.__setattr__(self, "portfolio", SimulatedPortfolio(portfolio if portfolio is not None else event.get("portfolio")))
         object.__setattr__(self, "params", FrozenMap(params or {}))
         object.__setattr__(self, "instrument_id", event.get("instrumentId"))
@@ -1116,8 +1283,8 @@ class SourcePolicyVisitor(ast.NodeVisitor):
             )
 
     def visit_Attribute(self, node):
-        if node.attr.startswith("__"):
-            self._forbidden("forbidden_syntax", "strategy source must not access dunder attributes", node)
+        if node.attr.startswith("_"):
+            self._forbidden("forbidden_syntax", "strategy source must not access private attributes", node)
         if node.attr == "contracts":
             self._forbidden(
                 "invalid_strategy_api",
@@ -1408,6 +1575,7 @@ def main():
     last_event_as_of_ms = None
     market_cache = {}
     portfolio_cache = PortfolioLedgerCache()
+    indicator_cache = RollingIndicatorCache()
     strategy_params = {}
     emit({"type": "ready", "apiVersion": 2})
     for raw_line in sys.stdin:
@@ -1432,6 +1600,7 @@ def main():
                 last_event_as_of_ms = None
                 market_cache = {}
                 portfolio_cache = PortfolioLedgerCache()
+                indicator_cache = RollingIndicatorCache()
                 emit({
                     "type": "loaded",
                     "requestId": request_id,
@@ -1465,7 +1634,7 @@ def main():
                     continue
                 market = merge_market_snapshot(market_cache, event["market"])
                 portfolio = portfolio_cache.snapshot(event.get("portfolio"))
-                context = StrategyContext(event, market, portfolio, strategy_params)
+                context = StrategyContext(event, market, portfolio, strategy_params, indicator_cache)
                 with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                     output = handler(context)
                 output = validate_output(output, event)
@@ -1505,7 +1674,7 @@ def main():
                     else:
                         market = merge_market_snapshot(market_cache, event["market"])
                         portfolio = portfolio_cache.snapshot(event.get("portfolio"))
-                        context = StrategyContext(event, market, portfolio, strategy_params)
+                        context = StrategyContext(event, market, portfolio, strategy_params, indicator_cache)
                         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
                             output = handler(context)
                         output = validate_output(output, event)

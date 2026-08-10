@@ -874,6 +874,7 @@ export function validateStrategySource(source) {
   if (/\bclass\s+[A-Za-z_]/.test(sanitized)) fail("forbidden_syntax", "strategy source must not define classes");
   if (/\b(?:yield|await)\b/.test(sanitized)) fail("forbidden_syntax", "strategy source must not use yield or await");
   if (/\b__[A-Za-z0-9_]*\b/.test(sanitized)) fail("forbidden_syntax", "strategy source must not access dunder names");
+  if (/\.\s*_[A-Za-z][A-Za-z0-9_]*/.test(sanitized)) fail("forbidden_syntax", "strategy source must not access private attributes");
   const forbiddenCallPattern = new RegExp(`\\b(?:${FORBIDDEN_CALLS.join("|")})\\s*\\(`);
   const forbiddenCall = sanitized.match(forbiddenCallPattern);
   if (forbiddenCall && typeof forbiddenCall.index === "number") {

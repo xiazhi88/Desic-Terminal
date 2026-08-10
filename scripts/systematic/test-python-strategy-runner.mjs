@@ -232,6 +232,11 @@ expectProtocolFailure(
   () => validateStrategySource("def on_bar(ctx=None):\n    return ctx.no_action()\n"),
   "invalid_handler"
 );
+expectProtocolFailure(
+  "private context attributes are unavailable",
+  () => validateStrategySource("def on_bar(ctx):\n    ctx.indicators._cache._ema.clear()\n    return ctx.no_action()\n"),
+  "forbidden_syntax"
+);
 
 for (const [name, code] of [
   ["invalid-network-import.py", "forbidden_import"],
@@ -625,6 +630,90 @@ if (testPython) {
   assert.equal(batchOutput[2].outputs.length, 2);
   assert.deepEqual(batchOutput[2].outputs.map((output) => output.kind), ["no_action", "no_action"]);
   assert.equal(batchOutput[3].type, "shutdown");
+
+  const indicatorOutput = await runRawRuntime(testPython, [
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "load",
+      requestId: "raw-indicator-load",
+      source: `def on_bar(ctx):
+    ema = ctx.indicators.ema(ctx.instrument_id, "1m", 2)
+    previous_ema = ctx.indicators.ema(ctx.instrument_id, "1m", 2, offset=1)
+    atr = ctx.indicators.atr(ctx.instrument_id, "1m", 1)
+    return ctx.open_long("indicator values", metadata={"ema": ema, "previousEma": previous_ema or -1, "atr": atr})
+`,
+      params: {}
+    },
+    { ...barInvocation(), requestId: "raw-indicator-invoke" },
+    {
+      ...strategyEvent("bar", { requestId: "raw-indicator-incremental" }),
+      event: {
+        ...strategyEvent("bar", { requestId: "raw-indicator-incremental" }).event,
+        asOfMs: cutoffMs + 60_000,
+        bar: bar(cutoffMs, cutoffMs + 60_000, 104, 106, 102, 103, 16),
+        market: {
+          series: [{
+            instrumentId: "BTC-USDT-SWAP",
+            interval: "1m",
+            bars: [bar(cutoffMs, cutoffMs + 60_000, 104, 106, 102, 103, 16)]
+          }]
+        }
+      }
+    },
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "shutdown",
+      requestId: "raw-indicator-shutdown"
+    }
+  ]);
+  assert.deepEqual(indicatorOutput[1].marketIntervals, ["1m"]);
+  assert.equal(indicatorOutput[2].output.kind, "action");
+  assert.equal(indicatorOutput[2].output.metadata.ema, 102.5);
+  assert.equal(indicatorOutput[2].output.metadata.previousEma, -1);
+  assert.equal(indicatorOutput[2].output.metadata.atr, 5);
+  assert.equal(indicatorOutput[3].output.metadata.ema, 102.83333333333333);
+  assert.equal(indicatorOutput[3].output.metadata.previousEma, 102.5);
+  assert.equal(indicatorOutput[3].output.metadata.atr, 4);
+
+  const chunkedBars = Array.from({ length: 600 }, (_, index) => bar(
+    cutoffMs + index * 60_000,
+    cutoffMs + (index + 1) * 60_000,
+    100 + index,
+    101 + index,
+    99 + index,
+    100 + index,
+    1
+  ));
+  const chunkedTailOutput = await runRawRuntime(testPython, [
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "load",
+      requestId: "raw-chunked-tail-load",
+      source: `def on_bar(ctx):
+    recent = ctx.market.bars(ctx.instrument_id, "1m", lookback=3)
+    return ctx.open_long("chunked tail", metadata={"count": len(recent), "first": recent[0].close, "last": recent[-1].close})
+`,
+      params: {}
+    },
+    {
+      protocol: PYTHON_STRATEGY_PROTOCOL,
+      type: "invoke",
+      requestId: "raw-chunked-tail-invoke",
+      event: {
+        kind: "bar",
+        snapshotId: "chunked-tail-fixture",
+        asOfMs: cutoffMs + 600 * 60_000,
+        instrumentId: "BTC-USDT-SWAP",
+        interval: "1m",
+        bar: chunkedBars.at(-1),
+        market: {
+          series: [{ instrumentId: "BTC-USDT-SWAP", interval: "1m", bars: chunkedBars }]
+        }
+      }
+    },
+    { protocol: PYTHON_STRATEGY_PROTOCOL, type: "shutdown", requestId: "raw-chunked-tail-shutdown" }
+  ]);
+  assert.deepEqual(chunkedTailOutput[2].output.metadata, { count: 3, first: 697, last: 699 });
 
   const runner = new ManagedPythonStrategyRunner({
     pythonPath: path.resolve(testPython),
