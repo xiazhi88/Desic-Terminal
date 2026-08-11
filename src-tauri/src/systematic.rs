@@ -3535,16 +3535,33 @@ fn backtest_replay_projection(
             .collect()
     });
 
+    // Keep the exact append-only ledger prefix needed by the current replay
+    // page. Future fills and closed trades neither belong to the cursor state
+    // nor need to cross IPC every time a long replay changes pages.
+    let fills = active_end_ms.map_or_else(Vec::new, |end_ms| {
+        report
+            .fills
+            .iter()
+            .filter(|fill| fill.time_ms <= end_ms)
+            .cloned()
+            .collect()
+    });
+    let closed_trades = active_end_ms.map_or_else(Vec::new, |end_ms| {
+        report
+            .closed_trades
+            .iter()
+            .filter(|trade| trade.exit_time_ms <= end_ms)
+            .cloned()
+            .collect()
+    });
+
     SystematicBacktestReplayReport {
         metrics: report.metrics.clone(),
         equity_curve,
         replay_snapshots,
         statistics: report.statistics.clone(),
-        // Snapshot counts refer to these durable append-only ledgers. They
-        // remain complete so the visible ledger and historical position tabs
-        // can still represent the exact prefix at the replay cursor.
-        fills: report.fills.clone(),
-        closed_trades: report.closed_trades.clone(),
+        fills,
+        closed_trades,
         strategy_actions,
         limit_order_fill_model: report
             .order_events

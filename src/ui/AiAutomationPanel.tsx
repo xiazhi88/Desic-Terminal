@@ -11,6 +11,7 @@ import { createPortal } from "react-dom";
 import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import { useTranslation } from "react-i18next";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 import {
   Activity,
   AlertTriangle,
@@ -4240,7 +4241,8 @@ function AiAutomationPanelComponent({
   const scopeProfile = scopeProfileId ? profiles.find((profile) => profile.id === scopeProfileId) ?? null : null;
   const scopeRuns = scopeProfileId ? (summary?.runs ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.runs ?? []);
   const scopeWakeConditions = scopeProfileId ? (summary?.wakeConditions ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.wakeConditions ?? []);
-  const scopeNotificationDeliveries = scopeProfileId ? (summary?.notificationDeliveries ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.notificationDeliveries ?? []);
+  const automationNotificationDeliveries = (summary?.notificationDeliveries ?? []).filter((item) => !["systematic_profile_signal", "strategy_signal"].includes(item.relatedType ?? ""));
+  const scopeNotificationDeliveries = scopeProfileId ? automationNotificationDeliveries.filter((item) => item.profileId === scopeProfileId) : automationNotificationDeliveries;
   const scopeOptimizationSuggestions = scopeProfileId && scopeProfile
     ? (summary?.optimizationSuggestions ?? []).filter((item) => profileUsesSkill(scopeProfile, item.currentSkillId))
     : (summary?.optimizationSuggestions ?? []);
@@ -4302,7 +4304,7 @@ function AiAutomationPanelComponent({
   }, { scope: panelRef, dependencies: [activeTab], revertOnUpdate: true });
 
   return (
-    <div className="ai-automation-panel" ref={panelRef}>
+    <WorkspaceFrame className="ai-automation-panel" tone="automation" ref={panelRef}>
       <header className="automation-overview">
         <label className="automation-master-toggle">
           <span className={clsx("automation-system-mark", summary?.masterEnabled && "active")}><Bot size={17} /></span>
@@ -4469,7 +4471,7 @@ function AiAutomationPanelComponent({
           }}
         />
       ) : null}
-    </div>
+    </WorkspaceFrame>
   );
 }
 

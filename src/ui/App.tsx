@@ -316,6 +316,8 @@ const SystematicResearchWorkspacePage = lazy(() =>
 );
 
 const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
+const PRIMARY_CHART_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m"] as const;
+const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as const;
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
 const WATCHLIST_STORAGE_KEY = "desictrade.watchlist.v1";
 const WATCHLIST_COLLAPSED_STORAGE_KEY = "desictrade.watchlist.collapsed.v1";
@@ -1460,8 +1462,13 @@ function TradingTerminal({
   const centerPanelRef = useRef<HTMLElement | null>(null);
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
   const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
+  const [systematicLoading, setSystematicLoading] = useState(false);
   const [newsUnreadCount, setNewsUnreadCount] = useState(0);
   const [isMaximized, setIsMaximized] = useState(false);
+
+  const handleSystematicReady = useCallback(() => {
+    setSystematicLoading(false);
+  }, []);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY);
@@ -1497,11 +1504,29 @@ function TradingTerminal({
   const [helpCenterOpen, setHelpCenterOpen] = useState(false);
   const helpSearchRef = useRef<HTMLInputElement | null>(null);
   const [chartPresentation, setChartPresentation] = useState<"chart" | "table">("chart");
+  const [chartUtilitiesOpen, setChartUtilitiesOpen] = useState(false);
+  const chartUtilitiesRef = useRef<HTMLDivElement | null>(null);
   const [pendingOrderLineEdit, setPendingOrderLineEdit] = useState<ChartOrderLineEdit | null>(null);
   const [pendingOrderLineCancel, setPendingOrderLineCancel] = useState<ChartOrderLine | null>(null);
   const [pendingPositionLineIntent, setPendingPositionLineIntent] = useState<PositionLineTradeIntent | null>(null);
   const [chartQuickTrade, setChartQuickTrade] = useState<ChartContextTradeIntent | null>(null);
   const [chartQuickTradeAccountConfig, setChartQuickTradeAccountConfig] = useState<ChartQuickTradeAccountConfig | null>(null);
+  useEffect(() => {
+    if (!chartUtilitiesOpen) return;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof Node && !chartUtilitiesRef.current?.contains(target)) setChartUtilitiesOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setChartUtilitiesOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutsidePointer);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutsidePointer);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [chartUtilitiesOpen]);
   const handleChartTradeConfigChange = useCallback((next: ChartQuickTradeAccountConfig) => {
     persistChartQuickTradeAccountConfig(next);
     setChartQuickTradeAccountConfig((current) => current?.accountId === next.accountId && current?.environment === next.environment
@@ -3929,7 +3954,13 @@ function TradingTerminal({
   }, [applyChartAdjacentSize, chartResizeBounds, mainSection]);
 
   return (
-    <main className={clsx("terminal", firstLaunchOnboarding.open && "onboarding-active")}>
+    <main className={clsx(
+      "terminal",
+      firstLaunchOnboarding.open && "onboarding-active",
+      mainSection === "systematic" && "systematic-active",
+      mainSection === "automation" && "automation-active",
+      mainSection === "intelligence" && "intelligence-active",
+    )}>
       <aside className="rail">
         <AppUpdateBadge />
         {navItems.map(({ id, labelKey, Icon }, index) => {
@@ -3953,6 +3984,9 @@ function TradingTerminal({
                   : index === 0 && mainSection === "terminal") && "active"
             )}
             key={id}
+            aria-label={label}
+            title={label}
+            data-workspace={id}
             onPointerEnter={() => {
               if (id === "automation") void loadAiAutomationModule();
               if (id === "systematic") preloadSystematicResearchModule();
@@ -3962,6 +3996,7 @@ function TradingTerminal({
               if (id === "systematic") preloadSystematicResearchModule();
             }}
             onClick={() => {
+              setSystematicLoading(id === "systematic");
               if (id === "terminal") {
                 setMainSection("terminal");
               }
@@ -3979,6 +4014,7 @@ function TradingTerminal({
               }
               if (id === "systematic") {
                 setMainSection("systematic");
+                void loadSystematicResearchModule().catch(() => setSystematicLoading(false));
               }
               if (id === "data") {
                 setMainSection("data");
@@ -3989,8 +4025,8 @@ function TradingTerminal({
               }
             }}
           >
-            <Icon size={20} />
-            <span>{label}</span>
+            <Icon size={20} aria-hidden="true" />
+            <span className="rail-item__label" aria-hidden="true">{label}</span>
             {id === "intelligence" && newsUnreadCount > 0 ? <b className="rail-unread-badge">{newsUnreadCount > 99 ? "99+" : newsUnreadCount}</b> : null}
           </button>
           );
@@ -4117,8 +4153,19 @@ function TradingTerminal({
         ) : mainSection === "systematic" ? (
           <div className="systematic-research-workspace">
             <Suspense fallback={<div className="automation-page-loading"><Loader2 className="spin" size={20} /><span>{uiText("正在加载系统化研究工作台", "Loading Systematic Research workspace")}</span></div>}>
-              <SystematicResearchWorkspacePage selectedSymbol={symbol} watchlist={watchlist} marketAssets={marketAssets} accounts={accounts.map((item) => ({ id: item.id, name: item.name, environment: item.environment }))} onNotify={pushNotification} />
+              <SystematicResearchWorkspacePage selectedSymbol={symbol} watchlist={watchlist} marketAssets={marketAssets} accounts={accounts.map((item) => ({ id: item.id, name: item.name, environment: item.environment }))} onNotify={pushNotification} onReady={handleSystematicReady} />
             </Suspense>
+            {systematicLoading ? (
+              <div className="systematic-research-loading" role="status" aria-live="polite">
+                <div className="systematic-research-loading__dialog">
+                  <Loader2 size={18} className="spin" />
+                  <div>
+                    <strong>{uiText("正在加载策略研究", "Loading Strategy Research")}</strong>
+                    <span>{uiText("正在准备策略、回测和本地研究数据", "Preparing strategies, backtests, and local research data")}</span>
+                  </div>
+                </div>
+              </div>
+            ) : null}
           </div>
         ) : mainSection === "data" ? (
           <DataDashboardPage
@@ -4316,9 +4363,31 @@ function TradingTerminal({
           <section className="center-panel" ref={centerPanelRef}>
             <div className="chart-toolbar">
               <div className="periods">
-                {["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D"].map((period) => (
+                {PRIMARY_CHART_TIMEFRAMES.map((period) => (
                   <button className={period === bar ? "active" : ""} onClick={() => setBar(period)} key={period}>{period}</button>
                 ))}
+                {SECONDARY_CHART_TIMEFRAMES.includes(bar as typeof SECONDARY_CHART_TIMEFRAMES[number]) ? (
+                  <button className="active" onClick={() => setChartUtilitiesOpen(true)}>{bar}</button>
+                ) : null}
+                <div className="chart-utilities" ref={chartUtilitiesRef}>
+                  <button
+                    type="button"
+                    className={chartUtilitiesOpen ? "active" : ""}
+                    onClick={() => setChartUtilitiesOpen((open) => !open)}
+                    aria-expanded={chartUtilitiesOpen}
+                    title={uiText("更多周期与视图工具", "More intervals and chart tools")}
+                  >
+                    <SlidersHorizontal size={15} />
+                    <span>{uiText("更多", "More")}</span>
+                  </button>
+                  {chartUtilitiesOpen ? (
+                    <div className="chart-timeframe-menu" role="menu" aria-label={uiText("更多周期", "More intervals")}>
+                      {SECONDARY_CHART_TIMEFRAMES.map((period) => (
+                        <button key={period} type="button" className={period === bar ? "active" : ""} role="menuitem" onClick={() => { setBar(period); setChartUtilitiesOpen(false); }}>{period}</button>
+                      ))}
+                    </div>
+                  ) : null}
+                </div>
               </div>
               <div className="chart-actions">
                 <button onClick={openDetachedChart} title={t("chart:detachedChartWindow")}><Maximize2 size={15} /> {t("chart:popout")}</button>
@@ -4328,11 +4397,10 @@ function TradingTerminal({
                   aria-pressed={chartPresentation === "table"}
                   title={chartPresentation === "chart"
                     ? uiText("切换为 K 线、指标与交易标签数据表", "Switch to the candle, indicator, and trade-label data table")
-                    : uiText("返回 K 线图表", "Return to the candle chart")}
+                    : uiText("返回 K 线图表", "Return to the chart")}
                 >
                   <TableProperties size={15} /> {chartPresentation === "chart" ? t("chart:tableView") : t("chart:chart")}
                 </button>
-                <button title={uiText("指标与视图控制在图表右上角", "Indicator and view controls are in the chart's upper-right corner")}><SlidersHorizontal size={15} /></button>
               </div>
             </div>
             <div className="chart-stage">
@@ -12513,6 +12581,7 @@ function OrderTicket({
         </div>
       )}
       <div className="ticket-form">
+        <section className="ticket-section ticket-section--risk">
         <div className="ticket-control-grid">
           <div className="ticket-field">
             <label>{t("trading:marginMode")}</label>
@@ -12548,6 +12617,8 @@ function OrderTicket({
             <strong>{formatLeverageRows(leverageInfo)}</strong>
           </div>
         )}
+        </section>
+        <section className="ticket-section ticket-section--execution">
         <label htmlFor={orderTypeFieldId}>{t("trading:orderType")}</label>
         <TerminalSelect
           id={orderTypeFieldId}
@@ -12642,6 +12713,8 @@ function OrderTicket({
             <span id={`${trailingCallbackFieldId}-help`} className="ticket-field-help">价格回撤该比例时触发；价格源固定为最新成交价</span>
           </div>
         )}
+        </section>
+        <section className="ticket-section ticket-section--sizing">
         <label htmlFor={sizeFieldId}>{t("trading:quantityContracts")}</label>
         {ticketMode === "close" && (
           <div className="close-size-summary">
@@ -12734,6 +12807,7 @@ function OrderTicket({
             <span>{t("trading:maxOpen")} <b>{maxOpenSize || "--"} {t("trading:contracts")}</b></span>
           </div>
         )}
+        </section>
         <div className="trade-submit-zone">
           {lastOrderState?.scopeKey === tradeScopeKey && (
             <div className={clsx("trade-last-order", lastOrderState.status)} role="status">

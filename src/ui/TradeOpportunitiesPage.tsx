@@ -149,17 +149,6 @@ export function TradeOpportunitiesPage({
                       {shouldShowOpportunityExpiry(item, now) ? <small>{formatExpiry(item.expiresAt)}</small> : null}
                     </span>
                   </button>
-                  {canApproveOpportunity(item, now) ? (
-                    <div className="opportunity-list-actions">
-                      <button type="button" onClick={() => onApprove(item.id)}><CheckCircle2 size={13} />{opportunityText("opportunityApproveExecute", "Approve and execute", "通过并执行")}</button>
-                      <button type="button" className="danger" onClick={() => onReject(item.id)}><XCircle size={13} />{i18n.t("common:reject")}</button>
-                      <button type="button" className="icon danger" title={opportunityText("opportunityDelete", "Delete trade opportunity", "删除交易机会")} aria-label={opportunityText("opportunityDeleteAria", "Delete {{symbol}} trade opportunity", "删除 {{symbol}} 交易机会", { symbol: item.instId })} onClick={() => onDelete(item.id)}><Trash2 size={13} /></button>
-                    </div>
-                  ) : (
-                    <div className="opportunity-list-actions single-icon">
-                      <button type="button" className="icon danger" title={opportunityText("opportunityDelete", "Delete trade opportunity", "删除交易机会")} aria-label={opportunityText("opportunityDeleteAria", "Delete {{symbol}} trade opportunity", "删除 {{symbol}} 交易机会", { symbol: item.instId })} onClick={() => onDelete(item.id)}><Trash2 size={13} /></button>
-                    </div>
-                  )}
                 </article>
               ))}
               {filtered.length === 0 ? (
@@ -180,7 +169,18 @@ export function TradeOpportunitiesPage({
                     <SymbolLabel symbol={selected.instId} marketAssets={marketAssets} />
                     <span>{selected.strategyName || selected.sourceSessionId || opportunityText("opportunityAiPlan", "AI trading plan", "AI 交易计划")}</span>
                   </div>
-                  <OpportunityStatus opportunity={selected} now={now} />
+                  <div className="opportunity-detail-head-actions">
+                    <OpportunityStatus opportunity={selected} now={now} />
+                    <button
+                      className="opportunity-detail-delete"
+                      type="button"
+                      title={opportunityText("opportunityDelete", "Delete trade opportunity", "删除交易机会")}
+                      aria-label={opportunityText("opportunityDeleteAria", "Delete {{symbol}} trade opportunity", "删除 {{symbol}} 交易机会", { symbol: selected.instId })}
+                      onClick={() => onDelete(selected.id)}
+                    >
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
                 </header>
 
                 <div className="opportunity-detail-scroll">

@@ -81,7 +81,7 @@ import { SystematicPythonMergeView } from "./SystematicPythonMergeView";
 import { TerminalSelect } from "./TerminalSelect";
 import { SymbolIcon, symbolBase } from "./SymbolIcon";
 import { useMarketHotStore } from "../lib/marketHotStore";
-import type { AiEvent, Candle, ChartFillMarker, MarketAssetsSummary, OkxInstrumentSummary } from "../types";
+import type { AiEvent, Candle, ChartFillMarker, ChartPositionRange, ChartSignalMarker, MarketAssetsSummary, OkxInstrumentSummary } from "../types";
 import "./SystematicStrategyLab.css";
 
 type Notify = (notification: {
@@ -168,6 +168,7 @@ const EMPTY_PYTHON_DRAFT: PythonDraft = {
 
 const REPLAY_PAGE_BAR_LIMIT = 1_500;
 const REPLAY_PAGE_LOAD_DELAY_MS = 80;
+const REPLAY_PAGE_LOAD_TIMEOUT_MS = 20_000;
 const MAX_BACKTEST_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
 // Keep AI source writes visible without letting a long editor animation hold
 // the AI tool bridge open indefinitely.
@@ -638,12 +639,18 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     const requestId = replayPageRequestRef.current + 1;
     replayPageRequestRef.current = requestId;
     setLoadingReplayPage(true);
+    let timeoutId: number | undefined;
     try {
-      const next = await loadSystematicBacktestDetail({
-        runId: selectedRun.id,
-        offset,
-        limit,
-      });
+      const next = await Promise.race([
+        loadSystematicBacktestDetail({
+          runId: selectedRun.id,
+          offset,
+          limit,
+        }),
+        new Promise<never>((_, reject) => {
+          timeoutId = window.setTimeout(() => reject(new Error(text.replayPageTimeout)), REPLAY_PAGE_LOAD_TIMEOUT_MS);
+        })
+      ]);
       if (requestId !== replayPageRequestRef.current) return;
       if (!next || next.bars.length === 0) throw new Error(text.resultUnavailableDetail);
       const localIndex = Math.min(
@@ -658,6 +665,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       setReplayAbsoluteIndex(detail.barOffset + replayIndex);
       onNotify({ kind: "error", title: text.resultLoadFailed, message: messageOf(error) });
     } finally {
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
       if (requestId === replayPageRequestRef.current) setLoadingReplayPage(false);
     }
   }, [desktop, detail, onNotify, replayIndex, selectedRun?.id, text.resultLoadFailed, text.resultUnavailableDetail]);
@@ -1199,7 +1207,17 @@ function StrategyView({
             </div></>}
           </>
         ) : (
-          <EmptyState icon={<Code2 size={20} />} title={text.noStrategy} detail={text.noStrategyDetail} />
+          <EmptyState
+            icon={<Code2 size={20} />}
+            title={text.noStrategy}
+            detail={text.noStrategyDetail}
+            action={(
+              <button className="systematic-lab__command-button is-primary" type="button" onClick={onCreate} disabled={!desktop || creating}>
+                {creating ? <LoaderCircle size={13} className="is-spinning" /> : <FilePlus2 size={13} />}
+                {text.newStrategy}
+              </button>
+            )}
+          />
         )}
       </main>
 
@@ -2487,86 +2505,126 @@ function BacktestView({
   return (
     <div className="systematic-lab-backtest-view">
       <section className="systematic-lab-backtest-config">
-        <div className="systematic-lab-view-heading">
+        <div className="systematic-lab-view-heading systematic-lab-backtest-config__heading">
           <div>
             <span className="systematic-lab__eyebrow">{text.virtualAccount}</span>
             <h2>{text.backtest}</h2>
           </div>
-        </div>
-        <div className="systematic-lab-form-grid">
-          <label className="systematic-lab-field wide">
-            <span>{text.strategy}</span>
-            <TerminalSelect
-              ariaLabel={text.strategy}
-              value={selectedStrategy?.id ?? ""}
-              options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} · ${text.python}` }))}
-              onChange={onChoose}
-            />
-          </label>
-          {strategyVersion ? <div className="systematic-lab-selected-version"><span>{text.strategyVersion}</span><strong>v{strategyVersion}</strong>{strategyVersion !== selectedStrategy?.version ? <small>{text.historicalVersion}</small> : null}</div> : null}
-          <label className="systematic-lab-field">
-            <span>{text.contract}</span>
-            <TerminalSelect
-              ariaLabel={text.contract}
-              value={selectedSymbol}
-              options={watchlist.map((symbol) => ({ value: symbol, label: symbol }))}
-              onChange={onSymbolChange}
-            />
-          </label>
-          <NumericField label={text.initialEquity} value={initialEquity} onChange={onInitialEquity} suffix="USDT" />
-          <NumericField label={text.leverage} value={leverage} onChange={onLeverage} suffix="x" />
-          <NumericField label={text.marginSafetyMultiplier} value={marginSafetyMultiplier} onChange={onMarginSafetyMultiplier} suffix="x" />
-          <label className="systematic-lab-field">
-            <span>{text.positionSizing}</span>
-            <TerminalSelect
-              ariaLabel={text.positionSizing}
-              value={positionSizingMode}
-              options={[{ value: "equityPercent", label: text.equityPercent }, { value: "fixedUsdt", label: text.fixedUsdt }]}
-              onChange={(value) => onPositionSizingMode(value === "fixedUsdt" ? "fixedUsdt" : "equityPercent")}
-            />
-          </label>
-          <NumericField label={text.perEntryBudget} value={perEntryBudget} onChange={onPerEntryBudget} suffix={positionSizingMode === "equityPercent" ? "%" : "USDT"} />
-          <NumericField label={text.sameSideTotalBudget} value={sameSideTotalBudget} onChange={onSameSideTotalBudget} suffix={positionSizingMode === "equityPercent" ? "%" : "USDT"} />
-          <label className="systematic-lab-field">
-            <span>{text.start}</span>
-            <input type="datetime-local" value={startAt} onChange={(event) => onStartAt(event.target.value)} />
-          </label>
-          <label className="systematic-lab-field">
-            <span>{text.end}</span>
-            <input type="datetime-local" value={endAt} max={maximumEndAt || undefined} onChange={(event) => onEndAt(event.target.value)} />
-          </label>
-          <div className="systematic-lab-backtest-range-presets" role="group" aria-label={text.backtestRangeQuick}>
-            <span>{text.backtestRangeQuick}</span>
-            <div>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentMonth")}>{text.recentOneMonth}</button>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentThreeMonths")}>{text.recentThreeMonths}</button>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentYear")}>{text.recentOneYear}</button>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("thisYear")}>{text.thisYear}</button>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("lastYear")}>{text.lastYear}</button>
-              <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("yearBeforeLast")}>{text.yearBeforeLast}</button>
-            </div>
+          <div className="systematic-lab-backtest-config__context" aria-label={text.backtest}>
+            <strong>{selectedSymbol}</strong>
+            <span>{strategyVersion ? `v${strategyVersion}` : text.latestVersion}</span>
+            <span className={clsx("systematic-lab-backtest-config__runtime", runtimeAvailable ? "is-ready" : "is-guarded")}>
+              <i />{runtimeAvailable ? text.runtimeReady : text.runtimeGuarded}
+            </span>
           </div>
-          <NumericField label={text.preloadHistory} value={preloadBars} onChange={onPreloadBars} suffix="1m" wide />
         </div>
-        <PreloadScope text={text} startAt={startAt} preloadBars={preloadBars} />
-        <div className="systematic-lab-assumption-grid">
-          <NumericField label={text.entrySlippage} value={entrySlippage} onChange={onEntrySlippage} suffix="bps" />
-          <NumericField label={text.exitSlippage} value={exitSlippage} onChange={onExitSlippage} suffix="bps" />
-          <NumericField label={text.entryFee} value={entryFee} onChange={onEntryFee} suffix="%" />
-          <NumericField label={text.exitFee} value={exitFee} onChange={onExitFee} suffix="%" />
-          <label className="systematic-lab-field wide">
+
+        <div className="systematic-lab-backtest-config__section">
+          <div className="systematic-lab-backtest-config__section-head">
+            <strong>{text.strategy}</strong>
+            <span>{text.strategyVersion}</span>
+          </div>
+          <div className="systematic-lab-form-grid">
+            <label className="systematic-lab-field wide">
+              <span>{text.strategy}</span>
+              <TerminalSelect
+                ariaLabel={text.strategy}
+                value={selectedStrategy?.id ?? ""}
+                options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} · ${text.python}` }))}
+                onChange={onChoose}
+              />
+            </label>
+            {strategyVersion ? <div className="systematic-lab-selected-version"><span>{text.strategyVersion}</span><strong>v{strategyVersion}</strong>{strategyVersion !== selectedStrategy?.version ? <small>{text.historicalVersion}</small> : null}</div> : null}
+            <label className="systematic-lab-field">
+              <span>{text.contract}</span>
+              <TerminalSelect
+                ariaLabel={text.contract}
+                value={selectedSymbol}
+                options={watchlist.map((symbol) => ({ value: symbol, label: symbol }))}
+                onChange={onSymbolChange}
+              />
+            </label>
+          </div>
+        </div>
+
+        <div className="systematic-lab-backtest-config__section">
+          <div className="systematic-lab-backtest-config__section-head">
+            <strong>{text.virtualAccount}</strong>
+            <span>{text.positionSizing}</span>
+          </div>
+          <div className="systematic-lab-form-grid">
+            <NumericField label={text.initialEquity} value={initialEquity} onChange={onInitialEquity} suffix="USDT" />
+            <NumericField label={text.leverage} value={leverage} onChange={onLeverage} suffix="x" />
+            <NumericField label={text.marginSafetyMultiplier} value={marginSafetyMultiplier} onChange={onMarginSafetyMultiplier} suffix="x" />
+            <label className="systematic-lab-field">
+              <span>{text.positionSizing}</span>
+              <TerminalSelect
+                ariaLabel={text.positionSizing}
+                value={positionSizingMode}
+                options={[{ value: "equityPercent", label: text.equityPercent }, { value: "fixedUsdt", label: text.fixedUsdt }]}
+                onChange={(value) => onPositionSizingMode(value === "fixedUsdt" ? "fixedUsdt" : "equityPercent")}
+              />
+            </label>
+            <NumericField label={text.perEntryBudget} value={perEntryBudget} onChange={onPerEntryBudget} suffix={positionSizingMode === "equityPercent" ? "%" : "USDT"} />
+            <NumericField label={text.sameSideTotalBudget} value={sameSideTotalBudget} onChange={onSameSideTotalBudget} suffix={positionSizingMode === "equityPercent" ? "%" : "USDT"} />
+          </div>
+        </div>
+
+        <div className="systematic-lab-backtest-config__section">
+          <div className="systematic-lab-backtest-config__section-head">
+            <strong>{text.evaluationRange}</strong>
+            <span>{text.preloadHistory}</span>
+          </div>
+          <div className="systematic-lab-form-grid">
+            <label className="systematic-lab-field">
+              <span>{text.start}</span>
+              <input type="datetime-local" value={startAt} onChange={(event) => onStartAt(event.target.value)} />
+            </label>
+            <label className="systematic-lab-field">
+              <span>{text.end}</span>
+              <input type="datetime-local" value={endAt} max={maximumEndAt || undefined} onChange={(event) => onEndAt(event.target.value)} />
+            </label>
+            <div className="systematic-lab-backtest-range-presets" role="group" aria-label={text.backtestRangeQuick}>
+              <span>{text.backtestRangeQuick}</span>
+              <div>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentMonth")}>{text.recentOneMonth}</button>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentThreeMonths")}>{text.recentThreeMonths}</button>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("recentYear")}>{text.recentOneYear}</button>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("thisYear")}>{text.thisYear}</button>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("lastYear")}>{text.lastYear}</button>
+                <button className="systematic-lab__command-button" type="button" onClick={() => onQuickRange("yearBeforeLast")}>{text.yearBeforeLast}</button>
+              </div>
+            </div>
+            <NumericField label={text.preloadHistory} value={preloadBars} onChange={onPreloadBars} suffix="1m" wide />
+          </div>
+          <PreloadScope text={text} startAt={startAt} preloadBars={preloadBars} />
+        </div>
+
+        <div className="systematic-lab-backtest-config__section systematic-lab-backtest-config__assumptions">
+          <div className="systematic-lab-backtest-config__section-head">
+            <strong>{text.fillModel}</strong>
             <span>{text.endOfRun}</span>
-            <TerminalSelect
-              ariaLabel={text.endOfRun}
-              value={endPolicy}
-              options={[
-                { value: "markToMarket", label: text.markToMarket },
-                { value: "closeAtLastClose", label: text.forceClose }
-              ]}
-              onChange={(value) => onEndPolicy(value as "markToMarket" | "closeAtLastClose")}
-            />
-          </label>
+          </div>
+          <div className="systematic-lab-assumption-grid">
+            <NumericField label={text.entrySlippage} value={entrySlippage} onChange={onEntrySlippage} suffix="bps" />
+            <NumericField label={text.exitSlippage} value={exitSlippage} onChange={onExitSlippage} suffix="bps" />
+            <NumericField label={text.entryFee} value={entryFee} onChange={onEntryFee} suffix="%" />
+            <NumericField label={text.exitFee} value={exitFee} onChange={onExitFee} suffix="%" />
+            <label className="systematic-lab-field wide">
+              <span>{text.endOfRun}</span>
+              <TerminalSelect
+                ariaLabel={text.endOfRun}
+                value={endPolicy}
+                options={[
+                  { value: "markToMarket", label: text.markToMarket },
+                  { value: "closeAtLastClose", label: text.forceClose }
+                ]}
+                onChange={(value) => onEndPolicy(value as "markToMarket" | "closeAtLastClose")}
+              />
+            </label>
+          </div>
         </div>
+
         {selectedStrategy?.kind === "python" && !runtimeAvailable ? <PythonEnvironmentNotice runtime={pythonRuntime} preparing={preparingPython} text={text} onRetry={onRetryPythonEnvironment} /> : null}
         <div className="systematic-lab-backtest-config__footer">
           <span>{text.fillModel}</span>
@@ -2576,7 +2634,43 @@ function BacktestView({
           </div>
         </div>
       </section>
-      {selectedStrategy?.kind === "python" ? <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} /> : null}
+      <aside className="systematic-lab-backtest-rail">
+        <section className="systematic-lab-backtest-summary">
+          <div className="systematic-lab__pane-head"><span>{text.backtest}</span><span>{text.evaluationRange}</span></div>
+          <div className="systematic-lab-backtest-summary__identity">
+            <SymbolIcon base={symbolBase(selectedSymbol)} />
+            <div><strong>{selectedStrategy?.name ?? text.noStrategy}</strong><span>{selectedSymbol} · {text.python}</span></div>
+          </div>
+          <div className="systematic-lab-backtest-plan" aria-label={text.backtest}>
+            <div className="systematic-lab-backtest-plan__step is-context">
+              <span>01</span>
+              <div><strong>{text.preloadHistory}</strong><small>{preloadBars} 1m · {text.preloadBeforeStart}</small></div>
+            </div>
+            <div className="systematic-lab-backtest-plan__connector" aria-hidden="true" />
+            <div className="systematic-lab-backtest-plan__step is-active">
+              <span>02</span>
+              <div><strong>{text.evaluationRange}</strong><small>{formatBacktestDateRange(dateTimeInput(startAt), dateTimeInput(endAt))}</small></div>
+            </div>
+            <div className="systematic-lab-backtest-plan__connector" aria-hidden="true" />
+            <div className="systematic-lab-backtest-plan__step">
+              <span>03</span>
+              <div><strong>{text.endOfRun}</strong><small>{endPolicy === "markToMarket" ? text.markToMarket : text.forceClose}</small></div>
+            </div>
+          </div>
+          <dl className="systematic-lab-backtest-summary__facts">
+            <div><dt>{text.strategyVersion}</dt><dd>{strategyVersion ? `v${strategyVersion}` : "--"}</dd></div>
+            <div><dt>{text.evaluationRange}</dt><dd>{formatBacktestDateRange(dateTimeInput(startAt), dateTimeInput(endAt))}</dd></div>
+            <div><dt>{text.initialEquity}</dt><dd>{initialEquity} USDT</dd></div>
+            <div><dt>{text.leverage}</dt><dd>{leverage}x</dd></div>
+            <div><dt>{text.preloadHistory}</dt><dd>{preloadBars} 1m</dd></div>
+          </dl>
+          <div className="systematic-lab-backtest-summary__state">
+            <span className={runtimeAvailable ? "is-ready" : "is-guarded"} />
+            <div><strong>{runtimeAvailable ? text.runtimeReady : text.runtimeGuarded}</strong><small>{text.pythonBacktestGuard}</small></div>
+          </div>
+        </section>
+        {selectedStrategy?.kind === "python" ? <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} /> : null}
+      </aside>
     </div>
   );
 }
@@ -2645,6 +2739,9 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   deletingId: string | null;
 }>) {
   const [accountTab, setAccountTab] = useState<"ledger" | "position" | "history">("ledger");
+  const [replayPlaying, setReplayPlaying] = useState(false);
+  const [replaySpeed, setReplaySpeed] = useState(1);
+  const [compareRunIds, setCompareRunIds] = useState<string[]>([]);
   const report = detail?.report;
   const metrics = report?.metrics;
   const visibleBar = replayCursorBar;
@@ -2658,6 +2755,81 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
     ? Math.min(replayTotalBarCount, Math.max(1, replayAbsoluteIndex || loadedReplayIndex))
     : 0;
   const evaluationRange = formatBacktestDateRange(detail?.evaluationStartAt, detail?.evaluationEndAt);
+  const replayStrategySignals = useMemo<ChartSignalMarker[]>(() => {
+    const actions = detail?.report?.strategyActions ?? [];
+    if (!replayBars.length) return [];
+    return actions.flatMap((event, index) => {
+      const targetTime = event.asOfMs / 1_000;
+      const candle = replayBars.reduce<Candle | null>((closest, candidate) => {
+        if (!closest || Math.abs(candidate.time - targetTime) < Math.abs(closest.time - targetTime)) return candidate;
+        return closest;
+      }, null);
+      if (!candle) return [];
+      return [{
+        id: `strategy-action-${event.asOfMs}-${index}`,
+        time: candle.time,
+        price: candle.close,
+        source: "strategy",
+        side: event.action.kind.includes("short") || event.action.kind === "close_long" ? "sell" : "buy",
+        label: event.action.reason || event.action.kind
+      }];
+    });
+  }, [detail?.report?.strategyActions, replayBars]);
+  const replayPositionRanges = useMemo<ChartPositionRange[]>(() => {
+    const position = replaySnapshot?.position;
+    if (!position) return [];
+    return [{
+      id: `replay-position-${position.entryTimeMs}`,
+      instId: position.instId,
+      entryPrice: position.averageEntryPrice,
+      currentPrice: position.markedPrice,
+      posSide: position.side,
+      size: String(position.quantity),
+      pnl: String(position.unrealizedPnlUsdt),
+      label: position.side === "short" ? "Replay short" : "Replay long"
+    }];
+  }, [replaySnapshot?.position]);
+  const comparisonRuns = useMemo(
+    () => compareRunIds.map((id) => runs.find((run) => run.id === id)).filter((run): run is SystematicBacktestView => Boolean(run)),
+    [compareRunIds, runs],
+  );
+
+  useEffect(() => {
+    setReplayPlaying(false);
+    setCompareRunIds([]);
+  }, [selectedRun?.id]);
+
+  useEffect(() => {
+    if (!replayPlaying || replayTotalBarCount <= 0) return;
+    const timer = window.setInterval(() => {
+      if (absoluteReplayIndex >= replayTotalBarCount) {
+        setReplayPlaying(false);
+        return;
+      }
+      onReplayIndex(absoluteReplayIndex + 1, true);
+    }, Math.max(90, Math.round(620 / replaySpeed)));
+    return () => window.clearInterval(timer);
+  }, [absoluteReplayIndex, onReplayIndex, replayPlaying, replaySpeed, replayTotalBarCount]);
+
+  const toggleCompareRun = useCallback((runId: string) => {
+    setCompareRunIds((current) => current.includes(runId)
+      ? current.filter((id) => id !== runId)
+      : current.length >= 2 ? [current[1]!, runId] : [...current, runId]);
+  }, []);
+  const jumpToReplayTime = useCallback((timeMs: number) => {
+    if (!detail?.bars.length) return;
+    const localIndex = detail.bars.findIndex((bar) => bar.closeTimeMs >= timeMs);
+    if (localIndex < 0) return;
+    onReplayIndex(detail.barOffset + localIndex + 1, true);
+  }, [detail?.barOffset, detail?.bars, onReplayIndex]);
+  const toggleReplayPlayback = useCallback(() => {
+    setReplayPlaying((playing) => {
+      const next = !playing;
+      if (next && absoluteReplayIndex >= replayTotalBarCount) onReplayIndex(1, true);
+      return next;
+    });
+  }, [absoluteReplayIndex, onReplayIndex, replayTotalBarCount]);
+
   return (
     <div className="systematic-lab-review-view">
       <aside className="systematic-lab-run-list">
@@ -2672,6 +2844,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 <span>
                   <strong>{run.strategyName}</strong>
                   <small className="systematic-lab-run-row__instrument"><SymbolIcon base={symbolBase(run.instId)} /><span>{run.instId}</span><b>v{run.strategyVersion}</b><i>·</i>{formatRunTime(run.finishedAt ?? run.createdAt)}<i>·</i><span className="systematic-lab-run-row__duration" title={formatBacktestTimingTitle(run.timing) ?? text.backtestDuration}>{formatBacktestDuration(run.startedAt, run.finishedAt)}</span></small>
+                  <RunEquityPreview points={run.equityPreview} negative={completed && (returnPct ?? 0) < 0} />
                 </span>
                 <em className={clsx(
                   "systematic-lab-run-row__return",
@@ -2679,11 +2852,29 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                   completed && typeof returnPct === "number" && returnPct < 0 && "is-negative",
                 )}>{completed ? formatPercent(returnPct) : `${Math.round(run.progressPct)}%`}</em>
               </button>
+              <button
+                type="button"
+                className={clsx("systematic-lab-run-row__compare", compareRunIds.includes(run.id) && "is-active")}
+                title={text.compareRuns}
+                aria-label={`${text.compareRuns}: ${run.strategyName}`}
+                aria-pressed={compareRunIds.includes(run.id)}
+                onClick={() => toggleCompareRun(run.id)}
+              ><GitCompareArrows size={13} /></button>
               <button type="button" className="systematic-lab__row-delete" title={text.deleteBacktest} aria-label={text.deleteBacktest} disabled={deletingId === run.id || ["queued", "running", "cancelling"].includes(run.status)} onClick={() => onDelete(run)}>{deletingId === run.id ? <LoaderCircle size={13} className="is-spinning" /> : <Trash2 size={13} />}</button>
             </div>;
           })}
           {runs.length === 0 ? <EmptyState icon={<History size={18} />} title={text.noRuns} detail={text.noRunsDetail} /> : null}
         </div>
+        {comparisonRuns.length === 2 ? (
+          <section className="systematic-lab-run-comparison" aria-label={text.compareRuns}>
+            <header><strong>{text.compareRuns}</strong><button type="button" onClick={() => setCompareRunIds([])} title={text.clearComparison} aria-label={text.clearComparison}><X size={12} /></button></header>
+            <div className="systematic-lab-run-comparison__table">
+              <div><span>{text.netPnl}</span>{comparisonRuns.map((run) => <strong key={run.id} className={(run.metrics?.netReturnPct ?? 0) >= 0 ? "positive" : "negative"}>{formatPercent(run.metrics?.netReturnPct)}</strong>)}</div>
+              <div><span>{text.maxDrawdown}</span>{comparisonRuns.map((run) => <strong key={run.id}>{formatPercent(run.metrics?.maxDrawdownPct, false)}</strong>)}</div>
+              <div><span>{text.closedTrades}</span>{comparisonRuns.map((run) => <strong key={run.id}>{formatLocalizedNumber(run.metrics?.closedTradeCount ?? 0)}</strong>)}</div>
+            </div>
+          </section>
+        ) : null}
       </aside>
       <main className="systematic-lab-review-main">
         {selectedRun ? (
@@ -2697,15 +2888,25 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
             {loading ? <div className="systematic-lab-loading"><LoaderCircle size={18} className="is-spinning" /> {text.loadingResult}</div> : null}
             {report && replayBars.length ? (
               <>
-                <div className="systematic-lab-metrics-strip">
-                  <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "positive" : "negative"} />
-                  <Metric label={text.cashBalance} value={formatUsdt(replaySnapshot?.cashUsdt)} />
-                  <Metric label={text.accountEquity} value={formatUsdt(replaySnapshot?.equityUsdt)} />
-                  <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
-                  <Metric label={text.usedMargin} value={formatUsdt(replaySnapshot?.usedMarginUsdt)} />
-                  <Metric label={text.availableMargin} value={formatUsdt(replaySnapshot?.availableMarginUsdt)} />
-                  <Metric label={text.closedTrades} value={formatLocalizedNumber(replayClosedTradeCount)} />
-                  <Metric label={text.fees} value={formatUsdt(replayFees)} />
+                <div className="systematic-lab-result-deck">
+                  <section className="systematic-lab-result-deck__group is-final" aria-label={text.fullBacktest}>
+                    <header><span>{text.fullBacktest}</span><small>{selectedRun.dataSnapshotId}</small></header>
+                    <div className="systematic-lab-result-deck__metrics">
+                      <Metric label={text.netPnl} value={formatPnlUsdt(metrics?.netPnlUsdt)} tone={(metrics?.netPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.finalEquity} value={formatUsdt(metrics?.finalEquityUsdt)} />
+                      <Metric label={text.maxDrawdown} value={`${formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))} · ${formatPercent(metrics?.maxDrawdownPct, false)}`} tone="negative" />
+                      <Metric label={text.closedTrades} value={formatLocalizedNumber(metrics?.closedTradeCount ?? 0)} />
+                    </div>
+                  </section>
+                  <section className="systematic-lab-result-deck__group is-cursor" aria-label={text.replayAccount}>
+                    <header><span>{text.replayAccount}</span><small>{visibleBar ? formatRunTime(visibleBar.time * 1_000) : "--"}</small></header>
+                    <div className="systematic-lab-result-deck__metrics">
+                      <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.accountEquity} value={formatUsdt(replaySnapshot?.equityUsdt)} />
+                      <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.usedMargin} value={formatUsdt(replaySnapshot?.usedMarginUsdt)} />
+                    </div>
+                  </section>
                 </div>
                 <div className="systematic-lab-replay-stage">
                   <div className="systematic-lab-replay-stage__toolbar">
@@ -2720,8 +2921,11 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                       symbol={selectedRun.instId}
                       timeframe="1m"
                       fills={replayFills}
+                      signals={replayStrategySignals}
+                      positionRanges={replayPositionRanges}
                       variant="review"
                       workspaceId={`systematic-replay-${selectedRun.id}`}
+                      snapshotRevision={`${report.reportHash}:${detail?.barOffset ?? 0}:${replayBars.length}`}
                       persistWorkspace={false}
                       synchronizedCrosshairTime={visibleBar?.time ?? null}
                       followSynchronizedCrosshair
@@ -2730,6 +2934,17 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 </div>
                 <div className="systematic-lab-replay-controls">
                   <span className="systematic-lab-replay-controls__label"><History size={12} />{text.replay}</span>
+                  <button className="systematic-lab__icon-button" type="button" onClick={toggleReplayPlayback} disabled={replayTotalBarCount <= 0} title={replayPlaying ? text.pauseReplay : text.playReplay} aria-label={replayPlaying ? text.pauseReplay : text.playReplay}>{replayPlaying ? <CirclePause size={15} /> : <Play size={15} />}</button>
+                  <select className="systematic-lab-replay-controls__speed" value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} aria-label={text.replaySpeed} title={text.replaySpeed}>
+                    <option value="0.5">0.5x</option>
+                    <option value="1">1x</option>
+                    <option value="2">2x</option>
+                    <option value="4">4x</option>
+                    <option value="10">10x</option>
+                    <option value="20">20x</option>
+                    <option value="50">50x</option>
+                    <option value="100">100x</option>
+                  </select>
                   <button className="systematic-lab__icon-button" type="button" onClick={() => onReplayIndex(Math.max(1, absoluteReplayIndex - 1), true)} disabled={replayPageLoading || absoluteReplayIndex <= 1} title={text.previousBar} aria-label={text.previousBar}><ChevronLeft size={16} /></button>
                   <input
                     type="range"
@@ -2761,8 +2976,8 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 </div>
                 <div className="systematic-lab-review-insights">
                   <div className="systematic-lab-equity-stage">
-                    <div className="systematic-lab-equity-stage__head"><span>{text.equityCurve}</span><strong>{formatUsdt(replaySnapshot?.equityUsdt)}</strong></div>
-                    <SystematicEquityChart points={report.equityCurve} negative={(metrics?.netPnlUsdt ?? 0) < 0} label={text.equityCurve} cursorTimeMs={replayTimeMs} />
+                    <div className="systematic-lab-equity-stage__head"><span>{text.equityCurve}</span><div><span>{text.maxDrawdown} <b>{formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))}</b></span><strong>{formatUsdt(replaySnapshot?.equityUsdt)}</strong></div></div>
+                    <div className="systematic-lab-equity-stage__equity"><SystematicEquityChart points={report.equityCurve} negative={(metrics?.netPnlUsdt ?? 0) < 0} label={`${text.equityCurve} / ${text.maxDrawdown}`} cursorTimeMs={replayTimeMs} /></div>
                   </div>
                   <BacktestStatisticsPanel text={text} report={report} />
                 </div>
@@ -2782,7 +2997,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
         {accountTab === "ledger" ? (
           <ReplayFillLedgerPanel text={text} fills={replayFillLedger} visibleCount={replayFillCount} />
         ) : accountTab === "history" ? (
-          <ReplayPositionHistoryPanel text={text} trades={replayClosedTradeLedger} visibleCount={replayClosedTradeCount} />
+          <ReplayPositionHistoryPanel text={text} trades={replayClosedTradeLedger} visibleCount={replayClosedTradeCount} onJumpToTrade={jumpToReplayTime} />
         ) : <ReplayPositionPanel text={text} position={replaySnapshot?.position ?? null} atTimeMs={replaySnapshot?.timeMs ?? null} />}
       </aside>
     </div>
@@ -2837,10 +3052,11 @@ function ReplayFillLedgerRow({ text, fill }: Readonly<{
   );
 }
 
-function ReplayPositionHistoryPanel({ text, trades, visibleCount }: Readonly<{
+function ReplayPositionHistoryPanel({ text, trades, visibleCount, onJumpToTrade }: Readonly<{
   text: Copy;
   trades: readonly SystematicClosedTrade[];
   visibleCount: number;
+  onJumpToTrade: (timeMs: number) => void;
 }>) {
   if (!visibleCount) {
     return <div className="systematic-lab-trade-ledger__scroll" role="tabpanel"><EmptyState icon={<History size={18} />} title={text.noReplayTrades} detail={text.noReplayTradesDetail} /></div>;
@@ -2853,18 +3069,30 @@ function ReplayPositionHistoryPanel({ text, trades, visibleCount }: Readonly<{
         const tradeIndex = visibleCount - visibleIndex - 1;
         const trade = trades[tradeIndex];
         if (!trade) return null;
-        return <ReplayPositionHistoryRow key={`${trade.entryTimeMs}-${trade.exitTimeMs}-${tradeIndex}`} text={text} trade={trade} />;
+        return <ReplayPositionHistoryRow key={`${trade.entryTimeMs}-${trade.exitTimeMs}-${tradeIndex}`} text={text} trade={trade} onJumpToTrade={onJumpToTrade} />;
       }}
     />
   );
 }
 
-function ReplayPositionHistoryRow({ text, trade }: Readonly<{
+function ReplayPositionHistoryRow({ text, trade, onJumpToTrade }: Readonly<{
   text: Copy;
   trade: SystematicClosedTrade;
+  onJumpToTrade: (timeMs: number) => void;
 }>) {
   return (
-    <div className="systematic-lab-ledger-row is-virtual-trade">
+    <div
+      className="systematic-lab-ledger-row is-virtual-trade is-jumpable"
+      role="button"
+      tabIndex={0}
+      onClick={() => onJumpToTrade(trade.entryTimeMs)}
+      onKeyDown={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          onJumpToTrade(trade.entryTimeMs);
+        }
+      }}
+    >
       <div className="systematic-lab-ledger-row__head">
         <span className={trade.side === "long" ? "positive" : "negative"}>{trade.side === "long" ? text.long : text.short}</span>
         <strong className={trade.netPnlUsdt >= 0 ? "systematic-lab-pnl--gain" : "systematic-lab-pnl--loss"}>{formatPnlUsdt(trade.netPnlUsdt)}</strong>
@@ -2980,7 +3208,7 @@ function BacktestStatisticsPanel({ text, report }: Readonly<{
       <div className="systematic-lab-statistics-stage__head"><span>{text.statistics}</span><strong>{text.fullBacktest}</strong></div>
       <div className="systematic-lab-statistics-grid">
         <Statistic label={text.totalReturn} value={formatPercent(totalReturn)} tone={(totalReturn ?? 0) >= 0 ? "positive" : "negative"} />
-        <Statistic label={text.maxDrawdown} value={formatPercent(metrics.maxDrawdownPct * 100, false)} tone="negative" />
+        <Statistic label={text.maxDrawdown} value={formatPercent(metrics.maxDrawdownPct, false)} tone="negative" />
         <Statistic label={text.winRate} value={formatPercent(metrics.winRate === undefined || metrics.winRate === null ? null : metrics.winRate * 100, false)} />
         <Statistic label={text.sharpe} value={formatRatio(statistics?.annualizedSharpe)} />
         <Statistic label={text.sortino} value={formatRatio(statistics?.annualizedSortino)} />
@@ -3557,8 +3785,8 @@ function TabButton({ active, icon, label, count, onClick }: Readonly<{ active: b
   return <button type="button" className={active ? "is-active" : ""} onClick={onClick}>{icon}<span>{label}</span>{count !== undefined ? <small>{count}</small> : null}</button>;
 }
 
-function EmptyState({ icon, title, detail }: Readonly<{ icon: ReactNode; title: string; detail: string }>) {
-  return <div className="systematic-lab-empty-state"><span>{icon}</span><strong>{title}</strong><p>{detail}</p></div>;
+function EmptyState({ icon, title, detail, action }: Readonly<{ icon: ReactNode; title: string; detail: string; action?: ReactNode }>) {
+  return <div className="systematic-lab-empty-state"><span>{icon}</span><strong>{title}</strong><p>{detail}</p>{action ? <div className="systematic-lab-empty-state__action">{action}</div> : null}</div>;
 }
 
 function SystematicPythonTemplateDialog({ text, options, onCancel, onChoose }: Readonly<{
@@ -3867,6 +4095,16 @@ function PreloadScope({ text, startAt, preloadBars }: Readonly<{ text: Copy; sta
     </div>
   );
 }
+
+function RunEquityPreview({ points, negative }: Readonly<{ points: readonly number[]; negative: boolean }>) {
+  if (points.length < 2) return null;
+  const min = Math.min(...points);
+  const max = Math.max(...points);
+  const span = Math.max(Number.EPSILON, max - min);
+  const path = points.map((value, index) => `${(index / (points.length - 1)) * 100},${22 - ((value - min) / span) * 18}`).join(" ");
+  return <svg className={clsx("systematic-lab-run-row__equity", negative && "is-negative")} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points={path} fill="none" vectorEffect="non-scaling-stroke" /></svg>;
+}
+
 
 function Metric({ label, value, tone }: Readonly<{ label: string; value: string; tone?: "positive" | "negative" }>) {
   return <div className={clsx("systematic-lab-metric", tone && `is-${tone}`)}><span>{label}</span><strong>{value}</strong></div>;
@@ -4311,8 +4549,8 @@ function copy(chinese: boolean) {
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
       backtestRuns: "回测记录", backtestDuration: "耗时", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
-      result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线",
-      previousBar: "上一根 K 线", nextBar: "下一根 K 线", replay: "回放进度", replayActionLegend: "成交动作", limitFillEstimate: "限价：K 线保守估计", limitFillEstimateDetail: "限价单只依据后续 1 分钟 K 线的价格穿越与成交量参与上限模拟，不能代表历史订单簿队列成交。", resultUnavailable: "回放数据不可用", resultUnavailableDetail: "该回测没有可读取的本地快照。",
+      result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", replayPageTimeout: "回放区间加载超时，请重新拖动进度条后重试。", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线",
+      previousBar: "上一根 K 线", nextBar: "下一根 K 线", replay: "回放进度", playReplay: "播放回放", pauseReplay: "暂停回放", replaySpeed: "回放速度", compareRuns: "比较回测", clearComparison: "清除比较", replayActionLegend: "成交动作", limitFillEstimateDetail: "限价单只依据后续 1 分钟 K 线的价格穿越与成交量参与上限模拟，不能代表历史订单簿队列成交。", resultUnavailable: "回放数据不可用", resultUnavailableDetail: "该回测没有可读取的本地快照。",
       replayAccount: "回放账户", tradeLedger: "成交账本", position: "仓位", positionHistory: "历史仓位", noTrades: "没有已平仓交易", noTradesDetail: "动作、成交和权益仍会保留在回测报告中。", noReplayTrades: "当前时点没有已平仓交易", noReplayTradesDetail: "继续回放以查看后续记账结果。", noReplayFills: "当前时点没有成交", noReplayFillsDetail: "继续回放以查看下一根开盘成交和保护性退出。", noPosition: "当前时点没有持仓", noPositionDetail: "仓位将在下一根开盘成交后显示。", contracts: "张", contractValue: "每张面值", notional: "名义价值", entryPrice: "开仓均价", exitPrice: "平仓均价", markPrice: "标记价格", funding: "资金费用", stopLoss: "止损", takeProfit: "止盈", holdingTime: "持有时长", fillPrice: "成交价", marginChange: "保证金变动", entryNotional: "开仓名义价值", exitNotional: "平仓名义价值", fee: "手续费", buy: "买入", sell: "卖出", long: "多", short: "空",
       statistics: "策略统计", fullBacktest: "完整回测", totalReturn: "总收益", winRate: "胜率", sharpe: "夏普 (1m 年化)", sortino: "索提诺 (1m 年化)", volatility: "波动率 (1m 年化)", profitFactor: "盈亏因子", expectancy: "单笔期望", averageHolding: "平均持有", exposure: "持仓暴露", largestWinLoss: "最大盈 / 亏", maxStreak: "最长连胜 / 连亏",
       completed: "已完成", running: "运行中", queued: "排队中", cancelled: "已取消", failed: "失败",
@@ -4357,8 +4595,8 @@ function copy(chinese: boolean) {
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",
     backtestRuns: "Backtest runs", backtestDuration: "Elapsed", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
-    result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve",
-    previousBar: "Previous bar", nextBar: "Next bar", replay: "Replay progress", replayActionLegend: "Filled actions", limitFillEstimate: "Limit: conservative K-line estimate", limitFillEstimateDetail: "Limit fills use only later 1m price traversal and a volume-participation cap. They do not represent historical order-book queue fills.", resultUnavailable: "Replay data unavailable", resultUnavailableDetail: "This run has no readable local snapshot.",
+    result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", replayPageTimeout: "Replay page loading timed out. Drag the timeline again to retry.", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve",
+    previousBar: "Previous bar", nextBar: "Next bar", replay: "Replay progress", playReplay: "Play replay", pauseReplay: "Pause replay", replaySpeed: "Replay speed", compareRuns: "Compare backtests", clearComparison: "Clear comparison", replayActionLegend: "Filled actions", limitFillEstimate: "Limit: conservative K-line estimate", limitFillEstimateDetail: "Limit fills use only later 1m price traversal and a volume-participation cap. They do not represent historical order-book queue fills.", resultUnavailable: "Replay data unavailable", resultUnavailableDetail: "This run has no readable local snapshot.",
     replayAccount: "Replay account", tradeLedger: "Fill ledger", position: "Position", positionHistory: "Position history", noTrades: "No closed trades", noTradesDetail: "Actions, fills, and equity remain in the full backtest report.", noReplayTrades: "No closed trade at this time", noReplayTradesDetail: "Continue the replay to view later ledger entries.", noReplayFills: "No fill at this time", noReplayFillsDetail: "Continue the replay to view next-open fills and protective exits.", noPosition: "No position at this time", noPositionDetail: "A position appears after its next-open fill.", contracts: "contracts", contractValue: "Contract value", notional: "Notional", entryPrice: "Average entry", exitPrice: "Exit price", markPrice: "Mark price", funding: "Funding", stopLoss: "Stop loss", takeProfit: "Take profit", holdingTime: "Holding time", fillPrice: "Fill price", marginChange: "Margin change", entryNotional: "Entry notional", exitNotional: "Exit notional", fee: "Fee", buy: "Buy", sell: "Sell", long: "Long", short: "Short",
     statistics: "Strategy statistics", fullBacktest: "Full backtest", totalReturn: "Total return", winRate: "Win rate", sharpe: "Sharpe (1m ann.)", sortino: "Sortino (1m ann.)", volatility: "Volatility (1m ann.)", profitFactor: "Profit factor", expectancy: "Expectancy", averageHolding: "Avg. holding", exposure: "Exposure", largestWinLoss: "Largest win / loss", maxStreak: "Max win / loss streak",
     completed: "Completed", running: "Running", queued: "Queued", cancelled: "Cancelled", failed: "Failed",

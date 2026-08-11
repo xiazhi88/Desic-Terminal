@@ -5,6 +5,7 @@ import { logger } from "../lib/logger";
 import { isTauriRuntime } from "../lib/tauri";
 import type { MarketAssetsSummary } from "../types";
 import { SystematicStrategyLab } from "./SystematicStrategyLab";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 
 type AppNotification = {
   kind: "success" | "info" | "warning" | "error" | "trade";
@@ -18,6 +19,7 @@ type SystematicResearchPageProps = {
   marketAssets: MarketAssetsSummary | null;
   accounts: Array<{ id: string; name: string; environment: string }>;
   onNotify: (notification: AppNotification) => void;
+  onReady?: () => void;
 };
 
 function isChineseLocale(locale: string) {
@@ -30,7 +32,7 @@ function isChineseLocale(locale: string) {
  * this page makes the time-series strategy -> backtest -> replay workflow the
  * primary desktop experience.
  */
-export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets, accounts, onNotify }: SystematicResearchPageProps) {
+export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets, accounts, onNotify, onReady }: SystematicResearchPageProps) {
   const { i18n } = useTranslation();
   const [overview, setOverview] = useState<SystematicOverview | null>(null);
   const refreshTimer = useRef<number | null>(null);
@@ -52,8 +54,10 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
   }, [chinese, onNotify]);
 
   useEffect(() => {
-    void refresh();
     let active = true;
+    void refresh().finally(() => {
+      if (active) onReady?.();
+    });
     let unlisten: (() => void) | null = null;
     void listenSystematicEvents((event) => {
       if (!active) return;
@@ -105,10 +109,10 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
       unlisten?.();
       if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
     };
-  }, [chinese, onNotify, refresh]);
+  }, [chinese, onNotify, onReady, refresh]);
 
   return (
-    <div className="systematic-research-workspace">
+    <WorkspaceFrame className="systematic-research-workspace" tone="research">
       <SystematicStrategyLab
         overview={overview}
         selectedSymbol={selectedSymbol}
@@ -120,6 +124,6 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
         refresh={refresh}
         onNotify={onNotify}
       />
-    </div>
+    </WorkspaceFrame>
   );
 }
