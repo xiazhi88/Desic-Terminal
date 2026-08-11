@@ -105,6 +105,8 @@ type Props = {
   synchronizedCrosshairPosition?: ChartCrosshairPosition | null;
   followSynchronizedCrosshair?: boolean;
   synchronizedVisibleRange?: { from: number; to: number } | null;
+  /** Review pages replace a bounded replay page instead of merging it with live chart history. */
+  snapshotRevision?: string | number | null;
   onPriceAlert?: (payload: { price: number; direction: "above" | "below" | "cross"; last: number; source?: "manual" | "script" | "ai"; name?: string }) => void;
   onCreateChartAlert?: (payload: { id: string; symbol: string; definition: Record<string, unknown> }) => void;
   onDeletePriceAlert?: (payload: { id: string; symbol: string }) => void;
@@ -365,7 +367,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -431,6 +433,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const renderedFirstTimeRef = useRef<number | null>(null);
   const dataControllerRef = useRef(new ChartDataController());
   const renderedSeriesKeyRef = useRef("");
+  const reviewSnapshotRevisionRef = useRef<string | number | null>(null);
   const indicatorCalculatorsRef = useRef(new Map<string, ReturnType<typeof createIndicatorCalculator>>());
   const indicatorSeriesKeysRef = useRef(new Set<string>());
   const indicatorConfigSignatureRef = useRef("");
@@ -1288,9 +1291,16 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       setCoordinateVersion((version) => version + 1);
       return;
     }
-    const patch: ChartDataPatch = renderedSeriesKeyRef.current !== seriesKey && controller.getCandles(key).length === 0
+    const reviewSnapshotChanged = reviewVariant
+      && snapshotRevision !== null
+      && snapshotRevision !== undefined
+      && reviewSnapshotRevisionRef.current !== snapshotRevision;
+    const patch: ChartDataPatch = reviewSnapshotChanged
       ? controller.replaceSnapshot(key, candles)
-      : controller.ingestRealtime(key, candles);
+      : renderedSeriesKeyRef.current !== seriesKey && controller.getCandles(key).length === 0
+        ? controller.replaceSnapshot(key, candles)
+        : controller.ingestRealtime(key, candles);
+    if (reviewSnapshotChanged) reviewSnapshotRevisionRef.current = snapshotRevision ?? null;
     renderedSeriesKeyRef.current = seriesKey;
     const canonicalCandles = controller.getCandles(key);
     const visibleRangeBeforeUpdate = chart.getVisibleLogicalRange();
@@ -1369,7 +1379,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     setVisibleLogicalRange(currentVisibleRange);
     requestMoreHistoryIfNeeded(currentVisibleRange);
     setCoordinateVersion((version) => version + 1);
-  }, [autoFit, candles, indicatorConfigSignature, indicatorInstances, layerVisibility.indicators, requestMoreHistoryIfNeeded]);
+  }, [autoFit, candles, indicatorConfigSignature, indicatorInstances, layerVisibility.indicators, requestMoreHistoryIfNeeded, reviewVariant, snapshotRevision]);
 
   useEffect(() => {
     const chart = chartRef.current;

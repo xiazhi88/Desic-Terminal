@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { TFunction } from "i18next";
 import clsx from "clsx";
+import { WorkspaceFrame } from "./WorkspaceFrame";
 import {
   Activity,
   BarChart3,
@@ -712,6 +713,7 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
   const [newsEvents, setNewsEvents] = useState<IntelligenceRecord[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<IntelligenceRecord | null>(null);
   const [eventDetail, setEventDetail] = useState<IntelligenceRecord | null>(null);
+  const autoOpenedNewsEventRef = useRef(false);
   const [newsResponse, setNewsResponse] = useState<IntelligenceResponse | null>(null);
   const [newsFeedPage, setNewsFeedPage] = useState<NewsFeedPage | null>(null);
   const [newsReadState, setNewsReadState] = useState<NewsReadState | null>(null);
@@ -950,6 +952,12 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
       setBusy(null);
     }
   }, []);
+
+  useEffect(() => {
+    if (tab !== "news" || newsMode !== "events" || selectedEvent || autoOpenedNewsEventRef.current || newsEvents.length === 0) return;
+    autoOpenedNewsEventRef.current = true;
+    void openEvent(newsEvents[0]);
+  }, [newsEvents, newsMode, openEvent, selectedEvent, tab]);
 
   const loadDerivatives = useCallback(async (remote = false) => {
     const requestId = ++derivativesRequestIdRef.current;
@@ -1519,9 +1527,18 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
     return coins.some((coin) => relevantCoins.has(coin)) ? t("intelligence:positionOrWatchlist") : "";
   }, [relevantCoins, selectedSymbol, t]);
   const localizedStatus = localizeIntelligenceStatus(status, t);
+  const activeResponse = tab === "news"
+    ? newsResponse
+    : tab === "sentiment"
+      ? sentimentResponse
+      : tab === "derivatives"
+        ? derivativesResponse
+        : tab === "smart"
+          ? smartResponse
+          : null;
 
   return (
-    <div className="intelligence-page">
+    <WorkspaceFrame className="intelligence-page" tone="intelligence">
       <header className="intelligence-header">
         <div className="intelligence-title">
           <BrainCircuit size={18} />
@@ -1585,6 +1602,16 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
               </button>
             ))}
           </nav>
+
+          <div className="intelligence-context-bar" aria-label={t("intelligence:viewAria")}>
+            <span className="intelligence-context-scope">
+              <i aria-hidden="true" />
+              <strong>{selectedSymbol || t("intelligence:wholeMarket")}</strong>
+              <small>{accountId ? t("intelligence:account") : t("intelligence:loadingLocal")}</small>
+            </span>
+            <span className="intelligence-context-status">{localizedStatus}</span>
+            <ResultMeta response={activeResponse} />
+          </div>
 
           <section className="intelligence-content">
             {tab === "news" ? (
@@ -1917,6 +1944,6 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
               </div>
             ) : null}
           </section>
-    </div>
+    </WorkspaceFrame>
   );
 }

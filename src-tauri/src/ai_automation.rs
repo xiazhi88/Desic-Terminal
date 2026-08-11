@@ -3816,6 +3816,7 @@ fn load_notification_deliveries(
                     d.related_type,d.related_id,d.error,d.created_at,d.sent_at
              FROM ai_notification_deliveries d
              LEFT JOIN ai_agent_profiles p ON p.id=d.profile_id
+             WHERE COALESCE(d.related_type, '') NOT IN ('systematic_profile_signal', 'strategy_signal')
              ORDER BY d.created_at DESC LIMIT ?1",
         )
         .map_err(|err| err.to_string())?;

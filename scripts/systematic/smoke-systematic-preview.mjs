@@ -388,12 +388,13 @@ async function main() {
         return {
           durationMs: performance.now() - startedAt,
           sliderMax: max,
-          replaySnapshotCount: document.querySelectorAll(".systematic-lab-equity-chart canvas").length,
+          chartCandleCount: Number(document.querySelector(".systematic-lab-replay-stage .chart-wrap")?.getAttribute("data-candle-count") ?? 0),
           ledgerRows: document.querySelectorAll(".systematic-lab-virtual-list .systematic-lab-ledger-row").length,
           ledgerHeight: document.querySelector(".systematic-lab-virtual-list__spacer")?.getBoundingClientRect().height ?? 0,
         };
       });
-      assert(replayPerformance.sliderMax === replayBarLimit, `month replay must keep the chart page bounded: ${JSON.stringify(replayPerformance)}`);
+      assert(replayPerformance.sliderMax === barCount, `month replay timeline must expose the complete backtest: ${JSON.stringify(replayPerformance)}`);
+      assert(replayPerformance.chartCandleCount > 0 && replayPerformance.chartCandleCount <= replayBarLimit, `month replay chart page must remain bounded: ${JSON.stringify(replayPerformance)}`);
       assert(replayPerformance.ledgerRows > 0 && replayPerformance.ledgerRows <= 20, `month replay ledger must render only the visible rows: ${JSON.stringify(replayPerformance)}`);
       assert(replayPerformance.ledgerHeight > 100_000, `month replay must retain the full scrollable ledger: ${JSON.stringify(replayPerformance)}`);
       assert(replayPerformance.durationMs < 4_000, `month replay slider updates are too slow: ${JSON.stringify(replayPerformance)}`);
