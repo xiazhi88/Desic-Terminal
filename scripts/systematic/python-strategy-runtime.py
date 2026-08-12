@@ -1237,7 +1237,7 @@ def restricted_import(name, globals_=None, locals_=None, fromlist=(), level=0):
 
 SAFE_BUILTINS = {
     "abs": abs, "all": all, "any": any, "bool": bool, "dict": dict, "enumerate": enumerate,
-    "Exception": Exception, "filter": filter, "float": float, "int": int, "isinstance": isinstance,
+    "AttributeError": AttributeError, "Exception": Exception, "filter": filter, "float": float, "int": int, "isinstance": isinstance,
     "KeyError": KeyError, "len": len, "list": list, "map": map, "max": max, "min": min, "pow": pow,
     "range": range, "reversed": reversed, "round": round, "RuntimeError": RuntimeError, "set": set,
     "sorted": sorted, "str": str, "sum": sum, "tuple": tuple, "TypeError": TypeError, "ValueError": ValueError,

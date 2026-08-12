@@ -79,7 +79,7 @@ function buildPreviewOrderLines(lastPrice: number, t: ReturnType<typeof useTrans
     {
       id: "preview-editable-limit",
       type: "limit",
-      label: `${formatChartOrderLabel("limit", { side: "buy", posSide: "long" }, "0.08", t)} +12.4U +1.20%`,
+      label: formatChartOrderLabel("limit", { side: "buy", posSide: "long" }, "0.08", t),
       price: lastPrice + 220,
       side: "buy",
       posSide: "long",
@@ -87,9 +87,6 @@ function buildPreviewOrderLines(lastPrice: number, t: ReturnType<typeof useTrans
       tone: "positive",
       editable: true,
       editKind: "order-price",
-      estimateEntryPrice: lastPrice - 180,
-      estimateSize: 0.08,
-      estimateContractValue: 0.01,
       orderId: "preview-order-1",
       clientOrderId: "preview-client-1",
       size: "0.08"

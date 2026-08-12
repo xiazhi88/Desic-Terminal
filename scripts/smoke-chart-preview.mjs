@@ -262,6 +262,9 @@ async function main() {
   if (baseState.interactiveOrderLabelCount !== 1 || !/限价\s*·\s*做多\s*·\s*0\.08张/.test(baseState.interactiveOrderLabelText)) {
     throw new Error(`interactive order line should render exactly one compact label: ${JSON.stringify(baseState)}`);
   }
+  if (/\d(?:\.\d+)?U|\d(?:\.\d+)?%/.test(baseState.interactiveOrderLabelText)) {
+    throw new Error(`opening order line must not show PnL: ${JSON.stringify(baseState)}`);
+  }
   if (baseState.interactiveOrderLabelTag !== "DIV" || baseState.interactiveOrderCancelButtonCount !== 1) {
     throw new Error(`order label must expose an explicit cancel control instead of making the whole label destructive: ${JSON.stringify(baseState)}`);
   }
@@ -407,6 +410,14 @@ async function main() {
   if (indicatorPopoverState.animationName !== "desic-popup-enter") {
     throw new Error(`indicator popover entrance animation missing: ${JSON.stringify(indicatorPopoverState)}`);
   }
+  await page.locator(".chart-indicator-ai-button").click();
+  const newIndicatorSessionButton = page.getByRole("button", { name: "新建会话" });
+  await newIndicatorSessionButton.waitFor({ state: "visible", timeout: 5_000 });
+  const initialIndicatorAiMessages = await page.locator(".chart-indicator-ai-messages article").count();
+  if (initialIndicatorAiMessages !== 1) throw new Error(`indicator AI should start with one welcome message: ${initialIndicatorAiMessages}`);
+  await newIndicatorSessionButton.click();
+  const resetIndicatorAiMessages = await page.locator(".chart-indicator-ai-messages article").count();
+  if (resetIndicatorAiMessages !== 1) throw new Error(`new indicator AI session should reset the transcript: ${resetIndicatorAiMessages}`);
   await page.locator("[data-indicator-add=ema]").click();
   await page.locator("[data-indicator-add=vwap]").click();
   await page.locator("[data-indicator-add=adx]").click();
@@ -547,8 +558,8 @@ async function main() {
   await page.mouse.move(chartBox.x + chartBox.width * 0.62, Math.max(100, editableOrderLabel.y - 56), { steps: 4 });
   await page.waitForTimeout(120);
   const orderDragText = await page.locator(".chart-order-drag-readout").textContent();
-  if (!orderDragText || !/新价/.test(orderDragText) || !/预估/.test(orderDragText) || !/U/.test(orderDragText) || !/%/.test(orderDragText)) {
-    throw new Error(`order-line drag should show the modified estimated PnL: ${orderDragText}`);
+  if (!orderDragText || !/新价/.test(orderDragText) || /预估|U|%/.test(orderDragText)) {
+    throw new Error(`opening order-line drag should not show PnL: ${orderDragText}`);
   }
   await page.mouse.up();
 

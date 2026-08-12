@@ -305,8 +305,32 @@ export type SystematicBacktestView = {
   timing?: SystematicBacktestTiming | null;
 };
 
+export type SystematicBacktestsPageView = {
+  items: SystematicBacktestView[];
+  page: number;
+  pageSize: number;
+  total: number;
+  totalPages: number;
+};
+
+export type SystematicBacktestStartInput = {
+  strategyId: string;
+  strategyVersion?: number;
+  instId: string;
+  startAt?: number;
+  endAt?: number;
+  initialEquityUsdt?: number;
+  preloadBars?: number;
+  execution?: SystematicExecutionAssumptions;
+  leverage?: number;
+  marginSafetyMultiplier?: number;
+  positionSizing?: SystematicPositionSizing;
+  endOfRunPolicy?: "markToMarket" | "closeAtLastClose";
+};
+
 export type SystematicBacktestDetail = {
   run: SystematicBacktestView;
+  request: SystematicBacktestStartInput;
   report?: SystematicBacktestReport | null;
   bars: SystematicClosedBar[];
   barOffset: number;
@@ -454,6 +478,7 @@ export type SystematicOverview = {
   factorDefinitions: SystematicFactorDefinitionView[];
   strategies: SystematicStrategyView[];
   backtests: SystematicBacktestView[];
+  backtestsPage?: SystematicBacktestsPageView;
   optimizations: SystematicOptimizationView[];
   profiles: SystematicProfileView[];
   registryPackages: SystematicRegistryPackageView[];
@@ -478,6 +503,12 @@ export type SystematicEvent = {
 
 export function loadSystematicOverview() {
   return invokeOptional<SystematicOverview>("systematic_overview");
+}
+
+export function loadSystematicBacktests(page = 1, pageSize = 20) {
+  return invokeDesktop<SystematicBacktestsPageView>("systematic_backtests_page", {
+    request: { page, pageSize }
+  });
 }
 
 export function captureSystematicUniverse() {
@@ -577,20 +608,7 @@ export function respondToSystematicStrategyAiTool(request: {
   return invokeDesktop<void>("systematic_strategy_ai_tool_respond", { response: request });
 }
 
-export function startSystematicBacktest(request: {
-  strategyId: string;
-  strategyVersion?: number;
-  instId: string;
-  startAt?: number;
-  endAt?: number;
-  initialEquityUsdt?: number;
-  preloadBars?: number;
-  execution?: SystematicExecutionAssumptions;
-  leverage?: number;
-  marginSafetyMultiplier?: number;
-  positionSizing?: SystematicPositionSizing;
-  endOfRunPolicy?: "markToMarket" | "closeAtLastClose";
-}) {
+export function startSystematicBacktest(request: SystematicBacktestStartInput) {
   return invokeDesktop<SystematicBacktestView>("systematic_backtest_start", { request });
 }
 

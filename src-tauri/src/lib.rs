@@ -108,7 +108,7 @@ use crate::systematic::{
     start_systematic_worker, systematic_backtest_cancel, systematic_backtest_defaults,
     systematic_backtest_delete, systematic_backtest_detail, systematic_backtest_start, systematic_capture_universe_snapshot,
     systematic_factor_create_default, systematic_factor_evaluate, systematic_factor_save,
-    systematic_overview, systematic_python_prepare_environment,
+    systematic_overview, systematic_backtests_page, systematic_python_prepare_environment,
     systematic_python_run_sample, systematic_strategy_ai_cancel_session,
     systematic_strategy_ai_execute_tool, systematic_strategy_ai_send_message,
     systematic_strategy_ai_tool_respond,
@@ -261,6 +261,12 @@ script.createOrUpdate 参数要求：
 - enabled：通常设为 true。
 - hidden：通常设为 false。
 - openPanel：通常设为 true，便于用户检查。
+
+source 的运行边界（必须遵守）：
+- source 是由 Desic Terminal 本地 DSL 解释器读取的 JSON 文档，不是 JavaScript、TypeScript、Python，也不是可执行脚本文件。
+- source 字符串内严禁出现 import、export、模块 URL、动态脚本、代码块标记、函数源码或任何需要浏览器模块加载的内容；不要生成或引用 .js/.ts 文件。
+- 工具调用前必须先把 source 当作 JSON.parse 输入进行完整校验：顶层 schemaVersion 必须为数字 1，parameters/outputs 必须是数组，所有 output 的 expression 都必须递归符合下方白名单，不能有未知字段或未闭合 JSON。
+- 无法确认 DSL 文档可被本地解释器解析时，不要调用工具；先向用户说明缺少的信息或返回可修正的 DSL，而不是退化成脚本。
 
 安全指标 DSL 文档格式：
 {
@@ -984,6 +990,7 @@ struct AiRuntime {
     sidecar: Arc<tokio::sync::Mutex<Option<AiSidecarHandle>>>,
     session_sinks: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AiEvent>>>>,
     session_cancelled: Arc<Mutex<HashMap<String, bool>>>,
+    shutdown_started: Arc<AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -1190,6 +1197,8 @@ struct AiStreamOptions {
     tool_allowlist: Vec<String>,
     required_tool_name: Option<String>,
     interactive_account_id: Option<String>,
+    preserve_cline_conversation: bool,
+    conversation_scope: Option<Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2244,7 +2253,7 @@ fn ai_rename_session(
 }
 
 #[tauri::command]
-fn ai_delete_session(
+async fn ai_delete_session(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiRuntime>,
     request: AiSessionDeleteRequest,
@@ -2252,9 +2261,16 @@ fn ai_delete_session(
     if request.session_id.trim().is_empty() {
         return Err("AI session_id is required".to_string());
     }
-    let _ = stop_ai_session(&runtime, &request.session_id);
+    let session_id = request.session_id;
+    let _ = stop_ai_session(&runtime, &session_id);
+    let _ = send_ai_sidecar_command(
+        &app,
+        runtime.inner(),
+        json!({ "type": "delete", "sessionId": session_id }),
+    )
+    .await;
     let conn = open_database(&app)?;
-    delete_ai_session(&conn, &request.session_id)
+    delete_ai_session(&conn, &session_id)
 }
 
 #[tauri::command]
@@ -2322,6 +2338,11 @@ fn ai_send_message(
             model_id: request.model_id.clone(),
             permission_mode: request.permission_mode.clone(),
             reasoning_depth: request.reasoning_depth.clone(),
+            preserve_cline_conversation: true,
+            conversation_scope: Some(json!({
+                "kind": "trading-assistant",
+                "accountId": request.account_id,
+            })),
             ..Default::default()
         };
         if let Err(message) = run_ai_stream(
@@ -2433,7 +2454,7 @@ fn ai_generate_chart_indicator(
             reasoning_depth: None,
             system_prompt: Some(CHART_INDICATOR_AI_SYSTEM_PROMPT.to_string()),
             custom_rules: Some(
-                "本次会话只允许使用 script.createOrUpdate。只有用户明确要求创建或更新指标且信息足够时才调用它；其他内容正常对话，不要声称已保存。"
+                "本次会话只允许使用 script.createOrUpdate。只有用户明确要求创建或更新指标且信息足够时才调用它；调用前必须将 source 作为 JSON DSL 完整解析并校验 schemaVersion、parameters、outputs 及每个 expression，禁止 JavaScript/TypeScript/Python、import/export、模块 URL、代码块或任何需要脚本模块加载的内容；其他内容正常对话，不要声称已保存。"
                     .to_string(),
             ),
             enabled_skills: Some(Vec::new()),
@@ -2447,6 +2468,8 @@ fn ai_generate_chart_indicator(
             tool_allowlist: vec!["script.createOrUpdate".to_string()],
             required_tool_name: None,
             interactive_account_id: None,
+            preserve_cline_conversation: false,
+            conversation_scope: None,
         };
         if let Err(message) = run_ai_stream(
             app_handle.clone(),
@@ -3519,6 +3542,7 @@ struct CancelOrderRequest {
     account_id: Option<String>,
     environment: String,
     inst_id: String,
+    confirmed_live: Option<bool>,
     ord_id: Option<String>,
     cl_ord_id: Option<String>,
     is_algo: Option<bool>,
@@ -6091,6 +6115,9 @@ async fn okx_cancel_order(
     app: tauri::AppHandle,
     request: CancelOrderRequest,
 ) -> Result<OkxOrderResult, String> {
+    if normalize_environment(&request.environment) == "live" && request.confirmed_live != Some(true) {
+        return Err("实盘撤单缺少二次确认标记".to_string());
+    }
     let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     ensure_trade_account(&account, &request.environment).await?;
     if request.ord_id.as_deref().unwrap_or("").trim().is_empty()
@@ -13085,6 +13112,8 @@ async fn run_ai_stream(
             "enableAgentTeams": enable_agent_teams,
             "disableSkillsTool": disable_skills_tool,
             "streamFallbackText": options.as_ref().map(|value| value.stream_fallback_text).unwrap_or(false),
+            "preserveClineConversation": options.as_ref().map(|value| value.preserve_cline_conversation).unwrap_or(false),
+            "conversationScope": options.as_ref().and_then(|value| value.conversation_scope.clone()).unwrap_or_else(|| json!({})),
             "maxIterations": max_iterations,
             "toolAllowlist": tool_allowlist.clone(),
             "systemPrompt": config.system_prompt.clone(),
@@ -14012,6 +14041,27 @@ async fn send_ai_sidecar_command(
     }
 }
 
+async fn shutdown_ai_sidecar(runtime: &AiRuntime) {
+    let handle = runtime.sidecar.lock().await.clone();
+    let Some(handle) = handle else {
+        return;
+    };
+    let _ = send_sidecar_command(&handle, json!({ "type": "shutdown" })).await;
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let still_running = runtime
+            .sidecar
+            .lock()
+            .await
+            .as_ref()
+            .is_some_and(|current| current.id == handle.id);
+        if !still_running || Instant::now() >= deadline {
+            break;
+        }
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
 async fn send_sidecar_command(
     handle: &AiSidecarHandle,
     payload: serde_json::Value,
@@ -14521,6 +14571,15 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
                 | "strategy.readDevelopmentDocs"
                 | "strategy.readCurrentSource"
                 | "strategy.testCurrentSource"
+                | "strategy.listVersions"
+                | "strategy.getVersion"
+                | "strategy.inspectDataCoverage"
+                | "strategy.sampleMarketData"
+                | "strategy.getBacktestResult"
+                | "strategy.getBacktestTrades"
+                | "strategy.getBacktestDiagnostics"
+                | "strategy.compareBacktests"
+                | "strategy.getOptimizationResult"
         )
 }
 
@@ -14734,14 +14793,8 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     {
         return Err("market.readDecisionContext 仅允许绑定后台 Run 的主 Agent 调用".to_string());
     }
-    if matches!(
-        canonical,
-        "strategy.readDevelopmentDocs"
-            | "strategy.readCurrentSource"
-            | "strategy.testCurrentSource"
-    ) && !is_main
-    {
-        return Err("策略编辑器源码和受控测试仅可由主 AI 会话使用".to_string());
+    if canonical.starts_with("strategy.") && !is_main {
+        return Err("策略研究工具仅可由主 AI 会话使用".to_string());
     }
     let is_read = matches!(
         canonical,
@@ -14803,6 +14856,15 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "strategy.readDevelopmentDocs"
             | "strategy.readCurrentSource"
             | "strategy.testCurrentSource"
+            | "strategy.listVersions"
+            | "strategy.getVersion"
+            | "strategy.inspectDataCoverage"
+            | "strategy.sampleMarketData"
+            | "strategy.getBacktestResult"
+            | "strategy.getBacktestTrades"
+            | "strategy.getBacktestDiagnostics"
+            | "strategy.compareBacktests"
+            | "strategy.getOptimizationResult"
     );
     if is_read {
         return Ok(());
@@ -14829,6 +14891,11 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "script.delete"
             | "script.list"
             | "strategy.applySource"
+            | "strategy.create"
+            | "strategy.saveVersion"
+            | "strategy.rollbackVersion"
+            | "strategy.backtest"
+            | "strategy.optimize"
             | "notification.feishu.send"
     ) {
         return Ok(());
@@ -15365,13 +15432,7 @@ async fn execute_ai_tool(
     let canonical_name = canonical_ai_tool_name(tool_name);
     authorize_ai_tool(canonical_name, context)?;
     let session_id = context.session_id.as_str();
-    if matches!(
-        canonical_name,
-        "strategy.readDevelopmentDocs"
-            | "strategy.readCurrentSource"
-            | "strategy.testCurrentSource"
-            | "strategy.applySource"
-    ) {
+    if canonical_name.starts_with("strategy.") {
         ensure_ai_run_is_active(&app, context).await?;
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }
@@ -22495,6 +22556,7 @@ pub fn run() {
             intelligence_settings_save,
             intelligence_track_trader,
             systematic_overview,
+            systematic_backtests_page,
             systematic_capture_universe_snapshot,
             systematic_factor_create_default,
             systematic_factor_save,
@@ -22611,8 +22673,22 @@ pub fn run() {
             reconcile_private_streams,
             market_snapshot
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                let runtime = app_handle.state::<AiRuntime>().inner().clone();
+                if runtime.shutdown_started.swap(true, Ordering::AcqRel) {
+                    return;
+                }
+                api.prevent_exit();
+                let app_handle = app_handle.clone();
+                tauri::async_runtime::spawn(async move {
+                    shutdown_ai_sidecar(&runtime).await;
+                    app_handle.exit(0);
+                });
+            }
+        });
 }
 
 #[cfg(test)]
@@ -23263,6 +23339,15 @@ mod tests {
             "strategy.readDevelopmentDocs",
             "strategy.readCurrentSource",
             "strategy.testCurrentSource",
+            "strategy.listVersions",
+            "strategy.getVersion",
+            "strategy.inspectDataCoverage",
+            "strategy.sampleMarketData",
+            "strategy.getBacktestResult",
+            "strategy.getBacktestTrades",
+            "strategy.getBacktestDiagnostics",
+            "strategy.compareBacktests",
+            "strategy.getOptimizationResult",
         ] {
             assert!(ai_tool_allows_concurrent_execution(tool), "{tool}");
         }

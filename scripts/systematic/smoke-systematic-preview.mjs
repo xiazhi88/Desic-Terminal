@@ -287,9 +287,14 @@ async function main() {
       const strategyList = document.querySelector(".systematic-lab-strategy-list__scroll");
       const firstStrategy = strategyList?.querySelector(".systematic-lab-strategy-row")?.getBoundingClientRect();
       const strategyListStyle = strategyList ? getComputedStyle(strategyList) : null;
+      const strategySearchInput = document.querySelector(".systematic-lab-strategy-list__search input");
+      const strategySearchStyle = strategySearchInput ? getComputedStyle(strategySearchInput) : null;
       return {
         documentOverflow,
         allTuningFieldsVisible: Boolean(table) && fields.length === 9 && fields.every((field) => field.left >= table.left && field.right <= table.right),
+        strategySearchHasNoInnerFrame: Boolean(strategySearchStyle)
+          && strategySearchStyle.borderTopWidth === "0px"
+          && strategySearchStyle.backgroundColor === "rgba(0, 0, 0, 0)",
         strategyListIsVertical: Boolean(strategyList && firstStrategy && strategyListStyle)
           && strategyListStyle.display !== "flex"
           && strategyListStyle.overflowY !== "hidden"
@@ -298,6 +303,7 @@ async function main() {
     });
     assert(strategyLayout.documentOverflow <= 2, `strategy view has horizontal overflow: ${strategyLayout.documentOverflow}`);
     assert(strategyLayout.allTuningFieldsVisible, "parameter tuning min/max/step fields must all fit the inspector");
+    assert(strategyLayout.strategySearchHasNoInnerFrame, "strategy search input must not paint an inner border over its wrapper");
     assert(strategyLayout.strategyListIsVertical, `desktop strategy rows must stay vertically stacked in the strategy list: ${JSON.stringify(strategyLayout)}`);
 
     await page.getByRole("button", { name: "Development guide" }).click();
@@ -372,6 +378,30 @@ async function main() {
     assert(reviewLayout.statistics?.height > 80, "statistics panel must have visible height");
     assert(reviewLayout.accountTabs.length === 3, "replay must expose fill, current-position, and position-history tabs");
     assert(reviewLayout.accountTabs.every((tab) => tab.fits && tab.label), "replay account tabs must remain accessible and fit their pane");
+
+    const actionsTrigger = page.getByRole("button", { name: "Actions: Multi-timeframe pullback" });
+    assert(await actionsTrigger.count() === 1, "backtest rows should expose one Actions trigger");
+    assert(await page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" }).count() === 0, "backtest actions stay collapsed initially");
+    await actionsTrigger.click();
+    const actionsMenu = page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" });
+    await actionsMenu.waitFor({ state: "visible", timeout: 5_000 });
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".systematic-lab-run-row__actions-trigger")).fontSize === "9px", null, { timeout: 5_000 });
+    assert(await actionsMenu.count() === 1, "backtest Actions menu should open on demand");
+    assert(await actionsMenu.getByRole("menuitem").count() === 3, "completed backtests expose edit, compare, and delete actions");
+    const actionsMenuLayout = await actionsMenu.evaluate((menu) => {
+      const rect = menu.getBoundingClientRect();
+      return {
+        portaled: menu.parentElement === document.body,
+        insideViewport: rect.left >= 0 && rect.top >= 0 && rect.right <= window.innerWidth && rect.bottom <= window.innerHeight,
+      };
+    });
+    assert(actionsMenuLayout.portaled && actionsMenuLayout.insideViewport, `backtest Actions menu must escape scroll clipping: ${JSON.stringify(actionsMenuLayout)}`);
+    assert(await actionsTrigger.evaluate((button) => getComputedStyle(button).fontSize) === "9px", "backtest Actions trigger should use compact text");
+    await page.locator(".systematic-lab-review-main__head").click();
+    assert(await page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" }).count() === 0, "backtest Actions menu should close on outside click");
+    await actionsTrigger.click();
+    assert(await page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" }).count() === 1, "backtest Actions menu should reopen after outside click");
+    await actionsTrigger.click();
 
     if (barCount > 96) {
       const replayPerformance = await page.evaluate(async () => {

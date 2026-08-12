@@ -3092,13 +3092,11 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         <div className="chart-order-drag-readout" style={{ top: Math.max(84, draggingOrderLine.y - 16) }}>
           <strong>{orderLineDragTitle(draggingOrderLine.line)}</strong>
           <span>{t("chart:newPrice", { price: formatChartNumber(draggingOrderLine.price) })}</span>
-          <em className={clsx(
-            orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)
-              ? Number(orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)?.pnl) >= 0 ? "positive" : "negative"
-              : "muted"
-          )}>
-            {formatOrderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)}
-          </em>
+          {orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price) && (
+            <em className={Number(orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)?.pnl) >= 0 ? "positive" : "negative"}>
+              {formatOrderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)}
+            </em>
+          )}
         </div>
       )}
       {draggingPositionLine && (
@@ -4459,7 +4457,7 @@ function orderLineDragTitle(line: ChartOrderLine) {
 
 function formatOrderLineDragEstimate(line: ChartOrderLine, targetPrice: number) {
   const estimate = orderLineDragEstimate(line, targetPrice);
-  if (!estimate) return chartText("Estimated PnL --", "预估收益 --");
+  if (!estimate) return "";
   const sign = estimate.pnl >= 0 ? "+" : "";
   const ratioSign = estimate.ratio >= 0 ? "+" : "";
   return `${chartText("Estimated", "预估")} ${sign}${formatChartNumber(estimate.pnl)}U ${ratioSign}${estimate.ratio.toFixed(2)}%`;

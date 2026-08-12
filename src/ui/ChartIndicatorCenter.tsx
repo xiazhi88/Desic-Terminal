@@ -2,7 +2,7 @@ import { BrainCircuit, Code2, Eye, EyeOff, Pencil, Plus, Search, Send, SlidersHo
 import { useCallback, useDeferredValue, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useTranslation } from "react-i18next";
-import { generateChartIndicatorWithAi, listenAiEvents } from "../lib/ai";
+import { generateChartIndicatorWithAi, listenAiEvents, stopAiMessage } from "../lib/ai";
 import { useDraggableSurface } from "./useDraggableSurface";
 import {
   BUILT_IN_INDICATORS,
@@ -255,7 +255,7 @@ export function ChartIndicatorCenter({
   const [position, setPosition] = useState<PopoverPosition | null>(null);
   const [indicatorTooltip, setIndicatorTooltip] = useState<IndicatorTooltip | null>(null);
   const [aiPanelOpen, setAiPanelOpen] = useState(false);
-  const [aiSessionId] = useState(createIndicatorAiSessionId);
+  const [aiSessionId, setAiSessionId] = useState(createIndicatorAiSessionId);
   const [aiPrompt, setAiPrompt] = useState("");
   const [aiStatus, setAiStatus] = useState<IndicatorAiStatus>("idle");
   const [aiClockNow, setAiClockNow] = useState(Date.now());
@@ -352,6 +352,26 @@ export function ChartIndicatorCenter({
       })));
     }
   };
+
+  const createNewIndicatorAiSession = useCallback(() => {
+    if (aiStatus === "running") {
+      void stopAiMessage(aiSessionId).catch(() => undefined);
+    }
+    aiCreatedScriptRef.current = false;
+    aiTerminalErrorRef.current = false;
+    setAiSessionId(createIndicatorAiSessionId());
+    setAiPrompt("");
+    setAiStatus("idle");
+    setAiClockNow(Date.now());
+    setAiMessages([{
+      id: "welcome",
+      role: "assistant",
+      text: t("chart:indicatorAiWelcome"),
+      tools: [],
+      approvals: [],
+      status: t("chart:indicatorAiWaitingInput")
+    }]);
+  }, [aiSessionId, aiStatus, t]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -655,7 +675,10 @@ export function ChartIndicatorCenter({
                   <strong><BrainCircuit size={14} /> {t("chart:indicatorAiPanelTitle")}</strong>
                   <span>{t("chart:indicatorAiPanelDescription")}</span>
                 </div>
-                <button type="button" className="icon-button" title={t("chart:indicatorAiClose")} aria-label={t("chart:indicatorAiClose")} onClick={() => setAiPanelOpen(false)}><X size={15} /></button>
+                <div className="chart-indicator-ai-panel__actions">
+                  <button type="button" className="icon-button" title={t("chart:indicatorAiNewSession")} aria-label={t("chart:indicatorAiNewSession")} onClick={createNewIndicatorAiSession}><Plus size={15} /></button>
+                  <button type="button" className="icon-button" title={t("chart:indicatorAiClose")} aria-label={t("chart:indicatorAiClose")} onClick={() => setAiPanelOpen(false)}><X size={15} /></button>
+                </div>
               </header>
               <div className="chart-indicator-ai-messages" aria-live="polite" ref={aiMessagesRef}>
                 {aiMessages.map((message) => (

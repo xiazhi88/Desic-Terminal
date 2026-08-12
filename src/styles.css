@@ -3190,6 +3190,8 @@ button {
   border-bottom: 1px solid rgba(255, 255, 255, 0.075);
 }
 
+.chart-indicator-ai-panel__actions { display: inline-flex; align-items: center; gap: 4px; flex: 0 0 auto; }
+
 .chart-indicator-ai-panel header strong {
   display: inline-flex;
   align-items: center;

@@ -960,6 +960,15 @@ if (testPython) {
       (error) => error?.code === "runtime_error"
     );
 
+    const missingAttributeSource = "def on_bar(ctx):\n    return ctx.no_action(str(ctx.params.missing_parameter))\n";
+    await runner.load(missingAttributeSource);
+    await assert.rejects(
+      () => runner.invoke(strategyEvent("bar", { requestId: "missing-context-attribute" })),
+      (error) => error?.code === "runtime_error"
+        && /AttributeError: missing_parameter/.test(error.message)
+        && !/NameError/.test(error.message)
+    );
+
     const rawFutureRequest = strategyEvent("bar", { requestId: "raw-future-bar" });
     rawFutureRequest.event.market.series[0].bars[1].closeTimeMs = cutoffMs + 60_000;
     rawFutureRequest.event.bar = rawFutureRequest.event.market.series[0].bars[1];

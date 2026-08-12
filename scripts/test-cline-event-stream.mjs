@@ -1,4 +1,8 @@
 import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { bindConfiguredAgentToolEvent, buildSystemPrompt, createDesicTools, createProviderFetch, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const sessionId = "indicator-stream-test";
@@ -448,5 +452,59 @@ const modelFacingCorrection = await decisionContextTool.execute({
 });
 assert.match(modelFacingCorrection.correction, /background_finishRun/);
 assert.doesNotMatch(modelFacingCorrection.correction, /background\.finishRun/);
+
+const resumeHome = await mkdtemp(join(tmpdir(), "desic-cline-resume-"));
+try {
+  const restartContract = `
+    import assert from "node:assert/strict";
+    import { mkdtemp } from "node:fs/promises";
+    import { tmpdir } from "node:os";
+    import { join } from "node:path";
+    import { ClineCore } from "@cline/sdk";
+
+    const cwd = await mkdtemp(join(tmpdir(), "desic-cline-resume-workspace-"));
+    const config = {
+      sessionId: "resume-contract-test",
+      providerId: "openai-compatible",
+      modelId: "test-model",
+      apiKey: "placeholder",
+      cwd,
+      workspaceRoot: cwd,
+      mode: "plan",
+      enableTools: false,
+      enableSpawnAgent: false,
+      enableAgentTeams: false,
+      disableMcpSettingsTools: true,
+      systemPrompt: "test"
+    };
+    const messages = [{
+      role: "user",
+      content: [{ type: "text", text: "remember this context" }],
+      ts: Date.now()
+    }];
+    const first = await ClineCore.create({ clientName: "Desic session test", backendMode: "local" });
+    await first.start({ config, interactive: true, initialMessages: messages });
+    await first.dispose();
+
+    const second = await ClineCore.create({ clientName: "Desic session test", backendMode: "local" });
+    const persisted = await second.readMessages(config.sessionId);
+    assert.equal(persisted.length, 1);
+    await second.start({ config, interactive: true, initialMessages: persisted });
+    const rehydrated = await second.readMessages(config.sessionId);
+    assert.equal(rehydrated.length, 1);
+    await second.dispose();
+    console.log("cline restart hydration contract passed");
+  `;
+  const result = spawnSync(process.execPath, ["--input-type=module", "--eval", restartContract], {
+    cwd: process.cwd(),
+    env: { ...process.env, HOME: resumeHome },
+    encoding: "utf8",
+    timeout: 30_000
+  });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /cline restart hydration contract passed/);
+} finally {
+  await rm(resumeHome, { recursive: true, force: true });
+}
 
 console.log("cline nested agent_event streaming mapper passed");

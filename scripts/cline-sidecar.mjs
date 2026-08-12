@@ -1,4 +1,5 @@
 import { setMaxListeners } from "node:events";
+import { createHash } from "node:crypto";
 import { resolve } from "node:path";
 import readline from "node:readline";
 import { pathToFileURL } from "node:url";
@@ -31,6 +32,7 @@ setMaxListeners(0);
 
 let activeSessionId = "unknown";
 const sessions = new Map();
+const persistentClineConversationSessions = new Map();
 const pendingApprovals = new Map();
 const pendingToolExecutions = new Map();
 let clinePromise = null;
@@ -89,6 +91,53 @@ function debugAiEvent(label, payload) {
 function previewText(value, max = 160) {
   const text = String(value || "").replace(/\s+/g, " ").trim();
   return text.length > max ? `${text.slice(0, max)}...` : text;
+}
+
+function preservesClineConversation(sessionId, config = null) {
+  return Boolean(config?.preserveClineConversation)
+    || String(sessionId || "").startsWith("systematic-strategy-ai-");
+}
+
+function canResumeClineConversation(sessionId, session, config = null) {
+  return preservesClineConversation(sessionId, config)
+    && String(session?.status || "").toLowerCase() === "idle";
+}
+
+function clineConversationFingerprint(config) {
+  const scope = config?.conversationScope && typeof config.conversationScope === "object"
+    ? config.conversationScope
+    : {};
+  const stable = {
+    scope,
+    model: String(config?.model || ""),
+    permissionMode: String(config?.permissionMode || ""),
+    toolAllowlist: [...stringListConfig(config?.toolAllowlist)].sort(),
+    activeSkillIds: [...stringListConfig(config?.activeSkillIds)].sort(),
+    systemPrompt: String(config?.systemPrompt || ""),
+    customRules: String(config?.customRules || "")
+  };
+  return createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+}
+
+function clineConversationMetadata(config, fingerprint) {
+  return {
+    desicConversation: {
+      version: 1,
+      fingerprint,
+      scope: config?.conversationScope || {}
+    }
+  };
+}
+
+function persistedConversationMatches(session, fingerprint) {
+  return session?.metadata?.desicConversation?.fingerprint === fingerprint;
+}
+
+function canRehydrateClineConversation(session, fingerprint) {
+  // The Cline message artifact is the conversation source of truth. Runtime
+  // status (idle, failed, running, cancelled, etc.) only describes the old
+  // process and must never make Desic discard a scope-matched transcript.
+  return persistedConversationMatches(session, fingerprint);
 }
 
 function lastUserMessage(messages) {
@@ -1334,6 +1383,140 @@ const STRATEGY_APPLY_SOURCE_SCHEMA = {
   required: ["source", "expectedRevision"]
 };
 
+const STRATEGY_CREATE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    name: { type: "string", minLength: 1, maxLength: 120 },
+    description: { type: "string", maxLength: 2000 },
+    source: { type: "string", minLength: 1, maxLength: 262144 },
+    parameters: { type: "object" },
+    parameterTuning: { type: "object" }
+  },
+  required: ["name", "source"]
+};
+
+const STRATEGY_SAVE_VERSION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    name: { type: "string", minLength: 1, maxLength: 120 },
+    description: { type: "string", maxLength: 2000 },
+    source: { type: "string", minLength: 1, maxLength: 262144 },
+    parameters: { type: "object" },
+    parameterTuning: { type: "object" },
+    changeSummary: { type: "string", maxLength: 1000 }
+  },
+  required: ["strategyId", "name", "source"]
+};
+
+const STRATEGY_VERSION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    version: { type: "integer", minimum: 1 },
+    page: { type: "integer", minimum: 1 },
+    pageSize: { type: "integer", minimum: 1, maximum: 100 }
+  },
+  required: ["strategyId"]
+};
+
+const STRATEGY_ROLLBACK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    version: { type: "integer", minimum: 1 },
+    changeSummary: { type: "string", maxLength: 1000 }
+  },
+  required: ["strategyId", "version"]
+};
+
+const STRATEGY_MARKET_DATA_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    instId: { type: "string", minLength: 1, maxLength: 64 },
+    startAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." },
+    endAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." },
+    limit: { type: "integer", minimum: 1, maximum: 500 }
+  },
+  required: ["strategyId", "instId"]
+};
+
+const STRATEGY_BACKTEST_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    strategyVersion: { type: "integer", minimum: 1 },
+    instId: { type: "string", minLength: 1, maxLength: 64 },
+    startAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." },
+    endAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." },
+    parameters: { type: "object", description: "Must be empty. Persist parameter changes as a new strategy version before backtesting." }
+  },
+  required: ["strategyId", "instId"]
+};
+
+const STRATEGY_BACKTEST_RESULT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    runId: { type: "string", minLength: 1, maxLength: 160 },
+    waitSeconds: { type: "integer", minimum: 0, maximum: 300, description: "Host-side wait before returning a non-terminal status. Defaults to 120 seconds." }
+  },
+  required: ["strategyId", "runId"]
+};
+
+const STRATEGY_BACKTEST_SLICE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    runId: { type: "string", minLength: 1, maxLength: 160 },
+    limit: { type: "integer", minimum: 1, maximum: 200 }
+  },
+  required: ["strategyId", "runId"]
+};
+
+const STRATEGY_COMPARE_BACKTESTS_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    leftRunId: { type: "string", minLength: 1, maxLength: 160 },
+    rightRunId: { type: "string", minLength: 1, maxLength: 160 }
+  },
+  required: ["strategyId", "leftRunId", "rightRunId"]
+};
+
+const STRATEGY_OPTIMIZE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    strategyVersion: { type: "integer", minimum: 1 },
+    instId: { type: "string", minLength: 1, maxLength: 64 },
+    startAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." },
+    endAt: { type: "integer", minimum: 0, description: "Unix epoch milliseconds." }
+  },
+  required: ["strategyId", "instId"]
+};
+
+const STRATEGY_OPTIMIZATION_RESULT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    strategyId: { type: "string", minLength: 1, maxLength: 160 },
+    optimizationId: { type: "string", minLength: 1, maxLength: 160 }
+  },
+  required: ["strategyId", "optimizationId"]
+};
+
 const INTELLIGENCE_NEWS_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1558,10 +1741,14 @@ function executeDesicTool(sessionId, name, input, options = {}, context = {}) {
     requestedAt
   });
   return new Promise((resolve, reject) => {
+    const requestedBacktestWaitSeconds = Number(scopedInput?.waitSeconds);
+    const toolTimeoutMs = name === "strategy.getBacktestResult"
+      ? (Math.min(300, Math.max(0, Number.isFinite(requestedBacktestWaitSeconds) ? requestedBacktestWaitSeconds : 120)) + 15) * 1_000
+      : 120_000;
     const timeout = setTimeout(() => {
       pendingToolExecutions.delete(executionId);
       reject(new Error("工具执行超时"));
-    }, 120_000);
+    }, toolTimeoutMs);
     pendingToolExecutions.set(executionId, {
       resolve: (result) => {
         clearTimeout(timeout);
@@ -1742,10 +1929,24 @@ function createDesicTools(sessionId, options = {}) {
     tool("script.enable", "Enable or disable a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.delete", "Delete a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.list", "List local chart scripts.", SCRIPT_TOOL_SCHEMA),
-    tool("strategy.readDevelopmentDocs", "Read the complete versioned Desic Python strategy development document. Call this before creating or changing source. It returns only the built-in read-only protocol document and never reads an arbitrary file, market data, account, credential, or another strategy.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
-    tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing source. It reads only the selected unsaved editor buffer and cannot read another strategy, a file, market data, an account, or credentials.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
-    tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, report its line and contract diagnostics, then run the source against bounded deterministic fixtures. The fixtures use simulated K-line series, saved parameters, and empty, synthetic-long, and synthetic-short portfolio snapshots; they never force a trading signal. They validate only the actions returned by those fixtures, while a statically checked call site may remain runtime-unreached. This is not a historical backtest, live-market check, fill simulation, or strategy-quality judgment. It cannot access files, networks, accounts, credentials, or another strategy, and it never submits an order.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
-    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call only after strategy.readCurrentSource and strategy.readDevelopmentDocs in this same turn, and send the read revision as expectedRevision. This does not save a strategy, run a backtest, or place any order. The user must review and save manually.", STRATEGY_APPLY_SOURCE_SCHEMA)
+    tool("strategy.readDevelopmentDocs", "Optionally read the complete versioned Desic Python strategy development document when protocol details are needed. Source writes do not require this read-only reference.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
+    tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing the current buffer.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
+    tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, then run bounded deterministic fixtures. This is a source-contract test, not a historical backtest or live execution check.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
+    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call after strategy.readCurrentSource and send expectedRevision. The host validates source policy and protocol before changing only the unsaved editor buffer.", STRATEGY_APPLY_SOURCE_SCHEMA),
+    tool("strategy.create", "Create and persist a new immutable-versioned local Python research strategy. Choose its name, description, source, and saved parameters. This cannot activate a Profile or submit an order.", STRATEGY_CREATE_SCHEMA),
+    tool("strategy.saveVersion", "Persist a new immutable version of the current or session-created strategy. It never overwrites prior versions and cannot activate a Profile or submit an order.", STRATEGY_SAVE_VERSION_SCHEMA),
+    tool("strategy.listVersions", "List immutable versions and their saved backtest/Profile usage counts for a session strategy.", STRATEGY_VERSION_SCHEMA),
+    tool("strategy.getVersion", "Read one immutable strategy version, including its exact source and saved parameters.", STRATEGY_VERSION_SCHEMA),
+    tool("strategy.rollbackVersion", "Create a new immutable current version using the exact source and parameters from an earlier version. It never deletes history or changes any Profile.", STRATEGY_ROLLBACK_SCHEMA),
+    tool("strategy.inspectDataCoverage", "Read local confirmed 1m K-line coverage, counts, and gaps for a session strategy research instrument. It never accesses exchange accounts or credentials.", STRATEGY_MARKET_DATA_SCHEMA),
+    tool("strategy.sampleMarketData", "Read up to 500 local 1m OHLCV bars for a session strategy research instrument and time window. It never accesses network or account data.", STRATEGY_MARKET_DATA_SCHEMA),
+    tool("strategy.backtest", "Queue a host-owned local historical backtest for one immutable strategy version. It pins source and local K-line snapshot, uses normal research assumptions, and cannot activate a Profile or submit an order.", STRATEGY_BACKTEST_SCHEMA),
+    tool("strategy.getBacktestResult", "Wait inside the host for a session strategy backtest, then return structured status, metrics, snapshot identity, and timing. The host polls without model calls. If timedOut=true, call again in the same turn until the run completes, fails, or is cancelled.", STRATEGY_BACKTEST_RESULT_SCHEMA),
+    tool("strategy.getBacktestTrades", "Read a bounded recent sample of fills and closed trades from a completed session strategy backtest.", STRATEGY_BACKTEST_SLICE_SCHEMA),
+    tool("strategy.getBacktestDiagnostics", "Read frozen request metadata, source/data identity, errors, and phase timing for a session strategy backtest.", STRATEGY_BACKTEST_SLICE_SCHEMA),
+    tool("strategy.compareBacktests", "Compare two backtests of the same session strategy, including return, drawdown, Sharpe, fees, trade counts, and snapshot compatibility.", STRATEGY_COMPARE_BACKTESTS_SCHEMA),
+    tool("strategy.optimize", "Run host-owned bounded parameter research with a 70/30 train-validation split. Candidates come only from desktop-owned saved tuning ranges and cannot activate a Profile or submit an order.", STRATEGY_OPTIMIZE_SCHEMA),
+    tool("strategy.getOptimizationResult", "Read parameter research candidates, train/validation metrics, selected parameters, and errors for a session strategy.", STRATEGY_OPTIMIZATION_RESULT_SCHEMA)
   ].filter(Boolean);
 
   return tools.filter(Boolean);
@@ -2978,6 +3179,10 @@ async function sendMessage(cline, input) {
   const command = normalizeCommand(input);
   const sessionId = command.sessionId;
   const runtimeSessionId = toClineRuntimeSessionId(sessionId);
+  const preserveConversation = preservesClineConversation(sessionId, command.config);
+  const conversationFingerprint = preserveConversation
+    ? clineConversationFingerprint(command.config)
+    : "";
   activeSessionId = sessionId;
   let prompt = lastUserMessage(command.messages);
   if (!prompt) throw new Error("missing user prompt");
@@ -2989,7 +3194,9 @@ async function sendMessage(cline, input) {
     previous.unsubscribe?.();
     const previousRuntimeSessionId = previous.runtimeSessionId || toClineRuntimeSessionId(sessionId);
     await cline?.abort?.(previousRuntimeSessionId).catch(() => {});
-    await cline?.stop?.(previousRuntimeSessionId).catch(() => {});
+    if (!previous.preservesClineConversation) {
+      await cline?.stop?.(previousRuntimeSessionId).catch(() => {});
+    }
   }
 
   const state = {
@@ -3000,6 +3207,8 @@ async function sendMessage(cline, input) {
     done: false,
     unsubscribe: null,
     runtimeSessionId,
+    preservesClineConversation: preserveConversation,
+    conversationFingerprint,
     hasProviderProgress: false,
     retryableNetworkError: "",
     abortController: new AbortController()
@@ -3013,6 +3222,64 @@ async function sendMessage(cline, input) {
       emitMappedCoreEvent(state, sessionId, command.config, event);
     }, { sessionId: runtimeSessionId });
 
+    const existingCoreSession = preserveConversation
+      ? await cline.get(runtimeSessionId).catch(() => null)
+      : null;
+    if (existingCoreSession && !canRehydrateClineConversation(existingCoreSession, conversationFingerprint)) {
+      throw new Error("该历史 AI 会话的策略、账户或权限配置已变化。为避免混用上下文，请创建新会话。");
+    }
+    const canResumeExisting = persistentClineConversationSessions.get(runtimeSessionId) === conversationFingerprint
+      && canResumeClineConversation(sessionId, existingCoreSession, command.config);
+    if (canResumeExisting) {
+      emit({ type: "status", sessionId, status: "running", message: "继续已有 AI 会话" });
+      const result = await cline.send({
+        sessionId: runtimeSessionId,
+        prompt
+      });
+      const text = resultText(result);
+      const finishReason = result?.finishReason || "completed";
+      if (!state.cancelled && finishReason !== "error" && text) {
+        const lifecycle = reduceAssistantTextLifecycle(state, {
+          type: "finalText",
+          sessionId,
+          content: text,
+          finishReason,
+          source: "send-result"
+        });
+        emitAssistantTextOutputs(state, sessionId, lifecycle.outputs);
+      }
+      if (!state.cancelled && !state.done) {
+        state.done = true;
+        emit({ type: "done", sessionId, finishReason });
+      }
+      return;
+    }
+
+    // A local Cline runtime is process-owned. After the desktop sidecar has
+    // restarted, `get` can find the persisted record but cannot run a turn
+    // until we create a new interactive runtime. Rehydrate it from Cline's
+    // own persisted message artifact, including any in-flight tool calls.
+    const restoringConversation = preserveConversation && Boolean(existingCoreSession);
+    let initialMessages;
+    if (restoringConversation) {
+      initialMessages = await cline.readMessages(runtimeSessionId).catch((error) => {
+        emit({
+          type: "status",
+          sessionId,
+          status: "connecting",
+          message: `读取 Cline 历史消息失败，将由 Cline 继续当前会话：${error?.message || String(error)}`
+        });
+        return [];
+      });
+      if (!Array.isArray(initialMessages)) initialMessages = [];
+      emit({
+        type: "status",
+        sessionId,
+        status: "connecting",
+        message: "恢复已有 AI 会话上下文"
+      });
+    }
+
     emit({ type: "status", sessionId, status: "connecting", message: "连接 ClineCore" });
     const permissionMode = normalizePermissionMode(command.config.permissionMode);
     const baseMainPolicyConfig = {
@@ -3021,13 +3288,15 @@ async function sendMessage(cline, input) {
       agentRole: "main",
       agentId: sessionId
     };
-    const orchestration = await runConfiguredProfileAgents(
-      sessionId,
-      command,
-      state,
-      runtimeSessionId,
-      prompt
-    );
+    const orchestration = restoringConversation
+      ? { prompt, veto: null }
+      : await runConfiguredProfileAgents(
+        sessionId,
+        command,
+        state,
+        runtimeSessionId,
+        prompt
+      );
     if (state.cancelled) return;
     prompt = orchestration.prompt;
     const coordinatorCommand = orchestration.veto
@@ -3047,6 +3316,7 @@ async function sendMessage(cline, input) {
     if (describeToolPolicy("team_status", mainPolicyConfig).allowed) {
       mainTools.push(...createDesicTeamTools(sessionId, coordinatorCommand, state, runtimeSessionId));
     }
+    const hasPersistedMessages = restoringConversation && initialMessages.length > 0;
     const startInput = {
       config: createRuntimeConfig(coordinatorCommand, permissionMode, mainTools, runtimeSessionId),
       localRuntime: {
@@ -3054,8 +3324,12 @@ async function sendMessage(cline, input) {
       },
       toolPolicies: buildToolPolicies(mainPolicyConfig),
       requestToolApproval,
-      prompt: toProviderToolReferences(prompt),
-      interactive: false
+      sessionMetadata: preserveConversation
+        ? clineConversationMetadata(command.config, conversationFingerprint)
+        : undefined,
+      ...(!hasPersistedMessages ? { prompt: toProviderToolReferences(prompt) } : {}),
+      interactive: preserveConversation,
+      ...(hasPersistedMessages ? { initialMessages } : {})
     };
     let startResult = null;
     for (let attempt = 1; attempt <= PROVIDER_NETWORK_MAX_ATTEMPTS; attempt += 1) {
@@ -3088,6 +3362,12 @@ async function sendMessage(cline, input) {
       if (state.cancelled) return;
     }
     if (!startResult) throw new Error("ClineCore 未返回运行结果");
+    if (preserveConversation) {
+      persistentClineConversationSessions.set(runtimeSessionId, conversationFingerprint);
+    }
+    if (hasPersistedMessages) {
+      startResult.result = await cline.send({ sessionId: runtimeSessionId, prompt });
+    }
     let text = resultText(startResult);
     const finishReason = startResult.result?.finishReason || "completed";
     if (!state.cancelled && finishReason !== "error" && text) {
@@ -3115,13 +3395,41 @@ async function sendMessage(cline, input) {
   } finally {
     state.abortController?.abort();
     state.unsubscribe?.();
-    cleanupCodexToolBridges(sessionId);
-    cleanupClaudeToolBridges(sessionId);
+    if (!state.preservesClineConversation) {
+      cleanupCodexToolBridges(sessionId);
+      cleanupClaudeToolBridges(sessionId);
+    }
     sessions.delete(sessionId);
   }
 }
 
 async function stopSession(cline, input) {
+  const sessionId = input.sessionId || activeSessionId;
+  const state = sessions.get(sessionId);
+  const runtimeSessionId = state?.runtimeSessionId || toClineRuntimeSessionId(sessionId);
+  const preserveConversation = state?.preservesClineConversation
+    || persistentClineConversationSessions.has(runtimeSessionId)
+    || preservesClineConversation(sessionId);
+  if (state) {
+    state.cancelled = true;
+    state.done = true;
+    state.abortController?.abort();
+    state.unsubscribe?.();
+  }
+  if (cline) {
+    await cline.abort(runtimeSessionId).catch(() => {});
+    if (!preserveConversation) {
+      await cline.stop(runtimeSessionId).catch(() => {});
+      cleanupCodexToolBridges(sessionId);
+      cleanupClaudeToolBridges(sessionId);
+    }
+  }
+  sessions.delete(sessionId);
+  emit({ type: "status", sessionId, status: "stopped", message: "已停止" });
+  emit({ type: "done", sessionId, finishReason: "cancelled" });
+}
+
+async function deleteSession(cline, input) {
   const sessionId = input.sessionId || activeSessionId;
   const state = sessions.get(sessionId);
   const runtimeSessionId = state?.runtimeSessionId || toClineRuntimeSessionId(sessionId);
@@ -3131,15 +3439,14 @@ async function stopSession(cline, input) {
     state.abortController?.abort();
     state.unsubscribe?.();
   }
-  if (cline) {
-    await cline.abort(runtimeSessionId).catch(() => {});
-    await cline.stop(runtimeSessionId).catch(() => {});
-  }
-  sessions.delete(sessionId);
+  const core = cline || await ensureCline();
+  await core.abort(runtimeSessionId).catch(() => {});
+  await core.stop(runtimeSessionId).catch(() => {});
+  await core.delete(runtimeSessionId).catch(() => {});
+  persistentClineConversationSessions.delete(runtimeSessionId);
   cleanupCodexToolBridges(sessionId);
   cleanupClaudeToolBridges(sessionId);
-  emit({ type: "status", sessionId, status: "stopped", message: "已停止" });
-  emit({ type: "done", sessionId, finishReason: "cancelled" });
+  sessions.delete(sessionId);
 }
 
 async function withTimeout(promise, ms) {
@@ -3243,11 +3550,16 @@ async function main() {
       const type = input.type || "sendMessage";
       if (type === "stop" || type === "abort") {
         trackTask(stopSession(cline, input));
+      } else if (type === "delete") {
+        trackTask(deleteSession(cline, input));
       } else if (type === "approvalDecision") {
         resolveApprovalDecision(input);
       } else if (type === "toolExecuteResult") {
         resolveToolExecution(input);
       } else if (type === "shutdown") {
+        for (const sessionId of Array.from(sessions.keys())) {
+          await stopSession(cline, { sessionId }).catch(() => {});
+        }
         break;
       } else {
         trackTask(sendMessage(cline, input));
@@ -3289,7 +3601,11 @@ export {
   mapCoreEvent,
   mapToolResult,
   multiAgentVetoBlocksTool,
+  canResumeClineConversation,
+  canRehydrateClineConversation,
+  clineConversationFingerprint,
   prepareBackgroundOpportunityCommit,
+  preservesClineConversation,
   precheckHasNonRemediableBlocker,
   precheckSupportsAffordabilityVeto,
   profileAgentClaimsAffordabilityVeto,

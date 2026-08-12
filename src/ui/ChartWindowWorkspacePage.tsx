@@ -1,6 +1,6 @@
 import { Activity, ChevronDown, LayoutDashboard, Maximize2, Minus, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
-import type { ChartWindowState, MarketAssetsSummary, Ticker } from "../types";
+import type { AccountSummary, ChartWindowState, MarketAssetsSummary, Ticker } from "../types";
 import {
   listChartWindows,
   loadAccounts,
@@ -71,6 +71,7 @@ export function ChartWindowWorkspacePage({ initialWindowLabel }: { initialWindow
   const [workspace, setWorkspace] = useState<ChartWorkspaceDocument>(() => createChartWorkspaceDocument({ id: storageId }));
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(null);
   const [accountId, setAccountId] = useState<string | null>(null);
+  const [account, setAccount] = useState<AccountSummary | null>(null);
   const [environment, setEnvironment] = useState<"demo" | "live">("demo");
   const [ready, setReady] = useState(false);
   const [paneStatuses, setPaneStatuses] = useState<Record<string, string>>({});
@@ -110,6 +111,7 @@ export function ChartWindowWorkspacePage({ initialWindowLabel }: { initialWindow
         setBackendState(matched);
         setMarketAssets(assets);
         setAccountId(matched?.accountId ?? selectedAccount?.id ?? null);
+        setAccount(selectedAccount);
         setEnvironment(matched?.environment === "live" || selectedAccount?.environment === "live" ? "live" : "demo");
       })
       .catch((error) => logger.error("failed to initialize detached chart workspace", error, { windowId }))
@@ -251,6 +253,7 @@ export function ChartWindowWorkspacePage({ initialWindowLabel }: { initialWindow
               symbol={pane.symbol}
               timeframe={pane.timeframe}
               accountId={accountId}
+              account={account}
               environment={environment}
               marketAssets={marketAssets}
               onSymbolChange={(value) => updatePane(pane.id, "symbol", value)}

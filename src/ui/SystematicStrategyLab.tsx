@@ -17,8 +17,10 @@ import {
   GitCompareArrows,
   History,
   LoaderCircle,
+  Pencil,
   Play,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Send,
@@ -35,6 +37,7 @@ import {
   deleteSystematicBacktest,
   deleteSystematicStrategy,
   deleteSystematicProfile,
+  loadSystematicBacktests,
   loadSystematicStrategyVersionDetail,
   loadSystematicStrategyVersions,
   loadSystematicProfileSignals,
@@ -50,11 +53,13 @@ import {
   sendSystematicStrategyAiMessage,
   startSystematicBacktest,
   type SystematicBacktestDetail,
+  type SystematicBacktestStartInput,
   type SystematicEquityPoint,
   type SystematicBacktestFill,
   type SystematicBacktestStatistics,
   type SystematicBacktestTiming,
   type SystematicBacktestView,
+  type SystematicBacktestsPageView,
   type SystematicClosedBar,
   type SystematicClosedTrade,
   type SystematicExecutionAssumptions,
@@ -70,10 +75,10 @@ import {
   type SystematicStrategyAiEditorToolRequest,
   type SystematicStrategyView
 } from "../lib/systematic";
-import { listenAiEvents, stopAiMessage } from "../lib/ai";
+import { listAiSessions, loadAiSession, listenAiEvents, stopAiMessage } from "../lib/ai";
 import { listenOptional } from "../lib/tauri";
 import { formatLocalizedDate, formatLocalizedNumber } from "../i18n/runtime";
-import { AiMessageError, AiProcessTimeline, AiTokenUsageLine, MarkdownMessage, applyAiEvent, type AiUiMessage } from "./AiMessageProcess";
+import { AiMessageError, AiProcessTimeline, AiTokenUsageLine, MarkdownMessage, applyAiEvent, storedMessageToUiMessage, type AiUiMessage } from "./AiMessageProcess";
 import { KlineChart } from "./KlineChart";
 import { SystematicEquityChart } from "./SystematicEquityChart";
 import { SystematicPythonEditor } from "./SystematicPythonEditor";
@@ -81,7 +86,7 @@ import { SystematicPythonMergeView } from "./SystematicPythonMergeView";
 import { TerminalSelect } from "./TerminalSelect";
 import { SymbolIcon, symbolBase } from "./SymbolIcon";
 import { useMarketHotStore } from "../lib/marketHotStore";
-import type { AiEvent, Candle, ChartFillMarker, ChartPositionRange, ChartSignalMarker, MarketAssetsSummary, OkxInstrumentSummary } from "../types";
+import type { AiEvent, AiSession, Candle, ChartFillMarker, ChartPositionRange, ChartSignalMarker, MarketAssetsSummary, OkxInstrumentSummary } from "../types";
 import "./SystematicStrategyLab.css";
 
 type Notify = (notification: {
@@ -113,6 +118,35 @@ type PythonDraft = {
   parameters: string;
   parameterTuning: string;
 };
+
+const SYSTEMATIC_AI_SESSION_STORAGE_KEY = "desic-terminal.systematic-strategy-ai-sessions.v1";
+
+function readSystematicAiSessionIds(strategyId: string): string[] {
+  try {
+    const raw = window.localStorage.getItem(SYSTEMATIC_AI_SESSION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const values = parsed[strategyId];
+    return Array.isArray(values)
+      ? values.filter((value): value is string => typeof value === "string" && value.trim().length > 0).slice(0, 30)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function rememberSystematicAiSession(strategyId: string, sessionId: string) {
+  try {
+    const raw = window.localStorage.getItem(SYSTEMATIC_AI_SESSION_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const previous = Array.isArray(parsed[strategyId])
+      ? parsed[strategyId].filter((value): value is string => typeof value === "string")
+      : [];
+    parsed[strategyId] = [sessionId, ...previous.filter((value) => value !== sessionId)].slice(0, 30);
+    window.localStorage.setItem(SYSTEMATIC_AI_SESSION_STORAGE_KEY, JSON.stringify(parsed));
+  } catch {
+    // Session persistence is best effort; the durable transcript remains in SQLite.
+  }
+}
 
 type ProfileDraft = {
   id?: string;
@@ -184,6 +218,13 @@ const EMPTY_PROFILE_SIGNAL_PAGE: SystematicProfileSignalsPageView = {
   totalPages: 1,
   cooldownBlockedCount: 0,
 };
+const EMPTY_BACKTEST_PAGE: SystematicBacktestsPageView = {
+  items: [],
+  page: 1,
+  pageSize: 20,
+  total: 0,
+  totalPages: 1,
+};
 
 export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, marketAssets, accounts, desktop, chinese, refresh, onNotify }: Props) {
   const [tab, setTab] = useState<Tab>("strategy");
@@ -196,9 +237,13 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [startingBacktest, setStartingBacktest] = useState(false);
   const [startingOptimization, setStartingOptimization] = useState(false);
+  const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
+  const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [confirmation, setConfirmation] = useState<SystematicConfirmation | null>(null);
   const [detail, setDetail] = useState<SystematicBacktestDetail | null>(null);
+  const [backtestPage, setBacktestPage] = useState<SystematicBacktestsPageView | null>(null);
+  const [loadingBacktestPage, setLoadingBacktestPage] = useState(false);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [replayIndex, setReplayIndex] = useState(0);
   const [replayAbsoluteIndex, setReplayAbsoluteIndex] = useState(0);
@@ -224,6 +269,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [preparingPython, setPreparingPython] = useState(false);
   const pythonPreparationAttemptedRef = useRef(false);
   const backtestDefaultRangeSymbolRef = useRef<string | null>(null);
+  const backtestReproductionSymbolRef = useRef<string | null>(null);
   const replayPageRequestRef = useRef(0);
   const replayPageTimerRef = useRef<number | null>(null);
   const replayRangeDraggingRef = useRef(false);
@@ -239,8 +285,27 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     () => (overview?.strategies ?? []).filter((strategy) => strategy.kind === "python"),
     [overview?.strategies],
   );
-  const runs = overview?.backtests ?? [];
+  const runs = backtestPage?.items ?? overview?.backtests ?? [];
   const pythonRuntime = runtimePreparation ?? overview?.pythonRuntime;
+
+  useEffect(() => {
+    const next = overview?.backtestsPage;
+    if (next) setBacktestPage(next);
+    else if (overview) setBacktestPage({ ...EMPTY_BACKTEST_PAGE, items: overview.backtests, total: overview.backtests.length });
+  }, [overview]);
+
+  const loadBacktestPage = useCallback(async (page: number) => {
+    if (!desktop) return;
+    setLoadingBacktestPage(true);
+    try {
+      const next = await loadSystematicBacktests(page, backtestPage?.pageSize ?? 20);
+      if (next) setBacktestPage(next);
+    } catch (error) {
+      onNotify({ kind: "error", title: text.resultLoadFailed, message: messageOf(error) });
+    } finally {
+      setLoadingBacktestPage(false);
+    }
+  }, [backtestPage?.pageSize, desktop, onNotify, text.resultLoadFailed]);
   const selectedStrategy = useMemo(
     () => strategies.find((strategy) => strategy.id === selectedStrategyId) ?? strategies[0] ?? null,
     [selectedStrategyId, strategies]
@@ -342,6 +407,10 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     return () => { active = false; };
   }, [backtestSymbol, desktop]);
   useEffect(() => {
+    if (backtestReproductionSymbolRef.current === backtestSymbol) {
+      backtestReproductionSymbolRef.current = null;
+      return;
+    }
     if (!watchlist.includes(backtestSymbol)) setBacktestSymbol(watchlist[0] ?? selectedSymbol);
   }, [backtestSymbol, selectedSymbol, watchlist]);
 
@@ -430,6 +499,73 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       onNotify({ kind: "error", title: text.backtestDeleteFailed, message: messageOf(error) });
     } finally { setDeletingId(null); }
   }, [desktop, onNotify, refresh, text]);
+
+  const loadBacktestReproductionRequest = useCallback(async (run: SystematicBacktestView) => {
+    if (detail?.run.id === run.id) return detail.request;
+    const loaded = await loadSystematicBacktestDetail({ runId: run.id });
+    if (!loaded) throw new Error(text.resultUnavailableDetail);
+    return loaded.request;
+  }, [detail, text.resultUnavailableDetail]);
+
+  const applyBacktestReproductionRequest = useCallback((request: SystematicBacktestStartInput) => {
+    const strategy = strategies.find((item) => item.id === request.strategyId);
+    if (!strategy) throw new Error(text.noStrategyDetail);
+    setSelectedStrategyId(request.strategyId);
+    setBacktestStrategyVersion(request.strategyVersion ?? strategy.version);
+    backtestReproductionSymbolRef.current = request.instId;
+    backtestDefaultRangeSymbolRef.current = request.instId;
+    setBacktestSymbol(request.instId);
+    setStartAt(request.startAt ? toDateTimeLocal(request.startAt) : "");
+    setEndAt(request.endAt ? toDateTimeLocal(request.endAt) : "");
+    if (request.initialEquityUsdt !== undefined) setInitialEquity(formatBacktestInputNumber(request.initialEquityUsdt));
+    if (request.preloadBars !== undefined) setPreloadBars(String(request.preloadBars));
+    if (request.execution) {
+      setEntrySlippage(formatBacktestInputNumber(request.execution.entrySlippageBps));
+      setExitSlippage(formatBacktestInputNumber(request.execution.exitSlippageBps));
+      setEntryFee(formatBacktestInputNumber(request.execution.entryFeeRate * 100));
+      setExitFee(formatBacktestInputNumber(request.execution.exitFeeRate * 100));
+    }
+    if (request.leverage !== undefined) setLeverage(formatBacktestInputNumber(request.leverage));
+    if (request.marginSafetyMultiplier !== undefined) setMarginSafetyMultiplier(formatBacktestInputNumber(request.marginSafetyMultiplier));
+    if (request.positionSizing) {
+      setBacktestPositionSizingMode(request.positionSizing.mode);
+      setBacktestPerEntryBudget(formatBacktestInputNumber(request.positionSizing.perEntryBudget));
+      setBacktestSameSideTotalBudget(formatBacktestInputNumber(request.positionSizing.sameSideTotalBudget));
+    }
+    if (request.endOfRunPolicy) setEndPolicy(request.endOfRunPolicy);
+    setTab("backtest");
+  }, [strategies, text.noStrategyDetail]);
+
+  const editBacktest = useCallback(async (run: SystematicBacktestView) => {
+    if (!desktop) return;
+    setEditingRunId(run.id);
+    try {
+      const request = await loadBacktestReproductionRequest(run);
+      applyBacktestReproductionRequest(request);
+    } catch (error) {
+      onNotify({ kind: "error", title: text.backtestReproductionFailed, message: messageOf(error) });
+    } finally {
+      setEditingRunId(null);
+    }
+  }, [applyBacktestReproductionRequest, desktop, loadBacktestReproductionRequest, onNotify, text]);
+
+  const retryBacktest = useCallback(async (run: SystematicBacktestView) => {
+    if (!desktop || run.status !== "failed") return;
+    setRetryingRunId(run.id);
+    try {
+      const request = await loadBacktestReproductionRequest(run);
+      const retried = await startSystematicBacktest(request);
+      if (!retried) throw new Error(text.desktopOnlyDetail);
+      await refresh();
+      setSelectedRunId(retried.id);
+      setTab("review");
+      onNotify({ kind: "info", title: text.backtestRetryQueued, message: `${run.strategyName} · v${run.strategyVersion} · ${run.instId}` });
+    } catch (error) {
+      onNotify({ kind: "error", title: text.backtestFailed, message: backtestErrorMessage(error, text) });
+    } finally {
+      setRetryingRunId(null);
+    }
+  }, [desktop, loadBacktestReproductionRequest, onNotify, refresh, text]);
 
   const confirmDelete = useCallback(() => {
     const action = confirmation;
@@ -814,13 +950,16 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       <nav className="systematic-strategy-lab__tabs" aria-label={text.workflow}>
         <TabButton active={tab === "strategy"} icon={<Code2 size={14} />} label={text.strategy} onClick={() => setTab("strategy")} />
         <TabButton active={tab === "backtest"} icon={<WalletCards size={14} />} label={text.backtest} onClick={() => setTab("backtest")} />
-        <TabButton active={tab === "review"} icon={<BarChart3 size={14} />} label={text.review} count={runs.length} onClick={() => setTab("review")} />
+        <TabButton active={tab === "review"} icon={<BarChart3 size={14} />} label={text.review} count={backtestPage?.total ?? runs.length} onClick={() => setTab("review")} />
         <TabButton active={tab === "profiles"} icon={<Bot size={14} />} label={text.profiles} count={overview?.profiles.length} onClick={() => setTab("profiles")} />
         <TabButton active={tab === "signals"} icon={<History size={14} />} label={text.profileSignals} onClick={() => setTab("signals")} />
       </nav>
 
       <div className="systematic-strategy-lab__body">
-        {tab === "strategy" ? (
+        <div
+          className={clsx("systematic-strategy-lab__tab-panel", tab !== "strategy" && "is-hidden")}
+          aria-hidden={tab !== "strategy"}
+        >
           <StrategyView
             text={text}
             strategies={strategies}
@@ -848,7 +987,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
               setTab("backtest");
             }}
           />
-        ) : null}
+        </div>
         {tab === "backtest" ? (
           <BacktestView
             text={text}
@@ -922,8 +1061,15 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
             onChoose={setSelectedRunId}
             onReplayIndex={moveReplayCursor}
             onReplayRangeDragging={setReplayRangeDragging}
+            onEdit={(run) => void editBacktest(run)}
+            onRetry={(run) => void retryBacktest(run)}
             onDelete={(run) => setConfirmation({ kind: "backtest", item: run })}
+            editingId={editingRunId}
+            retryingId={retryingRunId}
             deletingId={deletingId}
+            page={backtestPage ?? EMPTY_BACKTEST_PAGE}
+            pageLoading={loadingBacktestPage}
+            onPageChange={(page) => void loadBacktestPage(page)}
           />
         ) : null}
         {tab === "profiles" ? (
@@ -1228,9 +1374,11 @@ function StrategyView({
           closeButtonRef={documentationCloseRef}
           onClose={closeDocumentation}
         />
-      ) : aiOpen && selectedPython ? (
+      ) : null}
+      {selectedPython ? (
         <StrategyAiPanel
           key={selectedPython.id}
+          visible={aiOpen && !documentationOpen && !versionsOpen}
           text={text}
           draft={draft}
           strategy={selectedPython}
@@ -1246,7 +1394,8 @@ function StrategyView({
             setAiOpen(false);
           }}
         />
-      ) : versionsOpen && selectedPython ? (
+      ) : null}
+      {versionsOpen && selectedPython ? (
         <StrategyVersionHistory
           text={text}
           strategy={selectedPython}
@@ -1261,7 +1410,7 @@ function StrategyView({
           onUseForBacktest={onUseVersionForBacktest}
           onNotify={onNotify}
         />
-      ) : selectedPython ? (
+      ) : !aiOpen && !documentationOpen && !versionsOpen && selectedPython ? (
         <aside className="systematic-lab-strategy-inspector">
           <div className="systematic-lab__pane-head"><span>{text.strategyParameters}</span></div>
           <div className="systematic-lab-strategy-inspector__params">
@@ -2054,6 +2203,7 @@ function strategyGuideCopy(chinese: boolean) {
 
 function StrategyAiPanel({
   text,
+  visible,
   draft,
   strategy,
   chinese,
@@ -2066,6 +2216,7 @@ function StrategyAiPanel({
   onClose,
 }: Readonly<{
   text: Copy;
+  visible: boolean;
   draft: PythonDraft;
   strategy: SystematicStrategyView;
   chinese: boolean;
@@ -2085,6 +2236,9 @@ function StrategyAiPanel({
   const previousDraftRef = useRef(draft);
   const sourceRevisionRef = useRef(0);
   const sessionIdRef = useRef("");
+  const [sessionId, setSessionId] = useState("");
+  const [sessions, setSessions] = useState<AiSession[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
   const statusRef = useRef(status);
   const messagesRef = useRef(messages);
   const onDraftChangeRef = useRef(onDraftChange);
@@ -2128,6 +2282,50 @@ function StrategyAiPanel({
     const timer = window.setInterval(() => setClock(Date.now()), 1_000);
     return () => window.clearInterval(timer);
   }, [busy]);
+
+  const refreshSessions = useCallback(async () => {
+    if (!desktop) return [] as AiSession[];
+    const all = await listAiSessions();
+    const next = (all ?? [])
+      .filter((item) => item.id.startsWith("systematic-strategy-ai-"))
+      .sort((left, right) => right.updatedAt - left.updatedAt);
+    setSessions(next);
+    return next;
+  }, [desktop]);
+
+  const restoreSession = useCallback(async () => {
+    if (!desktop) {
+      setSessionsLoading(false);
+      return;
+    }
+    setSessionsLoading(true);
+    try {
+      const available = await refreshSessions();
+      const remembered = readSystematicAiSessionIds(strategy.id);
+      const targetId = remembered.find((id) => available.some((item) => item.id === id)) ?? available[0]?.id;
+      if (!targetId) {
+        sessionIdRef.current = "";
+        setSessionId("");
+        setMessages([]);
+        return;
+      }
+      const snapshot = await loadAiSession(targetId);
+      if (!snapshot) return;
+      sessionIdRef.current = snapshot.session.id;
+      setSessionId(snapshot.session.id);
+      rememberSystematicAiSession(strategy.id, snapshot.session.id);
+      setMessages(snapshot.messages.map(storedMessageToUiMessage));
+      setStatus("idle");
+    } catch (error) {
+      onNotifyRef.current({ kind: "error", title: textRef.current.aiAssistantFailed, message: messageOf(error) });
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [desktop, refreshSessions, strategy.id]);
+
+  useEffect(() => {
+    void restoreSession();
+  }, [restoreSession]);
 
   const replaceDraftSource = useCallback((source: string) => {
     const current = draftRef.current;
@@ -2297,19 +2495,49 @@ function StrategyAiPanel({
   }, [clearSourceTypingPreview]);
 
   useEffect(() => () => {
-    clearSourceTypingPreview();
-    const sessionId = sessionIdRef.current;
-    if (sessionId) void stopAiMessage(sessionId).catch(() => undefined);
+    // The panel stays mounted while tabs or the close button only hide it.
+    // An actual unmount means the strategy scope left the page, so abort the
+    // old turn while keeping its persisted Cline transcript available.
+    stopConversation();
     onBusyChange(false);
-  }, [clearSourceTypingPreview, onBusyChange]);
+  }, [onBusyChange, stopConversation]);
+
+  const switchSession = useCallback(async (targetSessionId: string) => {
+    if (!targetSessionId || targetSessionId === sessionIdRef.current || busy) return;
+    try {
+      setSessionsLoading(true);
+      const snapshot = await loadAiSession(targetSessionId);
+      if (!snapshot) throw new Error("策略 AI 会话不存在或已被删除");
+      sessionIdRef.current = snapshot.session.id;
+      setSessionId(snapshot.session.id);
+      rememberSystematicAiSession(strategy.id, snapshot.session.id);
+      setMessages(snapshot.messages.map(storedMessageToUiMessage));
+      setStatus("idle");
+    } catch (error) {
+      onNotifyRef.current({ kind: "error", title: textRef.current.aiAssistantFailed, message: messageOf(error) });
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [busy, strategy.id]);
+
+  const startNewSession = useCallback(() => {
+    if (busy) return;
+    sessionIdRef.current = "";
+    setSessionId("");
+    setMessages([]);
+    setStatus("idle");
+    clearSourceTypingPreview();
+  }, [busy, clearSourceTypingPreview]);
 
   const submit = useCallback(async () => {
     const content = prompt.trim();
     if (!content || busy || !desktop || !draftRef.current.id) return;
     if (!sessionIdRef.current) {
       sessionIdRef.current = `systematic-strategy-ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      setSessionId(sessionIdRef.current);
     }
     const sessionId = sessionIdRef.current;
+    rememberSystematicAiSession(strategy.id, sessionId);
     const userMessage: AiUiMessage = { id: `u-${Date.now()}`, role: "user", text: content, tools: [], approvals: [] };
     const assistantMessage: AiUiMessage = { id: `a-${Date.now()}`, role: "assistant", text: "", reasoning: "", tools: [], approvals: [], status: textRef.current.aiChatConnecting };
     const nextMessages = [...messagesRef.current, userMessage, assistantMessage];
@@ -2324,6 +2552,7 @@ function StrategyAiPanel({
         prompt: content,
         commentLanguage: chinese ? "zh-CN" : "en-US",
       });
+      void refreshSessions();
     } catch (error) {
       if (sessionIdRef.current !== sessionId) return;
       setStatus("failed");
@@ -2332,12 +2561,7 @@ function StrategyAiPanel({
         : message));
       onNotifyRef.current({ kind: "error", title: textRef.current.aiAssistantFailed, message: messageOf(error) });
     }
-  }, [busy, chinese, desktop, prompt, strategy.id]);
-
-  const close = useCallback(() => {
-    stopConversation();
-    onClose();
-  }, [onClose, stopConversation]);
+  }, [busy, chinese, desktop, prompt, refreshSessions, strategy.id]);
 
   const statusLabel = status === "typing" ? text.aiSourceWriting
     : status === "failed" ? text.aiAssistantFailed
@@ -2345,13 +2569,30 @@ function StrategyAiPanel({
         : text.aiChatReady;
 
   return (
-    <aside className="systematic-lab-strategy-ai-panel" aria-label={text.aiAssistant}>
+    <aside className={clsx("systematic-lab-strategy-ai-panel", !visible && "is-hidden")} aria-label={text.aiAssistant} aria-hidden={!visible}>
       <div className="systematic-lab-strategy-ai-panel__head">
         <div>
           <span className="systematic-lab__eyebrow">{text.aiAssistant}</span>
           <strong><Bot size={14} /> {strategy.name}</strong>
         </div>
-        <button className="systematic-lab__icon-button" type="button" onClick={close} title={text.closeAiAssistant} aria-label={text.closeAiAssistant}><X size={14} /></button>
+        <div className="systematic-lab-strategy-ai-panel__head-actions">
+          <TerminalSelect
+            className="systematic-lab-strategy-ai-panel__session-select"
+            triggerClassName="systematic-lab-strategy-ai-panel__session-trigger"
+            value={sessionId}
+            disabled={sessionsLoading || busy}
+            ariaLabel={text.aiChatSession}
+            menuMinWidth={240}
+            preserveOptionLabels
+            options={[
+              { value: "", label: text.aiChatNewSession },
+              ...sessions.map((item) => ({ value: item.id, label: `${item.title || item.id} · ${formatFullDateTime(item.updatedAt)}` })),
+            ]}
+            onChange={(value) => value ? void switchSession(value) : startNewSession()}
+          />
+          <button className="systematic-lab__icon-button" type="button" onClick={startNewSession} disabled={busy} title={text.aiChatNewSession} aria-label={text.aiChatNewSession}><FilePlus2 size={13} /></button>
+          <button className="systematic-lab__icon-button" type="button" onClick={onClose} title={text.closeAiAssistant} aria-label={text.closeAiAssistant}><X size={14} /></button>
+        </div>
       </div>
       <div className="systematic-lab-strategy-ai-panel__messages" ref={scrollRef}>
         {messages.length === 0 ? <div className="systematic-lab-strategy-ai-panel__empty"><Bot size={18} /><p>{text.aiChatEmpty}</p></div> : null}
@@ -2499,6 +2740,10 @@ function BacktestView({
   onApplyOptimization: (parameters: Record<string, unknown>) => void;
 }>) {
   const runtimeAvailable = Boolean(pythonRuntime?.available);
+  const contractOptions = useMemo(
+    () => Array.from(new Set([selectedSymbol, ...watchlist].filter(Boolean))).map((symbol) => ({ value: symbol, label: symbol })),
+    [selectedSymbol, watchlist],
+  );
   const canRun = selectedStrategy?.kind === "python"
     && runtimeAvailable
     && !starting && !optimizing;
@@ -2540,7 +2785,7 @@ function BacktestView({
               <TerminalSelect
                 ariaLabel={text.contract}
                 value={selectedSymbol}
-                options={watchlist.map((symbol) => ({ value: symbol, label: symbol }))}
+                options={contractOptions}
                 onChange={onSymbolChange}
               />
             </label>
@@ -2714,7 +2959,7 @@ function OptimizationPanel({ text, optimizations, onApply }: Readonly<{
   );
 }
 
-function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, replayAbsoluteIndex, replayPageLoading, replayBars, replayCursorBar, replayFills, replayFillLedger, replayFillCount, replaySnapshot, replayClosedTradeLedger, replayClosedTradeCount, replayFees, onChoose, onReplayIndex, onReplayRangeDragging, onDelete, deletingId }: Readonly<{
+function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, replayAbsoluteIndex, replayPageLoading, replayBars, replayCursorBar, replayFills, replayFillLedger, replayFillCount, replaySnapshot, replayClosedTradeLedger, replayClosedTradeCount, replayFees, onChoose, onReplayIndex, onReplayRangeDragging, onEdit, onRetry, onDelete, editingId, retryingId, deletingId, page, pageLoading, onPageChange }: Readonly<{
   text: Copy;
   runs: SystematicBacktestView[];
   selectedRun: SystematicBacktestView | null;
@@ -2735,13 +2980,24 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   onChoose: (id: string) => void;
   onReplayIndex: (value: number, immediate?: boolean) => void;
   onReplayRangeDragging: (dragging: boolean) => void;
+  onEdit: (run: SystematicBacktestView) => void;
+  onRetry: (run: SystematicBacktestView) => void;
   onDelete: (run: SystematicBacktestView) => void;
+  editingId: string | null;
+  retryingId: string | null;
   deletingId: string | null;
+  page: SystematicBacktestsPageView;
+  pageLoading: boolean;
+  onPageChange: (page: number) => void;
 }>) {
   const [accountTab, setAccountTab] = useState<"ledger" | "position" | "history">("ledger");
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [compareRunIds, setCompareRunIds] = useState<string[]>([]);
+  const [openActionRunId, setOpenActionRunId] = useState<string | null>(null);
+  const actionTriggerRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const actionMenuRef = useRef<HTMLDivElement | null>(null);
+  const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const report = detail?.report;
   const metrics = report?.metrics;
   const visibleBar = replayCursorBar;
@@ -2797,7 +3053,71 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   useEffect(() => {
     setReplayPlaying(false);
     setCompareRunIds([]);
+    setOpenActionRunId(null);
+    setActionMenuPosition(null);
   }, [selectedRun?.id]);
+
+  const openActionRun = openActionRunId ? runs.find((run) => run.id === openActionRunId) ?? null : null;
+  const actionMenuItemCount = openActionRun?.status === "failed" ? 4 : 3;
+  const calculateActionMenuPosition = useCallback((trigger: HTMLElement, itemCount: number) => {
+    const rect = trigger.getBoundingClientRect();
+    const menuWidth = 176;
+    const menuHeight = itemCount * 25 + 10 + Math.max(0, itemCount - 1);
+    const viewportGap = 10;
+    const menuGap = 5;
+    const left = Math.min(
+      Math.max(viewportGap, rect.right - menuWidth),
+      Math.max(viewportGap, window.innerWidth - menuWidth - viewportGap),
+    );
+    const below = rect.bottom + menuGap;
+    const above = rect.top - menuHeight - menuGap;
+    const top = below + menuHeight <= window.innerHeight - viewportGap
+      ? below
+      : Math.max(viewportGap, above);
+    return { top, left };
+  }, []);
+  const updateActionMenuPosition = useCallback(() => {
+    if (!openActionRunId) return;
+    const trigger = actionTriggerRefs.current[openActionRunId]
+      ?? Array.from(document.querySelectorAll<HTMLButtonElement>(".systematic-lab-run-row__actions-trigger"))
+        .find((candidate) => candidate.dataset.actionRunId === openActionRunId);
+    if (!trigger) return;
+    setActionMenuPosition(calculateActionMenuPosition(trigger, actionMenuItemCount));
+  }, [actionMenuItemCount, calculateActionMenuPosition, openActionRunId]);
+
+  useEffect(() => {
+    if (!openActionRunId) {
+      setActionMenuPosition(null);
+      return;
+    }
+    updateActionMenuPosition();
+    const close = (event: PointerEvent) => {
+      const target = event.target;
+      const trigger = actionTriggerRefs.current[openActionRunId]
+        ?? Array.from(document.querySelectorAll<HTMLButtonElement>(".systematic-lab-run-row__actions-trigger"))
+          .find((candidate) => candidate.dataset.actionRunId === openActionRunId);
+      if (target instanceof Node && (actionMenuRef.current?.contains(target) || trigger?.contains(target))) return;
+      setOpenActionRunId(null);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setOpenActionRunId(null);
+      const trigger = actionTriggerRefs.current[openActionRunId]
+        ?? Array.from(document.querySelectorAll<HTMLButtonElement>(".systematic-lab-run-row__actions-trigger"))
+          .find((candidate) => candidate.dataset.actionRunId === openActionRunId);
+      trigger?.focus();
+    };
+    document.addEventListener("pointerdown", close);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", updateActionMenuPosition);
+    window.addEventListener("scroll", updateActionMenuPosition, true);
+    return () => {
+      document.removeEventListener("pointerdown", close);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", updateActionMenuPosition);
+      window.removeEventListener("scroll", updateActionMenuPosition, true);
+    };
+  }, [openActionRunId, updateActionMenuPosition]);
 
   useEffect(() => {
     if (!replayPlaying || replayTotalBarCount <= 0) return;
@@ -2833,12 +3153,14 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   return (
     <div className="systematic-lab-review-view">
       <aside className="systematic-lab-run-list">
-        <div className="systematic-lab__pane-head"><span>{text.backtestRuns}</span><span className="systematic-lab__count">{runs.length}</span></div>
+        <div className="systematic-lab__pane-head"><span>{text.backtestRuns}</span><span className="systematic-lab__count">{page.total}</span></div>
         <div className="systematic-lab-run-list__scroll">
           {runs.map((run) => {
             const returnPct = run.metrics?.netReturnPct;
             const completed = run.status === "completed";
-            return <div key={run.id} className={clsx("systematic-lab-run-row", selectedRun?.id === run.id && "is-selected")}>
+            const actionMenuId = `systematic-backtest-actions-${run.id}`;
+            const actionsOpen = openActionRunId === run.id;
+            return <div key={run.id} className={clsx("systematic-lab-run-row", selectedRun?.id === run.id && "is-selected", actionsOpen && "is-actions-open")}>
               <button type="button" className="systematic-lab-run-row__select" onClick={() => onChoose(run.id)}>
                 <span className={clsx("systematic-lab-run-row__state", `is-${run.status}`)} />
                 <span>
@@ -2852,18 +3174,52 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                   completed && typeof returnPct === "number" && returnPct < 0 && "is-negative",
                 )}>{completed ? formatPercent(returnPct) : `${Math.round(run.progressPct)}%`}</em>
               </button>
-              <button
-                type="button"
-                className={clsx("systematic-lab-run-row__compare", compareRunIds.includes(run.id) && "is-active")}
-                title={text.compareRuns}
-                aria-label={`${text.compareRuns}: ${run.strategyName}`}
-                aria-pressed={compareRunIds.includes(run.id)}
-                onClick={() => toggleCompareRun(run.id)}
-              ><GitCompareArrows size={13} /></button>
-              <button type="button" className="systematic-lab__row-delete" title={text.deleteBacktest} aria-label={text.deleteBacktest} disabled={deletingId === run.id || ["queued", "running", "cancelling"].includes(run.status)} onClick={() => onDelete(run)}>{deletingId === run.id ? <LoaderCircle size={13} className="is-spinning" /> : <Trash2 size={13} />}</button>
+              <div className="systematic-lab-run-row__actions">
+                <button
+                  type="button"
+                  className="systematic-lab-run-row__actions-trigger"
+                  ref={(node) => { actionTriggerRefs.current[run.id] = node; }}
+                  data-action-run-id={run.id}
+                  title={text.runActions}
+                  aria-label={`${text.runActions}: ${run.strategyName}`}
+                  aria-expanded={actionsOpen}
+                  aria-controls={actionMenuId}
+                  onClick={(event) => {
+                    if (actionsOpen) {
+                      setOpenActionRunId(null);
+                      setActionMenuPosition(null);
+                      return;
+                    }
+                    setOpenActionRunId(run.id);
+                    setActionMenuPosition(calculateActionMenuPosition(event.currentTarget, run.status === "failed" ? 4 : 3));
+                  }}
+                >{text.runActions}<ChevronDown size={12} className={clsx(actionsOpen && "is-open")} /></button>
+              </div>
+              {actionsOpen && actionMenuPosition && typeof document !== "undefined" ? createPortal(
+                <div
+                  ref={actionMenuRef}
+                  id={actionMenuId}
+                  className="systematic-lab-run-row__menu"
+                  role="menu"
+                  aria-label={`${text.runActions}: ${run.strategyName}`}
+                  style={actionMenuPosition}
+                  onPointerDown={(event) => event.stopPropagation()}
+                >
+                  <button type="button" role="menuitem" disabled={editingId === run.id} onClick={() => { setOpenActionRunId(null); setActionMenuPosition(null); onEdit(run); }}>{editingId === run.id ? <LoaderCircle size={13} className="is-spinning" /> : <Pencil size={13} />}{text.editBacktest}</button>
+                  {run.status === "failed" ? <button type="button" role="menuitem" disabled={retryingId === run.id} onClick={() => { setOpenActionRunId(null); setActionMenuPosition(null); onRetry(run); }}>{retryingId === run.id ? <LoaderCircle size={13} className="is-spinning" /> : <RotateCcw size={13} />}{text.retryBacktest}</button> : null}
+                  <button type="button" role="menuitem" className={clsx(compareRunIds.includes(run.id) && "is-active")} aria-pressed={compareRunIds.includes(run.id)} onClick={() => { setOpenActionRunId(null); setActionMenuPosition(null); toggleCompareRun(run.id); }}><GitCompareArrows size={13} />{text.compareRuns}</button>
+                  <button type="button" role="menuitem" className="is-danger" disabled={deletingId === run.id || ["queued", "running", "cancelling"].includes(run.status)} onClick={() => { setOpenActionRunId(null); setActionMenuPosition(null); onDelete(run); }}>{deletingId === run.id ? <LoaderCircle size={13} className="is-spinning" /> : <Trash2 size={13} />}{text.deleteBacktest}</button>
+                </div>,
+                document.body,
+              ) : null}
             </div>;
           })}
           {runs.length === 0 ? <EmptyState icon={<History size={18} />} title={text.noRuns} detail={text.noRunsDetail} /> : null}
+        </div>
+        <div className="systematic-lab-run-list__pagination" aria-label={text.backtestPagination}>
+          <button type="button" disabled={pageLoading || page.page <= 1} onClick={() => onPageChange(page.page - 1)} title={text.backtestPreviousPage} aria-label={text.backtestPreviousPage}><ChevronLeft size={13} /></button>
+          <span>{page.page} / {Math.max(1, page.totalPages)}</span>
+          <button type="button" disabled={pageLoading || page.page >= page.totalPages} onClick={() => onPageChange(page.page + 1)} title={text.backtestNextPage} aria-label={text.backtestNextPage}><ChevronRight size={13} /></button>
         </div>
         {comparisonRuns.length === 2 ? (
           <section className="systematic-lab-run-comparison" aria-label={text.compareRuns}>
@@ -4216,6 +4572,10 @@ function numberInput(value: string) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 
+function formatBacktestInputNumber(value: number) {
+  return Number(value.toFixed(10)).toString();
+}
+
 function integerInput(value: string) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
@@ -4523,7 +4883,7 @@ function copy(chinese: boolean) {
       pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.10 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", retryPython: "重新检测",
       save: "保存版本", name: "名称", description: "说明", source: "策略源码", strategyParameters: "策略参数", parameters: "参数", parameterTuning: "参数调优范围", parameterTuningHint: "平台固定支持顶层数值参数；仅调整范围与步长", parameterTuningUnavailable: "策略参数数据无效。", noNumericParameters: "当前参数中没有可调优的顶层数值。", noVisualParameters: "没有可视化的标量参数。", parameter: "参数", parameterDefault: "当前值", tuningMin: "最小", tuningMax: "最大", tuningStep: "步长", bestBacktest: "最佳回测", backtestDays: "回测 {days} 天", openBestBacktest: "查看最佳回测", deleteStrategy: "删除策略", deleteStrategyConfirm: "删除策略“{name}”及其所有本地回测、报告和调优记录？此操作不可撤销。", strategyDeleted: "策略已删除", strategyDeleteFailed: "无法删除策略", deleteBacktest: "删除回测", deleteBacktestConfirm: "删除“{name}”的该回测记录和本地回放数据？此操作不可撤销。", backtestDeleted: "回测已删除", backtestDeleteFailed: "无法删除回测", strategyUnchanged: "策略没有变更", strategyUnchangedDetail: "名称、说明、源码、参数和调优范围均未变化，未创建新版本。",
       versionHistory: "版本历史", closeVersionHistory: "关闭版本历史", versionHistoryHint: "历史快照不可修改；载入后只会写入当前未保存草稿。", versionLabel: "版本 {version}", latestVersion: "最新", versionUsage: "回测 {backtests} · Profiles {profiles}", noVersions: "没有可用版本", noVersionsDetail: "保存策略后会在此保留不可变版本。", loading: "正在加载", setCompareBaseline: "设为对比基线", compareBaseline: "对比基线：{version}", compareVersions: "比较版本", compareDraft: "与当前草稿比较", currentDraft: "当前草稿", loadVersionToDraft: "载入到草稿", versionLoadedToDraft: "版本已载入草稿", versionLoadedToDraftDetail: "{version} 已载入编辑器，尚未保存，也不会覆盖历史版本。", backtestThisVersion: "回测此版本", selectVersion: "选择一个版本以审阅、比较或载入草稿。", versionBacktests: "回测", versionProfiles: "Profiles", versionHash: "源码哈希", noDescription: "没有说明", closeComparison: "关闭比较", compareSections: "比较内容", historicalVersion: "历史版本",
-      aiAssistant: "AI 策略助手", closeAiAssistant: "关闭 AI 策略助手", aiSourceApplied: "AI 已写入源码", aiSourceAppliedDetail: "只写入当前未保存草稿；请审阅后手动保存版本。", aiSourceWriteCancelled: "你已手动编辑源码，已停止 AI 写入。", aiAssistantFailed: "AI 策略助手不可用", aiChatConnecting: "正在连接策略助手", aiSourceWriting: "正在写入编辑器", aiChatWorking: "正在处理", aiChatReady: "可继续对话", aiChatEmpty: "说明要修改、解释或审阅的策略逻辑。AI 会先读取当前编辑器内容；只有使用写入工具时才会修改当前未保存源码。", you: "你", ai: "AI", aiChatPlaceholder: "例如：解释当前入场条件，并将止损改为以 ATR 为基础", aiChatPrompt: "向 AI 策略助手提问", aiChatStop: "停止生成", aiChatSend: "发送",
+      aiAssistant: "AI 策略助手", closeAiAssistant: "关闭 AI 策略助手", aiSourceApplied: "AI 已写入源码", aiSourceAppliedDetail: "只写入当前未保存草稿；请审阅后手动保存版本。", aiSourceWriteCancelled: "你已手动编辑源码，已停止 AI 写入。", aiAssistantFailed: "AI 策略助手不可用", aiChatConnecting: "正在连接策略助手", aiSourceWriting: "正在写入编辑器", aiChatWorking: "正在处理", aiChatReady: "可继续对话", aiChatEmpty: "说明要修改、解释或审阅的策略逻辑。AI 会先读取当前编辑器内容；只有使用写入工具时才会修改当前未保存源码。", aiChatSession: "策略 AI 会话", aiChatNewSession: "新建会话", you: "你", ai: "AI", aiChatPlaceholder: "例如：解释当前入场条件，并将止损改为以 ATR 为基础", aiChatPrompt: "向 AI 策略助手提问", aiChatStop: "停止生成", aiChatSend: "发送",
       developmentDocumentation: "开发文档", closeDocumentation: "关闭开发文档", documentationTitle: "Python 策略开发", documentationIntro: "宿主提供当前时点的行情与虚拟账户；策略只返回高层动作，所有成交、费用和账本由回测引擎处理。",
       documentationLifecycle: "1 分钟收线后决策", documentationLifecycleDetail: "必须实现 on_bar(ctx)。on_start(ctx) 可用于初始化；需要成交记录时，在 on_bar 中读取 ctx.portfolio.recent_fills。当前回测只在已确认的 1m K 线收线后调用。",
       documentationMarket: "读取当前时点市场数据", documentationMarketDetail: "使用 ctx.market.bars(合约, 周期, lookback=...) 读取 1m 至 1D 的窗口。高周期最后一根可能仍在形成，使用 bar.confirmed 判断后再作为确认信号。",
@@ -4548,7 +4908,7 @@ function copy(chinese: boolean) {
       timeline: "时间线", replayContract: "虚拟账户回放", preloadHistoryDetail: "只加载正式评估开始前的已确认 1 分钟 K 线，不进入权益、回放或统计。", barCloses: "K 线收线", barClosesDetail: "正式评估中，策略只能读取当前及过去数据；高周期末根会明确标记是否已收线。",
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
-      backtestRuns: "回测记录", backtestDuration: "耗时", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
+    backtestRuns: "回测记录", backtestDuration: "耗时", runActions: "操作", editBacktest: "编辑回测参数", retryBacktest: "重试回测", backtestRetryQueued: "回测已重新排队", backtestParametersRestored: "回测参数已复现", backtestReproductionFailed: "无法复现回测参数", backtestPagination: "回测记录分页", backtestPreviousPage: "上一页", backtestNextPage: "下一页", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
       result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", replayPageTimeout: "回放区间加载超时，请重新拖动进度条后重试。", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线",
       previousBar: "上一根 K 线", nextBar: "下一根 K 线", replay: "回放进度", playReplay: "播放回放", pauseReplay: "暂停回放", replaySpeed: "回放速度", compareRuns: "比较回测", clearComparison: "清除比较", replayActionLegend: "成交动作", limitFillEstimateDetail: "限价单只依据后续 1 分钟 K 线的价格穿越与成交量参与上限模拟，不能代表历史订单簿队列成交。", resultUnavailable: "回放数据不可用", resultUnavailableDetail: "该回测没有可读取的本地快照。",
       replayAccount: "回放账户", tradeLedger: "成交账本", position: "仓位", positionHistory: "历史仓位", noTrades: "没有已平仓交易", noTradesDetail: "动作、成交和权益仍会保留在回测报告中。", noReplayTrades: "当前时点没有已平仓交易", noReplayTradesDetail: "继续回放以查看后续记账结果。", noReplayFills: "当前时点没有成交", noReplayFillsDetail: "继续回放以查看下一根开盘成交和保护性退出。", noPosition: "当前时点没有持仓", noPositionDetail: "仓位将在下一根开盘成交后显示。", contracts: "张", contractValue: "每张面值", notional: "名义价值", entryPrice: "开仓均价", exitPrice: "平仓均价", markPrice: "标记价格", funding: "资金费用", stopLoss: "止损", takeProfit: "止盈", holdingTime: "持有时长", fillPrice: "成交价", marginChange: "保证金变动", entryNotional: "开仓名义价值", exitNotional: "平仓名义价值", fee: "手续费", buy: "买入", sell: "卖出", long: "多", short: "空",
@@ -4569,7 +4929,7 @@ function copy(chinese: boolean) {
     pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.10 through 3.13, add it to your system PATH, then select Recheck.", retryPython: "Recheck",
     save: "Save version", name: "Name", description: "Description", source: "Strategy source", strategyParameters: "Strategy parameters", parameters: "Parameters", parameterTuning: "Parameter tuning ranges", parameterTuningHint: "The platform recognizes top-level numeric parameters; adjust only range and step", parameterTuningUnavailable: "Strategy parameters are invalid.", noNumericParameters: "This strategy has no top-level numeric parameters to tune.", noVisualParameters: "No scalar parameters can be edited visually.", parameter: "Parameter", parameterDefault: "Current", tuningMin: "Min", tuningMax: "Max", tuningStep: "Step", bestBacktest: "Best backtest", backtestDays: "{days}d backtest", openBestBacktest: "Open best backtest", deleteStrategy: "Delete strategy", deleteStrategyConfirm: "Delete strategy “{name}” with all of its local backtests, reports, and optimization records? This cannot be undone.", strategyDeleted: "Strategy deleted", strategyDeleteFailed: "Could not delete strategy", deleteBacktest: "Delete backtest", deleteBacktestConfirm: "Delete this backtest record and local replay data for “{name}”? This cannot be undone.", backtestDeleted: "Backtest deleted", backtestDeleteFailed: "Could not delete backtest", strategyUnchanged: "No strategy changes", strategyUnchangedDetail: "Name, description, source, parameters, and tuning ranges are unchanged, so no version was created.",
     versionHistory: "Version history", closeVersionHistory: "Close version history", versionHistoryHint: "Historical snapshots are immutable. Loading one writes only to the current unsaved draft.", versionLabel: "Version {version}", latestVersion: "Latest", versionUsage: "Backtests {backtests} · Profiles {profiles}", noVersions: "No saved version", noVersionsDetail: "Saved strategies keep immutable snapshots here.", loading: "Loading", setCompareBaseline: "Set comparison baseline", compareBaseline: "Baseline: {version}", compareVersions: "Compare versions", compareDraft: "Compare with draft", currentDraft: "Current draft", loadVersionToDraft: "Load into draft", versionLoadedToDraft: "Version loaded into draft", versionLoadedToDraftDetail: "{version} is now in the editor, unsaved, and did not replace historical snapshots.", backtestThisVersion: "Backtest this version", selectVersion: "Select a version to review, compare, or load into the draft.", versionBacktests: "Backtests", versionProfiles: "Profiles", versionHash: "Source hash", noDescription: "No description", closeComparison: "Close comparison", compareSections: "Comparison section", historicalVersion: "Historical version",
-    aiAssistant: "AI strategy assistant", closeAiAssistant: "Close AI strategy assistant", aiSourceApplied: "AI source written", aiSourceAppliedDetail: "Only the current unsaved draft changed. Review it, then save a version manually.", aiSourceWriteCancelled: "You edited the source, so AI writing stopped.", aiAssistantFailed: "AI strategy assistant unavailable", aiChatConnecting: "Connecting strategy assistant", aiSourceWriting: "Writing into the editor", aiChatWorking: "Working", aiChatReady: "Ready for another message", aiChatEmpty: "Ask to change, explain, or review the strategy. AI reads the current editor first and can change only this unsaved source through its write tool.", you: "You", ai: "AI", aiChatPlaceholder: "For example: explain the current entry logic and use an ATR-based stop", aiChatPrompt: "Ask the AI strategy assistant", aiChatStop: "Stop generation", aiChatSend: "Send",
+    aiAssistant: "AI strategy assistant", closeAiAssistant: "Close AI strategy assistant", aiSourceApplied: "AI source written", aiSourceAppliedDetail: "Only the current unsaved draft changed. Review it, then save a version manually.", aiSourceWriteCancelled: "You edited the source, so AI writing stopped.", aiAssistantFailed: "AI strategy assistant unavailable", aiChatConnecting: "Connecting strategy assistant", aiSourceWriting: "Writing into the editor", aiChatWorking: "Working", aiChatReady: "Ready for another message", aiChatEmpty: "Ask to change, explain, or review the strategy. AI reads the current editor first and can change only this unsaved source through its write tool.", aiChatSession: "Strategy AI session", aiChatNewSession: "New session", you: "You", ai: "AI", aiChatPlaceholder: "For example: explain the current entry logic and use an ATR-based stop", aiChatPrompt: "Ask the AI strategy assistant", aiChatStop: "Stop generation", aiChatSend: "Send",
     developmentDocumentation: "Development guide", closeDocumentation: "Close development guide", documentationTitle: "Python strategy development", documentationIntro: "The host provides point-in-time market data and a virtual account. Your strategy returns high-level actions; the backtest engine owns fills, costs, and the ledger.",
     documentationLifecycle: "Decide after a one-minute close", documentationLifecycleDetail: "Implement on_bar(ctx). Use optional on_start(ctx) for initialization; read ctx.portfolio.recent_fills from on_bar when you need completed fills. The current backtest calls only after a confirmed 1m bar closes.",
     documentationMarket: "Read point-in-time market data", documentationMarketDetail: "Use ctx.market.bars(instrument, interval, lookback=...) for 1m through 1D windows. A final higher-timeframe bar can still be forming, so check bar.confirmed before treating it as a confirmed signal.",
@@ -4594,7 +4954,7 @@ function copy(chinese: boolean) {
     timeline: "TIMELINE", replayContract: "Virtual-account replay", preloadHistoryDetail: "Confirmed 1-minute history before evaluation start is context only, never equity, replay, or statistics.", barCloses: "Bar closes", barClosesDetail: "The host exposes only current and earlier data; the final higher-timeframe bar states whether it is confirmed.",
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",
-    backtestRuns: "Backtest runs", backtestDuration: "Elapsed", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
+    backtestRuns: "Backtest runs", backtestDuration: "Elapsed", runActions: "Actions", editBacktest: "Edit backtest parameters", retryBacktest: "Retry backtest", backtestRetryQueued: "Backtest re-queued", backtestParametersRestored: "Backtest parameters restored", backtestReproductionFailed: "Could not reproduce backtest parameters", backtestPagination: "Backtest pagination", backtestPreviousPage: "Previous page", backtestNextPage: "Next page", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
     result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", replayPageTimeout: "Replay page loading timed out. Drag the timeline again to retry.", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve",
     previousBar: "Previous bar", nextBar: "Next bar", replay: "Replay progress", playReplay: "Play replay", pauseReplay: "Pause replay", replaySpeed: "Replay speed", compareRuns: "Compare backtests", clearComparison: "Clear comparison", replayActionLegend: "Filled actions", limitFillEstimate: "Limit: conservative K-line estimate", limitFillEstimateDetail: "Limit fills use only later 1m price traversal and a volume-participation cap. They do not represent historical order-book queue fills.", resultUnavailable: "Replay data unavailable", resultUnavailableDetail: "This run has no readable local snapshot.",
     replayAccount: "Replay account", tradeLedger: "Fill ledger", position: "Position", positionHistory: "Position history", noTrades: "No closed trades", noTradesDetail: "Actions, fills, and equity remain in the full backtest report.", noReplayTrades: "No closed trade at this time", noReplayTradesDetail: "Continue the replay to view later ledger entries.", noReplayFills: "No fill at this time", noReplayFillsDetail: "Continue the replay to view next-open fills and protective exits.", noPosition: "No position at this time", noPositionDetail: "A position appears after its next-open fill.", contracts: "contracts", contractValue: "Contract value", notional: "Notional", entryPrice: "Average entry", exitPrice: "Exit price", markPrice: "Mark price", funding: "Funding", stopLoss: "Stop loss", takeProfit: "Take profit", holdingTime: "Holding time", fillPrice: "Fill price", marginChange: "Margin change", entryNotional: "Entry notional", exitNotional: "Exit notional", fee: "Fee", buy: "Buy", sell: "Sell", long: "Long", short: "Short",

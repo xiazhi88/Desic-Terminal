@@ -1029,6 +1029,7 @@ pub(crate) async fn systematic_profile_cancel_order(
             account_id: Some(account_id.to_string()),
             environment: environment.to_string(),
             inst_id: inst_id.to_string(),
+            confirmed_live: Some(true),
             ord_id: Some(order_id.to_string()),
             cl_ord_id: None,
             is_algo: Some(false),
@@ -1085,6 +1086,7 @@ pub(crate) async fn systematic_profile_cancel_order_by_client_id(
             account_id: Some(account_id.to_string()),
             environment: environment.to_string(),
             inst_id: inst_id.to_string(),
+            confirmed_live: Some(true),
             ord_id: (!order.ord_id.trim().is_empty()).then_some(order.ord_id.clone()),
             cl_ord_id: (!order.cl_ord_id.trim().is_empty())
                 .then_some(order.cl_ord_id.clone())
@@ -10064,6 +10066,7 @@ async fn execute_trade_opportunity(
             account_id: opportunity.account_id.clone(),
             environment: opportunity.environment.clone(),
             inst_id: opportunity.inst_id.clone(),
+            confirmed_live: Some(true),
             ord_id: opportunity.order_id.clone(),
             cl_ord_id: opportunity.client_order_id.clone(),
             is_algo: Some(

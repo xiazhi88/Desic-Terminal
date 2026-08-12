@@ -8,6 +8,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
+import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, preservesClineConversation } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -55,6 +56,55 @@ expectEqual("runtime id is stable", backgroundRuntimeId, toClineRuntimeSessionId
 expectTrue("sanitized ids remain collision resistant", toClineRuntimeSessionId("run:a") !== toClineRuntimeSessionId("run?a"));
 expectTrue("runtime id length is bounded", toClineRuntimeSessionId(`background:${"x".repeat(200)}`).length <= 96);
 expectTrue("Windows reserved name is prefixed", toClineRuntimeSessionId("CON").toLowerCase() !== "con");
+expectTrue("strategy conversations preserve the Cline runtime", preservesClineConversation("systematic-strategy-ai-123"));
+expectTrue("idle strategy runtime resumes its Cline conversation", canResumeClineConversation("systematic-strategy-ai-123", { status: "idle" }));
+expectEqual("failed strategy runtime starts a fresh Cline conversation", canResumeClineConversation("systematic-strategy-ai-123", { status: "failed" }), false);
+expectEqual("ordinary conversations retain normal stop behavior without an explicit scope", preservesClineConversation("session-123"), false);
+expectTrue(
+  "explicitly scoped trading conversations preserve the Cline runtime",
+  preservesClineConversation("session-123", { preserveClineConversation: true })
+);
+expectTrue(
+  "idle scoped trading runtime resumes its Cline conversation",
+  canResumeClineConversation("session-123", { status: "idle" }, { preserveClineConversation: true })
+);
+expectEqual(
+  "completed scoped runtime is rehydrated instead of directly resumed",
+  canResumeClineConversation("session-123", { status: "completed" }, { preserveClineConversation: true }),
+  false
+);
+const conversationConfig = {
+  preserveClineConversation: true,
+  conversationScope: { kind: "trading-assistant", accountId: "account-test" },
+  model: "test-model",
+  permissionMode: "advisor",
+  toolAllowlist: ["market.readTicker"],
+  activeSkillIds: ["desic-core-operations"],
+  systemPrompt: "test",
+  customRules: "test"
+};
+const conversationFingerprint = clineConversationFingerprint(conversationConfig);
+expectTrue(
+  "a scope-matched completed runtime is safe to rehydrate after sidecar disposal",
+  canRehydrateClineConversation(
+    { status: "completed", metadata: { desicConversation: { fingerprint: conversationFingerprint } } },
+    conversationFingerprint
+  )
+);
+expectTrue(
+  "a stale-reconciled failed runtime is rehydrated from Cline's persisted artifact",
+  canRehydrateClineConversation(
+    { status: "failed", metadata: { desicConversation: { fingerprint: conversationFingerprint } } },
+    conversationFingerprint
+  )
+);
+expectTrue(
+  "an interrupted running runtime remains eligible for Cline-owned recovery",
+  canRehydrateClineConversation(
+    { status: "running", metadata: { desicConversation: { fingerprint: conversationFingerprint } } },
+    conversationFingerprint
+  )
+);
 
 const advisorBeforeTool = createBeforeToolHook({ permissionMode: "advisor", agentRole: "main" });
 const allowedTickerHook = advisorBeforeTool({ snapshot: { agentRole: "main" }, tool: { name: "market.readTicker" } });
@@ -83,6 +133,13 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "intelligence.sma
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "intelligence.news.readMarketReaction", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "intelligence.smartMoney.readMarketPositioning", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "intelligence.smartMoney.readDerivativeDecisionContext", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.inspectDataCoverage", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.getBacktestResult", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.create", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.saveVersion", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.backtest", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.optimize", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "trade.placeOrder", disabled);
 expectEqual("news tools hidden without skill", isSkillToolEnabled("intelligence.news.list", []), false);
 expectEqual("news tools exposed with skill", isSkillToolEnabled("intelligence.news.list", ["okx-news-intelligence"]), true);
 expectEqual("smart money tools hidden without skill", isSkillToolEnabled("intelligence.smartMoney.readSignalTrendByFilter", []), false);
@@ -122,6 +179,9 @@ for (const mode of ["advisor", "copilot", "limited_auto", "readonly", "approval"
   expectPolicy({ permissionMode: mode, agentRole: "main" }, "apply_patch", disabled);
   expectPolicy({ permissionMode: mode, agentRole: "main" }, "editor", disabled);
 }
+
+expectPolicy({ permissionMode: "advisor", agentRole: "subagent" }, "strategy.inspectDataCoverage", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "subagent" }, "strategy.create", disabled);
 
 for (const agentRole of ["subagent", "team"]) {
   const config = {

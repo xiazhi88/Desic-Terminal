@@ -242,6 +242,10 @@ import { ErrorBoundary } from "./ErrorBoundary";
 import { ChartDataTable } from "./ChartDataTable";
 import { KlineChart, type ChartContextTradeIntent } from "./KlineChart";
 import { ChartQuickTradeDialog, persistChartQuickTradeAccountConfig, type ChartQuickTradeAccountConfig } from "./ChartQuickTradeDialog";
+import { SharedChartOrderLineEditDialog, SharedPositionLineTradeDialog } from "./ChartTradeDialogs";
+import { ChartRiskRewardTradeDialog as SharedChartRiskRewardTradeDialog } from "./ChartRiskRewardTradeDialog";
+import { amendChartOrder, cancelChartOrder, submitRiskRewardChartAction } from "../lib/chartTradeActions";
+import { buildSharedChartOrderLines, buildSharedChartPositionRanges } from "../lib/chartTradeLines";
 import { ChartWindowPage } from "./ChartWindowPage";
 import { HelpCenter, type HelpTarget } from "./HelpCenter";
 import { AiMessageError, AiProcessTimeline, AiTokenUsageLine, MarkdownMessage, applyAiEvent, localizeAiMessageStatus, safeJson, storedMessageToUiMessage, updateLastAssistant, type AiUiMessage } from "./AiMessageProcess";
@@ -1212,7 +1216,7 @@ function HotKlineChart({ positions, algoOrders, instrument, ...props }: HotKline
   const tickerLast = useMarketHotStore((state) => state.ticker?.last ?? "");
   const liveCandles = useMemo(() => applyLivePriceToLatestCandle(candles, tickerLast), [candles, tickerLast]);
   const ticker = tickerLast ? getMarketHotState().ticker : null;
-  const positionRanges = useMemo(() => buildChartPositionRanges(props.symbol ?? DEFAULT_SYMBOL, positions, ticker, algoOrders, instrument, t), [algoOrders, instrument, positions, props.symbol, t, ticker]);
+  const positionRanges = useMemo(() => buildSharedChartPositionRanges(t, props.symbol ?? DEFAULT_SYMBOL, positions, ticker, algoOrders, instrument), [algoOrders, instrument, positions, props.symbol, t, ticker]);
   return <KlineChart {...props} ticker={ticker} candles={liveCandles} positionRanges={positionRanges} />;
 }
 
@@ -1706,16 +1710,7 @@ function TradingTerminal({
     [privateSnapshot, visiblePendingOrders]
   );
   const chartOrderLines = useMemo(
-    () =>
-      buildChartOrderLines({
-        symbol,
-        orders: visiblePendingOrders,
-        algoOrders,
-        positions: visiblePrivateSnapshot?.positions ?? [],
-        instrument: currentInstrument,
-        overrides: pendingOrderLineOverrides,
-        translate: t
-      }),
+    () => buildSharedChartOrderLines({ t, symbol, orders: visiblePendingOrders, algoOrders, positions: visiblePrivateSnapshot?.positions ?? [], instrument: currentInstrument, overrides: pendingOrderLineOverrides }),
     [algoOrders, currentInstrument, pendingOrderLineOverrides, symbol, t, visiblePendingOrders, visiblePrivateSnapshot?.positions]
   );
   const chartFillMarkers = useMemo(
@@ -1761,15 +1756,7 @@ function TradingTerminal({
   const requestPendingOrderAmend = useCallback((order: OkxPendingOrder) => {
     const matchesOrder = (line: ChartOrderLine) => line.editKind === "order-price"
       && ((order.ordId && line.orderId === order.ordId) || (order.clOrdId && line.clientOrderId === order.clOrdId));
-    const line = chartOrderLines.find(matchesOrder) ?? buildChartOrderLines({
-      symbol: order.instId,
-      orders: [order],
-      algoOrders: [],
-      positions: visiblePrivateSnapshot?.positions ?? [],
-      instrument: assetMap.get(order.instId),
-      overrides: pendingOrderLineOverrides,
-      translate: t
-    }).find(matchesOrder);
+    const line = chartOrderLines.find(matchesOrder) ?? buildSharedChartOrderLines({ t, symbol: order.instId, orders: [order], algoOrders: [], positions: visiblePrivateSnapshot?.positions ?? [], instrument: assetMap.get(order.instId), overrides: pendingOrderLineOverrides }).find(matchesOrder);
     if (!line) {
       pushNotification({
         kind: "warning",
@@ -2672,17 +2659,7 @@ function TradingTerminal({
     }
     setPendingOrderLineOverrides((items) => ({ ...items, [line.id]: { price: Number(nextPrice), expiresAt: Date.now() + 15_000 } }));
     if (line.editKind === "order-price") {
-      void amendOkxOrder({
-        accountId: account.id,
-        environment: effectiveTradeEnvironment,
-        instId: editSymbol,
-        ordId: line.orderId,
-        clOrdId: line.clientOrderId,
-        newSize: line.size,
-        newPrice: nextPrice,
-        confirmedLive,
-        executionKey: createTradeExecutionKey(account.id, effectiveTradeEnvironment, editSymbol),
-      })
+      void amendChartOrder({ accountId: account.id, environment: effectiveTradeEnvironment, defaultInstId: editSymbol, getInstrument: (instId) => assetMap.get(instId) }, edit, confirmedLive)
         .then((result) => {
           pushNotification({ kind: "trade", title: uiText("委托改单已提交", "Order amendment submitted"), message: `${editSymbol} ${line.label} -> ${nextPrice}${chineseUi ? "，" : ", "}${result?.ordId || result?.clOrdId || uiText("等待确认", "awaiting confirmation")}` });
           setPrivateHistoryVersion((version) => version + 1);
@@ -2699,20 +2676,7 @@ function TradingTerminal({
       return;
     }
     if (line.editKind === "algo-trigger" || line.editKind === "algo-tp" || line.editKind === "algo-sl") {
-      void amendOkxAlgoOrder({
-        accountId: account.id,
-        environment: effectiveTradeEnvironment,
-        instId: editSymbol,
-        algoId: line.algoId,
-        algoClOrdId: line.algoClientOrderId,
-        newSize: line.size,
-        newTriggerPx: line.editKind === "algo-trigger" ? nextTriggerPrice : undefined,
-        newOrdPx: line.editKind === "algo-trigger" ? nextOrderPrice : undefined,
-        newTpTriggerPx: line.editKind === "algo-tp" ? nextPrice : undefined,
-        newSlTriggerPx: line.editKind === "algo-sl" ? nextPrice : undefined,
-        confirmedLive,
-        executionKey: createTradeExecutionKey(account.id, effectiveTradeEnvironment, editSymbol)
-      })
+      void amendChartOrder({ accountId: account.id, environment: effectiveTradeEnvironment, defaultInstId: editSymbol, getInstrument: (instId) => assetMap.get(instId) }, edit, confirmedLive)
         .then((result) => {
           const label = line.editKind === "algo-trigger"
             ? `${uiText("触发", "Trigger")} ${nextTriggerPrice} / ${uiText("委托", "Order")} ${nextOrderPrice === "-1" ? t("trading:market") : nextOrderPrice}`
@@ -2869,31 +2833,7 @@ function TradingTerminal({
       pushNotification({ kind: "warning", title: uiText("图表交易参数无效", "Invalid chart-trade parameters"), message: uiText("请确认数量满足 minSz/lotSz，开仓、止盈和止损价格满足 tickSz。", "Ensure quantity satisfies minSz/lotSz and entry, take-profit, and stop-loss prices satisfy tickSz.") });
       return;
     }
-    void placeOkxOrder({
-      accountId: account.id,
-      instId: intent.instId,
-      tdMode,
-      orderType: "limit",
-      ticketMode: "open",
-      action: intent.side,
-      price: entryPrice,
-      size: normalizedSize,
-      lever,
-      environment: effectiveTradeEnvironment,
-      confirmedLive,
-      operator: "user",
-      executionKey: createTradeExecutionKey(account.id, effectiveTradeEnvironment, intent.instId),
-      attachAlgoOrds: intent.action === "bracket" ? [{
-        attachAlgoClOrdId: `chart-${Date.now()}-${Math.random().toString(16).slice(2, 10)}`,
-        tpTriggerPx: takeProfitPrice,
-        tpOrdPx: "-1",
-        tpTriggerPxType: "last",
-        slTriggerPx: stopLossPrice,
-        slOrdPx: "-1",
-        slTriggerPxType: "last",
-        sz: normalizedSize
-      }] : undefined
-    })
+    void submitRiskRewardChartAction({ accountId: account.id, environment: effectiveTradeEnvironment, getInstrument: (instId) => assetMap.get(instId) }, intent, size, tdMode, lever, confirmedLive)
       .then((result) => {
         if (!result) return;
         pushNotification({
@@ -3054,16 +2994,7 @@ function TradingTerminal({
       pushNotification({ kind: "warning", title: "无法撤单", message: `${line.label} 缺少 OKX 委托 ID。` });
       return;
     }
-    void cancelOkxOrder({
-      accountId: account.id,
-      environment: effectiveTradeEnvironment,
-      instId: symbol,
-      ordId: line.orderId,
-      clOrdId: line.clientOrderId,
-      isAlgo,
-      algoId: line.algoId,
-      algoClOrdId: line.algoClientOrderId
-    })
+    void cancelChartOrder({ accountId: account.id, environment: effectiveTradeEnvironment, defaultInstId: symbol }, line, true)
       .then((result) => {
         pushNotification({
           kind: "trade",
@@ -4713,7 +4644,7 @@ function TradingTerminal({
         />
       )}
       {pendingOrderLineEdit && (
-        <ChartOrderLineEditDialog
+        <SharedChartOrderLineEditDialog
           edit={pendingOrderLineEdit}
           environment={effectiveTradeEnvironment}
           position={findChartOrderLinePosition(
@@ -4748,12 +4679,12 @@ function TradingTerminal({
         />
       )}
       {pendingPositionLineIntent && (
-        <PositionLineTradeDialog
+        <SharedPositionLineTradeDialog
           account={account}
           intent={pendingPositionLineIntent}
           position={privateSnapshot?.positions.find((item) => item.instId === pendingPositionLineIntent.instId && normalizeUiPosSide(item.posSide) === pendingPositionLineIntent.posSide)}
           instrument={assetMap.get(pendingPositionLineIntent.instId)}
-          tradeEnvironment={effectiveTradeEnvironment}
+          environment={effectiveTradeEnvironment}
           onClose={() => setPendingPositionLineIntent(null)}
           onSubmit={(intent, size, orderPx, confirmedLive) => {
             setPendingPositionLineIntent(null);
@@ -4790,16 +4721,18 @@ function TradingTerminal({
         />
       )}
       {pendingChartRiskRewardIntent && (
-        <ChartRiskRewardTradeDialog
-          account={account}
+        <SharedChartRiskRewardTradeDialog
+          accountId={account?.id}
           intent={pendingChartRiskRewardIntent}
           snapshot={privateSnapshot}
           instrument={assetMap.get(pendingChartRiskRewardIntent.instId)}
-          tradeEnvironment={effectiveTradeEnvironment}
+          environment={effectiveTradeEnvironment}
           onClose={() => setPendingChartRiskRewardIntent(null)}
-          onSubmit={(intent, size, marginMode, lever, confirmedLive) => {
+          onSubmit={async (intent, size, marginMode, lever, confirmedLive) => {
+            if (!account) throw new Error(uiText("请先配置交易账号。", "Configure a trading account first."));
+            await submitRiskRewardChartAction({ accountId: account.id, environment: effectiveTradeEnvironment, getInstrument: (instId) => assetMap.get(instId) }, intent, size, marginMode, lever, confirmedLive);
             setPendingChartRiskRewardIntent(null);
-            submitChartRiskRewardIntent(intent, size, marginMode, lever, confirmedLive);
+            void refreshPrivateSnapshot();
           }}
         />
       )}

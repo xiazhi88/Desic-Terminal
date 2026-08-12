@@ -5,6 +5,7 @@ import { useTranslation } from "react-i18next";
 import { BellRing, ExternalLink, Layers3, Loader2, Redo2, SlidersHorizontal, Undo2, X } from "lucide-react";
 import type {
   Candle,
+  AccountSummary,
   ChartOrderLine,
   ChartOrderLineEdit,
   ChartPositionRange,
@@ -22,11 +23,7 @@ import type {
   Trade
 } from "../types";
 import {
-  amendOkxAlgoOrder,
-  amendOkxOrder,
-  cancelOkxOrder,
   deleteChartAlert,
-  closeOkxPosition,
   fetchCandles,
   fetchFundingRate,
   fetchHistoricalCandlesBefore,
@@ -35,8 +32,6 @@ import {
   fetchOkxAlgoOrders,
   fetchPrivateSnapshot,
   fetchTicker,
-  placeOkxAlgoOrder,
-  placeOkxOrder,
   openChartWindow,
   saveChartAlert,
 } from "../lib/okx";
@@ -46,11 +41,13 @@ import { i18n } from "../i18n/runtime";
 import { createChartIndicatorTemplate, loadChartIndicatorTemplates, saveChartIndicatorTemplates, type ChartIndicatorTemplate } from "../lib/chartIndicatorTemplates";
 import { KlineChart, type ChartContextTradeIntent } from "./KlineChart";
 import { ChartQuickTradeDialog } from "./ChartQuickTradeDialog";
+import { ChartRiskRewardTradeDialog } from "./ChartRiskRewardTradeDialog";
+import { SharedChartOrderCancelDialog, SharedChartOrderLineEditDialog, SharedPositionLineTradeDialog } from "./ChartTradeDialogs";
 import { TerminalSelect } from "./TerminalSelect";
-import { useDraggableSurface } from "./useDraggableSurface";
 import type { ChartCrosshairPosition } from "./chartAdapter";
 import type { ChartLayerKey, ChartLayerVisibility } from "./KlineChart";
-import { createTradeExecutionKey } from "./trade-ticket/model";
+import { amendChartOrder, cancelChartOrder, submitPositionChartAction, submitRiskRewardChartAction } from "../lib/chartTradeActions";
+import { buildSharedChartOrderLines, buildSharedChartPositionRanges } from "../lib/chartTradeLines";
 import {
   buildHistoricalFillMarkers,
   chartOrderVisual,
@@ -82,6 +79,7 @@ export type DetachedChartPaneProps = {
   symbol: string;
   timeframe: string;
   accountId?: string | null;
+  account?: AccountSummary | null;
   environment?: "demo" | "live";
   readOnly?: boolean;
   marketAssets: MarketAssetsSummary | null;
@@ -159,7 +157,7 @@ function mergeCandles(current: Candle[], incoming: Candle[]) {
   return [...byTime.values()].sort((left, right) => left.time - right.time);
 }
 
-function buildOrderLines(t: TFunction, symbol: string, orders: OkxPendingOrder[], algoOrders: OkxAlgoOrder[], positions: OkxPosition[]): ChartOrderLine[] {
+function buildOrderLinesLegacy(t: TFunction, symbol: string, orders: OkxPendingOrder[], algoOrders: OkxAlgoOrder[], positions: OkxPosition[]): ChartOrderLine[] {
   const lines: ChartOrderLine[] = [];
   const add = (line: ChartOrderLine) => {
     if (Number.isFinite(line.price) && line.price > 0) lines.push(line);
@@ -226,7 +224,7 @@ function buildOrderLines(t: TFunction, symbol: string, orders: OkxPendingOrder[]
   return lines;
 }
 
-function buildPositionRanges(t: TFunction, symbol: string, positions: OkxPosition[], ticker: Ticker | null, algoOrders: OkxAlgoOrder[], instrument?: OkxInstrumentSummary): ChartPositionRange[] {
+function buildPositionRangesLegacy(t: TFunction, symbol: string, positions: OkxPosition[], ticker: Ticker | null, algoOrders: OkxAlgoOrder[], instrument?: OkxInstrumentSummary): ChartPositionRange[] {
   const pendingAlgos = algoOrders.filter((order) => order.instId === symbol && isActiveAlgoOrder(order));
   const contractValue = Number(instrument?.ctVal);
   const normalizedContractValue = Number.isFinite(contractValue) && contractValue > 0 ? contractValue : 1;
@@ -264,6 +262,7 @@ export function DetachedChartPane({
   symbol,
   timeframe,
   accountId = null,
+  account = null,
   environment = "demo",
   readOnly = false,
   marketAssets,
@@ -305,6 +304,7 @@ export function DetachedChartPane({
   const [orderEdit, setOrderEdit] = useState<ChartOrderLineEdit | null>(null);
   const [orderCancel, setOrderCancel] = useState<ChartOrderLine | null>(null);
   const [positionIntent, setPositionIntent] = useState<PositionLineTradeIntent | null>(null);
+  const [riskRewardIntent, setRiskRewardIntent] = useState<import("../types").ChartRiskRewardTradeIntent | null>(null);
   const [toolbarAction, setToolbarAction] = useState<{ token: number; action: "indicators" | "alerts" | "undo" | "redo" } | null>(null);
   const [layerCommand, setLayerCommand] = useState<{ token: number; key: ChartLayerKey } | null>(null);
   const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(DEFAULT_LAYER_VISIBILITY);
@@ -445,12 +445,12 @@ export function DetachedChartPane({
   }, [paneId, symbol, timeframe]);
 
   const orderLines = useMemo(
-    () => buildOrderLines(t, symbol, privateSnapshot?.orders ?? EMPTY_PENDING_ORDERS, algoOrders, privateSnapshot?.positions ?? EMPTY_POSITIONS),
-    [algoOrders, privateSnapshot?.orders, privateSnapshot?.positions, symbol, t]
+    () => buildSharedChartOrderLines({ t, symbol, orders: privateSnapshot?.orders ?? EMPTY_PENDING_ORDERS, algoOrders, positions: privateSnapshot?.positions ?? EMPTY_POSITIONS, instrument }),
+    [algoOrders, instrument, privateSnapshot?.orders, privateSnapshot?.positions, symbol, t]
   );
   const fillMarkers = useMemo(() => buildHistoricalFillMarkers(symbol, fills, 240, t), [fills, symbol, t]);
   const positionRanges = useMemo(
-    () => buildPositionRanges(t, symbol, privateSnapshot?.positions ?? EMPTY_POSITIONS, ticker, algoOrders, instrument),
+    () => buildSharedChartPositionRanges(t, symbol, privateSnapshot?.positions ?? EMPTY_POSITIONS, ticker, algoOrders, instrument),
     [algoOrders, instrument, privateSnapshot?.positions, symbol, t, ticker]
   );
   const popOutPane = useCallback(() => {
@@ -589,6 +589,7 @@ export function DetachedChartPane({
           }}
           onPositionLineTradeIntent={(intent) => !readOnly && setPositionIntent(intent)}
           onPositionLineCloseRequest={(intent) => !readOnly && setPositionIntent({ ...intent, kind: "limit_close", targetPrice: intent.currentPrice })}
+          onRiskRewardTradeIntent={(intent) => !readOnly && setRiskRewardIntent(intent)}
           indicatorIds={indicatorIds}
           onIndicatorIdsChange={onIndicatorIdsChange}
           toolbarPlacement="external"
@@ -600,122 +601,30 @@ export function DetachedChartPane({
         />
       </div>
       {tradeDraft && <ChartQuickTradeDialog draft={tradeDraft} accountId={accountId} environment={environment} instrument={instrument} accountSnapshot={privateSnapshot} onClose={() => setTradeDraft(null)} onSubmitted={() => { setTradeDraft(null); void loadStaticData(); }} />}
-      {orderEdit && <DetachedOrderEditDialog edit={orderEdit} environment={environment} onClose={() => setOrderEdit(null)} onSubmit={async (edit, confirmedLive) => {
+      {orderEdit && <SharedChartOrderLineEditDialog edit={orderEdit} environment={environment} instrument={instrument} onClose={() => setOrderEdit(null)} onSubmit={async (edit, confirmedLive) => {
         if (!accountId) throw new Error(t("trading:noTradingAccountSelected"));
-        if (edit.line.editKind === "order-price") {
-          await amendOkxOrder({ accountId, environment, instId: symbol, ordId: edit.line.orderId, clOrdId: edit.line.clientOrderId, newSize: edit.line.size, newPrice: String(edit.price), confirmedLive, executionKey: createTradeExecutionKey(accountId, environment, symbol) });
-        } else {
-          await amendOkxAlgoOrder({ accountId, environment, instId: symbol, algoId: edit.line.algoId, algoClOrdId: edit.line.algoClientOrderId, newSize: edit.line.size, newTriggerPx: edit.line.editKind === "algo-trigger" ? String(edit.triggerPrice ?? edit.price) : undefined, newOrdPx: edit.line.editKind === "algo-trigger" ? edit.orderPrice === null ? "-1" : String(edit.orderPrice) : undefined, newTpTriggerPx: edit.line.editKind === "algo-tp" ? String(edit.price) : undefined, newSlTriggerPx: edit.line.editKind === "algo-sl" ? String(edit.price) : undefined, confirmedLive, executionKey: createTradeExecutionKey(accountId, environment, symbol) });
-        }
+        await amendChartOrder({ accountId, account, environment, defaultInstId: symbol, getInstrument: () => instrument }, edit, confirmedLive);
         setOrderEdit(null);
         void loadStaticData();
       }} />}
-      {orderCancel && <DetachedOrderCancelDialog line={orderCancel} environment={environment} onClose={() => setOrderCancel(null)} onSubmit={async (_confirmedLive) => {
+      {orderCancel && <SharedChartOrderCancelDialog line={orderCancel} environment={environment} onClose={() => setOrderCancel(null)} onSubmit={async (_confirmedLive) => {
         if (!accountId) throw new Error(t("trading:noTradingAccountSelected"));
         const line = orderCancel;
-        const isAlgo = line.source === "algo" || Boolean(line.algoId || line.algoClientOrderId) || line.editKind === "algo-trigger" || line.editKind === "algo-tp" || line.editKind === "algo-sl";
-        await cancelOkxOrder({ accountId, environment, instId: symbol, ordId: line.orderId, clOrdId: line.clientOrderId, isAlgo, algoId: line.algoId, algoClOrdId: line.algoClientOrderId });
+        await cancelChartOrder({ accountId, account, environment, defaultInstId: symbol }, line, _confirmedLive);
         setOrderCancel(null);
         void loadStaticData();
       }} />}
-      {positionIntent && <DetachedPositionIntentDialog intent={positionIntent} environment={environment} maxSize={Math.abs(Number(privateSnapshot?.positions.find((item) => item.instId === positionIntent.instId && normalizePosSide(item.posSide) === positionIntent.posSide)?.pos ?? 0))} onClose={() => setPositionIntent(null)} onSubmit={async (intent, size, confirmedLive) => {
+      {positionIntent && <SharedPositionLineTradeDialog account={account} intent={positionIntent} environment={environment} position={privateSnapshot?.positions.find((item) => item.instId === positionIntent.instId && normalizePosSide(item.posSide) === positionIntent.posSide)} instrument={instrument} onClose={() => setPositionIntent(null)} onSubmit={async (intent, size, _orderPx, confirmedLive) => {
         if (!accountId) throw new Error(t("trading:noTradingAccountSelected"));
-        const position = privateSnapshot?.positions.find((item) => item.instId === intent.instId && normalizePosSide(item.posSide) === intent.posSide);
-        if (!position || Math.abs(Number(position.pos)) <= 0) throw new Error(t("trading:positionChanged"));
-        const side: "buy" | "sell" = isShortPosition(position) ? "buy" : "sell";
-        if (intent.side !== side) throw new Error(t("trading:positionDirectionChanged"));
-        const tdMode = position.mgnMode === "isolated" ? "isolated" : "cross";
-        if (intent.kind === "market_close") {
-          await closeOkxPosition({ accountId, environment, instId: intent.instId, mgnMode: tdMode, posSide: normalizePosSide(position.posSide), confirmedLive });
-        } else if (intent.kind === "limit_close") {
-          await placeOkxOrder({ accountId, environment, instId: intent.instId, tdMode, orderType: "limit", ticketMode: "close", action: side === "buy" ? "close-short" : "close-long", price: String(intent.targetPrice), size, lever: position.lever || "1", confirmedLive, operator: "user", executionKey: createTradeExecutionKey(accountId, environment, intent.instId) });
-        } else {
-          const targetSide: "tp" | "sl" = intent.existingAlgoSide ?? (intent.kind === "take_profit" ? "tp" : "sl");
-          const executionKey = createTradeExecutionKey(accountId, environment, intent.instId);
-          if (intent.existingAlgoId || intent.existingAlgoClientOrderId) {
-            await amendOkxAlgoOrder({ accountId, environment, instId: intent.instId, algoId: intent.existingAlgoId, algoClOrdId: intent.existingAlgoClientOrderId, newSize: size, newTpTriggerPx: targetSide === "tp" ? String(intent.targetPrice) : undefined, newTpOrdPx: targetSide === "tp" ? "-1" : undefined, newSlTriggerPx: targetSide === "sl" ? String(intent.targetPrice) : undefined, newSlOrdPx: targetSide === "sl" ? "-1" : undefined, confirmedLive, executionKey });
-          } else {
-            await placeOkxAlgoOrder({ accountId, environment, instId: intent.instId, tdMode, posSide: normalizePosSide(position.posSide), side, ordType: "conditional", size, tpTriggerPx: targetSide === "tp" ? String(intent.targetPrice) : undefined, tpOrdPx: targetSide === "tp" ? "-1" : undefined, slTriggerPx: targetSide === "sl" ? String(intent.targetPrice) : undefined, slOrdPx: targetSide === "sl" ? "-1" : undefined, confirmedLive, operator: "user", executionKey });
-          }
-        }
+        await submitPositionChartAction({ accountId, account, environment, snapshot: privateSnapshot, getInstrument: () => instrument }, intent, size, _orderPx, confirmedLive);
         setPositionIntent(null);
+        void loadStaticData();
+      }} />}
+      {riskRewardIntent && accountId && <ChartRiskRewardTradeDialog intent={riskRewardIntent} snapshot={privateSnapshot} instrument={instrument} environment={environment} onClose={() => setRiskRewardIntent(null)} onSubmit={async (intent, size, marginMode, lever, confirmedLive) => {
+        await submitRiskRewardChartAction({ accountId, account, environment, getInstrument: () => instrument }, intent, size, marginMode, lever, confirmedLive);
+        setRiskRewardIntent(null);
         void loadStaticData();
       }} />}
     </section>
   );
-}
-
-function trimQuantity(value: number) {
-  if (!Number.isFinite(value) || value <= 0) return "";
-  return value.toFixed(8).replace(/0+$/, "").replace(/\.$/, "");
-}
-
-function DetachedOrderEditDialog({ edit, environment, onClose, onSubmit }: { edit: ChartOrderLineEdit; environment: "demo" | "live"; onClose: () => void; onSubmit: (edit: ChartOrderLineEdit, confirmedLive: boolean) => Promise<void> }) {
-  const { t } = useTranslation(["trading", "common"]);
-  const [price, setPrice] = useState(String(edit.price));
-  const isTriggerOrder = edit.line.editKind === "algo-trigger";
-  const [triggerPrice, setTriggerPrice] = useState(String(edit.triggerPrice ?? edit.line.triggerPrice ?? edit.price));
-  const initialOrderPrice = edit.orderPrice ?? edit.line.orderPrice;
-  const [orderPrice, setOrderPrice] = useState(initialOrderPrice === null ? "-1" : initialOrderPrice ? String(initialOrderPrice) : "");
-  const [error, setError] = useState("");
-  const drag = useDraggableSurface<HTMLElement>();
-  const executionAtMarket = orderPrice === "-1";
-  const valid = isTriggerOrder
-    ? Number(triggerPrice) > 0 && (executionAtMarket || Number(orderPrice) > 0)
-    : Number(price) > 0;
-  return <div className="detached-trade-backdrop" role="presentation" onMouseDown={onClose}><section ref={drag.surfaceRef} className="detached-trade-dialog compact" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-    <header {...drag.handleProps}><strong>{t("trading:modifyOrder", { label: edit.line.label })}</strong><button type="button" onClick={onClose}>{t("common:close")}</button></header>
-    {isTriggerOrder ? <>
-      <label>{t("trading:triggerPrice")}<input value={triggerPrice} inputMode="decimal" onChange={(event) => setTriggerPrice(event.target.value)} /></label>
-      <label>{t("trading:orderPriceAfterTrigger")}</label>
-      <div className="detached-trade-segmented" role="group" aria-label={t("trading:triggerOrderExecutionMode")}>
-        <button type="button" className={executionAtMarket ? "active" : undefined} onClick={() => setOrderPrice("-1")}>{t("trading:market")}</button>
-        <button type="button" className={!executionAtMarket ? "active" : undefined} onClick={() => setOrderPrice((current) => current === "-1" ? triggerPrice : current)}>{t("trading:limit")}</button>
-      </div>
-      {!executionAtMarket && <input value={orderPrice} inputMode="decimal" placeholder={t("trading:enterOrderPrice")} onChange={(event) => setOrderPrice(event.target.value)} />}
-    </> : <label>{t("trading:targetPrice")}<input value={price} inputMode="decimal" onChange={(event) => setPrice(event.target.value)} /></label>}
-    {error && <p className="detached-trade-status">{error}</p>}
-    <footer><button type="button" onClick={onClose}>{t("common:cancel")}</button><button type="button" disabled={!valid} onClick={() => void (async () => { try { await onSubmit(isTriggerOrder ? { ...edit, price: Number(triggerPrice), triggerPrice: Number(triggerPrice), orderPrice: executionAtMarket ? null : Number(orderPrice) } : { ...edit, price: Number(price) }, environment === "live"); onClose(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } })()}>{t("trading:confirmModification")}</button></footer>
-  </section></div>;
-}
-
-function DetachedOrderCancelDialog({ line, environment, onClose, onSubmit }: { line: ChartOrderLine; environment: "demo" | "live"; onClose: () => void; onSubmit: (confirmedLive: boolean) => Promise<void> }) {
-  const { t } = useTranslation(["trading", "common"]);
-  const [error, setError] = useState("");
-  const drag = useDraggableSurface<HTMLElement>();
-  return <div className="detached-trade-backdrop" role="presentation" onMouseDown={onClose}><section ref={drag.surfaceRef} className="detached-trade-dialog compact" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-    <header {...drag.handleProps}><strong>{t("trading:confirmCancelOrder")}</strong><button type="button" onClick={onClose}>{t("common:close")}</button></header>
-    <p data-i18n-skip="true">{line.label} · {line.price.toFixed(3)}</p>
-    <p>{t("trading:cancelOrderWarning", { environment: environment === "live" ? t("common:live") : t("common:demo") })}</p>
-    {error && <p className="detached-trade-status">{error}</p>}
-    <footer><button type="button" onClick={onClose}>{t("common:cancel")}</button><button type="button" className="danger" onClick={() => void (async () => { try { await onSubmit(environment === "live"); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } })()}>{t("trading:confirmCancellation")}</button></footer>
-  </section></div>;
-}
-
-function DetachedPositionIntentDialog({ intent, environment, maxSize, onClose, onSubmit }: { intent: PositionLineTradeIntent; environment: "demo" | "live"; maxSize: number; onClose: () => void; onSubmit: (intent: PositionLineTradeIntent, size: string, confirmedLive: boolean) => Promise<void> }) {
-  const { t } = useTranslation(["trading", "common"]);
-  const [size, setSize] = useState(() => intent.size.trim().replace(/^-/, "") || trimQuantity(maxSize));
-  const supportsQuickClose = intent.kind === "limit_close" || intent.kind === "market_close";
-  const [closeMode, setCloseMode] = useState<"limit" | "market">(intent.kind === "market_close" ? "market" : "limit");
-  const [error, setError] = useState("");
-  const drag = useDraggableSurface<HTMLElement>();
-  const executionIntent: PositionLineTradeIntent = supportsQuickClose
-    ? { ...intent, kind: closeMode === "market" ? "market_close" : "limit_close" }
-    : intent;
-  const title = executionIntent.kind === "market_close"
-    ? t("trading:marketClosePosition")
-    : executionIntent.kind === "limit_close"
-      ? t("trading:limitCloseAtCurrentPrice")
-      : t("trading:setProtectionPrice");
-  return <div className="detached-trade-backdrop" role="presentation" onMouseDown={onClose}><section ref={drag.surfaceRef} className="detached-trade-dialog compact" role="dialog" aria-modal="true" onMouseDown={(event) => event.stopPropagation()}>
-    <header {...drag.handleProps}><strong>{title}</strong><button type="button" onClick={onClose}>{t("common:close")}</button></header>
-    <p>{t("trading:positionTargetSummary", { symbol: intent.instId, side: intent.side === "buy" ? t("trading:short") : t("trading:long"), price: intent.targetPrice.toFixed(3) })}</p>
-    <label>{t("trading:operationQuantityContracts")}<input value={size} inputMode="decimal" onChange={(event) => setSize(event.target.value)} /></label>
-    {supportsQuickClose && <div className="detached-trade-segmented" role="group" aria-label={t("trading:positionCloseMode")}>
-      <button type="button" className={closeMode === "limit" ? "active" : undefined} onClick={() => setCloseMode("limit")}>{t("trading:limitAtCurrentPrice")}</button>
-      <button type="button" className={closeMode === "market" ? "active" : undefined} onClick={() => setCloseMode("market")}>{t("trading:market")}</button>
-    </div>}
-    {error && <p className="detached-trade-status">{error}</p>}
-    <footer><button type="button" onClick={onClose}>{t("common:cancel")}</button><button type="button" onClick={() => void (async () => { try { const normalizedSize = size.trim(); const numericSize = Number(normalizedSize); if (!Number.isFinite(numericSize) || numericSize <= 0) { setError(t("trading:invalidOperationQuantity")); return; } await onSubmit(executionIntent, normalizedSize, environment === "live"); onClose(); } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } })()}>{t("trading:confirmSubmit")}</button></footer>
-  </section></div>;
 }

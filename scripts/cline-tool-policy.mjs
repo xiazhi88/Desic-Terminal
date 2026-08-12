@@ -57,6 +57,15 @@ export const ANALYSIS_TOOLS = new Set([
   "strategy.readDevelopmentDocs",
   "strategy.readCurrentSource",
   "strategy.testCurrentSource",
+  "strategy.listVersions",
+  "strategy.getVersion",
+  "strategy.inspectDataCoverage",
+  "strategy.sampleMarketData",
+  "strategy.getBacktestResult",
+  "strategy.getBacktestTrades",
+  "strategy.getBacktestDiagnostics",
+  "strategy.compareBacktests",
+  "strategy.getOptimizationResult",
   "skills"
 ]);
 
@@ -74,7 +83,12 @@ export const LOCAL_SIDE_EFFECT_TOOLS = new Set([
   "script.enable",
   "script.delete",
   "script.list",
-  "strategy.applySource"
+  "strategy.applySource",
+  "strategy.create",
+  "strategy.saveVersion",
+  "strategy.rollbackVersion",
+  "strategy.backtest",
+  "strategy.optimize"
 ]);
 
 export const OPPORTUNITY_READ_TOOLS = new Set([
@@ -242,7 +256,7 @@ export function resolveToolPolicy(name, config = {}) {
   }
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
-      (canonicalName === "strategy.readDevelopmentDocs" || canonicalName === "strategy.readCurrentSource" || canonicalName === "strategy.testCurrentSource")
+      canonicalName.startsWith("strategy.")
       && role !== "main"
     ) {
       return disabledPolicy("disabled:strategy-editor-main-session-only");

@@ -1086,6 +1086,7 @@ export type CancelOrderRequest = {
   accountId?: string;
   environment: "demo" | "live";
   instId: string;
+  confirmedLive?: boolean;
   ordId?: string;
   clOrdId?: string;
   isAlgo?: boolean;
