@@ -1190,6 +1190,7 @@ struct AiStreamOptions {
     runtime_scoped_skills: Vec<crate::storage_config::AiSkillBundle>,
     clear_skill_definitions: bool,
     disable_skills_tool: Option<bool>,
+    disable_loop_detection: Option<bool>,
     enable_spawn_agent: Option<bool>,
     enable_agent_teams: Option<bool>,
     stream_fallback_text: bool,
@@ -2461,6 +2462,7 @@ fn ai_generate_chart_indicator(
             runtime_scoped_skills: Vec::new(),
             clear_skill_definitions: true,
             disable_skills_tool: Some(true),
+            disable_loop_detection: None,
             enable_spawn_agent: Some(false),
             enable_agent_teams: Some(false),
             stream_fallback_text: false,
@@ -12983,6 +12985,10 @@ async fn run_ai_stream(
             }
         }
     }
+    let disable_loop_detection = options
+        .as_ref()
+        .and_then(|value| value.disable_loop_detection)
+        .unwrap_or(false);
     let disable_skills_tool = options
         .as_ref()
         .and_then(|value| value.disable_skills_tool)
@@ -13128,6 +13134,16 @@ async fn run_ai_stream(
             .map(|message| json!({ "id": message.id, "role": message.role, "content": message.content }))
             .collect::<Vec<_>>()
     });
+    // Inserted after construction: the config literal above is already at the
+    // json! macro's recursion limit, so one more inline key fails to compile.
+    let mut payload = payload;
+    if let Some(config_payload) = payload.get_mut("config").and_then(|value| value.as_object_mut()) {
+        config_payload.insert(
+            "disableLoopDetection".to_string(),
+            serde_json::Value::Bool(disable_loop_detection),
+        );
+    }
+    let payload = payload;
     emit_ai(
         &app,
         AiEvent::Status {

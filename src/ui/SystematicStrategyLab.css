@@ -420,7 +420,8 @@
 .systematic-lab-ai-message__text { min-width: 0; color: #dfe4ed; font-size: 10px; line-height: 1.55; }
 .systematic-lab-ai-message__text p { margin: 0; white-space: pre-wrap; }
 .systematic-lab-ai-message__text .ai-markdown { color: inherit; font-size: inherit; line-height: inherit; }
-.systematic-lab-ai-message__status { color: #cbbcff; font-size: 9px; line-height: 1.35; }
+.systematic-lab-ai-message__status { display: inline-flex; align-items: center; gap: 4px; color: #cbbcff; font-size: 9px; line-height: 1.35; }
+.systematic-lab-ai-message__status svg { flex: none; opacity: 0.85; }
 .systematic-lab-ai-message .ai-process-timeline,
 .systematic-lab-ai-message .ai-process-group,
 .systematic-lab-ai-message .ai-tool-trace,

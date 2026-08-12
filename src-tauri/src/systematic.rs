@@ -3094,6 +3094,11 @@ pub(crate) async fn systematic_strategy_ai_send_message(
             // the Skill to a slash command that this prompt never triggers,
             // silently dropping the entire authoring contract.
             disable_skills_tool: Some(false),
+            // strategy.getBacktestResult is a bounded-wait poll: it returns
+            // timedOut=true and must be re-called with identical input until the
+            // run finishes. That is the documented contract, not a loop, so the
+            // generic repeat-call guard must not hard-stop this conversation.
+            disable_loop_detection: Some(true),
             enable_spawn_agent: Some(false),
             enable_agent_teams: Some(false),
             stream_fallback_text: true,

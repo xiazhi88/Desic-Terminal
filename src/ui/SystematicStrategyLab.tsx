@@ -210,6 +210,9 @@ const AI_SOURCE_TYPEWRITER_MIN_DURATION_MS = 450;
 const AI_SOURCE_TYPEWRITER_MAX_DURATION_MS = 6_000;
 const AI_SOURCE_TYPEWRITER_MAX_RENDER_STEPS = 120;
 const AI_SOURCE_TYPEWRITER_FALLBACK_GRACE_MS = 1_000;
+// Treat "near the bottom" as at the bottom so sub-pixel rounding, momentum
+// scrolling, and a growing last message do not silently disable following.
+const AI_SCROLL_FOLLOW_THRESHOLD_PX = 24;
 const EMPTY_PROFILE_SIGNAL_PAGE: SystematicProfileSignalsPageView = {
   items: [],
   page: 1,
@@ -2248,6 +2251,7 @@ function StrategyAiPanel({
   const typewriterFallbackRef = useRef<number | null>(null);
   const sourcePreviewRequestIdRef = useRef<string | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const followTranscriptRef = useRef(true);
 
   draftRef.current = draft;
   statusRef.current = status;
@@ -2271,11 +2275,29 @@ function StrategyAiPanel({
     onBusyChange(busy);
   }, [busy, onBusyChange]);
 
+  // Follow new output only while the user is already at the bottom. Scrolling up
+  // during a long answer must not be fought by the next streamed chunk; coming
+  // back to the bottom re-enables following.
+  const isAtBottom = useCallback((target: HTMLElement) => (
+    target.scrollHeight - target.scrollTop - target.clientHeight <= AI_SCROLL_FOLLOW_THRESHOLD_PX
+  ), []);
+
+  const handleTranscriptScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
+    followTranscriptRef.current = isAtBottom(event.currentTarget);
+  }, [isAtBottom]);
+
   useEffect(() => {
     const target = scrollRef.current;
-    if (!target) return;
+    if (!target || !followTranscriptRef.current) return;
     target.scrollTop = target.scrollHeight;
   }, [messages, status]);
+
+  // A newly opened or switched session starts pinned to the latest message.
+  useEffect(() => {
+    followTranscriptRef.current = true;
+    const target = scrollRef.current;
+    if (target) target.scrollTop = target.scrollHeight;
+  }, [sessionId]);
 
   useEffect(() => {
     if (!busy) return;
@@ -2545,6 +2567,8 @@ function StrategyAiPanel({
     setMessages(nextMessages);
     setPrompt("");
     setStatus("connecting");
+    // Sending is an explicit request to see the new turn.
+    followTranscriptRef.current = true;
     try {
       await sendSystematicStrategyAiMessage({
         sessionId,
@@ -2594,7 +2618,7 @@ function StrategyAiPanel({
           <button className="systematic-lab__icon-button" type="button" onClick={onClose} title={text.closeAiAssistant} aria-label={text.closeAiAssistant}><X size={14} /></button>
         </div>
       </div>
-      <div className="systematic-lab-strategy-ai-panel__messages" ref={scrollRef}>
+      <div className="systematic-lab-strategy-ai-panel__messages" ref={scrollRef} onScroll={handleTranscriptScroll}>
         {messages.length === 0 ? <div className="systematic-lab-strategy-ai-panel__empty"><Bot size={18} /><p>{text.aiChatEmpty}</p></div> : null}
         {messages.map((message) => (
           <article className={clsx("systematic-lab-ai-message", message.role)} key={message.id}>
@@ -2607,7 +2631,12 @@ function StrategyAiPanel({
               </div>
             ) : null}
             {message.role === "assistant" && message.usage ? <AiTokenUsageLine usage={message.usage} /> : null}
-            {message.role === "assistant" && message.status ? <small className="systematic-lab-ai-message__status" aria-live="polite">{message.status}</small> : null}
+            {message.role === "assistant" && message.status ? (
+              <small className="systematic-lab-ai-message__status" aria-live="polite">
+                <LoaderCircle size={10} className="is-spinning" aria-hidden />
+                {message.status}
+              </small>
+            ) : null}
           </article>
         ))}
       </div>

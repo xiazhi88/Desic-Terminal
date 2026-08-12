@@ -2588,6 +2588,13 @@ function createRuntimeConfig(
     systemPrompt: buildSystemPrompt(command.config, permissionMode),
     toolPolicies: buildToolPolicies(policyConfig),
     ...(configuredMaxIterations ? { maxIterations: configuredMaxIterations } : {}),
+    // Some hosted tools are deliberately poll-shaped: strategy.getBacktestResult
+    // returns timedOut=true and must be called again with identical input until
+    // the run reaches a terminal state. Cline's repeat-call guard reads that as a
+    // loop and hard-stops the turn, so sessions that own such a tool opt out.
+    ...(boolConfig(command.config.disableLoopDetection, false)
+      ? { execution: { loopDetection: false } }
+      : {}),
     checkpoint: { enabled: false },
     extraTools: tools
   };
