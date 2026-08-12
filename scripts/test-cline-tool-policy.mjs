@@ -276,6 +276,41 @@ expectPolicy(
   disabled
 );
 
+// The scoped strategy editor session, exactly as systematic.rs configures it.
+const strategyEditorSession = {
+  permissionMode: "advisor",
+  agentRole: "main",
+  disableSkillsTool: false,
+  toolAllowlist: [
+    "skills",
+    "skill.readResource",
+    "strategy.readDevelopmentDocs",
+    "strategy.readCurrentSource",
+    "strategy.testCurrentSource",
+    "strategy.applySource"
+  ]
+};
+
+// Regression: the authoring Skill is delivered as a real Skill file, so the
+// skills tool must stay registered. Suppressing it downgraded the Skill to a
+// slash command the strategy prompt never triggers, silently dropping the whole
+// authoring contract.
+expectPolicy(strategyEditorSession, "skills", enabled);
+expectPolicy(strategyEditorSession, "skill.readResource", enabled);
+expectPolicy(strategyEditorSession, toProviderToolName("skill.readResource"), enabled);
+
+// Progressive disclosure must not become general filesystem or shell access.
+for (const tool of ["read_files", "run_commands", "search_codebase", "editor", "apply_patch"]) {
+  expectPolicy(strategyEditorSession, tool, disabled);
+}
+
+// Bundled Skill resources stay read-only to the main scoped session.
+expectPolicy(
+  { ...strategyEditorSession, agentRole: "subagent" },
+  "skill.readResource",
+  disabled
+);
+
 const providerOpportunity = toProviderToolName("tradeOpportunity.create");
 expectPolicy({ permissionMode: "copilot", agentRole: "main" }, providerOpportunity, enabled);
 expectPolicy({ permissionMode: "copilot", agentRole: "main" }, "totally_unknown_tool", disabled);

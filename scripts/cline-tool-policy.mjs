@@ -66,6 +66,7 @@ export const ANALYSIS_TOOLS = new Set([
   "strategy.getBacktestDiagnostics",
   "strategy.compareBacktests",
   "strategy.getOptimizationResult",
+  "skill.readResource",
   "skills"
 ]);
 
@@ -256,7 +257,7 @@ export function resolveToolPolicy(name, config = {}) {
   }
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
-      canonicalName.startsWith("strategy.")
+      (canonicalName.startsWith("strategy.") || canonicalName === "skill.readResource")
       && role !== "main"
     ) {
       return disabledPolicy("disabled:strategy-editor-main-session-only");

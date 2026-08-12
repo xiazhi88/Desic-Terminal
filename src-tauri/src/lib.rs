@@ -1187,7 +1187,7 @@ struct AiStreamOptions {
     system_prompt: Option<String>,
     custom_rules: Option<String>,
     enabled_skills: Option<Vec<String>>,
-    runtime_scoped_skills: Vec<desic_storage_config::AiSkillDefinition>,
+    runtime_scoped_skills: Vec<crate::storage_config::AiSkillBundle>,
     clear_skill_definitions: bool,
     disable_skills_tool: Option<bool>,
     enable_spawn_agent: Option<bool>,
@@ -12969,8 +12969,9 @@ async fn run_ai_stream(
             config.enabled_skills.clear();
             config.skill_definitions.clear();
         }
-        for skill in &options.runtime_scoped_skills {
-            crate::storage_config::sync_cline_runtime_scoped_skill(skill)?;
+        for bundle in &options.runtime_scoped_skills {
+            crate::storage_config::sync_cline_runtime_scoped_skill(bundle)?;
+            let skill = &bundle.definition;
             if let Some(existing) = config
                 .skill_definitions
                 .iter_mut()
@@ -14568,6 +14569,7 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
                 | "alert.listPriceAlerts"
                 | "script.list"
                 | "skills"
+                | "skill.readResource"
                 | "strategy.readDevelopmentDocs"
                 | "strategy.readCurrentSource"
                 | "strategy.testCurrentSource"
@@ -14793,7 +14795,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     {
         return Err("market.readDecisionContext 仅允许绑定后台 Run 的主 Agent 调用".to_string());
     }
-    if canonical.starts_with("strategy.") && !is_main {
+    if (canonical.starts_with("strategy.") || canonical == "skill.readResource") && !is_main {
         return Err("策略研究工具仅可由主 AI 会话使用".to_string());
     }
     let is_read = matches!(
@@ -14853,6 +14855,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "trade.precheck"
             | "tradeOpportunity.list"
             | "tradeOpportunity.get"
+            | "skill.readResource"
             | "strategy.readDevelopmentDocs"
             | "strategy.readCurrentSource"
             | "strategy.testCurrentSource"
@@ -15432,7 +15435,7 @@ async fn execute_ai_tool(
     let canonical_name = canonical_ai_tool_name(tool_name);
     authorize_ai_tool(canonical_name, context)?;
     let session_id = context.session_id.as_str();
-    if canonical_name.starts_with("strategy.") {
+    if canonical_name.starts_with("strategy.") || canonical_name == "skill.readResource" {
         ensure_ai_run_is_active(&app, context).await?;
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }

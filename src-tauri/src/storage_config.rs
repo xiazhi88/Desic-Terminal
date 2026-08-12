@@ -475,11 +475,30 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
     Ok(())
 }
 
+/// One on-demand file inside a Skill directory, addressed by a relative path.
+#[derive(Debug, Clone)]
+pub(crate) struct AiSkillResource {
+    pub path: String,
+    pub contents: String,
+}
+
+/// A Skill plus the progressive-disclosure resources it exposes.
+#[derive(Debug, Clone)]
+pub(crate) struct AiSkillBundle {
+    pub definition: AiSkillDefinition,
+    pub resources: Vec<AiSkillResource>,
+}
+
 /// Writes an application-owned, non-persistent Skill for a narrowly scoped
 /// interaction. These Skills are never inserted into the user's AI
 /// configuration; the caller must still explicitly include its id in the
 /// per-run Cline configuration before it can be used.
-pub(crate) fn sync_cline_runtime_scoped_skill(skill: &AiSkillDefinition) -> Result<(), String> {
+///
+/// A bundle whose body already carries its own Markdown structure is written
+/// verbatim under generated frontmatter, so it keeps the standard
+/// `SKILL.md` + `docs/` layout rather than the legacy 规则/内容 sections.
+pub(crate) fn sync_cline_runtime_scoped_skill(bundle: &AiSkillBundle) -> Result<(), String> {
+    let skill = &bundle.definition;
     let id = skill.id.trim();
     if id.is_empty() || !is_runtime_scoped_skill_id(id) {
         return Err("未知的运行时 Skill 标识".to_string());
@@ -489,14 +508,111 @@ pub(crate) fn sync_cline_runtime_scoped_skill(skill: &AiSkillDefinition) -> Resu
     let dir = root.join(sanitize_skill_dir_name(id));
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let content = format!(
-        "---\nname: {}\ndescription: {}\ndisabled: false\n---\n\n# {}\n\n## 规则\n{}\n\n## 内容\n{}\n",
+        "---\nname: {}\ndescription: {}\ndisabled: false\n---\n\n{}\n",
         yaml_scalar(id),
         yaml_scalar(&skill.description),
-        id,
-        skill.rules.trim(),
         skill.content.trim(),
     );
-    write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())
+    write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
+    for resource in &bundle.resources {
+        let relative = validated_skill_resource_path(&resource.path)?;
+        let target = dir.join(&relative);
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err)
+            })?;
+        }
+        write_file_atomically(&target, resource.contents.as_bytes())?;
+    }
+    Ok(())
+}
+
+/// Validates a Skill-relative resource path.
+///
+/// Rejects absolute paths, parent traversal, and non-normal components so a
+/// bundle can only ever write inside its own Skill directory.
+pub(crate) fn validated_skill_resource_path(value: &str) -> Result<PathBuf, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("Skill 资源路径不能为空".to_string());
+    }
+    if trimmed.len() > 180 {
+        return Err("Skill 资源路径过长".to_string());
+    }
+    if trimmed.contains('\\') || trimmed.contains('\0') {
+        return Err(format!("Skill 资源路径不合法：{}", trimmed));
+    }
+    let candidate = Path::new(trimmed);
+    if candidate.is_absolute() {
+        return Err(format!("Skill 资源路径必须是相对路径：{}", trimmed));
+    }
+    // `Path::components` silently drops `.` segments, so reject any dot-prefixed
+    // segment on the raw text before normalization can hide it.
+    if trimmed
+        .split('/')
+        .any(|segment| segment.is_empty() || segment.starts_with('.'))
+    {
+        return Err(format!("Skill 资源路径不合法：{}", trimmed));
+    }
+    let mut normalized = PathBuf::new();
+    for component in candidate.components() {
+        match component {
+            std::path::Component::Normal(part) => {
+                let text = part
+                    .to_str()
+                    .ok_or_else(|| format!("Skill 资源路径不合法：{}", trimmed))?;
+                if text.starts_with('.') {
+                    return Err(format!("Skill 资源路径不合法：{}", trimmed));
+                }
+                normalized.push(text);
+            }
+            _ => return Err(format!("Skill 资源路径不合法：{}", trimmed)),
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(format!("Skill 资源路径不合法：{}", trimmed));
+    }
+    Ok(normalized)
+}
+
+/// Reads one on-demand resource belonging to an application-owned Skill.
+///
+/// The path is validated, resolved inside the Skill directory, and the final
+/// target must be a regular file that is still inside that directory after
+/// symlink resolution.
+pub(crate) fn read_cline_skill_resource(
+    skill_id: &str,
+    resource_path: &str,
+) -> Result<String, String> {
+    let id = skill_id.trim();
+    if id.is_empty() || !is_runtime_scoped_skill_id(id) {
+        return Err("未知的运行时 Skill 标识".to_string());
+    }
+    let relative = validated_skill_resource_path(resource_path)?;
+    let dir = runtime_paths()
+        .cline_skills_dir
+        .join(sanitize_skill_dir_name(id));
+    let root = dir
+        .canonicalize()
+        .map_err(|err| format!("Skill 目录不可用：{}", err))?;
+    let target = root.join(&relative);
+    let resolved = target.canonicalize().map_err(|_| {
+        format!(
+            "Skill 资源不存在：{}",
+            relative.to_string_lossy().replace('\\', "/")
+        )
+    })?;
+    if !resolved.starts_with(&root) {
+        return Err("Skill 资源路径超出该 Skill 目录".to_string());
+    }
+    let metadata = fs::metadata(&resolved).map_err(|err| err.to_string())?;
+    if !metadata.is_file() {
+        return Err("Skill 资源不是普通文件".to_string());
+    }
+    if metadata.len() > 256 * 1024 {
+        return Err("Skill 资源超过 256KB 读取上限".to_string());
+    }
+    fs::read_to_string(&resolved).map_err(|err| format!("读取 Skill 资源失败：{}", err))
 }
 
 fn is_runtime_scoped_skill_id(id: &str) -> bool {
@@ -2541,6 +2657,97 @@ pub(crate) fn save_notification_webhook(webhook: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn skill_resource_paths_accept_only_relative_normal_components() {
+        assert_eq!(
+            validated_skill_resource_path("docs/actions.md").unwrap(),
+            PathBuf::from("docs").join("actions.md")
+        );
+        assert_eq!(
+            validated_skill_resource_path("  templates/ema-trend.py  ").unwrap(),
+            PathBuf::from("templates").join("ema-trend.py")
+        );
+    }
+
+    #[test]
+    fn skill_resource_paths_reject_traversal_and_absolute_targets() {
+        for candidate in [
+            "",
+            "   ",
+            "..",
+            "../SKILL.md",
+            "docs/../../SKILL.md",
+            "docs/./actions.md",
+            "/etc/passwd",
+            "docs\\actions.md",
+            ".hidden",
+            "docs/.hidden",
+        ] {
+            assert!(
+                validated_skill_resource_path(candidate).is_err(),
+                "expected {candidate:?} to be rejected"
+            );
+        }
+        let long = format!("docs/{}.md", "a".repeat(200));
+        assert!(validated_skill_resource_path(&long).is_err());
+    }
+
+    #[test]
+    fn syncing_the_strategy_skill_bundle_writes_a_readable_layout() {
+        // Exercises the real sync + read path end to end so the paths advertised
+        // in SKILL.md are proven reachable, not just proven to reject traversal.
+        let bundle = AiSkillBundle {
+            definition: AiSkillDefinition {
+                id: "systematic-strategy-authoring".to_string(),
+                name: "systematic-strategy-authoring".to_string(),
+                description: "Use when editing the current strategy buffer.".to_string(),
+                rules: String::new(),
+                content: "# Systematic strategy authoring\n\nSee `docs/actions.md`.".to_string(),
+                builtin: true,
+            },
+            resources: vec![AiSkillResource {
+                path: "docs/actions.md".to_string(),
+                contents: "# Action reference\n".to_string(),
+            }],
+        };
+        if sync_cline_runtime_scoped_skill(&bundle).is_err() {
+            // The runtime skills directory is unavailable in this environment.
+            return;
+        }
+
+        let skill_file = runtime_paths()
+            .cline_skills_dir
+            .join("systematic-strategy-authoring")
+            .join("SKILL.md");
+        let written = fs::read_to_string(&skill_file).expect("SKILL.md");
+        // Frontmatter is generated (name/description are quoted YAML scalars);
+        // the body is written verbatim beneath it.
+        assert!(written.starts_with("---\n"));
+        assert!(written.contains("name: \"systematic-strategy-authoring\""));
+        assert!(written.contains("disabled: false"));
+        assert!(written.contains("# Systematic strategy authoring"));
+        assert!(!written.contains("## 规则"));
+
+        let resource =
+            read_cline_skill_resource("systematic-strategy-authoring", "docs/actions.md")
+                .expect("bundled resource is readable");
+        assert_eq!(resource, "# Action reference\n");
+        // A path the bundle never declared must not be readable.
+        assert!(read_cline_skill_resource("systematic-strategy-authoring", "docs/missing.md").is_err());
+    }
+
+    #[test]
+    fn skill_resources_are_only_readable_for_application_owned_skills() {
+        assert!(read_cline_skill_resource("", "docs/actions.md").is_err());
+        assert!(read_cline_skill_resource("trading-philosophy", "docs/actions.md").is_err());
+        assert!(read_cline_skill_resource("../../etc", "passwd").is_err());
+        // A known application-owned id must still reject a traversal payload
+        // before it ever touches the filesystem.
+        assert!(
+            read_cline_skill_resource("systematic-strategy-authoring", "../../SKILL.md").is_err()
+        );
+    }
 
     #[test]
     fn ui_locale_matching_normalizes_supported_language_families() {

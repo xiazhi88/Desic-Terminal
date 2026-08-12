@@ -264,6 +264,11 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 后台和复盘 Agent 不设置用户可配置的总运行时长上限；明确网络/Sidecar 错误应结束 Run 并退避，正常长推理继续等待。后续停滞检测必须基于连接心跳或最后事件时间，不能把总耗时直接当失败。
 - Review Agent 永远只读，不能自行修改或发布 Skill。只有证据明确指向可复用、可验证的 Skill 级缺陷时才允许提交完整候选 Skill；单笔盈亏、正常方差、一次性执行问题或数据缺失不得触发优化建议。候选必须绑定仓位决策实际使用的已发布版本，用户在逐行差异预览中明确采用后才直接发布；采用时若最新发布版本已偏离基线必须失败关闭，禁止覆盖后续修改。
 - Skill ID 必须唯一且能无损映射为目录名；配置文件、Skill 文件和版本状态必须按失败可恢复的顺序更新。发布中断恢复应完成原 draft，不能复制出一个新的 published 版本。
+- `SKILL.md` 的 `name` 必须等于其目录名。Cline 按 name 解析被调用的 Skill，写入产品化中文名会让 Skill 无法加载。`description` 使用「Use when …」触发语，供模型判断何时加载。
+- 关闭 `skills` 工具等于关闭 Skill 正文投递。`disableSkillsTool` 会让工具被 `toolPolicies` 过滤掉，Cline 随即不注册 `skills`，Skill 降级为只有 `/name` 开头的提示词才能命中的 slash command；提示词不以斜杠开头时，`SKILL.md` 正文会被静默丢弃，只剩系统提示词和工具描述。以 Skill 文件投递行为契约的会话必须保持 `skills` 可用，并把它写进 `toolAllowlist`。
+- 长 Skill 使用官方渐进式披露布局：常驻 `SKILL.md` 只放范围、工作流和硬约束，详细契约拆到 `docs/`，示例放 `templates/`。常驻正文控制在数 KB 量级并加体积回归断言，避免每轮重复投递完整契约。
+- Desic 的 AI 会话一律禁用 `read_files` 与 `run_commands`，因此 Skill 的 `docs/` 不能依赖通用文件读取，`scripts/` 也无法执行。按需文档统一通过受限的 `skill.readResource` 读取：只接受相对路径、拒绝绝对路径与 `..`/点号段、解析符号链接后仍必须位于该 Skill 目录内、限制大小、且只对应用自有 Skill 和主会话开放。不得为了实现渐进式披露而放开通用文件或 shell 权限。
+- `SKILL.md` 中标注的每个资源路径都必须真实存在，反向也要求打包资源都被标注；两侧用测试锁定，避免模型被指引去读不存在的文档。
 - Cline SDK 会把 `sessionId` 用作本地 session 目录名。业务层可以保留带命名空间的 ID（例如 `background:run-*`），但传入 SDK 的运行时 ID 必须经过稳定、抗碰撞、限长的 Windows 文件名安全映射；停止、订阅、恢复和 Subagent/Team 配置必须使用同一个映射结果。
 - 修复 session ID 映射时还要处理 Cline `sessions.db` 中已经存在的非法历史记录，否则 SDK 的 stale-session reconciler 会在新会话启动时重新访问旧冒号路径。迁移只能清理当前项目且提示词明确属于 Desic Terminal 或旧版 `desicTradeAI` 的 `background:/review:` 记录，并同步解除 schedule、父会话和 Subagent 队列引用，不能删除用户其它 Cline 会话。
 - Cline Provider ID 可识别、handler 可构造不代表最新模型已经完成线协议适配。升级模型模板时必须用占位凭据和拦截 `fetch` 的方式核对最终 endpoint、Model ID 与请求体，重点检查 thinking/reasoning、采样参数和 Responses/Chat/Anthropic 协议差异；适配层只能按明确 Provider + Model 白名单改写，不得记录请求头、API Key、完整提示词或响应正文。

@@ -1365,6 +1365,16 @@ const STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA = {
   required: []
 };
 
+const SKILL_READ_RESOURCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    skillId: { type: "string", minLength: 1, maxLength: 120 },
+    path: { type: "string", minLength: 1, maxLength: 180 }
+  },
+  required: ["skillId", "path"]
+};
+
 const STRATEGY_TEST_CURRENT_SOURCE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1929,6 +1939,7 @@ function createDesicTools(sessionId, options = {}) {
     tool("script.enable", "Enable or disable a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.delete", "Delete a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.list", "List local chart scripts.", SCRIPT_TOOL_SCHEMA),
+    tool("skill.readResource", "Read one bundled reference document belonging to the active Desic Skill, using the relative path listed in its SKILL.md. Use it to load an on-demand contract such as docs/pre-write-audit.md before writing source. It reads only files inside that Skill's own directory: it is not a general file reader and cannot reach an arbitrary path, market data, an account, credentials, or another strategy.", SKILL_READ_RESOURCE_SCHEMA),
     tool("strategy.readDevelopmentDocs", "Optionally read the complete versioned Desic Python strategy development document when protocol details are needed. Source writes do not require this read-only reference.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
     tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing the current buffer.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
     tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, then run bounded deterministic fixtures. This is a source-contract test, not a historical backtest or live execution check.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
