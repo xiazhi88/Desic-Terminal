@@ -204,7 +204,7 @@ function createClaudeArgs(config, bridge, runFiles) {
   const model = String(config.modelId || "").trim();
   if (!validModelId(model)) throw new Error("Claude Code Model ID 含有不支持的字符");
   const allowedTools = bridge.tools.map((tool) => `mcp__${bridge.bridgeId}__${tool.name}`);
-  return [
+  const args = [
     "-p",
     "--output-format", "stream-json",
     "--verbose",
@@ -214,17 +214,21 @@ function createClaudeArgs(config, bridge, runFiles) {
     "--permission-mode", "dontAsk",
     "--max-turns", String(claudeMaxTurns(bridge.maxTurns)),
     // User settings may carry the user's ANTHROPIC_BASE_URL/AUTH_TOKEN route.
-    // Command-line isolation below disables hooks, memories, skills and all native tools.
     "--setting-sources", "user",
-    "--settings", JSON.stringify({ disableAllHooks: true }),
     "--strict-mcp-config",
     "--mcp-config", runFiles.mcpPath,
-    "--tools", "",
-    ...(allowedTools.length > 0 ? ["--allowedTools", allowedTools.join(",")] : []),
-    "--disable-slash-commands",
     "--no-session-persistence",
     "--system-prompt-file", runFiles.systemPromptPath
   ];
+  if (bridge.openAgent !== true) {
+    args.push(
+      "--settings", JSON.stringify({ disableAllHooks: true }),
+      "--tools", "",
+      ...(allowedTools.length > 0 ? ["--allowedTools", allowedTools.join(",")] : []),
+      "--disable-slash-commands"
+    );
+  }
+  return args;
 }
 
 function createClaudeHandler(config) {

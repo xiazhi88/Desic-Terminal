@@ -179,7 +179,24 @@ function AiToolOutputCode({ value, pending }: { value: unknown; pending?: boolea
   return <code>{safeJson(normalized)}</code>;
 }
 
-function AiToolCard({ tool }: { tool: AiToolRun }) {
+function strategyActionForTool(tool: AiToolRun) {
+  if (!tool.name.startsWith("strategy.") || !tool.ok || !tool.result || typeof tool.result !== "object") return null;
+  const result = tool.result as Record<string, unknown>;
+  const input = tool.arguments && typeof tool.arguments === "object" ? tool.arguments as Record<string, unknown> : {};
+  const strategy = result.strategy && typeof result.strategy === "object" ? result.strategy as Record<string, unknown> : null;
+  const run = result.run && typeof result.run === "object" ? result.run as Record<string, unknown> : null;
+  const optimization = result.optimization && typeof result.optimization === "object" ? result.optimization as Record<string, unknown> : null;
+  const strategyId = String(strategy?.id ?? run?.strategyId ?? result.strategyId ?? input.strategyId ?? "").trim();
+  if (!strategyId) return null;
+  return {
+    strategyId,
+    runId: String(run?.id ?? result.runId ?? input.runId ?? "").trim() || undefined,
+    optimizationId: String(optimization?.id ?? result.optimizationId ?? input.optimizationId ?? "").trim() || undefined
+  };
+}
+
+function AiToolCard({ tool, onOpenStrategy }: { tool: AiToolRun; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
+  const strategyAction = strategyActionForTool(tool);
   return (
     <details
       className={clsx(
@@ -207,11 +224,12 @@ function AiToolCard({ tool }: { tool: AiToolRun }) {
           <AiToolOutputCode value={tool.result} pending={tool.status === "running"} />
         </details>
       </div>
+      {strategyAction && onOpenStrategy ? <button type="button" className="ai-tool-open-strategy" onClick={() => onOpenStrategy(strategyAction.strategyId, strategyAction.runId, strategyAction.optimizationId)}>{processText("openStrategyLab", "Open in Strategy Lab", "在策略实验室打开")}</button> : null}
     </details>
   );
 }
 
-function AiToolTraceRow({ tool, now }: { tool: AiToolRun; now: number }) {
+function AiToolTraceRow({ tool, now, onOpenStrategy }: { tool: AiToolRun; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
   const Icon = tool.status === "running" ? Loader2 : tool.status === "failed" || tool.ok === false || tool.blocked ? CircleAlert : CheckCircle2;
   const duration = toolDurationLabel(tool, now);
   const source = toolDataSourceLabel(tool);
@@ -224,6 +242,7 @@ function AiToolTraceRow({ tool, now }: { tool: AiToolRun; now: number }) {
         <strong>{toolStatusLabel(tool)}{source ? ` · ${source}` : ""}{duration ? ` · ${duration}` : ""}</strong>
       </summary>
       {tool.summary && <small data-i18n-skip>{tool.summary}</small>}
+      {strategyActionForTool(tool) && onOpenStrategy ? <button type="button" className="ai-tool-open-strategy" onClick={() => { const action = strategyActionForTool(tool); if (action) onOpenStrategy(action.strategyId, action.runId, action.optimizationId); }}>{processText("openStrategyLab", "Open in Strategy Lab", "在策略实验室打开")}</button> : null}
       <div className="ai-tool-panel">
         <details>
           <summary>{processText("toolInput", "Input", "输入")}</summary>
@@ -250,7 +269,7 @@ function toolDataSourceLabel(tool: AiToolRun) {
   return processText("localRead", "Local read", "本地读取");
 }
 
-function AiToolGroup({ items, message, now }: { items: Extract<AiTimelineItem, { kind: "tool" }>[]; message: AiUiMessage; now: number }) {
+function AiToolGroup({ items, message, now, onOpenStrategy }: { items: Extract<AiTimelineItem, { kind: "tool" }>[]; message: AiUiMessage; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
   const tools = items
     .map((item) =>
       item.agentId
@@ -273,7 +292,7 @@ function AiToolGroup({ items, message, now }: { items: Extract<AiTimelineItem, {
       </summary>
       <div className="ai-tool-trace-list">
         {tools.map((tool) => (
-          <AiToolTraceRow tool={tool} now={now} key={`${tool.agentId ?? "main"}-${tool.id}`} />
+          <AiToolTraceRow tool={tool} now={now} onOpenStrategy={onOpenStrategy} key={`${tool.agentId ?? "main"}-${tool.id}`} />
         ))}
       </div>
     </details>
@@ -379,7 +398,7 @@ export function AiTokenUsageLine({ usage }: { usage: unknown }) {
   );
 }
 
-export function AiProcessTimeline({ message, onApprove, now }: { message: AiUiMessage; onApprove: (approvalId: string, approved: boolean, reason: string) => void; now: number }) {
+export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: { message: AiUiMessage; onApprove: (approvalId: string, approved: boolean, reason: string) => void; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
   const timeline = message.timeline ?? [];
   const hasTimeline = timeline.length > 0;
   const hasLegacyProcess =
@@ -406,7 +425,7 @@ export function AiProcessTimeline({ message, onApprove, now }: { message: AiUiMe
       </summary>
       <div className="ai-process-list">
         {hasTimeline ? (
-          groups.map((group) => renderProcessGroup(group, message, onApprove, now))
+          groups.map((group) => renderProcessGroup(group, message, onApprove, now, onOpenStrategy))
         ) : (
           <>
             {message.draftText && <MarkdownMessage content={message.draftText} />}
@@ -423,7 +442,7 @@ export function AiProcessTimeline({ message, onApprove, now }: { message: AiUiMe
                 <code>{safeJson(message.teamEvents)}</code>
               </details>
             )}
-            {message.tools.length > 0 && <AiToolGroup items={message.tools.map((tool) => ({ id: `legacy-${tool.id}`, kind: "tool", toolId: tool.id }))} message={message} now={now} />}
+            {message.tools.length > 0 && <AiToolGroup items={message.tools.map((tool) => ({ id: `legacy-${tool.id}`, kind: "tool", toolId: tool.id }))} message={message} now={now} onOpenStrategy={onOpenStrategy} />}
             {(message.approvals ?? []).map((approval) => <AiApprovalCard approval={approval} onApprove={onApprove} key={approval.id} />)}
           </>
         )}
@@ -432,8 +451,8 @@ export function AiProcessTimeline({ message, onApprove, now }: { message: AiUiMe
   );
 }
 
-function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number) {
-  if (group.kind === "tools") return <AiToolGroup items={group.items} message={message} now={now} key={group.id} />;
+function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
+  if (group.kind === "tools") return <AiToolGroup items={group.items} message={message} now={now} onOpenStrategy={onOpenStrategy} key={group.id} />;
   if (group.kind === "team") {
     return (
       <details className="ai-process-group ai-team-events" key={group.id}>
@@ -442,10 +461,10 @@ function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onAppro
       </details>
     );
   }
-  return renderTimelineItem(group.item, message, onApprove, now);
+  return renderTimelineItem(group.item, message, onApprove, now, onOpenStrategy);
 }
 
-function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number) {
+function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
   if (item.kind === "text") return <MarkdownMessage content={item.content} key={item.id} />;
   if (item.kind === "reasoning") {
     return (
@@ -459,7 +478,7 @@ function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprov
     const tool = item.agentId
       ? message.agents?.find((agent) => agent.id === item.agentId)?.tools?.find((entry) => entry.id === item.toolId)
       : message.tools.find((entry) => entry.id === item.toolId);
-    return tool ? <AiToolCard tool={tool} key={item.id} /> : null;
+    return tool ? <AiToolCard tool={tool} onOpenStrategy={onOpenStrategy} key={item.id} /> : null;
   }
   if (item.kind === "agent") {
     const agent = message.agents?.find((entry) => entry.id === item.agentId);

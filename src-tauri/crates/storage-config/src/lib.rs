@@ -148,6 +148,10 @@ pub struct AiConfig {
     pub enabled_skills: Vec<String>,
     #[serde(default = "default_ai_skill_definitions")]
     pub skill_definitions: Vec<AiSkillDefinition>,
+    #[serde(default = "default_ai_open_agent")]
+    pub open_agent: bool,
+    #[serde(default)]
+    pub workspace_roots: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -196,6 +200,8 @@ pub struct AiConfigSummary {
     pub custom_rules: String,
     pub enabled_skills: Vec<String>,
     pub skill_definitions: Vec<AiSkillDefinition>,
+    pub open_agent: bool,
+    pub workspace_roots: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -246,6 +252,8 @@ pub struct AiConfigUpdate {
     pub custom_rules: Option<String>,
     pub enabled_skills: Option<Vec<String>>,
     pub skill_definitions: Option<Vec<AiSkillDefinition>>,
+    pub open_agent: Option<bool>,
+    pub workspace_roots: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -272,6 +280,10 @@ pub struct AiConnectionTestResult {
 
 fn default_ai_permission_mode() -> String {
     "advisor".to_string()
+}
+
+fn default_ai_open_agent() -> bool {
+    true
 }
 
 fn default_ai_reasoning_depth() -> String {

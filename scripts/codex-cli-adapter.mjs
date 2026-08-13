@@ -134,7 +134,19 @@ export function normalizeCodexUsage(usage = {}) {
   };
 }
 
-export function codexIsolationOverrides() {
+export function codexIsolationOverrides(openAgent = false) {
+  if (openAgent) {
+    return {
+      web_search: "live",
+      "features.shell_tool": true,
+      "features.unified_exec": true,
+      "features.multi_agent": true,
+      "features.apps": true,
+      "features.hooks": true,
+      "features.goals": true,
+      "features.skill_mcp_dependency_install": true
+    };
+  }
   return {
     web_search: "disabled",
     "features.shell_tool": false,
@@ -386,7 +398,7 @@ function codexSettings(config, bridge, serverConfig, isolatedCli) {
     cwd: bridge.cwd,
     env: isolatedCli.env,
     approvalMode: "never",
-    sandboxMode: "read-only",
+    sandboxMode: bridge.openAgent ? "workspace-write" : "read-only",
     skipGitRepoCheck: true,
     reasoningEffort: bridge.reasoningEffort,
     reasoningSummary: "auto",
@@ -402,7 +414,7 @@ function codexSettings(config, bridge, serverConfig, isolatedCli) {
       }
     },
     configOverrides: {
-      ...codexIsolationOverrides(),
+      ...codexIsolationOverrides(bridge.openAgent === true),
       ...codexProviderOverrides(bridge.providerRoute),
       // Codex owns provider-executed MCP calls. Only the tools already filtered by
       // Desic policy are exposed on this authenticated, per-run loopback server.
