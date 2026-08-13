@@ -279,6 +279,10 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const backtestDefaultRangeSymbolRef = useRef<string | null>(null);
   const backtestReproductionSymbolRef = useRef<string | null>(null);
   const replayPageRequestRef = useRef(0);
+  // Every slider intent gets a generation. A page response is only allowed to
+  // commit when it still belongs to the latest intent, including when the
+  // latest target is already inside the currently loaded page.
+  const replayIntentRef = useRef(0);
   /// Outstanding page requests, including superseded ones. The spinner clears
   /// when this reaches zero so no single request can strand it.
   const replayPageInFlightRef = useRef(0);
@@ -447,6 +451,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
 
   useEffect(() => {
     replayPageRequestRef.current += 1;
+    replayIntentRef.current += 1;
     // Switching runs abandons any in-flight page. Reset the counter with it so a
     // late arrival from the previous run cannot toggle this run's spinner, and
     // clear the stale drag flag so the new timeline is immediately usable.
@@ -489,6 +494,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
 
   useEffect(() => () => {
     replayPageRequestRef.current += 1;
+    replayIntentRef.current += 1;
     if (replayPageTimerRef.current !== null) {
       window.clearTimeout(replayPageTimerRef.current);
       replayPageTimerRef.current = null;
@@ -787,11 +793,12 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     setEndAt(toDateTimeLocal(endDate.getTime()));
   }, [backtestEndLimitAt, endAt]);
 
-  const loadReplayPage = useCallback(async (requestedIndex: number) => {
+  const loadReplayPage = useCallback(async (requestedIndex: number, intent = replayIntentRef.current) => {
     // Read `detail` through a ref, not the closure. A deferred load created
     // during a drag would otherwise run against the page that was loaded when
     // the timer was scheduled, compute an offset for a page that has since been
     // replaced, and fight with the request that superseded it.
+    if (intent !== replayIntentRef.current) return;
     const current = detailRef.current;
     if (!desktop || !selectedRun?.id || !current || current.totalBarCount <= 0 || current.bars.length === 0) return;
     const totalBarCount = current.totalBarCount;
@@ -829,7 +836,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
           timeoutId = window.setTimeout(() => reject(new Error(text.replayPageTimeout)), REPLAY_PAGE_LOAD_TIMEOUT_MS);
         })
       ]);
-      if (requestId !== replayPageRequestRef.current) return;
+      if (requestId !== replayPageRequestRef.current || intent !== replayIntentRef.current) return;
       if (!next || next.bars.length === 0) throw new Error(text.resultUnavailableDetail);
       const localIndex = Math.min(
         next.bars.length,
@@ -839,7 +846,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       setReplayIndex(localIndex);
       setReplayAbsoluteIndex(next.barOffset + localIndex);
     } catch (error) {
-      if (requestId !== replayPageRequestRef.current) return;
+      if (requestId !== replayPageRequestRef.current || intent !== replayIntentRef.current) return;
       const latest = detailRef.current;
       if (latest) setReplayAbsoluteIndex(latest.barOffset + replayIndexRef.current);
       onNotify({ kind: "error", title: text.resultLoadFailed, message: messageOf(error) });
@@ -857,6 +864,8 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   }, [desktop, onNotify, selectedRun?.id, text.replayPageTimeout, text.resultLoadFailed, text.resultUnavailableDetail]);
 
   const moveReplayCursor = useCallback((requestedIndex: number, immediate = false) => {
+    const intent = replayIntentRef.current + 1;
+    replayIntentRef.current = intent;
     const current = detailRef.current;
     if (!current || current.totalBarCount <= 0 || current.bars.length === 0) return;
     const targetIndex = Math.min(
@@ -885,7 +894,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     }
     const load = () => {
       replayPageTimerRef.current = null;
-      void loadReplayPage(targetIndex);
+      void loadReplayPage(targetIndex, intent);
     };
     // While the pointer is still down the page load is deferred rather than
     // skipped. Dropping it outright meant a drag that ended without a trailing

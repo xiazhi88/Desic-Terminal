@@ -2412,26 +2412,6 @@ button {
   white-space: nowrap;
 }
 
-.chart-replay-diagnostic {
-  position: absolute;
-  top: 34px;
-  left: 14px;
-  right: 14px;
-  z-index: 2;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 5px 11px;
-  color: rgba(207, 214, 228, 0.72);
-  font: 9px/1.35 "SFMono-Regular", Consolas, monospace;
-  pointer-events: none;
-}
-
-.chart-replay-diagnostic span:first-child {
-  color: #e1b656;
-  font-weight: 700;
-  text-transform: uppercase;
-}
-
 .connection-status {
   position: relative;
   cursor: pointer;

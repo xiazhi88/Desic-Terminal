@@ -116,6 +116,12 @@ export type ChartCrosshairPosition = {
 };
 
 export type TradingChartHandle = {
+  /**
+   * Remove every time-bearing point without destroying series or pane layout.
+   * Replay uses this before replacing a page so the time scale never observes
+   * old indicator data together with candles from the new page.
+   */
+  clearTemporalData: () => void;
   replaceSnapshot: (candles: ChartCandlePoint[], volumes: ChartVolumePoint[]) => void;
   appendLatest: (candle: ChartCandlePoint, volume: ChartVolumePoint) => void;
   updateLatest: (candle: ChartCandlePoint, volume: ChartVolumePoint) => void;
@@ -324,6 +330,27 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
   }
 
   return {
+    clearTemporalData: () => {
+      chart.clearCrosshairPosition();
+      markerPlugin.setMarkers([]);
+      candleSeries.setData([]);
+      volumeSeries.setData([]);
+      for (const series of lineSeries.values()) series.setData([]);
+      for (const [key, indicator] of indicatorSeries) {
+        if (lineSeries.has(key)) continue;
+        if (indicator.type === "histogram") {
+          (indicator.series as ISeriesApi<"Histogram">).setData([]);
+        } else {
+          (indicator.series as ISeriesApi<"Line">).setData([]);
+        }
+      }
+      latestCandlePoint = null;
+      candleLatestTime = null;
+      volumeLatestTime = null;
+      candleCloseByTime.clear();
+      lineLatestTimes.clear();
+      indicatorLatestTimes.clear();
+    },
     replaceSnapshot: (candles, volumes) => {
       const nextCandles = toChartCandles(candles);
       const nextVolumes = toChartVolumes(volumes);
