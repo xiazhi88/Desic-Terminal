@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use base64::{engine::general_purpose, Engine as _};
 use chrono::{Datelike, SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
@@ -95,7 +97,8 @@ use crate::private_history::{
     private_history_status as private_history_status_impl,
 };
 use crate::storage_config::{
-    ai_config_summary, ai_local_auth_status, ai_save_config, ai_sidecar_proxy_url,
+    ai_config_summary, ai_local_auth_status, ai_save_config, ai_skill_import, ai_skill_install_git,
+    ai_skill_pick_source, ai_sidecar_proxy_url,
     ai_test_connection, export_diagnostics, frontend_log, initialize_runtime_paths,
     load_accounts_config, load_ai_config, load_notification_webhook, load_proxy_config,
     load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
@@ -250,7 +253,8 @@ fn scrub_private_exchange_text(text: &str) -> String {
 }
 const CHART_INDICATOR_AI_SYSTEM_PROMPT: &str = r##"你是 desicTradeAI 指标中心里的自定义指标对话助手。
 你可以和用户讨论指标想法、解释指标逻辑、询问缺少的细节，也可以在用户明确要求时创建或更新一个本地图表自定义指标。
-不要调用 Skill、子 Agent、交易、账户、行情、通知、文件或 shell 类工具；不要输出任意 JavaScript。
+你可以使用当前开放 Agent 会话提供的文件、网络、浏览器、Shell、MCP 和用户 Skill 来研究资料，但这些能力不能替代指标 DSL 校验，也不能直接执行交易。
+不要输出任意 JavaScript。
 只有在用户明确要求创建或更新指标，并且已经有足够信息时，才调用 script.createOrUpdate。没有调用工具时，正常回答用户的问题，不要声称指标已经生成或写入。
 调用工具后必须等待工具返回；只有工具成功返回后，才能说明指标已写入指标库。
 
@@ -1200,6 +1204,7 @@ struct AiStreamOptions {
     interactive_account_id: Option<String>,
     preserve_cline_conversation: bool,
     conversation_scope: Option<Value>,
+    strategy_session_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -2263,6 +2268,7 @@ async fn ai_delete_session(
         return Err("AI session_id is required".to_string());
     }
     let session_id = request.session_id;
+    systematic_strategy_ai_cancel_session(&app, &session_id).await;
     let _ = stop_ai_session(&runtime, &session_id);
     let _ = send_ai_sidecar_command(
         &app,
@@ -2275,7 +2281,7 @@ async fn ai_delete_session(
 }
 
 #[tauri::command]
-fn ai_send_message(
+async fn ai_send_message(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiRuntime>,
     request: AiSendRequest,
@@ -2320,6 +2326,9 @@ fn ai_send_message(
         }
     }
     stop_ai_session(&runtime, &request.session_id)?;
+    app.state::<SystematicRuntime>()
+        .begin_trading_strategy_ai_session(&request.session_id)
+        .await?;
 
     let session_id = request.session_id.clone();
     let runtime_inner = runtime.inner().clone();
@@ -2344,6 +2353,7 @@ fn ai_send_message(
                 "kind": "trading-assistant",
                 "accountId": request.account_id,
             })),
+            strategy_session_kind: Some("trading-research".to_string()),
             ..Default::default()
         };
         if let Err(message) = run_ai_stream(
@@ -2455,7 +2465,7 @@ fn ai_generate_chart_indicator(
             reasoning_depth: None,
             system_prompt: Some(CHART_INDICATOR_AI_SYSTEM_PROMPT.to_string()),
             custom_rules: Some(
-                "本次会话只允许使用 script.createOrUpdate。只有用户明确要求创建或更新指标且信息足够时才调用它；调用前必须将 source 作为 JSON DSL 完整解析并校验 schemaVersion、parameters、outputs 及每个 expression，禁止 JavaScript/TypeScript/Python、import/export、模块 URL、代码块或任何需要脚本模块加载的内容；其他内容正常对话，不要声称已保存。"
+                "只有用户明确要求创建或更新指标且信息足够时才调用 script.createOrUpdate；调用前必须将 source 作为 JSON DSL 完整解析并校验 schemaVersion、parameters、outputs 及每个 expression，禁止 JavaScript/TypeScript/Python、import/export、模块 URL、代码块或任何需要脚本模块加载的内容；其他内容正常对话，不要声称已保存。"
                     .to_string(),
             ),
             enabled_skills: Some(Vec::new()),
@@ -2467,11 +2477,15 @@ fn ai_generate_chart_indicator(
             enable_agent_teams: Some(false),
             stream_fallback_text: false,
             max_iterations: Some(8),
-            tool_allowlist: vec!["script.createOrUpdate".to_string()],
+            tool_allowlist: vec![
+                "script.createOrUpdate".to_string(),
+                "research.webSearch".to_string(),
+            ],
             required_tool_name: None,
             interactive_account_id: None,
             preserve_cline_conversation: false,
             conversation_scope: None,
+            strategy_session_kind: None,
         };
         if let Err(message) = run_ai_stream(
             app_handle.clone(),
@@ -3193,6 +3207,14 @@ struct AiIndicatorRequest {
     start_time: Option<i64>,
     end_time: Option<i64>,
     indicators: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiWebSearchRequest {
+    query: String,
+    limit: Option<u8>,
+    region: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -12985,6 +13007,18 @@ async fn run_ai_stream(
             }
         }
     }
+    if options
+        .as_ref()
+        .and_then(|value| value.strategy_session_kind.as_deref())
+        == Some("trading-research")
+    {
+        config.custom_rules = format!(
+            "{}\n\n本次是 AI 交易助手的独立策略研究会话：只能创建、读取和修改本会话创建的策略；不得读取或修改当前策略编辑器，也不得操作其它已有策略。每次修改使用完整源码调用 strategy.saveVersion 创建不可变新版本；回测、比较和优化必须使用已保存版本。策略研究不会激活交易 Profile，也不会提交订单。完成策略或回测后，在回复中明确给出 strategyId、版本号和 runId/optimizationId。",
+            config.custom_rules.trim()
+        )
+        .trim()
+        .to_string();
+    }
     let disable_loop_detection = options
         .as_ref()
         .and_then(|value| value.disable_loop_detection)
@@ -13017,6 +13051,11 @@ async fn run_ai_stream(
         .as_ref()
         .map(|value| value.tool_allowlist.clone())
         .unwrap_or_default();
+    let strategy_session_kind = options
+        .as_ref()
+        .and_then(|value| value.strategy_session_kind.clone())
+        .unwrap_or_else(|| "none".to_string());
+    let strategy_session_kind_payload = strategy_session_kind.clone();
     let required_tool_name = options
         .as_ref()
         .and_then(|value| value.required_tool_name.as_deref())
@@ -13121,6 +13160,7 @@ async fn run_ai_stream(
             "streamFallbackText": options.as_ref().map(|value| value.stream_fallback_text).unwrap_or(false),
             "preserveClineConversation": options.as_ref().map(|value| value.preserve_cline_conversation).unwrap_or(false),
             "conversationScope": options.as_ref().and_then(|value| value.conversation_scope.clone()).unwrap_or_else(|| json!({})),
+            "strategySessionKind": strategy_session_kind_payload,
             "maxIterations": max_iterations,
             "toolAllowlist": tool_allowlist.clone(),
             "systemPrompt": config.system_prompt.clone(),
@@ -13142,6 +13182,16 @@ async fn run_ai_stream(
             "disableLoopDetection".to_string(),
             serde_json::Value::Bool(disable_loop_detection),
         );
+        config_payload.insert(
+            "openAgent".to_string(),
+            serde_json::Value::Bool(config.open_agent && run_context.is_none()),
+        );
+        let workspace_root = config
+            .workspace_roots
+            .first()
+            .cloned()
+            .unwrap_or_else(|| crate::storage_config::runtime_work_dir().to_string_lossy().into_owned());
+        config_payload.insert("workspaceRoot".to_string(), serde_json::Value::String(workspace_root));
     }
     let payload = payload;
     emit_ai(
@@ -13363,6 +13413,7 @@ async fn run_ai_stream(
                     active_skill_ids: active_skill_ids.iter().cloned().collect(),
                     account_context_id: account_context_id.clone(),
                     run_context: run_context.clone(),
+                    strategy_session_kind: strategy_session_kind.clone(),
                 };
                 let task_app = app.clone();
                 let task_runtime = runtime.clone();
@@ -14569,6 +14620,7 @@ struct AiToolExecutionContext {
     active_skill_ids: HashSet<String>,
     account_context_id: Option<String>,
     run_context: Option<BackgroundRunContext>,
+    strategy_session_kind: String,
 }
 
 fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
@@ -14869,6 +14921,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "intelligence.smartMoney.readConsensusDivergence"
             | "trade.evaluatePlan"
             | "trade.precheck"
+            | "research.webSearch"
             | "tradeOpportunity.list"
             | "tradeOpportunity.get"
             | "skill.readResource"
@@ -15441,6 +15494,94 @@ fn merge_ai_tool_timing(value: &mut Value, fields: &[(&str, u128)]) {
     }
 }
 
+fn decode_search_html(value: &str) -> String {
+    let mut output = value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">");
+    while let Some(start) = output.find('<') {
+        let Some(end) = output[start..].find('>') else { break };
+        output.replace_range(start..start + end + 1, "");
+    }
+    output.trim().to_string()
+}
+
+fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
+    let mut results = Vec::new();
+    let mut cursor = 0;
+    while results.len() < limit {
+        let Some(marker) = html[cursor..].find("class=\"result__a\"") else { break };
+        let marker = cursor + marker;
+        let Some(href_start) = html[..marker].rfind("href=\"") else { break };
+        let href_start = href_start + 6;
+        let Some(href_end) = html[href_start..].find('"') else { break };
+        let href = decode_search_html(&html[href_start..href_start + href_end]);
+        let Some(title_start) = html[marker..].find('>') else { break };
+        let title_start = marker + title_start + 1;
+        let Some(title_end) = html[title_start..].find("</a>") else { break };
+        let title = decode_search_html(&html[title_start..title_start + title_end]);
+        let snippet = html[title_start + title_end..]
+            .find("result__snippet")
+            .and_then(|offset| {
+                let start = title_start + title_end + offset;
+                html[start..].find('>').map(|tag_end| {
+                    let content_start = start + tag_end + 1;
+                    let content_end = html[content_start..]
+                        .find('<')
+                        .unwrap_or(html.len() - content_start);
+                    decode_search_html(&html[content_start..content_start + content_end])
+                })
+            })
+            .unwrap_or_default();
+        if !href.is_empty() && !title.is_empty() {
+            results.push(json!({ "title": title, "url": href, "snippet": snippet }));
+        }
+        cursor = title_start + title_end + 4;
+    }
+    results
+}
+
+async fn ai_web_search(request: AiWebSearchRequest) -> Result<Value, String> {
+    let query = request.query.trim();
+    if query.len() < 2 || query.len() > 240 {
+        return Err("搜索关键词长度必须在 2 到 240 个字符之间".to_string());
+    }
+    let limit = request.limit.unwrap_or(8).clamp(1, 10) as usize;
+    let mut url = reqwest::Url::parse("https://html.duckduckgo.com/html/")
+        .map_err(|err| format!("搜索地址无效：{err}"))?;
+    url.query_pairs_mut().append_pair("q", query);
+    if let Some(region) = request.region.as_deref().filter(|value| !value.trim().is_empty()) {
+        url.query_pairs_mut().append_pair("kl", region.trim());
+    }
+    let response = reqwest_client()?
+        .get(url)
+        .header("accept", "text/html")
+        .header("user-agent", "Desic-Terminal AI research")
+        .send()
+        .await
+        .map_err(|err| format!("联网搜索请求失败：{err}"))?;
+    let status = response.status();
+    let html = response
+        .text()
+        .await
+        .map_err(|err| format!("读取搜索结果失败：{err}"))?;
+    if !status.is_success() {
+        return Err(format!("联网搜索返回 HTTP {}", status.as_u16()));
+    }
+    let results = parse_duckduckgo_results(&html, limit);
+    Ok(json!({
+        "query": query,
+        "provider": "duckduckgo-html",
+        "searchedAt": now_ms(),
+        "resultCount": results.len(),
+        "results": results,
+        "limitations": "公开搜索结果可能受地区、频率和站点可见性影响；引用结论时应打开并核对原始页面。"
+    }))
+}
+
 async fn execute_ai_tool(
     app: tauri::AppHandle,
     tool_name: &str,
@@ -15453,6 +15594,16 @@ async fn execute_ai_tool(
     let session_id = context.session_id.as_str();
     if canonical_name.starts_with("strategy.") || canonical_name == "skill.readResource" {
         ensure_ai_run_is_active(&app, context).await?;
+        if context.strategy_session_kind == "trading-research"
+            && matches!(
+                canonical_name,
+                "strategy.readCurrentSource"
+                    | "strategy.testCurrentSource"
+                    | "strategy.applySource"
+            )
+        {
+            return Err("AI 交易助手不能访问或修改当前策略编辑器；请操作本会话创建的策略".to_string());
+        }
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }
     inject_ai_execution_context(&mut input, context);
@@ -15479,6 +15630,10 @@ async fn execute_ai_tool(
         .await;
     }
     match canonical_name {
+        "research.webSearch" => {
+            let request: AiWebSearchRequest = serde_json::from_value(input).map_err(|err| err.to_string())?;
+            ai_web_search(request).await
+        }
         "market.readTicker" => {
             let request: AiMarketReadRequest =
                 serde_json::from_value(input).map_err(|err| err.to_string())?;
@@ -22493,6 +22648,9 @@ pub fn run() {
             ai_config_summary,
             ai_local_auth_status,
             ai_save_config,
+            ai_skill_import,
+            ai_skill_install_git,
+            ai_skill_pick_source,
             ai_test_connection,
             ai_automation_summary,
             ai_automation_overview,
@@ -25264,6 +25422,7 @@ mod tests {
             active_skill_ids: HashSet::new(),
             account_context_id: None,
             run_context: None,
+            strategy_session_kind: "none".to_string(),
         }
     }
 

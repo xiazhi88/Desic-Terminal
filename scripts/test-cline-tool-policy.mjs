@@ -9,7 +9,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
-import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, preservesClineConversation } from "./cline-sidecar.mjs";
+import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, preservesClineConversation } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -140,6 +140,15 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.create"
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.saveVersion", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.backtest", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.optimize", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.create", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.backtest", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.getBacktestResult", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.optimize", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.readCurrentSource", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.testCurrentSource", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.applySource", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "research.webSearch", enabled);
+expectTrue("overloaded stream disconnect is retryable", isTransientAiNetworkError("stream disconnected before completion: Our servers are currently overloaded"));
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "trade.placeOrder", disabled);
 expectEqual("news tools hidden without skill", isSkillToolEnabled("intelligence.news.list", []), false);
 expectEqual("news tools exposed with skill", isSkillToolEnabled("intelligence.news.list", ["okx-news-intelligence"]), true);
@@ -303,6 +312,14 @@ expectPolicy(strategyEditorSession, toProviderToolName("skill.readResource"), en
 // Progressive disclosure must not become general filesystem or shell access.
 for (const tool of ["read_files", "run_commands", "search_codebase", "editor", "apply_patch"]) {
   expectPolicy(strategyEditorSession, tool, disabled);
+}
+
+// Open-agent sessions delegate native Cline tools to Cline's own runtime
+// approval model while keeping Desic's unknown-tool policy explicit.
+for (const tool of ["read_files", "run_commands", "search_codebase", "editor", "apply_patch", "browser_action"]) {
+  expectPolicy({ permissionMode: "advisor", agentRole: "main", openAgent: true }, tool, enabled);
+  const native = describeToolPolicy(tool, { permissionMode: "advisor", agentRole: "main", openAgent: true });
+  expectTrue(`open-agent native tool ${tool}`, native.allowed && !native.blocked);
 }
 
 // Bundled Skill resources stay read-only to the main scoped session.

@@ -42,7 +42,7 @@ let createAgentTeamsTools;
 let createSpawnAgentTool;
 let createTool;
 const AI_EVENT_DEBUG = process.env.DESIC_AI_EVENT_DEBUG === "1";
-const PROVIDER_NETWORK_MAX_ATTEMPTS = 3;
+const PROVIDER_NETWORK_MAX_ATTEMPTS = 5;
 const toolInputAjv = new Ajv({ allErrors: true, strict: false });
 const toolInputValidators = new WeakMap();
 
@@ -112,6 +112,7 @@ function clineConversationFingerprint(config) {
     model: String(config?.model || ""),
     permissionMode: String(config?.permissionMode || ""),
     toolAllowlist: [...stringListConfig(config?.toolAllowlist)].sort(),
+    strategySessionKind: String(config?.strategySessionKind || "none"),
     activeSkillIds: [...stringListConfig(config?.activeSkillIds)].sort(),
     systemPrompt: String(config?.systemPrompt || ""),
     customRules: String(config?.customRules || "")
@@ -281,7 +282,7 @@ function optionalPositiveIntConfig(value) {
 
 function isTransientAiNetworkError(error) {
   const message = String(error?.message || error || "");
-  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b|Connect Timeout Error|ConnectTimeoutError|UND_ERR_CONNECT_TIMEOUT|fetch failed|socket hang up/i.test(message);
+  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b|\bEPIPE\b|Connect Timeout Error|ConnectTimeoutError|UND_ERR_CONNECT_TIMEOUT|fetch failed|socket hang up|stream disconnected|servers are currently overloaded|service unavailable|temporarily unavailable|\b(?:502|503|504)\b/i.test(message);
 }
 
 function networkRetryDelay(attempt) {
@@ -1208,6 +1209,17 @@ const READ_ACCOUNT_SCHEMA = {
   }
 };
 
+const WEB_SEARCH_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["query"],
+  properties: {
+    query: { type: "string", minLength: 2, maxLength: 240 },
+    limit: { type: "integer", minimum: 1, maximum: 10 },
+    region: { type: "string", maxLength: 32 }
+  }
+};
+
 const READ_ORDER_STATUS_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -1804,6 +1816,8 @@ function createDesicTools(sessionId, options = {}) {
     latestOpportunityConflict: null
   };
   const tool = (name, description, inputSchema, extra = {}) => {
+    if (String(policyConfig.strategySessionKind || "") === "trading-research"
+      && ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"].includes(name)) return null;
     if (toolAllowlist.size > 0 && !toolAllowlist.has(name)) return null;
     if (multiAgentVetoBlocksTool(name, policyConfig)) return null;
     if (!describeToolPolicy(name, policyConfig).allowed) return null;
@@ -1926,6 +1940,7 @@ function createDesicTools(sessionId, options = {}) {
     tool("optimizationSuggestion.create", "Create a review-backed candidate Skill change for human preview. This is optional: call only when evidence identifies a reusable Skill-level defect, never merely because one trade lost money. Read the exact baseline first with review.readSkillVersion and submit a complete minimally changed proposedSkill.", OPTIMIZATION_SUGGESTION_SCHEMA),
     tool("trade.evaluatePlan", "Evaluate a USDT linear perpetual plan locally with the deterministic trade domain. It distinguishes contract count, base quantity, effectiveExposureMultiple, notional exposure, initial margin, stop risk and one-ATR account risk. effectiveExposureMultiple is gross notional/equity and the approximate equity-percent sensitivity to a 1% underlying move before costs. Omit size to evaluate minSz. This tool never creates an execution blocker; use trade.precheck for authoritative exchange/account eligibility.", TRADE_EVALUATE_PLAN_SCHEMA),
     tool("trade.precheck", "Run a read-only order precheck before placing a trade. For background Profiles the backend injects the frozen maximum single-trade margin percentage and returns one perpetualEvaluation object plus compatibility fields derived from it. effectiveExposureMultiple is gross notional/equity; notionalPctOfEquity is that multiple times 100 and must never be described as margin occupancy or used alone to infer narrow tolerance. marginPctOfEquity is estimated initial margin occupancy. Pass atr and stopPrice when available. timing reports total/instrument/account/limits milliseconds, snapshot source and account-config cache hit. Does not submit an order.", TRADE_PRECHECK_SCHEMA),
+    tool("research.webSearch", "Search public web pages and return titles, URLs, snippets and freshness metadata. Use this for general web research, public strategy references and sources outside the OKX news snapshot.", WEB_SEARCH_SCHEMA),
     profileLeverageEnabled ? tool("trade.setLeverage", "Synchronize the bound Profile account to its immutable target leverage for the requested instrument and margin mode. Call only after trade.precheck reports a leverage mismatch, then rerun trade.precheck. In hedge mode omit posSide so both long and short are synchronized.", SET_LEVERAGE_SCHEMA) : null,
     tool("chart.createDrawing", "Create a local chart drawing such as a trend line, horizontal line, vertical line or rectangle.", CHART_TOOL_SCHEMA),
     tool("chart.updateDrawing", "Update a local chart drawing.", CHART_TOOL_SCHEMA),
@@ -2454,11 +2469,11 @@ function emitMappedCoreEvent(state, sessionId, config, event) {
   ].includes(policyMapped.type)) {
     return;
   }
-  if (policyMapped.type === "error" && isTransientAiNetworkError(policyMapped.message) && !state.hasProviderProgress) {
+  if (policyMapped.type === "error" && isTransientAiNetworkError(policyMapped.message)) {
     state.retryableNetworkError = policyMapped.message;
     return;
   }
-  if (policyMapped.type === "status" && policyMapped.status === "failed" && state.retryableNetworkError && !state.hasProviderProgress) {
+  if (policyMapped.type === "status" && policyMapped.status === "failed" && state.retryableNetworkError) {
     return;
   }
   const lifecycle = reduceAssistantTextLifecycle(state, policyMapped);
@@ -2494,6 +2509,7 @@ function createRuntimeConfig(
     permissionMode,
     agentRole: command.config.agentRole || "main"
   };
+  const openAgent = boolConfig(command.config.openAgent, false);
   const reasoningEffort = ["none", "minimal", "low", "medium", "high", "xhigh"]
     .includes(String(command.config.reasoningDepth || "").trim())
     ? String(command.config.reasoningDepth).trim()
@@ -2507,7 +2523,8 @@ function createRuntimeConfig(
         tools,
         cliPath: String(command.config.localCliPath || "").trim(),
         providerRoute: command.config.codexProviderRoute,
-        cwd: process.cwd(),
+        cwd: String(command.config.workspaceRoot || process.cwd()),
+        openAgent,
         reasoningEffort,
         signal: bridgeOptions.signal,
         agentId: policyConfig.agentRole === "main"
@@ -2529,7 +2546,8 @@ function createRuntimeConfig(
         runtimeSessionId,
         tools,
         cliPath: String(command.config.localCliPath || "").trim(),
-        cwd: process.cwd(),
+        cwd: String(command.config.workspaceRoot || process.cwd()),
+        openAgent,
         reasoningEffort,
         maxTurns: configuredMaxIterations,
         signal: bridgeOptions.signal,
@@ -2572,16 +2590,16 @@ function createRuntimeConfig(
         }
       : {}),
     knownModels: knownModelsFor(command.config),
-    cwd: process.cwd(),
-    workspaceRoot: process.cwd(),
-    mode: "plan",
+    cwd: String(command.config.workspaceRoot || process.cwd()),
+    workspaceRoot: String(command.config.workspaceRoot || process.cwd()),
+    mode: openAgent ? "act" : "plan",
     thinking: reasoningEffort !== "none",
     reasoningEffort,
     enableTools: boolConfig(command.config.enableTools, true),
     ...(enabledSkillNames.length > 0 ? { skills: enabledSkillNames } : {}),
     enableSpawnAgent: boolConfig(command.config.enableSpawnAgent, true),
     enableAgentTeams: boolConfig(command.config.enableAgentTeams, false),
-    disableMcpSettingsTools: true,
+    disableMcpSettingsTools: !openAgent,
     hooks: {
       beforeTool: createBeforeToolHook(policyConfig)
     },
@@ -3355,15 +3373,15 @@ async function sendMessage(cline, input) {
       try {
         startResult = await cline.start(startInput);
       } catch (error) {
-        if (!isTransientAiNetworkError(error) || state.hasProviderProgress) throw error;
+        if (!isTransientAiNetworkError(error)) throw error;
         state.retryableNetworkError = error?.message || String(error);
         startResult = { result: { finishReason: "error" } };
       }
       const finishReason = String(startResult?.result?.finishReason || startResult?.result?.status || "").toLowerCase();
       const resultError = resultText(startResult);
       const retryableError = state.retryableNetworkError
-        || (finishReason === "error" && isTransientAiNetworkError(resultError) ? resultError : "");
-      if (!retryableError || state.hasProviderProgress || finishReason !== "error") break;
+        || (isTransientAiNetworkError(resultError) ? resultError : "");
+      if (!retryableError) break;
       if (attempt >= PROVIDER_NETWORK_MAX_ATTEMPTS) {
         emit({ type: "error", sessionId, message: retryableError });
         emit({ type: "status", sessionId, status: "failed", message: "failed" });
@@ -3374,8 +3392,10 @@ async function sendMessage(cline, input) {
         type: "status",
         sessionId,
         status: "retrying",
-        message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_ATTEMPTS - 1}）`
+        message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_ATTEMPTS}）`
       });
+      state.hasProviderProgress = false;
+      await cline.abort(runtimeSessionId).catch(() => undefined);
       await wait(delay);
       if (state.cancelled) return;
     }

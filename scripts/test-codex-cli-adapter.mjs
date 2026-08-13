@@ -49,6 +49,9 @@ assert.equal(isolation["features.unified_exec"], false);
 assert.equal(isolation["features.multi_agent"], false);
 assert.equal(isolation["agents.enabled"], undefined);
 assert.equal(Object.keys(isolation).some((key) => key.startsWith("mcp_servers.")), false);
+const openIsolation = codexIsolationOverrides(true);
+assert.equal(openIsolation.web_search, "live");
+assert.equal(openIsolation["features.shell_tool"], true);
 
 const providerOverrides = codexProviderOverrides({
   providerId: "PrivateGateway",

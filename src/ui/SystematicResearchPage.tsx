@@ -20,6 +20,7 @@ type SystematicResearchPageProps = {
   accounts: Array<{ id: string; name: string; environment: string }>;
   onNotify: (notification: AppNotification) => void;
   onReady?: () => void;
+  openAiStrategyRequest?: { strategyId: string; runId?: string; optimizationId?: string } | null;
 };
 
 function isChineseLocale(locale: string) {
@@ -32,7 +33,7 @@ function isChineseLocale(locale: string) {
  * this page makes the time-series strategy -> backtest -> replay workflow the
  * primary desktop experience.
  */
-export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets, accounts, onNotify, onReady }: SystematicResearchPageProps) {
+export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets, accounts, onNotify, onReady, openAiStrategyRequest }: SystematicResearchPageProps) {
   const { i18n } = useTranslation();
   const [overview, setOverview] = useState<SystematicOverview | null>(null);
   const refreshTimer = useRef<number | null>(null);
@@ -123,6 +124,7 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
         chinese={chinese}
         refresh={refresh}
         onNotify={onNotify}
+        openAiStrategyRequest={openAiStrategyRequest}
       />
     </WorkspaceFrame>
   );

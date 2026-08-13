@@ -8,7 +8,7 @@ use desic_storage_config::{
     UiPreferencesUpdate, WatchlistConfig,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
-use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
+use zip::{read::ZipArchive, write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 static AI_CONFIG_WRITE_LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
 static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -371,6 +371,16 @@ pub(crate) fn ai_save_config(
                 })
                 .unwrap_or_default(),
         ),
+        open_agent: update
+            .open_agent
+            .or_else(|| existing.as_ref().map(|config| config.open_agent))
+            .unwrap_or(true),
+        workspace_roots: normalize_ai_workspace_roots(
+            update
+                .workspace_roots
+                .or_else(|| existing.as_ref().map(|config| config.workspace_roots.clone()))
+                .unwrap_or_default(),
+        ),
     };
     validate_ai_config(&config)?;
     save_ai_config(&app, &config)?;
@@ -473,6 +483,154 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
         write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
     }
     Ok(())
+}
+
+fn imported_skill_id(value: &str) -> String {
+    let mut id = value
+        .trim()
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+        .collect::<String>();
+    while id.contains("--") {
+        id = id.replace("--", "-");
+    }
+    id = id.trim_matches('-').chars().take(80).collect();
+    if id.is_empty() { format!("imported-skill-{}", now_ms()) } else { id }
+}
+
+fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinition, String> {
+    let mut name = String::new();
+    let mut description = String::new();
+    let mut body = markdown;
+    if let Some(rest) = markdown.strip_prefix("---") {
+        if let Some(end) = rest.find("\n---") {
+            let frontmatter = &rest[..end];
+            for line in frontmatter.lines() {
+                let Some((key, value)) = line.split_once(':') else { continue };
+                let value = value.trim().trim_matches(['\"', '\'']);
+                match key.trim() {
+                    "name" => name = value.to_string(),
+                    "description" => description = value.to_string(),
+                    _ => {}
+                }
+            }
+            body = &rest[end + 5..];
+        }
+    }
+    let id = imported_skill_id(if name.trim().is_empty() { fallback } else { &name });
+    let description = if description.trim().is_empty() {
+        format!("从 {} 导入的 Skill", fallback)
+    } else {
+        description.trim().to_string()
+    };
+    let content = body.trim().to_string();
+    if content.is_empty() {
+        return Err("SKILL.md 内容为空".to_string());
+    }
+    Ok(AiSkillDefinition {
+        id: id.clone(),
+        name: if name.trim().is_empty() { id.clone() } else { name.trim().to_string() },
+        description,
+        rules: String::new(),
+        content,
+        builtin: false,
+    })
+}
+
+fn read_imported_skill_markdown(source: &Path) -> Result<String, String> {
+    if source.is_dir() {
+        let path = source.join("SKILL.md");
+        return fs::read_to_string(&path).map_err(|err| format!("读取 {} 失败：{}", path.display(), err));
+    }
+    if source.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("zip")) {
+        let file = fs::File::open(source).map_err(|err| format!("打开 Skill ZIP 失败：{err}"))?;
+        let mut archive = ZipArchive::new(file).map_err(|err| format!("读取 Skill ZIP 失败：{err}"))?;
+        for index in 0..archive.len() {
+            let mut entry = archive.by_index(index).map_err(|err| err.to_string())?;
+            let name = entry.name().replace('\\', "/");
+            if name.ends_with("SKILL.md") && !name.contains("../") {
+                let mut contents = String::new();
+                entry.read_to_string(&mut contents).map_err(|err| err.to_string())?;
+                return Ok(contents);
+            }
+        }
+        return Err("ZIP 中未找到 SKILL.md".to_string());
+    }
+    Err("Skill 来源必须是包含 SKILL.md 的目录或 ZIP 文件".to_string())
+}
+
+fn persist_imported_skill(app: &tauri::AppHandle, skill: AiSkillDefinition) -> Result<AiConfigSummary, String> {
+    let _guard = lock_ai_config_writes()?;
+    let mut config = load_ai_config_locked(app)?;
+    if let Some(existing) = config.skill_definitions.iter_mut().find(|item| item.id == skill.id) {
+        *existing = skill.clone();
+    } else {
+        config.skill_definitions.push(skill.clone());
+    }
+    config.enabled_skills.push(skill.id.clone());
+    config.enabled_skills = normalize_ai_enabled_skills(config.enabled_skills);
+    config.skill_definitions = merge_ai_skill_definitions(config.skill_definitions);
+    validate_ai_config(&config)?;
+    save_ai_config(app, &config)?;
+    sync_cline_skill_files_from_config(&config)?;
+    drop(_guard);
+    crate::ai_automation::sync_ai_skill_versions(app)?;
+    let summary = ai_config_summary_from(config);
+    let _ = app.emit("ai:config-updated", summary.clone());
+    Ok(summary)
+}
+
+#[tauri::command]
+pub(crate) fn ai_skill_import(app: tauri::AppHandle, source: String) -> Result<AiConfigSummary, String> {
+    let source = PathBuf::from(source.trim());
+    if !source.is_absolute() {
+        return Err("Skill 来源路径必须是绝对路径".to_string());
+    }
+    let fallback = source.file_stem().and_then(|value| value.to_str()).unwrap_or("imported-skill");
+    let markdown = read_imported_skill_markdown(&source)?;
+    persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
+}
+
+#[tauri::command]
+pub(crate) fn ai_skill_pick_source(app: tauri::AppHandle, kind: String) -> Result<Option<String>, String> {
+    let selected = match kind.trim() {
+        "directory" => app
+            .dialog()
+            .file()
+            .set_title("选择包含 SKILL.md 的目录")
+            .blocking_pick_folder(),
+        "zip" => app
+            .dialog()
+            .file()
+            .set_title("选择 Skill ZIP")
+            .add_filter("Skill ZIP", &["zip"])
+            .blocking_pick_file(),
+        _ => return Err("未知的 Skill 来源类型".to_string()),
+    };
+    let Some(selected) = selected else { return Ok(None) };
+    match selected {
+        FilePath::Path(path) => Ok(Some(path.to_string_lossy().into_owned())),
+        FilePath::Url(_) => Err("Skill 来源必须是本地路径".to_string()),
+    }
+}
+
+#[tauri::command]
+pub(crate) async fn ai_skill_install_git(app: tauri::AppHandle, url: String) -> Result<AiConfigSummary, String> {
+    let url = url.trim();
+    if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("git@")) {
+        return Err("Git 地址只支持 http(s):// 或 git@ 主机格式".to_string());
+    }
+    let repo = url.rsplit('/').next().unwrap_or("skill").trim_end_matches(".git");
+    let target = runtime_work_dir().join(".cline").join("imported-git-skills").join(format!("{}-{}", sanitize_skill_dir_name(repo), now_ms()));
+    if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|err| err.to_string())?; }
+    let output = Command::new("git").args(["clone", "--depth", "1", url]).arg(&target).output().await
+        .map_err(|_| "未找到 git，请先安装 Git 后重试".to_string())?;
+    if !output.status.success() {
+        return Err(format!("Git 安装失败：{}", String::from_utf8_lossy(&output.stderr).trim()));
+    }
+    let markdown = read_imported_skill_markdown(&target)?;
+    let fallback = target.file_name().and_then(|value| value.to_str()).unwrap_or("imported-skill");
+    persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
 }
 
 /// One on-demand file inside a Skill directory, addressed by a relative path.
@@ -2110,6 +2268,8 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
         custom_rules: config.custom_rules,
         enabled_skills: config.enabled_skills,
         skill_definitions: merge_ai_skill_definitions(config.skill_definitions),
+        open_agent: config.open_agent,
+        workspace_roots: config.workspace_roots,
     }
 }
 
@@ -2128,6 +2288,8 @@ fn unconfigured_ai_config_summary() -> AiConfigSummary {
         custom_rules: String::new(),
         enabled_skills: normalize_ai_enabled_skills(Vec::new()),
         skill_definitions: desic_storage_config::default_ai_skill_definitions(),
+        open_agent: true,
+        workspace_roots: Vec::new(),
     })
 }
 
@@ -2510,7 +2672,24 @@ fn validate_ai_config(config: &AiConfig) -> Result<(), String> {
             return Err(format!("已启用的 Skill 不存在：{}", skill_id));
         }
     }
+    for root in &config.workspace_roots {
+        let path = std::path::Path::new(root);
+        if root.trim().is_empty() || !path.is_absolute() {
+            return Err(format!("AI 工作区路径必须是绝对路径：{}", root));
+        }
+    }
     Ok(())
+}
+
+fn normalize_ai_workspace_roots(items: Vec<String>) -> Vec<String> {
+    let mut seen = std::collections::HashSet::new();
+    items
+        .into_iter()
+        .map(|item| item.trim().to_string())
+        .filter(|item| !item.is_empty())
+        .filter(|item| seen.insert(item.clone()))
+        .take(32)
+        .collect()
 }
 
 pub(crate) fn is_unconfigured_ai_config_error(error: &str) -> bool {
@@ -2568,19 +2747,25 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
     let original_enabled_skills = serde_json::to_string(&config.enabled_skills).unwrap_or_default();
     let original_skill_definitions =
         serde_json::to_string(&config.skill_definitions).unwrap_or_default();
+    let original_open_agent = config.open_agent;
+    let original_workspace_roots = serde_json::to_string(&config.workspace_roots).unwrap_or_default();
     config.permission_mode = normalize_ai_permission_mode(Some(&config.permission_mode));
     config.reasoning_depth = normalize_ai_reasoning_depth(Some(&config.reasoning_depth));
     config.system_prompt =
         desic_storage_config::migrate_default_ai_system_prompt(config.system_prompt);
     config.enabled_skills = normalize_ai_enabled_skills(config.enabled_skills);
     config.skill_definitions = merge_ai_skill_definitions(config.skill_definitions);
+    config.workspace_roots = normalize_ai_workspace_roots(config.workspace_roots);
     config = normalize_ai_models(config);
     config = apply_active_ai_model(config);
     validate_ai_config(&config)?;
     let skill_config_changed = original_enabled_skills
         != serde_json::to_string(&config.enabled_skills).unwrap_or_default()
         || original_skill_definitions
-            != serde_json::to_string(&config.skill_definitions).unwrap_or_default();
+            != serde_json::to_string(&config.skill_definitions).unwrap_or_default()
+        || original_open_agent != config.open_agent
+        || original_workspace_roots
+            != serde_json::to_string(&config.workspace_roots).unwrap_or_default();
     let model_config_changed = config.permission_mode != original_permission_mode
         || config.reasoning_depth != original_reasoning_depth
         || config.system_prompt != original_system_prompt
@@ -2882,6 +3067,8 @@ wire_api = "responses"
             custom_rules: String::new(),
             enabled_skills,
             skill_definitions,
+            open_agent: true,
+            workspace_roots: Vec::new(),
         }
     }
 

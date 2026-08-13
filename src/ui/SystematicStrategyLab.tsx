@@ -105,6 +105,7 @@ type Props = Readonly<{
   chinese: boolean;
   refresh: () => Promise<void>;
   onNotify: Notify;
+  openAiStrategyRequest?: { strategyId: string; runId?: string; optimizationId?: string } | null;
 }>;
 
 type Tab = "strategy" | "backtest" | "review" | "profiles" | "signals";
@@ -229,7 +230,7 @@ const EMPTY_BACKTEST_PAGE: SystematicBacktestsPageView = {
   totalPages: 1,
 };
 
-export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, marketAssets, accounts, desktop, chinese, refresh, onNotify }: Props) {
+export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, marketAssets, accounts, desktop, chinese, refresh, onNotify, openAiStrategyRequest }: Props) {
   const [tab, setTab] = useState<Tab>("strategy");
   const [selectedStrategyId, setSelectedStrategyId] = useState("");
   const [selectedRunId, setSelectedRunId] = useState("");
@@ -318,6 +319,15 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     [runs, selectedRunId]
   );
   const selectedPython = selectedStrategy?.kind === "python" ? selectedStrategy : null;
+
+  useEffect(() => {
+    if (!openAiStrategyRequest) return;
+    if (strategies.some((strategy) => strategy.id === openAiStrategyRequest.strategyId)) {
+      setSelectedStrategyId(openAiStrategyRequest.strategyId);
+      if (openAiStrategyRequest.runId) setSelectedRunId(openAiStrategyRequest.runId);
+      setTab(openAiStrategyRequest.runId || openAiStrategyRequest.optimizationId ? "review" : "strategy");
+    }
+  }, [openAiStrategyRequest, strategies]);
   const bestRunsByStrategy = useMemo(() => {
     const best = new Map<string, SystematicBacktestView>();
     for (const run of runs) {

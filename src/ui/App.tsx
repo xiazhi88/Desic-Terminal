@@ -9,6 +9,9 @@ import {
   CircleAlert,
   CircleCheck,
   CircleHelp,
+  FilePlus2,
+  FolderOpen,
+  GitBranch,
   Edit3,
   ExternalLink,
   GripVertical,
@@ -551,6 +554,7 @@ export function App() {
     const timer = window.setInterval(trim, 5_000);
     return () => window.clearInterval(timer);
   }, []);
+
   const [windowLabel, setWindowLabel] = useState<string | null>(null);
   const [bootCompleted, setBootCompleted] = useState(false);
   const [mainActivated, setMainActivated] = useState(false);
@@ -1466,9 +1470,15 @@ function TradingTerminal({
   const centerPanelRef = useRef<HTMLElement | null>(null);
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
   const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
+  const [pendingAiStrategyOpen, setPendingAiStrategyOpen] = useState<{ strategyId: string; runId?: string; optimizationId?: string } | null>(null);
   const [systematicLoading, setSystematicLoading] = useState(false);
   const [newsUnreadCount, setNewsUnreadCount] = useState(0);
   const [isMaximized, setIsMaximized] = useState(false);
+
+  const openAiStrategy = useCallback((strategyId: string, runId?: string, optimizationId?: string) => {
+    setMainSection("systematic");
+    setPendingAiStrategyOpen({ strategyId, runId, optimizationId });
+  }, []);
 
   const handleSystematicReady = useCallback(() => {
     setSystematicLoading(false);
@@ -4084,7 +4094,7 @@ function TradingTerminal({
         ) : mainSection === "systematic" ? (
           <div className="systematic-research-workspace">
             <Suspense fallback={<div className="automation-page-loading"><Loader2 className="spin" size={20} /><span>{uiText("正在加载系统化研究工作台", "Loading Systematic Research workspace")}</span></div>}>
-              <SystematicResearchWorkspacePage selectedSymbol={symbol} watchlist={watchlist} marketAssets={marketAssets} accounts={accounts.map((item) => ({ id: item.id, name: item.name, environment: item.environment }))} onNotify={pushNotification} onReady={handleSystematicReady} />
+              <SystematicResearchWorkspacePage selectedSymbol={symbol} watchlist={watchlist} marketAssets={marketAssets} accounts={accounts.map((item) => ({ id: item.id, name: item.name, environment: item.environment }))} onNotify={pushNotification} onReady={handleSystematicReady} openAiStrategyRequest={pendingAiStrategyOpen} />
             </Suspense>
             {systematicLoading ? (
               <div className="systematic-research-loading" role="status" aria-live="polite">
@@ -4736,7 +4746,7 @@ function TradingTerminal({
           }}
         />
       )}
-      <MemoAiDock accountId={account?.id} onOpenSettings={openAiSettings} />
+      <MemoAiDock accountId={account?.id} onOpenSettings={openAiSettings} onOpenStrategy={openAiStrategy} />
     </main>
   );
 }
@@ -6042,7 +6052,7 @@ function AiSettingsPane({
 function useAiConfigDraft(onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void) {
   const { t } = useTranslation("settings");
   const [summary, setSummary] = useState<AiConfigSummary | null>(null);
-  const [draft, setDraft] = useState<AiConfigUpdate & { apiKey: string; permissionMode: AiPermissionMode; stream: boolean; enabledSkills: string[]; skillDefinitions: AiSkillDefinition[] }>({
+  const [draft, setDraft] = useState<AiConfigUpdate & { apiKey: string; permissionMode: AiPermissionMode; stream: boolean; enabledSkills: string[]; skillDefinitions: AiSkillDefinition[]; openAgent: boolean; workspaceRoots: string[] }>({
     provider: "openai-compatible",
     model: "",
     baseUrl: "",
@@ -6052,7 +6062,9 @@ function useAiConfigDraft(onNotify: (notification: Omit<AppNotification, "id" | 
     systemPrompt: "",
     customRules: "",
     enabledSkills: withRequiredAiSkills([]),
-    skillDefinitions: AI_SKILL_OPTIONS
+    skillDefinitions: AI_SKILL_OPTIONS,
+    openAgent: true,
+    workspaceRoots: []
   });
   const [status, setStatus] = useState(() => t("readingAiConfiguration"));
   const [busy, setBusy] = useState(false);
@@ -6070,7 +6082,9 @@ function useAiConfigDraft(onNotify: (notification: Omit<AppNotification, "id" | 
       systemPrompt: config.systemPrompt,
       customRules: config.customRules,
       enabledSkills: withRequiredAiSkills(config.enabledSkills),
-      skillDefinitions: normalizeAiSkillDefinitions(config.skillDefinitions)
+      skillDefinitions: normalizeAiSkillDefinitions(config.skillDefinitions),
+      openAgent: config.openAgent,
+      workspaceRoots: config.workspaceRoots
     }));
   }, []);
 
@@ -6105,7 +6119,9 @@ function useAiConfigDraft(onNotify: (notification: Omit<AppNotification, "id" | 
         systemPrompt: draft.systemPrompt,
         customRules: draft.customRules,
         enabledSkills: withRequiredAiSkills(draft.enabledSkills),
-        skillDefinitions: draft.skillDefinitions
+        skillDefinitions: draft.skillDefinitions,
+        openAgent: draft.openAgent,
+        workspaceRoots: draft.workspaceRoots
       });
       if (!next) {
         setStatus(t("aiSaveDesktopOnly"));
@@ -6159,6 +6175,31 @@ function PromptSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
           onChange={(event) => setDraft((current) => ({ ...current, customRules: event.target.value }))}
         />
       </label>
+      <section className="settings-section" data-i18n-skip>
+        <div>
+          <strong>开放 Agent 能力</strong>
+          <span>允许当前三个 AI 使用 Cline 的文件、Shell、网络、浏览器、MCP 和用户 Skill 工具。</span>
+        </div>
+        <label className="settings-toggle-field">
+          <input
+            type="checkbox"
+            checked={draft.openAgent !== false}
+            onChange={(event) => setDraft((current) => ({ ...current, openAgent: event.target.checked }))}
+          />
+          <span>{draft.openAgent !== false ? "已开启" : "已关闭"}</span>
+        </label>
+      </section>
+      <label className="settings-textarea-field compact" data-i18n-skip>
+        <span>Agent 工作区目录</span>
+        <textarea
+          value={(draft.workspaceRoots ?? []).join("\n")}
+          placeholder="每行一个绝对路径；留空使用 Desic 工作区"
+          onChange={(event) => setDraft((current) => ({
+            ...current,
+            workspaceRoots: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
+          }))}
+        />
+      </label>
       <div className="modal-actions">
         <button className="primary-action" disabled={busy} onClick={() => void save(t("settings:promptConfigurationSaved"))}>
           {busy ? t("settings:saving") : t("settings:savePrompt")}
@@ -6170,7 +6211,13 @@ function PromptSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
 
 function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void }) {
   const { t } = useTranslation(["settings", "common"]);
-  const { draft, setDraft, status, busy, save } = useAiConfigDraft(onNotify);
+  const { draft, setDraft, status, busy, save, applySummary } = useAiConfigDraft(onNotify);
+  const [skillDialogOpen, setSkillDialogOpen] = useState(false);
+  const [skillDialogMode, setSkillDialogMode] = useState<"custom" | "local" | "git">("custom");
+  const [customSkill, setCustomSkill] = useState({ id: "", description: "", rules: "", content: "" });
+  const [skillSource, setSkillSource] = useState("");
+  const [gitSource, setGitSource] = useState("");
+  const [importBusy, setImportBusy] = useState<"path" | "git" | null>(null);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [viewedVersionId, setViewedVersionId] = useState<string>("current");
   const [automationSummary, setAutomationSummary] = useState<AiAutomationOverview | null>(null);
@@ -6275,13 +6322,21 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
   }, [fixedSkillIds, selectSkill, setDraft, skills]);
 
   const addSkill = useCallback(() => {
-    const id = `custom-skill-${Date.now()}`;
+    const id = customSkill.id
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, "-")
+      .replace(/^-+|-+$/g, "") || `custom-skill-${Date.now()}`;
+    if (skills.some((skill) => skill.id === id)) {
+      onNotify({ kind: "error", title: "无法新增 Skill", message: "Skill ID 已存在，请使用不同的名称。" });
+      return;
+    }
     const skill: AiSkillDefinition = {
       id,
       name: id,
-      description: t("settings:newSkillDescription"),
-      rules: t("settings:newSkillRules"),
-      content: t("settings:newSkillContent"),
+      description: customSkill.description.trim() || t("settings:newSkillDescription"),
+      rules: customSkill.rules.trim() || t("settings:newSkillRules"),
+      content: customSkill.content.trim() || t("settings:newSkillContent"),
       builtin: false
     };
     setDraft((current) => ({
@@ -6290,7 +6345,9 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
       skillDefinitions: [...(current.skillDefinitions ?? AI_SKILL_OPTIONS), skill]
     }));
     selectSkill(id);
-  }, [selectSkill, setDraft, t]);
+    setCustomSkill({ id: "", description: "", rules: "", content: "" });
+    setSkillDialogOpen(false);
+  }, [customSkill, onNotify, selectSkill, setDraft, skills, t]);
 
   const removeSkill = useCallback((skillId: string) => {
     const target = skills.find((skill) => skill.id === skillId);
@@ -6308,6 +6365,55 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
     const next = await save(t("settings:skillsConfigurationSaved"));
     if (next) await refreshSkillVersions();
   }, [refreshSkillVersions, save]);
+
+  const importSkill = useCallback(async () => {
+    if (!skillSource.trim()) return;
+    setImportBusy("path");
+    try {
+      const next = await invokeDesktop<AiConfigSummary>("ai_skill_import", { source: skillSource.trim() });
+      if (!next) throw new Error("导入后未返回 AI 配置");
+      applySummary(next);
+      setSkillSource("");
+      const imported = next.skillDefinitions.find((skill) => !skills.some((current) => current.id === skill.id));
+      if (imported) selectSkill(imported.id);
+      setSkillDialogOpen(false);
+      onNotify({ kind: "success", title: "Skill 导入成功", message: "已启用并同步到 Cline Skill 目录" });
+      await refreshSkillVersions();
+    } catch (error) {
+      onNotify({ kind: "error", title: "Skill 导入失败", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setImportBusy(null);
+    }
+  }, [applySummary, onNotify, refreshSkillVersions, selectSkill, skillSource, skills]);
+
+  const installSkillFromGit = useCallback(async () => {
+    if (!gitSource.trim()) return;
+    setImportBusy("git");
+    try {
+      const next = await invokeDesktop<AiConfigSummary>("ai_skill_install_git", { url: gitSource.trim() });
+      if (!next) throw new Error("安装后未返回 AI 配置");
+      applySummary(next);
+      setGitSource("");
+      const imported = next.skillDefinitions.find((skill) => !skills.some((current) => current.id === skill.id));
+      if (imported) selectSkill(imported.id);
+      setSkillDialogOpen(false);
+      onNotify({ kind: "success", title: "Git Skill 安装成功", message: "仓库已克隆、导入并启用" });
+      await refreshSkillVersions();
+    } catch (error) {
+      onNotify({ kind: "error", title: "Git Skill 安装失败", message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      setImportBusy(null);
+    }
+  }, [applySummary, gitSource, onNotify, refreshSkillVersions, selectSkill, skills]);
+
+  const pickSkillSource = useCallback(async (kind: "directory" | "zip") => {
+    try {
+      const selected = await invokeDesktop<string | null>("ai_skill_pick_source", { kind });
+      if (selected) setSkillSource(selected);
+    } catch (error) {
+      onNotify({ kind: "error", title: "无法选择 Skill 来源", message: error instanceof Error ? error.message : String(error) });
+    }
+  }, [onNotify]);
 
   const publishVersion = useCallback(async (version: AiSkillVersion) => {
     setVersionBusy(`publish:${version.id}`);
@@ -6358,7 +6464,7 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
         </div>
         <div className="skill-header-actions">
           <button type="button" onClick={() => void refreshSkillVersions()} disabled={Boolean(versionBusy)} title={t("settings:refreshVersions")}><RefreshCw size={14} /></button>
-          <button className="primary-action" onClick={addSkill}><Plus size={14} />{t("settings:addSkill")}</button>
+          <button className="primary-action" onClick={() => setSkillDialogOpen(true)}><Plus size={14} />新增 Skill</button>
         </div>
       </section>
       <div className="skills-editor-layout">
@@ -6419,6 +6525,51 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
       <div className="modal-actions">
         <button className="primary-action" disabled={busy || readOnly} onClick={() => void saveAndRefreshVersions()}>{busy ? t("settings:saving") : readOnly ? t("settings:historicalVersionsReadOnly") : t("settings:saveAndCreateVersion")}</button>
       </div>
+      {skillDialogOpen ? (
+        <ModalShell
+          title="新增 Skill"
+          description="选择来源后，将它添加到当前 AI 工作区。"
+          compact
+          className="skill-source-modal"
+          onClose={() => !importBusy && setSkillDialogOpen(false)}
+        >
+          <div className="skill-source-modal__body">
+            <div className="skill-source-tabs" role="tablist" aria-label="Skill 来源">
+              <button type="button" role="tab" aria-selected={skillDialogMode === "custom"} className={clsx(skillDialogMode === "custom" && "active")} onClick={() => setSkillDialogMode("custom")}><FilePlus2 size={16} />自定义 Skill</button>
+              <button type="button" role="tab" aria-selected={skillDialogMode === "local"} className={clsx(skillDialogMode === "local" && "active")} onClick={() => setSkillDialogMode("local")}><FolderOpen size={16} />本地目录 / ZIP</button>
+              <button type="button" role="tab" aria-selected={skillDialogMode === "git"} className={clsx(skillDialogMode === "git" && "active")} onClick={() => setSkillDialogMode("git")}><GitBranch size={16} />Git 地址</button>
+            </div>
+            {skillDialogMode === "custom" ? (
+              <div className="skill-source-form">
+                <label><span>Skill 名称</span><input autoFocus value={customSkill.id} placeholder="例如：btc-scalping-research" onChange={(event) => setCustomSkill((current) => ({ ...current, id: event.target.value }))} /></label>
+                <label><span>简短说明</span><input value={customSkill.description} placeholder="这个 Skill 在什么场景下工作？" onChange={(event) => setCustomSkill((current) => ({ ...current, description: event.target.value }))} /></label>
+                <label><span>规则</span><textarea value={customSkill.rules} placeholder="给 AI 的关键约束和工作流程" onChange={(event) => setCustomSkill((current) => ({ ...current, rules: event.target.value }))} /></label>
+                <label><span>内容</span><textarea value={customSkill.content} placeholder="参考资料、模板或详细指令" onChange={(event) => setCustomSkill((current) => ({ ...current, content: event.target.value }))} /></label>
+              </div>
+            ) : skillDialogMode === "local" ? (
+              <div className="skill-source-form skill-source-form--single">
+                <div className="skill-source-hint"><FolderOpen size={18} /><div><strong>导入本地 Skill</strong><span>选择包含 SKILL.md 的目录，或一个 Skill ZIP 压缩包。</span></div></div>
+                <div className="skill-source-picker-actions">
+                  <button type="button" onClick={() => void pickSkillSource("directory")}><FolderOpen size={15} />选择目录</button>
+                  <button type="button" onClick={() => void pickSkillSource("zip")}><FilePlus2 size={15} />选择 ZIP</button>
+                </div>
+                <label><span>本地绝对路径</span><input autoFocus value={skillSource} placeholder="选择上方来源，或手动输入绝对路径" onChange={(event) => setSkillSource(event.target.value)} /></label>
+              </div>
+            ) : (
+              <div className="skill-source-form skill-source-form--single">
+                <div className="skill-source-hint"><GitBranch size={18} /><div><strong>从 Git 安装</strong><span>仓库根目录必须包含 SKILL.md；支持 HTTPS 和 SSH 地址。</span></div></div>
+                <label><span>Git 仓库地址</span><input autoFocus value={gitSource} placeholder="https://github.com/owner/skill.git" onChange={(event) => setGitSource(event.target.value)} /></label>
+              </div>
+            )}
+            <div className="modal-actions skill-source-modal__actions">
+              <button type="button" onClick={() => setSkillDialogOpen(false)} disabled={Boolean(importBusy)}>取消</button>
+              {skillDialogMode === "custom" ? <button type="button" className="primary-action" onClick={addSkill}>创建 Skill</button> : null}
+              {skillDialogMode === "local" ? <button type="button" className="primary-action" onClick={() => void importSkill()} disabled={importBusy !== null || !skillSource.trim()}>{importBusy === "path" ? "导入中..." : "导入 Skill"}</button> : null}
+              {skillDialogMode === "git" ? <button type="button" className="primary-action" onClick={() => void installSkillFromGit()} disabled={importBusy !== null || !gitSource.trim()}>{importBusy === "git" ? "安装中..." : "从 Git 安装"}</button> : null}
+            </div>
+          </div>
+        </ModalShell>
+      ) : null}
     </div>
   );
 }
@@ -8597,7 +8748,7 @@ function clampAiDockPosition(position: AiDockPosition): AiDockPosition {
   };
 }
 
-function AiDock({ preview, onOpenSettings, accountId }: { preview?: boolean; onOpenSettings?: () => void; accountId?: string } = {}) {
+function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { preview?: boolean; onOpenSettings?: () => void; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; accountId?: string } = {}) {
   const { t } = useTranslation(["automation", "common", "settings"]);
   const [open, setOpen] = useState(Boolean(preview));
   const [dockPosition, setDockPosition] = useState<AiDockPosition | null>(null);
@@ -8632,7 +8783,9 @@ function AiDock({ preview, onOpenSettings, accountId }: { preview?: boolean; onO
           systemPrompt: "",
           customRules: "",
           enabledSkills: ["market-analysis", "risk-review"],
-          skillDefinitions: AI_SKILL_OPTIONS
+          skillDefinitions: AI_SKILL_OPTIONS,
+          openAgent: true,
+          workspaceRoots: []
         }
       : null
   );
@@ -9404,6 +9557,7 @@ function AiDock({ preview, onOpenSettings, accountId }: { preview?: boolean; onO
                   message={message}
                   now={aiClockNow}
                   onApprove={(approvalId, approved, reason) => void approveAiTool(sessionIdRef.current, approvalId, approved, reason)}
+                  onOpenStrategy={onOpenStrategy}
                 />
                 <AiMessageError message={message} />
                 {message.text && (

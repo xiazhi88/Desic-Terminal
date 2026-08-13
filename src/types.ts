@@ -1647,6 +1647,8 @@ export type AiConfigSummary = {
   customRules: string;
   enabledSkills: string[];
   skillDefinitions: AiSkillDefinition[];
+  openAgent: boolean;
+  workspaceRoots: string[];
 };
 
 export type AiReasoningDepth = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -1724,6 +1726,8 @@ export type AiConfigUpdate = {
   customRules?: string;
   enabledSkills?: string[];
   skillDefinitions?: AiSkillDefinition[];
+  openAgent?: boolean;
+  workspaceRoots?: string[];
 };
 
 export type AiAutomationTab =

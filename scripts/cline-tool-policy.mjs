@@ -54,6 +54,7 @@ export const ANALYSIS_TOOLS = new Set([
   "intelligence.smartMoney.readConsensusDivergence",
   "trade.evaluatePlan",
   "trade.precheck",
+  "research.webSearch",
   "strategy.readDevelopmentDocs",
   "strategy.readCurrentSource",
   "strategy.testCurrentSource",
@@ -241,11 +242,26 @@ export function resolveToolPolicy(name, config = {}) {
   const mode = normalizePermissionMode(config.permissionMode);
   const role = normalizeAgentRole(config.agentRole);
   const allowlist = toolAllowlistConfig(config.toolAllowlist);
+  const openAgent = boolConfig(config.openAgent, false);
+  const knownTool = allKnownToolNames().includes(canonicalName);
+  const desicTool = knownTool
+    && !PROHIBITED_TOOLS.has(canonicalName)
+    && !DISABLED_SUBAGENT_WRAPPER_TOOLS.has(canonicalName);
 
-  if (allowlist.size > 0 && !allowlist.has(canonicalName)) {
+  if (String(config.strategySessionKind || "") === "trading-research"
+    && ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"].includes(canonicalName)) {
+    return disabledPolicy("disabled:trading-assistant-no-editor-access");
+  }
+
+  // In open-agent mode the allowlist remains a boundary for Desic-owned tools,
+  // while Cline's native tools are intentionally governed by Cline itself.
+  if (allowlist.size > 0 && desicTool && !allowlist.has(canonicalName)) {
     return disabledPolicy("disabled:not-in-tool-allowlist");
   }
 
+  if (PROHIBITED_TOOLS.has(canonicalName) && openAgent) {
+    return enabledPolicy("auto-approved:cline-native-tool");
+  }
   if (PROHIBITED_TOOLS.has(canonicalName)) {
     return disabledPolicy("disabled:prohibited-tool");
   }
@@ -254,6 +270,9 @@ export function resolveToolPolicy(name, config = {}) {
   }
   if (DISABLED_SUBAGENT_WRAPPER_TOOLS.has(canonicalName)) {
     return disabledPolicy("disabled:use-spawn-agent-for-observable-subtasks");
+  }
+  if (openAgent && !knownTool) {
+    return enabledPolicy("auto-approved:cline-native-tool");
   }
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
@@ -370,6 +389,9 @@ export function createBeforeToolHook(policyConfig = {}) {
 }
 
 export function buildToolPolicies(config = {}) {
+  if (boolConfig(config.openAgent, false)) {
+    return { "*": { enabled: true, autoApprove: true } };
+  }
   const policies = { "*": { enabled: false, autoApprove: false } };
   for (const name of allKnownToolNames()) {
     const resolved = resolveToolPolicy(name, config);

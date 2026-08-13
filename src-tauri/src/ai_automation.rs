@@ -9584,6 +9584,8 @@ mod tests {
             custom_rules: String::new(),
             enabled_skills: Vec::new(),
             skill_definitions: desic_storage_config::default_ai_skill_definitions(),
+            open_agent: true,
+            workspace_roots: Vec::new(),
         };
         let disabled = ai_skill_files_fingerprint(&config).expect("fingerprint disabled skills");
         config.enabled_skills.push("trading-philosophy".to_string());
