@@ -154,6 +154,11 @@ export type TradingChartHandle = {
   onVisibleRangeChange: (handler: (range: ChartVisibleLogicalRange | null) => void) => () => void;
   getVisibleLogicalRange: () => ChartVisibleLogicalRange | null;
   setVisibleLogicalRange: (range: ChartVisibleLogicalRange) => void;
+  /// Pins how many pixels one bar occupies. Setting a range alone is not enough
+  /// after a full data replacement: bar spacing survives the swap, and with
+  /// `maxBarSpacing: 0` the library allows up to half the chart per bar, which
+  /// renders a handful of giant candles against the right edge.
+  setBarSpacing: (spacing: number) => void;
   destroy: () => void;
 };
 
@@ -615,7 +620,14 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         chart.clearCrosshairPosition();
         return;
       }
-      chart.setCrosshairPosition(close, normalized as UTCTimestamp, candleSeries);
+      // Same mid-swap hazard as `setCrosshairPosition`: the library asserts on
+      // its own internal state ("Value is null") when the series data no longer
+      // covers the requested time, which the lookup above cannot detect.
+      try {
+        chart.setCrosshairPosition(close, normalized as UTCTimestamp, candleSeries);
+      } catch {
+        chart.clearCrosshairPosition();
+      }
     },
     setCrosshairPosition: (position) => {
       if (!position) {
@@ -628,11 +640,21 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         chart.clearCrosshairPosition();
         return;
       }
-      chart.setCrosshairPosition(
-        Number.isFinite(position.price) ? position.price : fallbackPrice,
-        normalized as UTCTimestamp,
-        candleSeries,
-      );
+      // Replay paging replaces the candle series while the caller may still be
+      // pointing at a time from the previous page. The library asserts on its
+      // own internal state here ("Value is null") when the series has no data
+      // for the requested time yet, which surfaced as an uncaught window error
+      // while dragging the replay timeline. The time lookup above covers the
+      // common case; this keeps a transient mid-swap state from throwing.
+      try {
+        chart.setCrosshairPosition(
+          Number.isFinite(position.price) ? position.price : fallbackPrice,
+          normalized as UTCTimestamp,
+          candleSeries,
+        );
+      } catch {
+        chart.clearCrosshairPosition();
+      }
     },
     onClick: (handler) => {
       const listener = (param: Parameters<typeof chart.subscribeClick>[0] extends (arg: infer P) => void ? P : never) => {
@@ -652,8 +674,20 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       const range = chart.timeScale().getVisibleLogicalRange();
       return range ? { from: Number(range.from), to: Number(range.to) } : null;
     },
+    setBarSpacing: (spacing) => {
+      if (!Number.isFinite(spacing) || spacing <= 0) return;
+      chart.timeScale().applyOptions({ barSpacing: spacing });
+    },
     setVisibleLogicalRange: (range) => {
-      chart.timeScale().setVisibleLogicalRange({ from: range.from, to: range.to });
+      if (!Number.isFinite(range.from) || !Number.isFinite(range.to) || range.to <= range.from) return;
+      // Replay paging scrolls the view to follow the cursor while the series is
+      // being replaced. The time scale asserts on its own internal state
+      // ("Value is null") when it has no bars to map the range onto.
+      try {
+        chart.timeScale().setVisibleLogicalRange({ from: range.from, to: range.to });
+      } catch {
+        /* the next data update re-derives the visible range */
+      }
     },
     destroy: () => chart.remove()
   };

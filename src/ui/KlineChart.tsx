@@ -356,6 +356,11 @@ const lineToolItems = [
 ] as const;
 
 const AUTO_FIT_READY_CANDLE_COUNT = 80;
+/// Bars shown around the replay cursor when a new page has no prior zoom to
+/// inherit. Wide enough to read structure around the cursor without rendering
+/// the whole 1500-bar page as a dense wall.
+const REPLAY_DEFAULT_VISIBLE_BARS = 180;
+const REPLAY_MIN_VISIBLE_BARS = 40;
 const FILL_SOURCE_LIMIT = 160;
 const DISPLAY_FILL_LIMIT = 100;
 const EXPANDED_MARKER_MAX_VISIBLE_BARS = 48;
@@ -419,6 +424,11 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const drawingDragPendingPointRef = useRef<MeasurePoint | null>(null);
   const riskRewardCreateGestureRef = useRef<RiskRewardCreateGesture | null>(null);
   const onNeedMoreHistoryRef = useRef<Props["onNeedMoreHistory"]>(onNeedMoreHistory);
+  /// Read by the data-render effect to frame a new replay page. Kept in a ref so
+  /// moving the cursor does not re-run that effect, which rebuilds indicators.
+  const replayCursorTimeRef = useRef<number | null>(null);
+  const replayViewportFrameRef = useRef<number | null>(null);
+  const replayViewportEpochRef = useRef(0);
   const onChartCrosshairTimeRef = useRef<Props["onChartCrosshairTime"]>(onChartCrosshairTime);
   const onChartCrosshairPositionRef = useRef<Props["onChartCrosshairPosition"]>(onChartCrosshairPosition);
   const onChartVisibleRangeRef = useRef<Props["onChartVisibleRange"]>(onChartVisibleRange);
@@ -627,6 +637,22 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     const x = chart.timeToCoordinate(latest.time);
     return x === null ? null : Number(x);
   }, [coordinateVersion, latest]);
+  const replayDiagnostic = useMemo(() => {
+    if (!reviewVariant || !import.meta.env.DEV || candles.length === 0 || !visibleLogicalRange) return null;
+    const span = visibleLogicalRange.to - visibleLogicalRange.from;
+    const width = containerRef.current?.clientWidth ?? 0;
+    const nearest = (index: number) => candles[Math.min(candles.length - 1, Math.max(0, Math.round(index)))];
+    const from = nearest(visibleLogicalRange.from);
+    const to = nearest(visibleLogicalRange.to);
+    return {
+      range: `${visibleLogicalRange.from.toFixed(1)}..${visibleLogicalRange.to.toFixed(1)}`,
+      spacing: span > 0 && width > 0 ? `${(width / span).toFixed(1)}px` : "--",
+      first: formatShanghaiChartTimestamp(candles[0].time, true),
+      last: formatShanghaiChartTimestamp(candles[candles.length - 1].time, true),
+      visibleFirst: from ? formatShanghaiChartTimestamp(from.time, true) : "--",
+      visibleLast: to ? formatShanghaiChartTimestamp(to.time, true) : "--"
+    };
+  }, [candles, reviewVariant, visibleLogicalRange]);
   const positionRangeOverlays = useMemo(() => {
     const chart = chartRef.current;
     if (!chart) return [];
@@ -962,6 +988,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     onNeedMoreHistoryRef.current = onNeedMoreHistory;
   }, [onNeedMoreHistory]);
 
+  const replayCursorTime = synchronizedCrosshairPosition?.time ?? synchronizedCrosshairTime ?? null;
+  replayCursorTimeRef.current = typeof replayCursorTime === "number" ? replayCursorTime : null;
+
   useEffect(() => {
     onOrderLineEditRef.current = onOrderLineEdit;
   }, [onOrderLineEdit]);
@@ -1146,6 +1175,11 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       resizeObserver.disconnect();
       chart.destroy();
       chartRef.current = null;
+      replayViewportEpochRef.current += 1;
+      if (replayViewportFrameRef.current !== null) {
+        window.cancelAnimationFrame(replayViewportFrameRef.current);
+        replayViewportFrameRef.current = null;
+      }
       setVisibleLogicalRange(null);
       priceAlertLinesRef.current.clear();
       orderPriceLinesRef.current.clear();
@@ -1295,11 +1329,17 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       && snapshotRevision !== null
       && snapshotRevision !== undefined
       && reviewSnapshotRevisionRef.current !== snapshotRevision;
-    const patch: ChartDataPatch = reviewSnapshotChanged
+    // Replay always hands over a complete, self-contained page, so it must
+    // always replace. Incremental ingestion is wrong here: jumping backwards
+    // produces a page whose bars are all older than the current ones, which
+    // `ingestRealtime` classifies as a history "prepend" and *merges*, leaving
+    // two disjoint time ranges in one series. The chart then renders the seam
+    // between them — a wall of empty space with the cursor pointing at a bar
+    // from the page that was replaced.
+    const patch: ChartDataPatch = reviewVariant
+      || (renderedSeriesKeyRef.current !== seriesKey && controller.getCandles(key).length === 0)
       ? controller.replaceSnapshot(key, candles)
-      : renderedSeriesKeyRef.current !== seriesKey && controller.getCandles(key).length === 0
-        ? controller.replaceSnapshot(key, candles)
-        : controller.ingestRealtime(key, candles);
+      : controller.ingestRealtime(key, candles);
     if (reviewSnapshotChanged) reviewSnapshotRevisionRef.current = snapshotRevision ?? null;
     renderedSeriesKeyRef.current = seriesKey;
     const canonicalCandles = controller.getCandles(key);
@@ -1368,6 +1408,86 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     if (autoFit && patch.type !== "updateLatest") {
       chart.resetView();
       if (canonicalCandles.length >= AUTO_FIT_READY_CANDLE_COUNT) setAutoFit(false);
+    } else if (reviewVariant && canonicalCandles[0]?.time !== renderedFirstTimeRef.current) {
+      // A replay page swap replaces every bar, so the previous page's logical
+      // range is meaningless: index 1400 of the old page is unrelated to index
+      // 1400 of the new one, and any part of it past the new end renders as the
+      // bars bunching against the right edge with blank space beside them.
+      // Frame the window around the replay cursor instead, keeping the same
+      // zoom the user had rather than snapping back to fitContent.
+      const cursorTime = replayCursorTimeRef.current;
+      const lastIndex = Math.max(0, canonicalCandles.length - 1);
+      // Prefer the exact bar. If the cursor time falls between bars, use the
+      // nearest one rather than silently defaulting to the end of the page,
+      // which would frame a window nowhere near where the user dragged.
+      let cursorIndex = cursorTime === null ? undefined : candleIndexRef.current.get(cursorTime);
+      if (cursorIndex === undefined && cursorTime !== null) {
+        let low = 0;
+        let high = lastIndex;
+        while (low < high) {
+          const middle = low + Math.floor((high - low) / 2);
+          if ((canonicalCandles[middle]?.time ?? 0) < cursorTime) low = middle + 1;
+          else high = middle;
+        }
+        cursorIndex = low;
+      }
+      // A full page replacement invalidates logical coordinates outside the
+      // page. lightweight-charts can report a range such as `-1470..1` while
+      // it is reconciling the old page; preserving that span makes the new
+      // page render only its first two bars at the edge. Keep the user's zoom
+      // only when the old range was fully inside the replacement page.
+      const previousRangeIsUsable = visibleRangeBeforeUpdate
+        && visibleRangeBeforeUpdate.from >= -0.5
+        && visibleRangeBeforeUpdate.to <= lastIndex + 0.5;
+      const previousSpan = previousRangeIsUsable
+        ? visibleRangeBeforeUpdate.to - visibleRangeBeforeUpdate.from
+        : 0;
+      const span = Math.min(
+        lastIndex + 1,
+        Math.max(REPLAY_MIN_VISIBLE_BARS, previousSpan > 0 ? previousSpan : REPLAY_DEFAULT_VISIBLE_BARS)
+      );
+      // Pin the zoom before asking for a range. Bar spacing survives a data
+      // replacement, and `maxBarSpacing: 0` lets the library keep up to half the
+      // chart width per bar, so a stale large spacing renders a few enormous
+      // candles jammed against the right edge no matter what range is requested.
+      const chartWidth = containerRef.current?.clientWidth ?? 0;
+      // Put the cursor slightly right of centre so recent history stays visible,
+      // then clamp so the window never runs past either end of the page.
+      const anchor = cursorIndex ?? lastIndex;
+      let from = anchor - span * 0.7;
+      let to = from + span;
+      if (from < -0.5) {
+        from = -0.5;
+        to = from + span;
+      }
+      if (to > lastIndex + 0.5) {
+        to = lastIndex + 0.5;
+        from = Math.max(-0.5, to - span);
+      }
+      const targetRange = { from, to };
+      const targetSpacing = chartWidth > 0 ? chartWidth / span : null;
+      const viewportEpoch = replayViewportEpochRef.current + 1;
+      replayViewportEpochRef.current = viewportEpoch;
+      if (replayViewportFrameRef.current !== null) window.cancelAnimationFrame(replayViewportFrameRef.current);
+      const applyReplayViewport = (remainingFrames: number) => {
+        if (viewportEpoch !== replayViewportEpochRef.current || chartRef.current !== chart) return;
+        if (targetSpacing !== null) chart.setBarSpacing(targetSpacing);
+        chart.setVisibleLogicalRange(targetRange);
+        const activeCursorTime = replayCursorTimeRef.current;
+        if (activeCursorTime !== null) chart.setCrosshairTime(activeCursorTime);
+        const appliedRange = chart.getVisibleLogicalRange();
+        setVisibleLogicalRange(appliedRange);
+        setCoordinateVersion((version) => version + 1);
+        if (remainingFrames > 0) {
+          replayViewportFrameRef.current = window.requestAnimationFrame(() => applyReplayViewport(remainingFrames - 1));
+        } else {
+          replayViewportFrameRef.current = null;
+        }
+      };
+      // Series replacement triggers asynchronous time-scale reconciliation.
+      // Reassert across the next two paints so that reconciliation cannot put
+      // the old page's `-span..1` range back after this effect returns.
+      applyReplayViewport(2);
     } else if (visibleRangeBeforeUpdate && prependedCount > 0) {
       chart.setVisibleLogicalRange({
         from: visibleRangeBeforeUpdate.from + prependedCount,
@@ -2445,6 +2565,13 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       data-latest-candle-x={latestCandleX ?? ""}
       data-candle-count={candles.length}
       data-first-candle-time={candles[0]?.time ?? ""}
+      // Diagnostic-only attributes make replay paging/zoom state inspectable
+      // without changing the chart surface. The spacing is the effective
+      // pixels-per-logical-bar approximation used by the time scale.
+      data-visible-range={visibleLogicalRange ? `${visibleLogicalRange.from}..${visibleLogicalRange.to}` : ""}
+      data-bar-spacing={visibleLogicalRange && visibleLogicalRange.to > visibleLogicalRange.from && containerRef.current?.clientWidth
+        ? (containerRef.current.clientWidth / (visibleLogicalRange.to - visibleLogicalRange.from)).toFixed(3)
+        : ""}
     >
       <div className="ohlc-strip">
         <div className="ohlc-summary">
@@ -2476,6 +2603,16 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
           </div>
         ) : null}
       </div>
+      {replayDiagnostic ? (
+        <div className="chart-replay-diagnostic" role="status">
+          <span>diag</span>
+          <span>{candles.length} bars</span>
+          <span>visible {replayDiagnostic.range}</span>
+          <span>spacing ~{replayDiagnostic.spacing}</span>
+          <span>page {replayDiagnostic.first} - {replayDiagnostic.last}</span>
+          <span>view {replayDiagnostic.visibleFirst} - {replayDiagnostic.visibleLast}</span>
+        </div>
+      ) : null}
       {!reviewVariant && toolbarPlacement === "external" && <ChartIndicatorCenter
         instances={indicatorInstances}
         onChange={handleIndicatorInstancesChange}

@@ -762,6 +762,11 @@ pub struct BacktestReport {
     pub fills: Vec<Fill>,
     pub closed_trades: Vec<ClosedTrade>,
     pub funding_payments: Vec<FundingPayment>,
+    /// Retained for reports written by earlier engine versions. The engine no
+    /// longer records a row per callback: the timeline was one entry per bar,
+    /// 99.97% of it `no_action`, and no consumer read it. `strategy_actions`
+    /// carries the decisions that matter.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strategy_events: Vec<StrategyEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub strategy_actions: Vec<StrategyActionEvent>,
@@ -930,24 +935,25 @@ impl BacktestEngine {
                         let current_index = current_index.expect("batch index was checked");
                         let end = (current_index + batch_size).min(request.bars.len());
                         let mut snapshots = Vec::with_capacity(end - current_index);
-                        // Each batch event only needs the bars new since the
-                        // previous dispatch. The engine cursor already
-                        // validated the full window once; snapshotting the
-                        // whole visible window per event would re-copy the
-                        // entire evaluation range on every batch (O(n) per
-                        // event) and dominate the IPC round-trip savings.
-                        let mut incremental_bars: Vec<ClosedBar> =
-                            Vec::with_capacity(end - current_index);
+                        // Each batch event carries only the single bar that is
+                        // new at its own cutoff. Accumulating the batch window
+                        // instead would make event `k` carry bars `0..k`, i.e.
+                        // O(n^2) bar clones and an O(n^2) IPC payload per batch
+                        // (~32x the necessary copies at the observed batch size
+                        // of 63), which dominated the round-trip savings.
+                        // Consumers reassemble history from the incremental
+                        // stream: the managed runtime feeds these bars to a
+                        // cursor that skips already-seen close times, and every
+                        // other consumer only reads the tail bar.
                         for index in current_index..end {
                             let bar = &request.bars[index];
                             let include_ledger = index == current_index || !incremental_ledger_batch;
-                            incremental_bars.push(bar.clone());
                             snapshots.push(StrategyContextSnapshot {
                                 market: CurrentDataSnapshot {
                                     inst_id: inst_id.to_string(),
                                     as_of_ms: bar.close_time_ms,
                                     interval_ms: ONE_MINUTE_MS,
-                                    bars: incremental_bars.clone(),
+                                    bars: vec![bar.clone()],
                                     features: BTreeMap::new(),
                                 },
                                 portfolio: virtual_portfolio(request, state, bar.close),
@@ -1053,10 +1059,19 @@ impl BacktestEngine {
                     realized_cash_usdt: state.cash_usdt,
                     unrealized_pnl_usdt: unrealized,
                 };
-                let replay_snapshot =
+                let snapshot =
                     replay_snapshot(request, &state, bar.close_time_ms, bar.close, unrealized);
                 state.equity_curve.push(equity_point);
-                state.replay_snapshots.push(replay_snapshot);
+                state.evaluation_bar_count += 1;
+                if snapshot.position.is_some() {
+                    state.exposed_bar_count += 1;
+                }
+                // Only a change in replayable position state needs a row. The
+                // marked price moves every bar, so compare the state a consumer
+                // can act on rather than the whole snapshot.
+                if replay_state_changed(state.replay_snapshots.last(), &snapshot) {
+                    state.replay_snapshots.push(snapshot);
+                }
             }
 
             // The final preloaded bar closes exactly at evaluation start. It
@@ -1081,20 +1096,22 @@ impl BacktestEngine {
                 decision.validate_for(&context)?;
                 let mut stateful_action = false;
                 if let Some(action) = callback.action {
-                    state.strategy_actions.push(StrategyActionEvent {
-                        as_of_ms: context.as_of_ms(),
-                        action: action.clone(),
-                    });
+                    // A `no_action` output carries no replayable information and
+                    // dominates a minute-resolution timeline, so only acting
+                    // decisions are recorded. The pending queue still receives
+                    // every action so execution scheduling is unchanged.
+                    if !matches!(action, StrategyAction::NoAction { .. }) {
+                        state.strategy_actions.push(StrategyActionEvent {
+                            as_of_ms: context.as_of_ms(),
+                            action: action.clone(),
+                        });
+                    }
                     pending_strategy_actions.push(PendingStrategyAction {
                         submitted_at_ms: context.as_of_ms(),
                         action,
                     });
                     stateful_action = true;
                 }
-                state.strategy_events.push(StrategyEvent {
-                    as_of_ms: context.as_of_ms(),
-                    decision: decision.clone(),
-                });
                 match decision {
                     StrategyDecision::NoAction { .. } => {}
                     StrategyDecision::Signal { signal } => state.signals.push(SignalRecord {
@@ -1156,8 +1173,23 @@ impl BacktestEngine {
                 }
                 let snapshot =
                     replay_snapshot(request, &state, last_bar.close_time_ms, last_bar.close, 0.0);
-                if let Some(last_snapshot) = state.replay_snapshots.last_mut() {
-                    *last_snapshot = snapshot;
+                // The forced close retroactively makes the final bar flat, so
+                // it no longer counts toward exposure. Mirrors the previous
+                // behaviour, where this replacement happened before
+                // `exposure_pct` was derived from the snapshot rows.
+                if state.exposed_bar_count > 0
+                    && state
+                        .replay_snapshots
+                        .last()
+                        .is_some_and(|last| last.position.is_some())
+                {
+                    state.exposed_bar_count -= 1;
+                }
+                match state.replay_snapshots.last_mut() {
+                    Some(last_snapshot) if last_snapshot.time_ms == snapshot.time_ms => {
+                        *last_snapshot = snapshot;
+                    }
+                    _ => state.replay_snapshots.push(snapshot),
                 }
             }
         }
@@ -1251,8 +1283,18 @@ struct SimulationState {
     closed_trades: Vec<ClosedTrade>,
     funding_payments: Vec<FundingPayment>,
     equity_curve: Vec<EquityPoint>,
+    /// Position-state history recorded only where it changes. A minute-resolution
+    /// run spends most bars in an unchanged state, so storing one row per bar
+    /// grew reports past 250 MB; the engine now keeps the transitions and the
+    /// consumer reconstructs any bar by taking the latest row at or before it.
     replay_snapshots: Vec<ReplaySnapshot>,
-    strategy_events: Vec<StrategyEvent>,
+    /// Count of evaluation bars closed while a position was open. Preserves
+    /// `exposure_pct` exactly without retaining a row per bar.
+    exposed_bar_count: usize,
+    evaluation_bar_count: usize,
+    /// Strategy decisions worth replaying. `no_action` outputs were 99.97% of
+    /// this timeline on a year-long minute run and no consumer reads them, so
+    /// only acting decisions are retained.
     strategy_actions: Vec<StrategyActionEvent>,
     open_orders: Vec<OpenPaperOrder>,
     order_events: Vec<OpenOrderSummary>,
@@ -1270,10 +1312,9 @@ impl SimulationState {
             closed_trades: Vec::new(),
             funding_payments: Vec::new(),
             equity_curve: Vec::with_capacity(evaluation_steps),
-            replay_snapshots: Vec::with_capacity(evaluation_steps),
-            // The final preloaded bar can dispatch one additional strategy
-            // event before the evaluation curve begins.
-            strategy_events: Vec::with_capacity(evaluation_steps.saturating_add(1)),
+            replay_snapshots: Vec::new(),
+            exposed_bar_count: 0,
+            evaluation_bar_count: 0,
             strategy_actions: Vec::new(),
             open_orders: Vec::new(),
             order_events: Vec::new(),
@@ -2605,7 +2646,8 @@ fn build_report(
     let statistics = backtest_statistics(
         &state.equity_curve,
         &state.closed_trades,
-        &state.replay_snapshots,
+        state.exposed_bar_count,
+        state.evaluation_bar_count,
     );
     let mut report = BacktestReport {
         schema_version: schema_version.to_string(),
@@ -2632,7 +2674,7 @@ fn build_report(
         fills: state.fills,
         closed_trades: state.closed_trades,
         funding_payments: state.funding_payments,
-        strategy_events: state.strategy_events,
+        strategy_events: Vec::new(),
         strategy_actions: state.strategy_actions,
         order_events: state.order_events,
         limit_order_fill_model: default_limit_order_fill_model(),
@@ -2674,10 +2716,46 @@ fn replay_snapshot(
     }
 }
 
+/// Whether `candidate` carries replayable state the previous row does not.
+///
+/// Marked-price-derived values (equity, unrealized PnL, and the position's own
+/// mark) move on nearly every bar, so they are deliberately excluded: a
+/// consumer recovers those from the equity curve, which is still stored per
+/// bar. What must be preserved exactly is the discrete state — whether a
+/// position exists, its identity and size, and the ledger counts that gate
+/// which fills and trades are visible at a replay boundary.
+fn replay_state_changed(previous: Option<&ReplaySnapshot>, candidate: &ReplaySnapshot) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if previous.fill_count != candidate.fill_count
+        || previous.closed_trade_count != candidate.closed_trade_count
+        || previous.funding_payment_count != candidate.funding_payment_count
+    {
+        return true;
+    }
+    match (&previous.position, &candidate.position) {
+        (None, None) => false,
+        (None, Some(_)) | (Some(_), None) => true,
+        (Some(previous_position), Some(candidate_position)) => {
+            previous_position.side != candidate_position.side
+                || previous_position.entry_time_ms != candidate_position.entry_time_ms
+                || !approximately_equal(previous_position.quantity, candidate_position.quantity)
+                || !approximately_equal(
+                    previous_position.average_entry_price,
+                    candidate_position.average_entry_price,
+                )
+                || previous_position.stop_loss != candidate_position.stop_loss
+                || previous_position.take_profit != candidate_position.take_profit
+        }
+    }
+}
+
 fn backtest_statistics(
     equity_curve: &[EquityPoint],
     closed_trades: &[ClosedTrade],
-    replay_snapshots: &[ReplaySnapshot],
+    exposed_bar_count: usize,
+    evaluation_bar_count: usize,
 ) -> BacktestStatistics {
     const MINUTES_PER_YEAR: f64 = 365.0 * 24.0 * 60.0;
     let returns = equity_curve
@@ -2793,15 +2871,12 @@ fn backtest_statistics(
         .map(|trade| trade.net_pnl_usdt)
         .min_by(|left, right| left.total_cmp(right));
     let (max_consecutive_wins, max_consecutive_losses) = consecutive_trade_streaks(closed_trades);
-    let exposure_pct = if replay_snapshots.is_empty() {
+    // Counted during the run so this stays identical to the previous
+    // per-bar-snapshot derivation without retaining a row per bar.
+    let exposure_pct = if evaluation_bar_count == 0 {
         0.0
     } else {
-        replay_snapshots
-            .iter()
-            .filter(|snapshot| snapshot.position.is_some())
-            .count() as f64
-            / replay_snapshots.len() as f64
-            * 100.0
+        exposed_bar_count as f64 / evaluation_bar_count as f64 * 100.0
     };
 
     BacktestStatistics {
@@ -3291,7 +3366,22 @@ mod tests {
         assert_eq!(result.report.fills.len(), 1);
         assert_eq!(result.report.fills[0].time_ms, 2 * ONE_MINUTE_MS);
         assert_eq!(result.report.equity_curve.len(), 3);
-        assert_eq!(result.report.replay_snapshots.len(), 3);
+        // The single entry fills at the first evaluation bar and is then held
+        // unchanged, so the replay timeline needs one transition row rather
+        // than one row per evaluation bar.
+        assert_eq!(result.report.replay_snapshots.len(), 1);
+        // Snapshots are stamped with the bar close; the entry filled at this
+        // bar's open, so the first recorded transition is its close.
+        assert_eq!(
+            result.report.replay_snapshots[0].time_ms,
+            3 * ONE_MINUTE_MS
+        );
+        assert!(result.report.replay_snapshots[0].position.is_some());
+        // Held for all three evaluation bars.
+        assert_eq!(
+            result.report.statistics.as_ref().map(|s| s.exposure_pct),
+            Some(100.0)
+        );
         assert_eq!(result.report.reproducibility.preload_start_time_ms, Some(0));
         assert_eq!(result.report.reproducibility.preload_bar_count, Some(2));
         assert_eq!(
@@ -3390,7 +3480,9 @@ mod tests {
 
         assert_eq!(strategy.snapshots.len(), 3);
         assert_eq!(report.schema_version, "2");
-        assert_eq!(report.strategy_actions.len(), 3);
+        // The trailing `no_action` output is not recorded: it carries no
+        // replayable information and would otherwise be one row per bar.
+        assert_eq!(report.strategy_actions.len(), 2);
         assert!(matches!(
             report.strategy_actions[0].action,
             StrategyAction::OpenLong { .. }
@@ -3399,10 +3491,13 @@ mod tests {
             report.strategy_actions[1].action,
             StrategyAction::CloseLong { .. }
         ));
-        assert!(matches!(
-            report.strategy_actions[2].action,
-            StrategyAction::NoAction { .. }
-        ));
+        assert!(
+            report
+                .strategy_actions
+                .iter()
+                .all(|event| !matches!(event.action, StrategyAction::NoAction { .. })),
+            "no_action outputs must not be recorded"
+        );
         assert_eq!(report.fills.len(), 2);
         assert_eq!(report.fills[0].time_ms, ONE_MINUTE_MS);
         assert_eq!(report.fills[0].side, FillSide::Buy);
@@ -3512,11 +3607,15 @@ mod tests {
 
         assert_eq!(strategy.batch_sizes, vec![4]);
         assert_eq!(strategy.fallback_calls, 3);
-        assert_eq!(report.strategy_actions.len(), 6);
+        // Only the single entry is recorded; the surrounding `no_action`
+        // outputs are not part of the replayable timeline.
+        assert_eq!(report.strategy_actions.len(), 1);
         assert!(matches!(
-            report.strategy_actions[2].action,
+            report.strategy_actions[0].action,
             StrategyAction::OpenLong { .. }
         ));
+        // Recorded at the decision cutoff, which fills at the next bar open.
+        assert_eq!(report.strategy_actions[0].as_of_ms, 3 * ONE_MINUTE_MS);
         assert_eq!(report.fills.len(), 1);
         assert_eq!(report.fills[0].time_ms, 3 * ONE_MINUTE_MS);
         assert!(report.has_valid_hash().expect("report hash"));
@@ -3577,7 +3676,8 @@ mod tests {
         // preference, the next eligible batch is constructed with 2 instead
         // of the start-of-run value.
         assert_eq!(strategy.batch_sizes, vec![4, 2, 1]);
-        assert_eq!(report.strategy_actions.len(), 7);
+        // This strategy never acts, so nothing enters the replayable timeline.
+        assert!(report.strategy_actions.is_empty());
         assert!(report.has_valid_hash().expect("report hash"));
     }
 
@@ -4131,6 +4231,72 @@ mod tests {
         assert!(decoded.has_valid_hash().unwrap());
     }
 
+    /// Reports written before the engine stopped recording a row per bar still
+    /// carry a dense `strategyEvents` timeline. They must keep deserializing
+    /// and keep verifying their original hash.
+    #[test]
+    fn legacy_dense_strategy_event_reports_still_load_and_verify() {
+        let data = vec![
+            bar(0, 100.0, 101.0, 99.0, 100.0),
+            bar(ONE_MINUTE_MS, 100.0, 101.0, 99.0, 100.0),
+        ];
+        let mut report = BacktestEngine::run(
+            &request(data),
+            &mut EnterOnce,
+            &CancellationToken::default(),
+        )
+        .unwrap()
+        .report;
+
+        // Recreate the historical shape: one decision row per dispatched bar.
+        report.strategy_events = vec![
+            StrategyEvent {
+                as_of_ms: 0,
+                decision: StrategyDecision::NoAction { reason: None },
+            },
+            StrategyEvent {
+                as_of_ms: ONE_MINUTE_MS,
+                decision: StrategyDecision::NoAction { reason: None },
+            },
+        ];
+        report.report_hash = report.deterministic_hash().unwrap();
+
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(
+            serialized
+                .get("strategyEvents")
+                .and_then(|value| value.as_array())
+                .map(Vec::len),
+            Some(2),
+            "a legacy report must round-trip its dense event timeline"
+        );
+        let decoded: BacktestReport = serde_json::from_value(serialized).unwrap();
+        assert_eq!(decoded.strategy_events.len(), 2);
+        assert!(decoded.has_valid_hash().unwrap());
+    }
+
+    /// A freshly produced report omits the dense timeline entirely rather than
+    /// emitting an empty array, keeping stored payloads small.
+    #[test]
+    fn new_reports_omit_the_dense_strategy_event_timeline() {
+        let data = vec![
+            bar(0, 100.0, 101.0, 99.0, 100.0),
+            bar(ONE_MINUTE_MS, 100.0, 101.0, 99.0, 100.0),
+        ];
+        let report = BacktestEngine::run(
+            &request(data),
+            &mut EnterOnce,
+            &CancellationToken::default(),
+        )
+        .unwrap()
+        .report;
+
+        assert!(report.strategy_events.is_empty());
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert!(serialized.get("strategyEvents").is_none());
+        assert!(report.has_valid_hash().unwrap());
+    }
+
     struct CancelAfterFirstEvent {
         token: CancellationToken,
         calls: usize,
@@ -4174,5 +4340,316 @@ mod tests {
         assert_eq!(recommended_backtest_workers(2), 1);
         assert_eq!(recommended_backtest_workers(4), 2);
         assert_eq!(recommended_backtest_workers(32), 4);
+    }
+
+    /// Trades repeatedly from market data alone, the way a managed Python
+    /// trend strategy does. Batched and single dispatch must therefore agree:
+    /// every decision is a pure function of the visible closed-bar window.
+    struct MarketOnlyCycleStrategy {
+        batch_size: usize,
+        batch_dispatches: usize,
+        batched_events: usize,
+    }
+
+    impl MarketOnlyCycleStrategy {
+        fn new(batch_size: usize) -> Self {
+            Self {
+                batch_size,
+                batch_dispatches: 0,
+                batched_events: 0,
+            }
+        }
+
+        /// Enters on a rising close every 8th minute and exits 3 minutes
+        /// later, producing many independent round trips across the run.
+        fn decide(bars: &[ClosedBar]) -> StrategyAction {
+            let Some(latest) = bars.last() else {
+                return StrategyAction::NoAction { reason: None };
+            };
+            let minute = latest.open_time_ms / ONE_MINUTE_MS;
+            if minute % 8 == 0 && latest.close > latest.open {
+                return StrategyAction::OpenLong {
+                    quantity: 1.0,
+                    execution: StrategyExecution::default(),
+                    stop_loss: None,
+                    take_profit: None,
+                    reason: "cycle entry".to_string(),
+                    diagnostics: BTreeMap::new(),
+                };
+            }
+            if minute % 8 == 3 {
+                return StrategyAction::CloseLong {
+                    quantity: 1.0,
+                    execution: StrategyExecution::default(),
+                    reason: "cycle exit".to_string(),
+                    diagnostics: BTreeMap::new(),
+                };
+            }
+            StrategyAction::NoAction { reason: None }
+        }
+    }
+
+    impl StatefulEventDrivenStrategy for MarketOnlyCycleStrategy {
+        fn on_bar(
+            &mut self,
+            context: &StrategyContext<'_>,
+        ) -> Result<StrategyAction, SystematicError> {
+            Ok(Self::decide(context.market().bars()))
+        }
+
+        fn no_action_batch_size(&self) -> usize {
+            self.batch_size
+        }
+
+        fn on_bar_batch(
+            &mut self,
+            contexts: &[StrategyContextSnapshot],
+        ) -> Result<Vec<StrategyAction>, SystematicError> {
+            self.batch_dispatches += 1;
+            self.batched_events += contexts.len();
+            let mut outputs = Vec::with_capacity(contexts.len());
+            for context in contexts {
+                let action = Self::decide(&context.market.bars);
+                let stop = !matches!(action, StrategyAction::NoAction { .. });
+                outputs.push(action);
+                // Mirror the managed runtime: stop at the first action so the
+                // engine only commits the prefix it actually observed.
+                if stop {
+                    break;
+                }
+            }
+            Ok(outputs)
+        }
+    }
+
+    /// Golden-baseline equivalence check for the batching lever.
+    ///
+    /// A strategy that keeps trading must produce byte-identical results
+    /// whether the engine dispatches one event at a time or batches every
+    /// flat-account stretch. This is what makes it safe to drop a host-side
+    /// "disable batching after the first action" heuristic: correctness comes
+    /// from the flat-account precondition, not from avoiding batches.
+    #[test]
+    fn batched_and_single_dispatch_produce_identical_results() {
+        let data: Vec<ClosedBar> = (0..240)
+            .map(|index| {
+                let price = 100.0 + (index % 11) as f64;
+                bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 2.0,
+                    price - 2.0,
+                    price + 1.0,
+                )
+            })
+            .collect();
+
+        let mut single = MarketOnlyCycleStrategy::new(1);
+        let baseline = BacktestEngine::run_stateful(
+            &request(data.clone()),
+            &mut single,
+            &CancellationToken::default(),
+        )
+        .expect("single-dispatch baseline")
+        .report;
+
+        assert_eq!(single.batch_dispatches, 0, "baseline must not batch");
+        assert!(
+            baseline.closed_trades.len() >= 8,
+            "fixture must exercise repeated round trips, got {}",
+            baseline.closed_trades.len()
+        );
+
+        // Every batch size must reproduce the baseline exactly, including the
+        // sizes that span many entry/exit cycles.
+        for batch_size in [2usize, 8, 64] {
+            let mut batched = MarketOnlyCycleStrategy::new(batch_size);
+            let report = BacktestEngine::run_stateful(
+                &request(data.clone()),
+                &mut batched,
+                &CancellationToken::default(),
+            )
+            .expect("batched run")
+            .report;
+
+            assert!(
+                batched.batch_dispatches > 0,
+                "batch size {batch_size} never batched"
+            );
+            assert_eq!(
+                report.fills, baseline.fills,
+                "batch size {batch_size} changed fills"
+            );
+            assert_eq!(
+                report.closed_trades, baseline.closed_trades,
+                "batch size {batch_size} changed closed trades"
+            );
+            assert_eq!(
+                report.equity_curve, baseline.equity_curve,
+                "batch size {batch_size} changed the equity curve"
+            );
+            assert_eq!(
+                report.metrics, baseline.metrics,
+                "batch size {batch_size} changed metrics"
+            );
+            assert_eq!(
+                report.statistics, baseline.statistics,
+                "batch size {batch_size} changed statistics"
+            );
+            assert_eq!(
+                report.strategy_actions, baseline.strategy_actions,
+                "batch size {batch_size} changed the action timeline"
+            );
+            assert_eq!(
+                report.report_hash, baseline.report_hash,
+                "batch size {batch_size} changed the reproducibility hash"
+            );
+        }
+    }
+
+    /// Sparse replay snapshots must stay information-equivalent to the former
+    /// one-row-per-bar timeline: reading the latest row at or before a bar has
+    /// to reproduce the same position state, and `exposure_pct` has to match a
+    /// direct per-bar count.
+    #[test]
+    fn sparse_replay_snapshots_reconstruct_every_bar_and_preserve_exposure() {
+        let data: Vec<ClosedBar> = (0..240)
+            .map(|index| {
+                let price = 100.0 + (index % 11) as f64;
+                bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 2.0,
+                    price - 2.0,
+                    price + 1.0,
+                )
+            })
+            .collect();
+
+        let mut strategy = MarketOnlyCycleStrategy::new(1);
+        let report = BacktestEngine::run_stateful(
+            &request(data.clone()),
+            &mut strategy,
+            &CancellationToken::default(),
+        )
+        .expect("cycle run")
+        .report;
+
+        assert!(
+            report.replay_snapshots.len() < data.len(),
+            "snapshots should be sparse, got {} rows for {} bars",
+            report.replay_snapshots.len(),
+            data.len()
+        );
+        assert!(
+            report.replay_snapshots.windows(2).all(|pair| pair[0].time_ms < pair[1].time_ms),
+            "snapshot rows must stay strictly chronological for boundary lookup"
+        );
+
+        // Reconstruct each evaluation bar the way a consumer does, then compare
+        // the exposure it implies against the reported statistic.
+        let mut exposed_bars = 0usize;
+        let mut cursor = 0usize;
+        let mut current: Option<&ReplaySnapshot> = None;
+        for point in &report.equity_curve {
+            while cursor < report.replay_snapshots.len()
+                && report.replay_snapshots[cursor].time_ms <= point.time_ms
+            {
+                current = Some(&report.replay_snapshots[cursor]);
+                cursor += 1;
+            }
+            if current.is_some_and(|snapshot| snapshot.position.is_some()) {
+                exposed_bars += 1;
+            }
+        }
+
+        let expected_exposure = exposed_bars as f64 / report.equity_curve.len() as f64 * 100.0;
+        let reported = report
+            .statistics
+            .as_ref()
+            .expect("statistics")
+            .exposure_pct;
+        assert!(
+            (reported - expected_exposure).abs() < 1e-9,
+            "exposure_pct {reported} disagrees with the reconstructed {expected_exposure}"
+        );
+        assert!(
+            exposed_bars > 0 && exposed_bars < report.equity_curve.len(),
+            "fixture must both hold and not hold a position, got {exposed_bars}"
+        );
+    }
+
+    /// Batching must remain confined to flat-account stretches. The engine
+    /// builds a batch from one `SimulationState`, so a batch that spanned a
+    /// fill would show later events a stale portfolio.
+    #[test]
+    fn batches_never_span_an_open_position() {
+        let data: Vec<ClosedBar> = (0..240)
+            .map(|index| {
+                let price = 100.0 + (index % 11) as f64;
+                bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 2.0,
+                    price - 2.0,
+                    price + 1.0,
+                )
+            })
+            .collect();
+
+        struct PositionAwareBatchStrategy {
+            saw_position_in_batch: bool,
+        }
+
+        impl StatefulEventDrivenStrategy for PositionAwareBatchStrategy {
+            fn on_bar(
+                &mut self,
+                context: &StrategyContext<'_>,
+            ) -> Result<StrategyAction, SystematicError> {
+                Ok(MarketOnlyCycleStrategy::decide(context.market().bars()))
+            }
+
+            fn no_action_batch_size(&self) -> usize {
+                64
+            }
+
+            fn on_bar_batch(
+                &mut self,
+                contexts: &[StrategyContextSnapshot],
+            ) -> Result<Vec<StrategyAction>, SystematicError> {
+                for context in contexts {
+                    if context.portfolio.position.is_some()
+                        || !context.portfolio.open_orders.is_empty()
+                    {
+                        self.saw_position_in_batch = true;
+                    }
+                }
+                let mut outputs = Vec::with_capacity(contexts.len());
+                for context in contexts {
+                    let action = MarketOnlyCycleStrategy::decide(&context.market.bars);
+                    let stop = !matches!(action, StrategyAction::NoAction { .. });
+                    outputs.push(action);
+                    if stop {
+                        break;
+                    }
+                }
+                Ok(outputs)
+            }
+        }
+
+        let mut strategy = PositionAwareBatchStrategy {
+            saw_position_in_batch: false,
+        };
+        BacktestEngine::run_stateful(
+            &request(data),
+            &mut strategy,
+            &CancellationToken::default(),
+        )
+        .expect("position-aware batched run");
+
+        assert!(
+            !strategy.saw_position_in_batch,
+            "a batch observed an open position or resting order"
+        );
     }
 }

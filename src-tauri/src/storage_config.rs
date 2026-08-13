@@ -1603,6 +1603,7 @@ fn storage_maintenance_blocking(app: tauri::AppHandle) -> Result<StorageMaintena
         )
         .map_err(|err| err.to_string())?;
     let deleted_ai_messages = trim_ai_messages(&conn, 200)?;
+    let archived_backtest_series = crate::systematic::archive_backtest_series(&conn)?;
     let intelligence_settings = desic_intelligence::load_settings(&conn)?;
     let deleted_intelligence_rows =
         desic_intelligence::run_retention(&conn, now_ms(), &intelligence_settings)?;
@@ -1635,6 +1636,7 @@ fn storage_maintenance_blocking(app: tauri::AppHandle) -> Result<StorageMaintena
         deleted_kline_sync_runs,
         deleted_ai_messages,
         deleted_intelligence_rows,
+        archived_backtest_series,
         finished_at,
     })
 }

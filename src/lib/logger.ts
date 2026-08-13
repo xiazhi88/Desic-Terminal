@@ -108,7 +108,10 @@ window.addEventListener("error", (event) => {
   logger.error("window.onerror", event.error ?? event.message, {
     filename: event.filename,
     lineno: event.lineno,
-    colno: event.colno
+    colno: event.colno,
+    // Without the stack an error thrown inside a bundled dependency only
+    // reports the listener's own position, which says nothing about the caller.
+    stack: event.error instanceof Error ? event.error.stack : undefined
   });
 });
 

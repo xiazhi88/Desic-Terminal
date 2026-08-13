@@ -194,24 +194,39 @@ def reject_unknown_fields(value, allowed, label):
             raise ProtocolFailure("unknown_field", f"{label}.{key} is not part of the protocol")
 
 
-def ensure_no_future_timestamps(value, cutoff_ms, label="event", depth=0):
+def ensure_no_future_timestamps(value, cutoff_ms, label="event", depth=0, skip_keys=()):
+    """Reject any timestamp past the event cutoff.
+
+    ``skip_keys`` omits top-level keys whose subtree a dedicated validator has
+    already walked with the same cutoff and the same rules. This keeps the
+    accepted/rejected set identical while avoiding a second full traversal of
+    the market series, which is the largest object in a steady-state event.
+    """
     if depth > 16 or not isinstance(value, (dict, list)):
         return
+    # Labels are only needed to describe a rejection, so they are built lazily.
+    # Formatting one per visited node made the walk cost scale with the payload
+    # even when every field was valid, which is the normal case for every bar.
     if isinstance(value, list):
         for index, child in enumerate(value):
-            ensure_no_future_timestamps(child, cutoff_ms, f"{label}[{index}]", depth + 1)
+            if isinstance(child, (dict, list)):
+                ensure_no_future_timestamps(child, cutoff_ms, f"{label}[{index}]", depth + 1)
         return
     for key, child in value.items():
+        if depth == 0 and key in skip_keys:
+            continue
         if key in TIMESTAMP_FIELDS:
             positive_int(child, f"{label}.{key}")
             # An aggregate's nominal close is deliberately ahead of the
             # current cutoff while the bucket is still forming. Its OHLCV is
             # bounded by the current event and `confirmed=False` makes the
             # state explicit to strategy code.
-            partial_bar_close = key == "closeTimeMs" and value.get("confirmed") is False
-            if child > cutoff_ms and not partial_bar_close:
+            if child > cutoff_ms and not (
+                key == "closeTimeMs" and value.get("confirmed") is False
+            ):
                 raise ProtocolFailure("future_data", f"{label}.{key} is later than event.asOfMs")
-        ensure_no_future_timestamps(child, cutoff_ms, f"{label}.{key}", depth + 1)
+        if isinstance(child, (dict, list)):
+            ensure_no_future_timestamps(child, cutoff_ms, f"{label}.{key}", depth + 1)
 
 
 def validate_bar(bar, cutoff_ms, label):
@@ -440,7 +455,12 @@ def validate_event(event):
             if "eligible" in row and not isinstance(row["eligible"], bool):
                 raise ProtocolFailure("invalid_universe", f"event.universe[{index}].eligible must be boolean when present")
             ensure_no_future_timestamps(row, cutoff_ms, f"event.universe[{index}]")
-    ensure_no_future_timestamps(value, cutoff_ms)
+    # `validate_market` already walked `event.market` with this same cutoff and
+    # the same partial-bucket rule, and it is the largest subtree in a
+    # steady-state event. Every other branch is still walked here, including
+    # `event.portfolio`, whose row validators check timestamp *shape* but not
+    # the cutoff.
+    ensure_no_future_timestamps(value, cutoff_ms, skip_keys=("market",))
     return value
 
 

@@ -739,6 +739,7 @@ dependencies = [
  "desic-storage-config",
  "desic-systematic",
  "desic-trade-domain",
+ "flate2",
  "futures-util",
  "hmac",
  "native-tls",
