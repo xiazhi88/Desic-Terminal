@@ -202,6 +202,10 @@ const EMPTY_PYTHON_DRAFT: PythonDraft = {
 
 const REPLAY_PAGE_BAR_LIMIT = 1_500;
 const REPLAY_PAGE_LOAD_DELAY_MS = 80;
+/// Coalescing window while the pointer is still down. Long enough that a fast
+/// sweep across the timeline does not fetch every intermediate page, short
+/// enough that the chart keeps up with a slow drag.
+const REPLAY_PAGE_DRAG_SETTLE_MS = 200;
 const REPLAY_PAGE_LOAD_TIMEOUT_MS = 20_000;
 const MAX_BACKTEST_RANGE_MS = 366 * 24 * 60 * 60 * 1_000;
 // Keep AI source writes visible without letting a long editor animation hold
@@ -274,6 +278,20 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const backtestDefaultRangeSymbolRef = useRef<string | null>(null);
   const backtestReproductionSymbolRef = useRef<string | null>(null);
   const replayPageRequestRef = useRef(0);
+  /// Outstanding page requests, including superseded ones. The spinner clears
+  /// when this reaches zero so no single request can strand it.
+  const replayPageInFlightRef = useRef(0);
+  /// Latest loaded page and cursor, read by deferred loads so they never act on
+  /// a page that was replaced while their timer was pending.
+  const detailRef = useRef<SystematicBacktestDetail | null>(null);
+  const replayIndexRef = useRef(0);
+  const replayAbsoluteIndexRef = useRef(0);
+  /// Set below, once `moveReplayCursor` exists. Lets the window-level pointer
+  /// release and the reconcile effect call it without ordering constraints.
+  const moveReplayCursorRef = useRef<((index: number, immediate?: boolean) => void) | null>(null);
+  detailRef.current = detail;
+  replayIndexRef.current = replayIndex;
+  replayAbsoluteIndexRef.current = replayAbsoluteIndex;
   const replayPageTimerRef = useRef<number | null>(null);
   const replayRangeDraggingRef = useRef(false);
 
@@ -419,6 +437,11 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
 
   useEffect(() => {
     replayPageRequestRef.current += 1;
+    // Switching runs abandons any in-flight page. Reset the counter with it so a
+    // late arrival from the previous run cannot toggle this run's spinner, and
+    // clear the stale drag flag so the new timeline is immediately usable.
+    replayPageInFlightRef.current = 0;
+    replayRangeDraggingRef.current = false;
     if (replayPageTimerRef.current !== null) {
       window.clearTimeout(replayPageTimerRef.current);
       replayPageTimerRef.current = null;
@@ -755,16 +778,21 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   }, [backtestEndLimitAt, endAt]);
 
   const loadReplayPage = useCallback(async (requestedIndex: number) => {
-    if (!desktop || !selectedRun?.id || !detail || detail.totalBarCount <= 0 || detail.bars.length === 0) return;
-    const totalBarCount = detail.totalBarCount;
+    // Read `detail` through a ref, not the closure. A deferred load created
+    // during a drag would otherwise run against the page that was loaded when
+    // the timer was scheduled, compute an offset for a page that has since been
+    // replaced, and fight with the request that superseded it.
+    const current = detailRef.current;
+    if (!desktop || !selectedRun?.id || !current || current.totalBarCount <= 0 || current.bars.length === 0) return;
+    const totalBarCount = current.totalBarCount;
     const targetIndex = Math.min(
       totalBarCount,
-      Math.max(1, Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : detail.barOffset + replayIndex),
+      Math.max(1, Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : current.barOffset + replayIndexRef.current),
     );
-    const activeStart = detail.barOffset + 1;
-    const activeEnd = detail.barOffset + detail.bars.length;
+    const activeStart = current.barOffset + 1;
+    const activeEnd = current.barOffset + current.bars.length;
     if (targetIndex >= activeStart && targetIndex <= activeEnd) {
-      setReplayIndex(targetIndex - detail.barOffset);
+      setReplayIndex(targetIndex - current.barOffset);
       setReplayAbsoluteIndex(targetIndex);
       return;
     }
@@ -777,6 +805,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     );
     const requestId = replayPageRequestRef.current + 1;
     replayPageRequestRef.current = requestId;
+    replayPageInFlightRef.current += 1;
     setLoadingReplayPage(true);
     let timeoutId: number | undefined;
     try {
@@ -801,41 +830,65 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       setReplayAbsoluteIndex(next.barOffset + localIndex);
     } catch (error) {
       if (requestId !== replayPageRequestRef.current) return;
-      setReplayAbsoluteIndex(detail.barOffset + replayIndex);
+      const latest = detailRef.current;
+      if (latest) setReplayAbsoluteIndex(latest.barOffset + replayIndexRef.current);
       onNotify({ kind: "error", title: text.resultLoadFailed, message: messageOf(error) });
     } finally {
       if (timeoutId !== undefined) window.clearTimeout(timeoutId);
-      if (requestId === replayPageRequestRef.current) setLoadingReplayPage(false);
+      // Track how many requests are actually outstanding instead of clearing
+      // only for the newest id. A superseded request used to return before this
+      // point without clearing, so if its successor also stopped owning the
+      // flag the spinner stayed on forever with no way to recover.
+      replayPageInFlightRef.current = Math.max(0, replayPageInFlightRef.current - 1);
+      if (replayPageInFlightRef.current === 0) setLoadingReplayPage(false);
     }
-  }, [desktop, detail, onNotify, replayIndex, selectedRun?.id, text.resultLoadFailed, text.resultUnavailableDetail]);
+    // Deliberately identity-stable: reading `detail`/`replayIndex` through refs
+    // keeps a pending deferred load from capturing a page that has been replaced.
+  }, [desktop, onNotify, selectedRun?.id, text.replayPageTimeout, text.resultLoadFailed, text.resultUnavailableDetail]);
 
   const moveReplayCursor = useCallback((requestedIndex: number, immediate = false) => {
-    if (!detail || detail.totalBarCount <= 0 || detail.bars.length === 0) return;
+    const current = detailRef.current;
+    if (!current || current.totalBarCount <= 0 || current.bars.length === 0) return;
     const targetIndex = Math.min(
-      detail.totalBarCount,
-      Math.max(1, Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : detail.barOffset + replayIndex),
+      current.totalBarCount,
+      Math.max(1, Number.isFinite(requestedIndex) ? Math.round(requestedIndex) : current.barOffset + replayIndexRef.current),
     );
     setReplayAbsoluteIndex(targetIndex);
-    const activeStart = detail.barOffset + 1;
-    const activeEnd = detail.barOffset + detail.bars.length;
+    const activeStart = current.barOffset + 1;
+    const activeEnd = current.barOffset + current.bars.length;
     if (targetIndex >= activeStart && targetIndex <= activeEnd) {
       if (replayPageTimerRef.current !== null) {
         window.clearTimeout(replayPageTimerRef.current);
         replayPageTimerRef.current = null;
       }
-      setReplayIndex(targetIndex - detail.barOffset);
+      setReplayIndex(targetIndex - current.barOffset);
       return;
     }
 
-    if (!immediate && replayRangeDraggingRef.current) return;
-    if (replayPageTimerRef.current !== null) window.clearTimeout(replayPageTimerRef.current);
+    // Always drop a pending load first. `immediate` (pointer release, arrow key,
+    // play) supersedes whatever the drag had queued; letting that timer survive
+    // meant a second request fired 200 ms later for a page the user had already
+    // left, which is what kept the spinner alive after the drag settled.
+    if (replayPageTimerRef.current !== null) {
+      window.clearTimeout(replayPageTimerRef.current);
+      replayPageTimerRef.current = null;
+    }
     const load = () => {
       replayPageTimerRef.current = null;
       void loadReplayPage(targetIndex);
     };
+    // While the pointer is still down the page load is deferred rather than
+    // skipped. Dropping it outright meant a drag that ended without a trailing
+    // pointerup left the timeline permanently out of range of its loaded page.
     if (immediate) load();
-    else replayPageTimerRef.current = window.setTimeout(load, REPLAY_PAGE_LOAD_DELAY_MS);
-  }, [detail, loadReplayPage, replayIndex]);
+    else {
+      replayPageTimerRef.current = window.setTimeout(
+        load,
+        replayRangeDraggingRef.current ? REPLAY_PAGE_DRAG_SETTLE_MS : REPLAY_PAGE_LOAD_DELAY_MS,
+      );
+    }
+  }, [loadReplayPage]);
+  moveReplayCursorRef.current = moveReplayCursor;
 
   const setReplayRangeDragging = useCallback((dragging: boolean) => {
     replayRangeDraggingRef.current = dragging;
@@ -844,6 +897,44 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       replayPageTimerRef.current = null;
     }
   }, []);
+
+  // A drag can end without the slider seeing it: releasing the pointer outside
+  // the input sends `pointerup` to the document, so React's handler never runs
+  // and the "still dragging" flag would stay set. Watch for the release at the
+  // window level so the timeline always settles.
+  useEffect(() => {
+    if (!desktop) return;
+    const release = () => {
+      if (!replayRangeDraggingRef.current) return;
+      replayRangeDraggingRef.current = false;
+      // Re-assert the cursor the slider is showing. `moveReplayCursor` is a
+      // no-op when that index is already on the loaded page.
+      const target = replayAbsoluteIndexRef.current;
+      if (target > 0) moveReplayCursorRef.current?.(target, true);
+    };
+    window.addEventListener("pointerup", release);
+    window.addEventListener("pointercancel", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("pointercancel", release);
+    };
+  }, [desktop]);
+
+  // Last line of defence against the slider and the chart disagreeing. If the
+  // cursor sits outside the loaded page while nothing is in flight and no load
+  // is queued, the page that should be showing was dropped somewhere; fetch it.
+  // This keeps a missed event from stranding the view on the wrong range.
+  useEffect(() => {
+    if (!desktop || !detail || detail.totalBarCount <= 0 || detail.bars.length === 0) return;
+    if (loadingReplayPage || replayPageTimerRef.current !== null) return;
+    if (replayRangeDraggingRef.current) return;
+    if (replayAbsoluteIndex <= 0) return;
+    const activeStart = detail.barOffset + 1;
+    const activeEnd = detail.barOffset + detail.bars.length;
+    if (replayAbsoluteIndex >= activeStart && replayAbsoluteIndex <= activeEnd) return;
+    const timer = window.setTimeout(() => moveReplayCursorRef.current?.(replayAbsoluteIndex, true), 0);
+    return () => window.clearTimeout(timer);
+  }, [desktop, detail, loadingReplayPage, replayAbsoluteIndex]);
 
   const replayBars = useMemo(() => {
     const bars = detail?.bars ?? [];
@@ -854,18 +945,18 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     return bar ? toCandle(bar) : null;
   }, [detail?.bars, replayIndex]);
   const replayBoundaryTimeMs = detail?.bars[replayIndex - 1]?.closeTimeMs ?? 0;
-  const replaySnapshotsByTime = useMemo(
-    () => indexReplayPointsByTime(detail?.report?.replaySnapshots ?? []),
+  const replaySnapshots = useMemo(
+    () => sortReplaySnapshots(detail?.report?.replaySnapshots ?? []),
     [detail?.report?.replaySnapshots],
   );
   const replayEquityByTime = useMemo(
     () => indexReplayPointsByTime(detail?.report?.equityCurve ?? []),
     [detail?.report?.equityCurve],
   );
-  const hasRecordedReplaySnapshots = replaySnapshotsByTime.size > 0;
+  const hasRecordedReplaySnapshots = replaySnapshots.length > 0;
   const replaySnapshot = useMemo(
-    () => replaySnapshotAt(detail, replayIndex, replaySnapshotsByTime, replayEquityByTime),
-    [detail, replayEquityByTime, replayIndex, replaySnapshotsByTime],
+    () => replaySnapshotAt(detail, replayIndex, replaySnapshots, replayEquityByTime),
+    [detail, replayEquityByTime, replayIndex, replaySnapshots],
   );
   const replayFillFeePrefix = useMemo(() => {
     const fills = detail?.report?.fills ?? [];
@@ -3336,7 +3427,9 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                     min={1}
                     max={replayTotalBarCount}
                     value={absoluteReplayIndex}
-                    disabled={replayPageLoading}
+                    // Never disabled while a page loads. A disabled input fires no
+                    // pointerup, so disabling mid-drag stranded the drag state as
+                    // "still dragging" and the timeline could not be moved again.
                     onPointerDown={() => onReplayRangeDragging(true)}
                     onChange={(event) => onReplayIndex(Number(event.target.value))}
                     onPointerUp={(event) => {
@@ -3362,7 +3455,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 <div className="systematic-lab-review-insights">
                   <div className="systematic-lab-equity-stage">
                     <div className="systematic-lab-equity-stage__head"><span>{text.equityCurve}</span><div><span>{text.maxDrawdown} <b>{formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))}</b></span><strong>{formatUsdt(replaySnapshot?.equityUsdt)}</strong></div></div>
-                    <div className="systematic-lab-equity-stage__equity"><SystematicEquityChart points={report.equityCurve} negative={(metrics?.netPnlUsdt ?? 0) < 0} label={`${text.equityCurve} / ${text.maxDrawdown}`} cursorTimeMs={replayTimeMs} /></div>
+                    <div className="systematic-lab-equity-stage__equity">{report.equitySeriesArchived ? <p className="systematic-lab-equity-stage__archived">{text.equitySeriesArchived}</p> : <SystematicEquityChart points={report.equityCurve} negative={(metrics?.netPnlUsdt ?? 0) < 0} label={`${text.equityCurve} / ${text.maxDrawdown}`} cursorTimeMs={replayTimeMs} />}</div>
                   </div>
                   <BacktestStatisticsPanel text={text} report={report} />
                 </div>
@@ -4677,17 +4770,72 @@ function indexReplayPointsByTime<T extends { timeMs: number }>(points: readonly 
   return index;
 }
 
+/// Replay snapshots record only the bars where position state changes, so a
+/// bar is described by the latest row at or before its close. Keeping them in
+/// a sorted array makes that an O(log n) lookup instead of an exact-time hit.
+function sortReplaySnapshots(
+  snapshots: readonly SystematicReplaySnapshot[],
+): readonly SystematicReplaySnapshot[] {
+  return snapshots
+    .filter((snapshot) => Number.isFinite(snapshot.timeMs))
+    .slice()
+    .sort((left, right) => left.timeMs - right.timeMs);
+}
+
+function replaySnapshotAtOrBefore(
+  snapshots: readonly SystematicReplaySnapshot[],
+  timeMs: number,
+): SystematicReplaySnapshot | null {
+  let low = 0;
+  let high = snapshots.length - 1;
+  let found: SystematicReplaySnapshot | null = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (snapshots[middle].timeMs <= timeMs) {
+      found = snapshots[middle];
+      low = middle + 1;
+    } else {
+      high = middle - 1;
+    }
+  }
+  return found;
+}
+
 function replaySnapshotAt(
   detail: SystematicBacktestDetail | null,
   replayIndex: number,
-  replaySnapshotsByTime: ReadonlyMap<number, SystematicReplaySnapshot>,
+  replaySnapshots: readonly SystematicReplaySnapshot[],
   replayEquityByTime: ReadonlyMap<number, SystematicEquityPoint>,
 ): SystematicReplaySnapshot | null {
   const report = detail?.report;
   const bar = detail?.bars[replayIndex - 1];
   if (!report || !bar || replayIndex <= 0) return null;
-  const snapshot = replaySnapshotsByTime.get(bar.closeTimeMs);
-  if (snapshot) return snapshot;
+  const snapshot = replaySnapshotAtOrBefore(replaySnapshots, bar.closeTimeMs);
+  if (snapshot) {
+    // Balances are only exact on the bar that produced the row. For later bars
+    // the equity curve still carries a per-bar value, so prefer it and keep the
+    // discrete state (position and ledger counts) from the transition row.
+    if (snapshot.timeMs === bar.closeTimeMs) return snapshot;
+    const equity = replayEquityByTime.get(bar.closeTimeMs);
+    if (!equity) return snapshot;
+    const usedMargin = snapshot.position ? snapshot.usedMarginUsdt : 0;
+    return {
+      ...snapshot,
+      timeMs: equity.timeMs,
+      equityUsdt: equity.equityUsdt,
+      cashUsdt: equity.realizedCashUsdt,
+      unrealizedPnlUsdt: equity.unrealizedPnlUsdt,
+      usedMarginUsdt: usedMargin,
+      availableMarginUsdt: Math.max(equity.equityUsdt - usedMargin, 0),
+      position: snapshot.position
+        ? {
+            ...snapshot.position,
+            markedPrice: bar.close,
+            unrealizedPnlUsdt: equity.unrealizedPnlUsdt,
+          }
+        : null,
+    };
+  }
   // Reports created before replay snapshots retain their equity curve. Expose
   // the historical balance and completed ledger prefix, but never invent a
   // past position that was not recorded by that older engine version.
@@ -4938,7 +5086,7 @@ function copy(chinese: boolean) {
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
     backtestRuns: "回测记录", backtestDuration: "耗时", runActions: "操作", editBacktest: "编辑回测参数", retryBacktest: "重试回测", backtestRetryQueued: "回测已重新排队", backtestParametersRestored: "回测参数已复现", backtestReproductionFailed: "无法复现回测参数", backtestPagination: "回测记录分页", backtestPreviousPage: "上一页", backtestNextPage: "下一页", noRuns: "还没有回测", noRunsDetail: "从回测页运行一次历史回放后，完整结果会保存在本机。",
-      result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", replayPageTimeout: "回放区间加载超时，请重新拖动进度条后重试。", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线",
+      result: "结果", resultLoadFailed: "无法读取回测结果", loadingResult: "正在读取回放数据", loadingReplayPage: "正在加载回放区间", replayPageTimeout: "回放区间加载超时，请重新拖动进度条后重试。", evaluationRange: "评估区间", netPnl: "净盈亏", finalEquity: "期末权益", cashBalance: "现金余额", accountEquity: "账户权益", unrealizedPnl: "未实现盈亏", usedMargin: "占用保证金", availableMargin: "可用保证金", maxDrawdown: "最大回撤", closedTrades: "已平仓交易", fees: "费用", equityCurve: "权益曲线", equitySeriesArchived: "逐根权益明细已在存储维护中归档，指标与成交记录仍然完整。重新运行该回测可恢复曲线。",
       previousBar: "上一根 K 线", nextBar: "下一根 K 线", replay: "回放进度", playReplay: "播放回放", pauseReplay: "暂停回放", replaySpeed: "回放速度", compareRuns: "比较回测", clearComparison: "清除比较", replayActionLegend: "成交动作", limitFillEstimateDetail: "限价单只依据后续 1 分钟 K 线的价格穿越与成交量参与上限模拟，不能代表历史订单簿队列成交。", resultUnavailable: "回放数据不可用", resultUnavailableDetail: "该回测没有可读取的本地快照。",
       replayAccount: "回放账户", tradeLedger: "成交账本", position: "仓位", positionHistory: "历史仓位", noTrades: "没有已平仓交易", noTradesDetail: "动作、成交和权益仍会保留在回测报告中。", noReplayTrades: "当前时点没有已平仓交易", noReplayTradesDetail: "继续回放以查看后续记账结果。", noReplayFills: "当前时点没有成交", noReplayFillsDetail: "继续回放以查看下一根开盘成交和保护性退出。", noPosition: "当前时点没有持仓", noPositionDetail: "仓位将在下一根开盘成交后显示。", contracts: "张", contractValue: "每张面值", notional: "名义价值", entryPrice: "开仓均价", exitPrice: "平仓均价", markPrice: "标记价格", funding: "资金费用", stopLoss: "止损", takeProfit: "止盈", holdingTime: "持有时长", fillPrice: "成交价", marginChange: "保证金变动", entryNotional: "开仓名义价值", exitNotional: "平仓名义价值", fee: "手续费", buy: "买入", sell: "卖出", long: "多", short: "空",
       statistics: "策略统计", fullBacktest: "完整回测", totalReturn: "总收益", winRate: "胜率", sharpe: "夏普 (1m 年化)", sortino: "索提诺 (1m 年化)", volatility: "波动率 (1m 年化)", profitFactor: "盈亏因子", expectancy: "单笔期望", averageHolding: "平均持有", exposure: "持仓暴露", largestWinLoss: "最大盈 / 亏", maxStreak: "最长连胜 / 连亏",
@@ -4984,7 +5132,7 @@ function copy(chinese: boolean) {
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",
     backtestRuns: "Backtest runs", backtestDuration: "Elapsed", runActions: "Actions", editBacktest: "Edit backtest parameters", retryBacktest: "Retry backtest", backtestRetryQueued: "Backtest re-queued", backtestParametersRestored: "Backtest parameters restored", backtestReproductionFailed: "Could not reproduce backtest parameters", backtestPagination: "Backtest pagination", backtestPreviousPage: "Previous page", backtestNextPage: "Next page", noRuns: "No backtest yet", noRunsDetail: "Run a historical replay from Backtest; the complete result stays local.",
-    result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", replayPageTimeout: "Replay page loading timed out. Drag the timeline again to retry.", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve",
+    result: "Result", resultLoadFailed: "Could not load result", loadingResult: "Loading replay data", loadingReplayPage: "Loading replay range", replayPageTimeout: "Replay page loading timed out. Drag the timeline again to retry.", evaluationRange: "Evaluation range", netPnl: "Net PnL", finalEquity: "Final equity", cashBalance: "Cash balance", accountEquity: "Account equity", unrealizedPnl: "Unrealized PnL", usedMargin: "Used margin", availableMargin: "Available margin", maxDrawdown: "Max drawdown", closedTrades: "Closed trades", fees: "Fees", equityCurve: "Equity curve", equitySeriesArchived: "Storage maintenance archived this run's per-bar equity detail. Metrics and trades are still complete. Re-run the backtest to restore the curve.",
     previousBar: "Previous bar", nextBar: "Next bar", replay: "Replay progress", playReplay: "Play replay", pauseReplay: "Pause replay", replaySpeed: "Replay speed", compareRuns: "Compare backtests", clearComparison: "Clear comparison", replayActionLegend: "Filled actions", limitFillEstimate: "Limit: conservative K-line estimate", limitFillEstimateDetail: "Limit fills use only later 1m price traversal and a volume-participation cap. They do not represent historical order-book queue fills.", resultUnavailable: "Replay data unavailable", resultUnavailableDetail: "This run has no readable local snapshot.",
     replayAccount: "Replay account", tradeLedger: "Fill ledger", position: "Position", positionHistory: "Position history", noTrades: "No closed trades", noTradesDetail: "Actions, fills, and equity remain in the full backtest report.", noReplayTrades: "No closed trade at this time", noReplayTradesDetail: "Continue the replay to view later ledger entries.", noReplayFills: "No fill at this time", noReplayFillsDetail: "Continue the replay to view next-open fills and protective exits.", noPosition: "No position at this time", noPositionDetail: "A position appears after its next-open fill.", contracts: "contracts", contractValue: "Contract value", notional: "Notional", entryPrice: "Average entry", exitPrice: "Exit price", markPrice: "Mark price", funding: "Funding", stopLoss: "Stop loss", takeProfit: "Take profit", holdingTime: "Holding time", fillPrice: "Fill price", marginChange: "Margin change", entryNotional: "Entry notional", exitNotional: "Exit notional", fee: "Fee", buy: "Buy", sell: "Sell", long: "Long", short: "Short",
     statistics: "Strategy statistics", fullBacktest: "Full backtest", totalReturn: "Total return", winRate: "Win rate", sharpe: "Sharpe (1m ann.)", sortino: "Sortino (1m ann.)", volatility: "Volatility (1m ann.)", profitFactor: "Profit factor", expectancy: "Expectancy", averageHolding: "Avg. holding", exposure: "Exposure", largestWinLoss: "Largest win / loss", maxStreak: "Max win / loss streak",

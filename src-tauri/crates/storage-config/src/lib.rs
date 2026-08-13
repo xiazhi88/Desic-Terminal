@@ -382,6 +382,9 @@ pub struct StorageMaintenanceResult {
     pub deleted_kline_sync_runs: usize,
     pub deleted_ai_messages: usize,
     pub deleted_intelligence_rows: HashMap<String, usize>,
+    /// Backtest runs whose per-bar equity detail was dropped. Their metrics and
+    /// summary stay queryable; only the replayable series is archived.
+    pub archived_backtest_series: usize,
     pub finished_at: i64,
 }
 

@@ -36,6 +36,7 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
   const { i18n } = useTranslation();
   const [overview, setOverview] = useState<SystematicOverview | null>(null);
   const refreshTimer = useRef<number | null>(null);
+  const nextRefreshAt = useRef(0);
   const desktop = isTauriRuntime();
   const chinese = isChineseLocale(i18n.resolvedLanguage ?? i18n.language);
 
@@ -98,8 +99,27 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
           message: event.error || event.runId || "--"
         });
       }
+      // Progress events are throttled, not debounced. A fast backtest emits one
+      // every ~170 ms, and rescheduling a 350 ms delay on each arrival meant the
+      // timer was always cleared before it fired: the bar sat at 0% and then
+      // jumped straight to the finished state. Everything else refreshes at once.
+      if (event.type === "backtestProgress") {
+        if (refreshTimer.current !== null) return;
+        const wait = Math.max(0, nextRefreshAt.current - Date.now());
+        refreshTimer.current = window.setTimeout(() => {
+          refreshTimer.current = null;
+          nextRefreshAt.current = Date.now() + 350;
+          void refresh();
+        }, wait);
+        return;
+      }
       if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
-      refreshTimer.current = window.setTimeout(() => void refresh(), event.type === "backtestProgress" ? 350 : 0);
+      refreshTimer.current = null;
+      nextRefreshAt.current = Date.now() + 350;
+      refreshTimer.current = window.setTimeout(() => {
+        refreshTimer.current = null;
+        void refresh();
+      }, 0);
     }).then((next) => {
       if (!active) next?.();
       else unlisten = next;

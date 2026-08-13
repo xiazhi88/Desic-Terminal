@@ -992,6 +992,7 @@
 .systematic-lab-equity-stage { grid-template-rows: 26px minmax(0, 1fr); }
 .systematic-lab-equity-stage__equity { min-width: 0; min-height: 0; }
 .systematic-lab-equity-stage__equity .systematic-lab-equity-chart { height: 100%; }
+.systematic-lab-equity-stage__archived { display: flex; align-items: center; justify-content: center; height: 100%; margin: 0; padding: 0 16px; text-align: center; font-size: 12px; line-height: 1.6; color: var(--muted); }
 .systematic-lab-equity-stage__head > div { display: inline-flex; align-items: baseline; gap: 9px; min-width: 0; }
 .systematic-lab-equity-stage__head > div > span { color: var(--lab-weak); font-size: 8px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
 .systematic-lab-equity-stage__head > div > span b { color: var(--lab-negative); font-size: 9px; font-weight: 700; }

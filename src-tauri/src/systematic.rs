@@ -80,7 +80,6 @@ const MAX_PYTHON_TUNING_CANDIDATES: usize = 300;
 const MAX_FACTOR_CODE_BYTES: usize = 32;
 const MAX_RUN_ID_BYTES: usize = 160;
 const FRESH_UNIVERSE_WINDOW_MS: i64 = 5 * ONE_MINUTE_MS;
-const MAX_BACKTEST_SNAPSHOT_BYTES: usize = 128 * 1024 * 1024;
 const DEFAULT_REPLAY_BAR_LIMIT: usize = 1_500;
 const MAX_REPLAY_BAR_LIMIT: usize = 5_000;
 // The active candle window remains exact. This additional budget preserves an
@@ -124,6 +123,20 @@ const SYSTEMATIC_PYTHON_SAMPLE_SOURCE: &str =
     include_str!("../../scripts/fixtures/systematic-python/valid-momentum-bar.py");
 const SYSTEMATIC_PYTHON_REQUIREMENTS: &str =
     include_str!("../../scripts/systematic/python-runtime-requirements.txt");
+/// Package indexes tried in order when installing the local research runtime.
+///
+/// The first entry is a mainland China mirror because that is where most users
+/// install from and the round trip to PyPI is slow there. A mirror can lag,
+/// rate-limit, or reject wheel downloads while still serving its index, so a
+/// failure falls through to the next entry and only an exhausted list is an
+/// error. Every entry is an HTTPS host that publishes the same immutable,
+/// version-pinned artifacts, and the requirement set stays pinned regardless of
+/// which index answers.
+const SYSTEMATIC_PYTHON_PACKAGE_INDEXES: &[(&str, &str)] = &[
+    ("Tsinghua", "https://pypi.tuna.tsinghua.edu.cn/simple"),
+    ("Aliyun", "https://mirrors.aliyun.com/pypi/simple"),
+    ("PyPI", "https://pypi.org/simple"),
+];
 const SYSTEMATIC_STRATEGY_AI_SKILL_ID: &str = "systematic-strategy-authoring";
 /// The always-loaded Skill body. Its YAML frontmatter is generated at sync time
 /// from the definition, so this constant holds only the Markdown body.
@@ -1446,6 +1459,11 @@ pub(crate) struct SystematicBacktestReplayReport {
     pub strategy_actions: Vec<StrategyActionEvent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit_order_fill_model: Option<String>,
+    /// Set when storage maintenance dropped this run's per-bar equity series.
+    /// The metrics and ledger below are complete; only the replay curve is gone,
+    /// so the UI can explain an empty chart instead of implying a flat result.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub equity_series_archived: bool,
     /// Identifies the complete immutable report retained in local storage.
     pub report_hash: String,
 }
@@ -1461,6 +1479,11 @@ struct PersistedBacktestReplayData {
     metrics: BacktestMetrics,
     #[serde(default)]
     equity_curve: Vec<EquityPoint>,
+    /// Bars the engine recorded, written alongside the columnar series. A
+    /// positive count with no chunks on disk means the series was archived
+    /// rather than the run being empty.
+    #[serde(default)]
+    equity_series_bar_count: usize,
     #[serde(default)]
     replay_snapshots: Vec<ReplaySnapshot>,
     #[serde(default)]
@@ -1627,6 +1650,24 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
           finished_at INTEGER,
           updated_at INTEGER NOT NULL
         );
+        -- Per-bar equity series for a completed backtest, stored as fixed-width
+        -- little-endian f64 columns instead of JSON objects. A 524k-bar run is
+        -- ~60 MB as `report_json` rows of four named fields and ~0.9 MB here,
+        -- and every value round-trips bit-for-bit (JSON decimal text does not
+        -- guarantee that). Timestamps are implied by `start_ms + step_ms * i`
+        -- when the series is uniformly spaced; the `f64x4` codec stores an
+        -- explicit time column for the irregular case.
+        CREATE TABLE IF NOT EXISTS systematic_backtest_series (
+          run_id TEXT NOT NULL,
+          chunk_index INTEGER NOT NULL,
+          from_bar INTEGER NOT NULL,
+          to_bar INTEGER NOT NULL,
+          start_ms INTEGER NOT NULL,
+          step_ms INTEGER NOT NULL,
+          codec TEXT NOT NULL,
+          payload BLOB NOT NULL,
+          PRIMARY KEY(run_id, chunk_index)
+        ) WITHOUT ROWID;
         CREATE TABLE IF NOT EXISTS systematic_strategy_versions (
           strategy_id TEXT NOT NULL,
           version INTEGER NOT NULL,
@@ -4251,31 +4292,43 @@ pub(crate) async fn systematic_backtest_detail(
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|error| error.to_string())?;
-        let report: Option<PersistedBacktestReplayData> = report_raw
+        let mut report: Option<PersistedBacktestReplayData> = report_raw
             .map(|raw| serde_json::from_str(&raw).map_err(|error| error.to_string()))
             .transpose()?;
+        // Runs written before the columnar series table still carry their curve
+        // inline; only replace it when chunks exist for this run.
+        if let Some(report) = report.as_mut() {
+            if let Some(points) = load_equity_series(&conn, &request.run_id)? {
+                report.equity_curve = points;
+            }
+        }
         let persisted: PersistedBacktestInput = serde_json::from_str(&input_raw)
             .map_err(|error| format!("Backtest input record is corrupt: {error}"))?;
-        let bars_raw: String = conn
-            .query_row(
-                "SELECT bars_json FROM systematic_data_snapshots WHERE id=?1",
-                [&run.data_snapshot_id],
-                |row| row.get(0),
-            )
-            .map_err(|error| format!("Backtest data snapshot is unavailable: {error}"))?;
-        let all_bars = serde_json::from_str::<Vec<ClosedBar>>(&bars_raw)
-            .map_err(|error| format!("Backtest data snapshot is corrupt: {error}"))?;
         let preload_bar_count = report
             .as_ref()
             .and_then(|value| value.reproducibility.preload_bar_count)
             .or(persisted.preload_bar_count)
             .unwrap_or(0);
-        if preload_bar_count > all_bars.len() {
-            return Err(
-                "Backtest data snapshot has fewer bars than its recorded preloaded history"
-                    .to_string(),
-            );
-        }
+        let limit = request
+            .limit
+            .unwrap_or(DEFAULT_REPLAY_BAR_LIMIT)
+            .clamp(1, MAX_REPLAY_BAR_LIMIT);
+        let requested_offset = request.offset;
+        // Only the page the caller asked for is read. `total_bar_count` comes
+        // from the snapshot's recorded count, so paging never depends on
+        // materialising the whole window.
+        let mut bar_offset = 0usize;
+        let window = load_backtest_snapshot_window(
+            &conn,
+            &run.data_snapshot_id,
+            preload_bar_count,
+            |evaluation_count| {
+                let default_offset = evaluation_count.saturating_sub(limit);
+                let offset = requested_offset.unwrap_or(default_offset).min(evaluation_count);
+                bar_offset = offset;
+                (offset, offset.saturating_add(limit).min(evaluation_count))
+            },
+        )?;
         let preload_start_at = report
             .as_ref()
             .and_then(|value| value.reproducibility.preload_start_time_ms)
@@ -4284,21 +4337,10 @@ pub(crate) async fn systematic_backtest_detail(
             .as_ref()
             .and_then(|value| value.reproducibility.start_time_ms)
             .or(persisted.evaluation_start_at)
-            .or_else(|| all_bars.get(preload_bar_count).map(|bar| bar.open_time_ms));
-        let evaluation_bars = &all_bars[preload_bar_count..];
-        let evaluation_end_at = evaluation_bars.last().map(|bar| bar.close_time_ms);
-        let total_bar_count = evaluation_bars.len();
-        let limit = request
-            .limit
-            .unwrap_or(DEFAULT_REPLAY_BAR_LIMIT)
-            .clamp(1, MAX_REPLAY_BAR_LIMIT);
-        let default_offset = total_bar_count.saturating_sub(limit);
-        let bar_offset = request
-            .offset
-            .unwrap_or(default_offset)
-            .min(total_bar_count);
-        let bar_end = bar_offset.saturating_add(limit).min(total_bar_count);
-        let bars = evaluation_bars[bar_offset..bar_end].to_vec();
+            .or(window.evaluation_start_open_ms);
+        let evaluation_end_at = window.evaluation_end_close_ms;
+        let total_bar_count = window.total_bar_count.saturating_sub(preload_bar_count);
+        let bars = window.bars;
         let replay_report = report
             .as_ref()
             .map(|value| backtest_replay_projection(value, &bars));
@@ -4344,11 +4386,24 @@ fn backtest_replay_projection(
     let active_end_ms = replay_bars.last().map(|bar| bar.close_time_ms);
     let has_active_window = active_start_ms.zip(active_end_ms);
 
+    // Snapshots are recorded only where position state changes, so a page must
+    // also carry the last transition before its first bar. Without that
+    // carry-in row a position opened on an earlier page would look flat for
+    // every bar of this one.
     let replay_snapshots = has_active_window.map_or_else(Vec::new, |(start_ms, end_ms)| {
-        report
+        let carry_in = report
             .replay_snapshots
             .iter()
-            .filter(|snapshot| snapshot.time_ms >= start_ms && snapshot.time_ms <= end_ms)
+            .rev()
+            .find(|snapshot| snapshot.time_ms < start_ms);
+        carry_in
+            .into_iter()
+            .chain(
+                report
+                    .replay_snapshots
+                    .iter()
+                    .filter(|snapshot| snapshot.time_ms >= start_ms && snapshot.time_ms <= end_ms),
+            )
             .cloned()
             .collect()
     });
@@ -4408,6 +4463,10 @@ fn backtest_replay_projection(
             .iter()
             .any(|order| order.order_type == desic_systematic::StrategyOrderType::Limit)
             .then(|| report.limit_order_fill_model.clone()),
+        // The run recorded a curve but none was loaded, so maintenance archived
+        // it. Legacy reports have a zero count here and are unaffected.
+        equity_series_archived: report.equity_series_bar_count > 0
+            && report.equity_curve.is_empty(),
         report_hash: report.report_hash.clone(),
     }
 }
@@ -4477,6 +4536,393 @@ fn sample_equity_context(points: &[EquityPoint], maximum_points: usize) -> Vec<E
         }
     }
     sampled
+}
+
+/// Completed runs that keep their replayable per-bar equity series.
+const RETAINED_BACKTEST_SERIES_RUNS: usize = 20;
+
+/// Drops the per-bar equity series of the oldest completed backtests.
+///
+/// Metrics, statistics, fills and closed trades stay in `report_json`, so an
+/// archived run still shows its result and remains comparable; only the
+/// bar-by-bar replay is unavailable. Newest runs are kept because those are the
+/// ones a user is still iterating on. Returns the number of runs archived.
+pub(crate) fn archive_backtest_series(conn: &Connection) -> Result<usize, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT DISTINCT run_id FROM systematic_backtest_series
+             WHERE run_id NOT IN (
+               SELECT id FROM systematic_backtests
+               WHERE status IN ('queued','running')
+               UNION ALL
+               SELECT id FROM (
+                 SELECT id FROM systematic_backtests
+                 WHERE report_json IS NOT NULL
+                 ORDER BY COALESCE(finished_at, updated_at, created_at) DESC
+                 LIMIT ?1
+               )
+             )",
+        )
+        .map_err(|error| error.to_string())?;
+    let stale = statement
+        .query_map(params![RETAINED_BACKTEST_SERIES_RUNS as i64], |row| {
+            row.get::<_, String>(0)
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+
+    let mut archived = 0usize;
+    for run_id in stale {
+        let removed = conn
+            .execute(
+                "DELETE FROM systematic_backtest_series WHERE run_id=?1",
+                params![run_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if removed > 0 {
+            archived += 1;
+        }
+    }
+    Ok(archived)
+}
+
+/// Reads and verifies every confirmed bar a backtest ran on.
+///
+/// Snapshots created before this change inlined the whole window as `bars_json`,
+/// which duplicated rows the `candles` table already held: a 524k bar window is
+/// ~70 MB as JSON text while all 2.7M cached candles together are ~290 MB of row
+/// storage. New snapshots leave `bars_json` empty and are rebuilt from `candles`
+/// over the recorded window instead.
+///
+/// Reconstruction is checked against the snapshot's `data_hash` rather than
+/// trusted, because cached candles can be corrected by a later sync. Hashing
+/// re-serialises the whole window (~0.5 s for 524k bars), so this is for callers
+/// that genuinely need the complete series; replay paging uses
+/// [`load_backtest_snapshot_window`].
+#[cfg_attr(not(test), expect(dead_code, reason = "integrity check for whole-window callers"))]
+fn load_backtest_snapshot_bars(
+    conn: &Connection,
+    snapshot_id: &str,
+) -> Result<Vec<ClosedBar>, String> {
+    let (inst_id, interval, start_at, end_at, bars_raw, data_hash): (
+        String,
+        String,
+        i64,
+        i64,
+        String,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT inst_id,interval,start_at,end_at,bars_json,data_hash
+             FROM systematic_data_snapshots WHERE id=?1",
+            [snapshot_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("Backtest data snapshot is unavailable: {error}"))?;
+
+    let inlined = serde_json::from_str::<Vec<ClosedBar>>(&bars_raw).unwrap_or_default();
+    if !inlined.is_empty() {
+        return Ok(inlined);
+    }
+    if interval != SYSTEMATIC_INTERVAL {
+        return Err(format!(
+            "Backtest data snapshot uses unsupported interval {interval}"
+        ));
+    }
+    // `start_at` is the first bar's open time and `end_at` its last close time,
+    // so the open-time window ends one interval earlier.
+    let bars = load_backtest_bars(
+        conn,
+        &inst_id,
+        start_at,
+        end_at.saturating_sub(ONE_MINUTE_MS),
+    )
+    .map_err(|error| format!("Backtest data snapshot could not be rebuilt: {error}"))?;
+    if sha256_json(&bars)? != data_hash {
+        return Err(
+            "Local K-line history no longer matches this backtest's data snapshot, so the run cannot be replayed reproducibly."
+                .to_string(),
+        );
+    }
+    Ok(bars)
+}
+
+/// What a replay page needs from a snapshot without materialising every bar.
+struct BacktestSnapshotWindow {
+    /// Bars in the whole snapshot, preloaded history included.
+    total_bar_count: usize,
+    /// The requested slice of evaluation bars, in order.
+    bars: Vec<ClosedBar>,
+    /// Open time of the first evaluation bar, if the snapshot has one.
+    evaluation_start_open_ms: Option<i64>,
+    /// Close time of the final evaluation bar.
+    evaluation_end_close_ms: Option<i64>,
+}
+
+/// Loads one page of a backtest's bars.
+///
+/// Rebuilding and re-hashing the entire window costs ~1.3 s for a 524k bar run,
+/// which is far too slow to repeat while a user drags the replay timeline. Only
+/// the requested slice is read here; `bar_count` and the recorded time bounds
+/// supply the totals the page needs.
+///
+/// This page is presentation state, so it does not re-verify `data_hash`. Drift
+/// still cannot pass silently: a snapshot id is `candle-<data_hash[..24]>`, so a
+/// re-run over changed candles hashes to a different id and becomes a distinct
+/// snapshot rather than overwriting this one. `load_backtest_bars` also rejects
+/// any window it cannot cover completely.
+fn load_backtest_snapshot_window(
+    conn: &Connection,
+    snapshot_id: &str,
+    preload_bar_count: usize,
+    bar_offset_from: impl FnOnce(usize) -> (usize, usize),
+) -> Result<BacktestSnapshotWindow, String> {
+    let (inst_id, interval, start_at, end_at, bar_count, bars_raw): (
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT inst_id,interval,start_at,end_at,bar_count,bars_json
+             FROM systematic_data_snapshots WHERE id=?1",
+            [snapshot_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                ))
+            },
+        )
+        .map_err(|error| format!("Backtest data snapshot is unavailable: {error}"))?;
+
+    // Snapshots that still inline their bars are served from the row itself; no
+    // windowed query can be cheaper than a slice of what is already parsed.
+    let inlined = serde_json::from_str::<Vec<ClosedBar>>(&bars_raw).unwrap_or_default();
+    if !inlined.is_empty() {
+        if preload_bar_count > inlined.len() {
+            return Err(
+                "Backtest data snapshot has fewer bars than its recorded preloaded history"
+                    .to_string(),
+            );
+        }
+        let evaluation = &inlined[preload_bar_count..];
+        let (from, to) = bar_offset_from(evaluation.len());
+        return Ok(BacktestSnapshotWindow {
+            total_bar_count: inlined.len(),
+            bars: evaluation[from..to].to_vec(),
+            evaluation_start_open_ms: evaluation.first().map(|bar| bar.open_time_ms),
+            evaluation_end_close_ms: evaluation.last().map(|bar| bar.close_time_ms),
+        });
+    }
+    if interval != SYSTEMATIC_INTERVAL {
+        return Err(format!(
+            "Backtest data snapshot uses unsupported interval {interval}"
+        ));
+    }
+    let total_bar_count = bar_count.max(0) as usize;
+    if preload_bar_count > total_bar_count {
+        return Err(
+            "Backtest data snapshot has fewer bars than its recorded preloaded history".to_string(),
+        );
+    }
+    let evaluation_count = total_bar_count - preload_bar_count;
+    let (from, to) = bar_offset_from(evaluation_count);
+    // One-minute bars are contiguous across the recorded window, so a bar index
+    // maps directly onto an open time and the slice becomes a range query.
+    let evaluation_start_open = start_at + preload_bar_count as i64 * ONE_MINUTE_MS;
+    let bars = if from >= to {
+        Vec::new()
+    } else {
+        let window_start = evaluation_start_open + from as i64 * ONE_MINUTE_MS;
+        let window_end = evaluation_start_open + (to as i64 - 1) * ONE_MINUTE_MS;
+        load_backtest_bars(conn, &inst_id, window_start, window_end)
+            .map_err(|error| format!("Backtest data snapshot could not be rebuilt: {error}"))?
+    };
+    Ok(BacktestSnapshotWindow {
+        total_bar_count,
+        bars,
+        evaluation_start_open_ms: (evaluation_count > 0).then_some(evaluation_start_open),
+        evaluation_end_close_ms: (evaluation_count > 0).then_some(end_at),
+    })
+}
+
+/// Bars per stored equity chunk. Chosen so a chunk stays a few hundred KB
+/// before compression, which keeps each write small without turning a
+/// full-curve read into thousands of row lookups.
+const EQUITY_SERIES_CHUNK_BARS: usize = 4_096;
+/// Three f64 columns with timestamps implied by `start_ms + step_ms * index`.
+const EQUITY_SERIES_CODEC_UNIFORM: &str = "f64x3+zlib";
+/// Four f64 columns; the first holds explicit timestamps as `i64` bit patterns
+/// for series whose spacing is not constant.
+const EQUITY_SERIES_CODEC_IRREGULAR: &str = "f64x4+zlib";
+
+/// One stored chunk of an equity curve.
+struct EquitySeriesChunk {
+    from_bar: usize,
+    to_bar: usize,
+    start_ms: i64,
+    step_ms: i64,
+    codec: &'static str,
+    payload: Vec<u8>,
+}
+
+/// Splits an equity curve into compressed columnar chunks.
+///
+/// Values are written as little-endian IEEE-754 bit patterns, so decoding
+/// returns the exact `f64` that was recorded. Column-major order groups like
+/// magnitudes together, which compresses far better than interleaved rows: a
+/// flat cash column collapses to almost nothing.
+fn encode_equity_series(points: &[EquityPoint]) -> Vec<EquitySeriesChunk> {
+    points
+        .chunks(EQUITY_SERIES_CHUNK_BARS)
+        .enumerate()
+        .map(|(index, chunk)| {
+            let from_bar = index * EQUITY_SERIES_CHUNK_BARS;
+            // A uniform step lets the whole timestamp column be dropped. Only
+            // claim it when every gap in this chunk matches the first one.
+            let step_ms = chunk
+                .windows(2)
+                .next()
+                .map(|pair| pair[1].time_ms - pair[0].time_ms)
+                .unwrap_or(0);
+            let uniform = step_ms > 0
+                && chunk
+                    .windows(2)
+                    .all(|pair| pair[1].time_ms - pair[0].time_ms == step_ms);
+            let mut raw = Vec::with_capacity(chunk.len() * if uniform { 24 } else { 32 });
+            if !uniform {
+                for point in chunk {
+                    raw.extend_from_slice(&point.time_ms.to_le_bytes());
+                }
+            }
+            for point in chunk {
+                raw.extend_from_slice(&point.equity_usdt.to_le_bytes());
+            }
+            for point in chunk {
+                raw.extend_from_slice(&point.realized_cash_usdt.to_le_bytes());
+            }
+            for point in chunk {
+                raw.extend_from_slice(&point.unrealized_pnl_usdt.to_le_bytes());
+            }
+            EquitySeriesChunk {
+                from_bar,
+                to_bar: from_bar + chunk.len() - 1,
+                start_ms: chunk.first().map(|point| point.time_ms).unwrap_or(0),
+                step_ms: if uniform { step_ms } else { 0 },
+                codec: if uniform {
+                    EQUITY_SERIES_CODEC_UNIFORM
+                } else {
+                    EQUITY_SERIES_CODEC_IRREGULAR
+                },
+                payload: deflate_bytes(&raw),
+            }
+        })
+        .collect()
+}
+
+fn deflate_bytes(raw: &[u8]) -> Vec<u8> {
+    use std::io::Write;
+    let mut encoder =
+        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(raw)
+        .and_then(|()| encoder.finish())
+        .unwrap_or_else(|_| raw.to_vec())
+}
+
+fn inflate_bytes(payload: &[u8]) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    let mut decoder = flate2::read::ZlibDecoder::new(payload);
+    let mut raw = Vec::new();
+    decoder
+        .read_to_end(&mut raw)
+        .map_err(|error| format!("Backtest equity chunk is corrupt: {error}"))?;
+    Ok(raw)
+}
+
+/// Decodes one stored chunk back into equity points.
+fn decode_equity_chunk(
+    start_ms: i64,
+    step_ms: i64,
+    codec: &str,
+    payload: &[u8],
+) -> Result<Vec<EquityPoint>, String> {
+    let raw = inflate_bytes(payload)?;
+    let explicit_time = match codec {
+        EQUITY_SERIES_CODEC_UNIFORM => false,
+        EQUITY_SERIES_CODEC_IRREGULAR => true,
+        other => return Err(format!("Unsupported backtest equity codec: {other}")),
+    };
+    let columns = if explicit_time { 4 } else { 3 };
+    let stride = columns * 8;
+    if raw.len() % stride != 0 {
+        return Err("Backtest equity chunk has a truncated column".to_string());
+    }
+    let count = raw.len() / stride;
+    let read = |column: usize, index: usize| -> [u8; 8] {
+        let offset = (column * count + index) * 8;
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(&raw[offset..offset + 8]);
+        bytes
+    };
+    let value_base = usize::from(explicit_time);
+    Ok((0..count)
+        .map(|index| EquityPoint {
+            time_ms: if explicit_time {
+                i64::from_le_bytes(read(0, index))
+            } else {
+                start_ms + step_ms * index as i64
+            },
+            equity_usdt: f64::from_le_bytes(read(value_base, index)),
+            realized_cash_usdt: f64::from_le_bytes(read(value_base + 1, index)),
+            unrealized_pnl_usdt: f64::from_le_bytes(read(value_base + 2, index)),
+        })
+        .collect())
+}
+
+/// Reads a run's equity curve from the chunk table.
+///
+/// Returns `None` when the run has no chunks, which means it predates this
+/// storage format and its curve is still inline in `report_json`.
+fn load_equity_series(conn: &Connection, run_id: &str) -> Result<Option<Vec<EquityPoint>>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT start_ms,step_ms,codec,payload FROM systematic_backtest_series
+             WHERE run_id=?1 ORDER BY chunk_index",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut rows = statement
+        .query(params![run_id])
+        .map_err(|error| error.to_string())?;
+    let mut points: Vec<EquityPoint> = Vec::new();
+    let mut found = false;
+    while let Some(row) = rows.next().map_err(|error| error.to_string())? {
+        found = true;
+        let start_ms: i64 = row.get(0).map_err(|error| error.to_string())?;
+        let step_ms: i64 = row.get(1).map_err(|error| error.to_string())?;
+        let codec: String = row.get(2).map_err(|error| error.to_string())?;
+        let payload: Vec<u8> = row.get(3).map_err(|error| error.to_string())?;
+        points.extend(decode_equity_chunk(start_ms, step_ms, &codec, &payload)?);
+    }
+    Ok(found.then_some(points))
 }
 
 fn run_systematic_blocking<T, F>(
@@ -5338,17 +5784,16 @@ fn persist_prepared_backtest(
         contract: request.contract,
         end_of_run_policy: request.end_of_run_policy,
     };
-    let bars_json = serde_json::to_string(&request.bars).map_err(|error| error.to_string())?;
-    if bars_json.len() > MAX_BACKTEST_SNAPSHOT_BYTES {
-        return Err(format!(
-            "Backtest data snapshot exceeds the local safety limit of {MAX_BACKTEST_SNAPSHOT_BYTES} bytes"
-        ));
-    }
+    // The bars themselves are not copied here. They are confirmed rows in
+    // `candles` already, and `load_backtest_snapshot_bars` rebuilds this exact
+    // window from them, checking the result against `data_hash`. Storing the
+    // window again cost ~70 MB of JSON text per long run. `MAX_BACKTEST_BARS`
+    // still bounds the window, so the old byte ceiling is redundant.
     conn.execute(
         "INSERT INTO systematic_data_snapshots(
            id,inst_id,interval,start_at,end_at,bar_count,data_hash,bars_json,source,created_at
-         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,'local-confirmed-candles',?9)
-         ON CONFLICT(id) DO UPDATE SET bars_json=excluded.bars_json",
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,'','local-confirmed-candles',?8)
+         ON CONFLICT(id) DO UPDATE SET bars_json=''",
         params![
             request.data_snapshot_id,
             request.inst_id,
@@ -5357,7 +5802,6 @@ fn persist_prepared_backtest(
             end_at,
             request.bars.len() as i64,
             data_hash,
-            bars_json,
             created_at,
         ],
     )
@@ -5449,30 +5893,85 @@ fn persist_backtest_result(
     status: desic_systematic::BacktestStatus,
     timing: &Value,
 ) -> Result<(), String> {
-    let conn = open_database(app)?;
     let status = match status {
         desic_systematic::BacktestStatus::Completed => "completed",
         desic_systematic::BacktestStatus::Cancelled => "cancelled",
     };
     let metrics = backtest_metrics_view(report);
     let preview = downsample_equity_preview(report, 240);
-    conn.execute(
-        "UPDATE systematic_backtests
+    // The per-bar equity curve is 99.5% of a long report's JSON. It moves to
+    // `systematic_backtest_series` as compressed f64 columns, leaving the
+    // summary fields (metrics, statistics, fills, closed trades) inline. The
+    // curve is still hashed into `report_hash`, so `report_json` keeps the
+    // field as an empty array rather than dropping it: the stored hash stays
+    // the value the engine computed over the full report.
+    let chunks = encode_equity_series(&report.equity_curve);
+    let mut trimmed = serde_json::to_value(report).map_err(|error| error.to_string())?;
+    if let Some(object) = trimmed.as_object_mut() {
+        object.insert("equityCurve".to_string(), Value::Array(Vec::new()));
+        object.insert(
+            "equitySeriesBarCount".to_string(),
+            Value::from(report.equity_curve.len()),
+        );
+    }
+    // Serialize before taking the connection: this used to run inside the
+    // `params!` list while the write lock was held, and `busy_timeout` for
+    // other commands is only five seconds.
+    let report_json = serde_json::to_string(&trimmed).map_err(|error| error.to_string())?;
+    let metrics_json = serde_json::to_string(&metrics).map_err(|error| error.to_string())?;
+    let preview_json = serde_json::to_string(&preview).map_err(|error| error.to_string())?;
+    let timing_json = serde_json::to_string(timing).map_err(|error| error.to_string())?;
+
+    let mut conn = open_database(app)?;
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "UPDATE systematic_backtests
          SET status=?2, progress_pct=CASE WHEN ?2='completed' THEN 100.0 ELSE progress_pct END,
              report_json=?3, metrics_json=?4, equity_preview_json=?5, timing_json=?6,
              error=NULL, finished_at=?7, updated_at=?7
          WHERE id=?1",
-        params![
-            run_id,
-            status,
-            serde_json::to_string(report).map_err(|error| error.to_string())?,
-            serde_json::to_string(&metrics).map_err(|error| error.to_string())?,
-            serde_json::to_string(&preview).map_err(|error| error.to_string())?,
-            serde_json::to_string(timing).map_err(|error| error.to_string())?,
-            now_ms(),
-        ],
-    )
-    .map_err(|error| error.to_string())?;
+            params![
+                run_id,
+                status,
+                report_json,
+                metrics_json,
+                preview_json,
+                timing_json,
+                now_ms(),
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    transaction
+        .execute(
+            "DELETE FROM systematic_backtest_series WHERE run_id=?1",
+            params![run_id],
+        )
+        .map_err(|error| error.to_string())?;
+    {
+        let mut insert = transaction
+            .prepare(
+                "INSERT INTO systematic_backtest_series
+                 (run_id,chunk_index,from_bar,to_bar,start_ms,step_ms,codec,payload)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+            )
+            .map_err(|error| error.to_string())?;
+        for (index, chunk) in chunks.iter().enumerate() {
+            insert
+                .execute(params![
+                    run_id,
+                    index as i64,
+                    chunk.from_bar as i64,
+                    chunk.to_bar as i64,
+                    chunk.start_ms,
+                    chunk.step_ms,
+                    chunk.codec,
+                    chunk.payload,
+                ])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    transaction.commit().map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -9427,29 +9926,61 @@ async fn install_local_python_dependencies(interpreter: &Path) -> Result<String,
     ));
     fs::write(&requirements_path, SYSTEMATIC_PYTHON_REQUIREMENTS)
         .map_err(|error| format!("Could not prepare Python dependency metadata: {error}"))?;
-    let mut command = Command::new(interpreter);
-    command
-        .arg("-m")
-        .arg("pip")
-        .arg("install")
-        .arg("--disable-pip-version-check")
-        .arg("--no-input")
-        .arg("--require-virtualenv")
-        .arg("--upgrade-strategy")
-        .arg("only-if-needed")
-        .arg("-r")
-        .arg(&requirements_path);
-    command.env_remove("PYTHONHOME");
-    command.env_remove("PYTHONPATH");
-    command.env_remove("VIRTUAL_ENV");
-    let install = run_local_python_command(
-        &mut command,
-        "install Desic Python dependencies",
-        SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT,
-    )
-    .await;
+    // Try each index in turn. A mirror that is lagging, rate-limiting, or
+    // refusing wheel downloads must not strand the user with no research
+    // runtime, so only an exhausted list is reported as a failure.
+    let mut failures = Vec::<String>::new();
+    let mut installed_from = None;
+    for (label, index_url) in SYSTEMATIC_PYTHON_PACKAGE_INDEXES {
+        let mut command = Command::new(interpreter);
+        command
+            .arg("-m")
+            .arg("pip")
+            .arg("install")
+            .arg("--disable-pip-version-check")
+            .arg("--no-input")
+            .arg("--require-virtualenv")
+            .arg("--upgrade-strategy")
+            .arg("only-if-needed")
+            // An explicit index keeps the attempt independent of whatever the
+            // machine's pip.conf points at, which is what makes the fallback
+            // meaningful: a broken configured mirror is the common case.
+            .arg("--index-url")
+            .arg(index_url)
+            .arg("-r")
+            .arg(&requirements_path);
+        command.env_remove("PYTHONHOME");
+        command.env_remove("PYTHONPATH");
+        command.env_remove("VIRTUAL_ENV");
+        // A user-level PIP_INDEX_URL would otherwise override the flag above.
+        command.env_remove("PIP_INDEX_URL");
+        command.env_remove("PIP_EXTRA_INDEX_URL");
+        match run_local_python_command(
+            &mut command,
+            &format!("install Desic Python dependencies from {label}"),
+            SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT,
+        )
+        .await
+        {
+            Ok(_) => {
+                installed_from = Some(*label);
+                break;
+            }
+            Err(error) => failures.push(error),
+        }
+    }
     let _ = fs::remove_file(&requirements_path);
-    install?;
+    if installed_from.is_none() {
+        return Err(format!(
+            "Could not install Desic Python dependencies from any package index ({}). {}",
+            SYSTEMATIC_PYTHON_PACKAGE_INDEXES
+                .iter()
+                .map(|(label, _)| *label)
+                .collect::<Vec<_>>()
+                .join(", "),
+            failures.join(" | ")
+        ));
+    }
 
     let mut verify = Command::new(interpreter);
     verify
@@ -9531,6 +10062,50 @@ fn configure_local_python_execution_std_command(command: &mut StdCommand) {
     }
 }
 
+/// Condenses a failed child process's output into a short, actionable reason.
+///
+/// Only the diagnostic tail is kept: pip prints progress for every resolved
+/// package, so the whole stream is far too long for a UI error, while the lines
+/// that explain a failure are always at the end. Without this the caller could
+/// only say "check your network and index settings", which does not distinguish
+/// a rejecting mirror from a genuinely offline machine.
+fn local_python_command_failure_detail(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    const MAX_LINES: usize = 4;
+    const MAX_CHARS: usize = 600;
+    let stderr = String::from_utf8_lossy(stderr);
+    let stdout = String::from_utf8_lossy(stdout);
+    // pip reports its hard failures on stderr, but some tools only use stdout.
+    let source = if stderr.trim().is_empty() { &stdout } else { &stderr };
+    let lines = source
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    if lines.is_empty() {
+        return None;
+    }
+    // Prefer the explicit diagnostics. pip prefixes them with ERROR/WARNING,
+    // and they name the failing URL and status, which is exactly what
+    // distinguishes a rejecting mirror from an offline machine. Only when a
+    // tool fails without such a marker does the plain tail get used.
+    let flagged = lines
+        .iter()
+        .filter(|line| {
+            let upper = line.to_ascii_uppercase();
+            upper.starts_with("ERROR") || upper.starts_with("FATAL") || upper.contains("ERROR:")
+        })
+        .copied()
+        .collect::<Vec<_>>();
+    let selected = if flagged.is_empty() { &lines } else { &flagged };
+    let start = selected.len().saturating_sub(MAX_LINES);
+    let mut detail = selected[start..].join(" / ");
+    if detail.chars().count() > MAX_CHARS {
+        detail = detail.chars().take(MAX_CHARS).collect::<String>();
+        detail.push('…');
+    }
+    Some(detail)
+}
+
 async fn run_local_python_command(
     command: &mut Command,
     action: &str,
@@ -9542,10 +10117,17 @@ async fn run_local_python_command(
         .map_err(|_| format!("Timed out while trying to {action}"))?
         .map_err(|error| format!("Could not {action}: {error}"))?;
     if !output.status.success() {
-        return Err(format!(
-            "Could not {action} (Python exited with {}). Check the Python installation, network access, and package index settings.",
+        let mut message = format!(
+            "Could not {action} (Python exited with {}).",
             output.status
-        ));
+        );
+        match local_python_command_failure_detail(&output.stdout, &output.stderr) {
+            Some(detail) => message.push_str(&format!(" {detail}")),
+            None => message.push_str(
+                " Check the Python installation, network access, and package index settings.",
+            ),
+        }
+        return Err(message);
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
@@ -9570,7 +10152,6 @@ struct LocalPythonStrategyRunner {
     position_sizing: Option<BacktestPositionSizing>,
     adaptive_no_action_batch_size: usize,
     direct_empty_no_action_streak: usize,
-    batching_disabled_for_run: bool,
     timing: PythonRunnerTiming,
 }
 
@@ -9920,12 +10501,12 @@ impl LocalPythonStrategyRunner {
             market_series: PythonMarketSeriesCursor::default(),
             portfolio_ledger: PythonPortfolioLedgerCursor::default(),
             position_sizing,
-            // Start with direct dispatch. A batch is enabled only after a
-            // proven long empty-account no-action streak, avoiding speculative
-            // payloads for strategies that become active quickly.
+            // Start with direct dispatch. Batching begins once an
+            // empty-account no-action streak shows this strategy has idle
+            // stretches worth covering, avoiding speculative payloads for
+            // strategies that act immediately.
             adaptive_no_action_batch_size: 1,
             direct_empty_no_action_streak: 0,
-            batching_disabled_for_run: false,
             timing: PythonRunnerTiming::default(),
         };
         runner.wait_for_ready()?;
@@ -10338,7 +10919,7 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
         // Preserve the ordinary first-callback lifecycle: it sends the full
         // initial market snapshot and invokes optional on_start before any
         // incremental batch can be considered.
-        if !self.started || !self.initial_market_sent || self.batching_disabled_for_run {
+        if !self.started || !self.initial_market_sent {
             1
         } else {
             self.adaptive_no_action_batch_size
@@ -10391,24 +10972,30 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
             .event_build_us
             .saturating_add(elapsed_micros(event_started));
         let actions = self.invoke_batch(events)?;
-        // A batch only pays for itself when it covers a genuinely idle run.
-        // Any strategy action returns to direct event dispatch; only a later
-        // empty-account no-action streak re-enables a small exploratory batch.
-        // This avoids serializing a speculative batch repeatedly for active
-        // strategies that tend to act after only a few empty bars.
+        // Batch sizing tracks how long this strategy actually stays idle while
+        // flat. A fully idle batch doubles the next window; a batch cut short
+        // by an action shrinks to the prefix the runtime really consumed.
+        //
+        // An action must not disable batching for the rest of the run. A
+        // strategy that trades dozens of times still spends most of a
+        // minute-resolution backtest flat and idle, and the engine only offers
+        // this path while the account is flat with no resting orders, so the
+        // remaining idle stretches stay eligible and keep their round-trip
+        // savings instead of collapsing to one request per bar after the very
+        // first entry.
         if actions
             .iter()
             .all(|action| matches!(action, StrategyAction::NoAction { .. }))
         {
             self.adaptive_no_action_batch_size = actions.len().saturating_mul(2).clamp(2, 64);
         } else {
-            self.adaptive_no_action_batch_size = 1;
+            // `actions.len()` counts the no-action prefix plus the acting
+            // event. The prefix is the part that batching genuinely covered,
+            // so retry near it rather than paying to rediscover it one bar at
+            // a time.
+            let productive_prefix = actions.len().saturating_sub(1);
+            self.adaptive_no_action_batch_size = productive_prefix.clamp(2, 64);
             self.direct_empty_no_action_streak = 0;
-            // An action proves this strategy's empty stretches are not a
-            // stable no-action workload. Continue with the known-correct
-            // single-event path for the rest of this run rather than paying
-            // for further speculative Python payloads after later exits.
-            self.batching_disabled_for_run = true;
         }
         // The remote runtime stops at the first non-no-action event, so it
         // observed only the first `actions.len()` events. Rewind the market
@@ -10468,17 +11055,20 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
             .event_build_us
             .saturating_add(elapsed_micros(event_started));
         let action = self.invoke(bar_event)?;
-        // After an action, direct callbacks are cheaper until the strategy
-        // demonstrates a meaningful empty-account no-action run. One hundred
-        // twenty-eight direct observations keep active strategies on the proven
-        // single-event path, while truly idle stretches still restart batching.
+        // A short confirmation streak is enough to re-enter batching once the
+        // account is flat again. This bound is paid after every exit, so a
+        // large threshold would spend thousands of single round trips per
+        // trade rediscovering an idle stretch the strategy has already shown.
+        // Sixteen keeps the probe cheap for genuinely active strategies while
+        // letting long flat stretches recover their batching quickly.
+        const DIRECT_STREAK_BEFORE_BATCHING: usize = 16;
         let empty_account = context.portfolio().position.is_none()
             && context.portfolio().open_orders.is_empty();
         if self.adaptive_no_action_batch_size == 1 && empty_account {
             if matches!(action, StrategyAction::NoAction { .. }) {
                 self.direct_empty_no_action_streak =
                     self.direct_empty_no_action_streak.saturating_add(1);
-                if self.direct_empty_no_action_streak >= 128 {
+                if self.direct_empty_no_action_streak >= DIRECT_STREAK_BEFORE_BATCHING {
                     self.adaptive_no_action_batch_size = 2;
                     self.direct_empty_no_action_streak = 0;
                 }
@@ -11913,6 +12503,71 @@ mod tests {
     use super::*;
 
     #[test]
+    fn package_index_fallback_starts_in_china_and_ends_at_pypi() {
+        let labels = SYSTEMATIC_PYTHON_PACKAGE_INDEXES
+            .iter()
+            .map(|(label, _)| *label)
+            .collect::<Vec<_>>();
+        assert_eq!(labels, vec!["Tsinghua", "Aliyun", "PyPI"]);
+        assert!(
+            SYSTEMATIC_PYTHON_PACKAGE_INDEXES.len() >= 2,
+            "a single index defeats the point of the fallback"
+        );
+        for (label, url) in SYSTEMATIC_PYTHON_PACKAGE_INDEXES {
+            assert!(
+                url.starts_with("https://"),
+                "{label} index must be fetched over TLS"
+            );
+        }
+    }
+
+    #[test]
+    fn install_failure_detail_surfaces_the_rejecting_index() {
+        // The exact shape pip produces when a mirror serves its index but
+        // refuses the wheel download.
+        let stderr = concat!(
+            "Looking in indexes: https://pypi.tuna.tsinghua.edu.cn/simple\n",
+            "Collecting joblib==1.5.3\n",
+            "  ERROR: HTTP error 403 while getting https://pypi.tuna.tsinghua.edu.cn/packages/7b/91/joblib-1.5.3-py3-none-any.whl\n",
+            "ERROR: Could not install requirement joblib==1.5.3 because of HTTP error 403 Client Error: Forbidden\n",
+        );
+        let detail = local_python_command_failure_detail(b"", stderr.as_bytes())
+            .expect("a failing pip run must produce a reason");
+
+        assert!(detail.contains("403"), "must keep the HTTP status: {detail}");
+        assert!(
+            detail.contains("tuna.tsinghua.edu.cn"),
+            "must name the failing index: {detail}"
+        );
+        assert!(
+            !detail.contains("Looking in indexes"),
+            "the leading progress noise should be dropped: {detail}"
+        );
+    }
+
+    #[test]
+    fn install_failure_detail_is_bounded_and_falls_back_to_stdout() {
+        let noisy = (0..500)
+            .map(|index| format!("Downloading package-{index}.whl"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let detail = local_python_command_failure_detail(noisy.as_bytes(), b"")
+            .expect("stdout-only failures still need a reason");
+        assert!(
+            detail.chars().count() <= 601,
+            "detail must stay short enough for a UI error, got {}",
+            detail.chars().count()
+        );
+        assert!(
+            detail.contains("package-499"),
+            "must keep the diagnostic tail, not the head: {detail}"
+        );
+
+        // A process that failed without saying anything keeps the generic hint.
+        assert!(local_python_command_failure_detail(b"", b"   \n  \n").is_none());
+    }
+
+    #[test]
     fn backtest_sizing_shortfall_becomes_an_auditable_no_action() {
         let action = backtest_position_sizing_skip_action(
             "entry budget is below this contract's minimum order".to_string(),
@@ -12902,6 +13557,7 @@ def on_bar(ctx):
             "systematic_universe_snapshots",
             "systematic_data_snapshots",
             "systematic_backtests",
+            "systematic_backtest_series",
             "systematic_strategy_versions",
             "systematic_optimizations",
             "systematic_optimization_candidates",
@@ -13515,6 +14171,407 @@ def on_bar(ctx):
         );
     }
 
+    /// Values must survive storage as the exact same bit patterns. Comparing
+    /// `f64` with `==` would accept a silently rounded value and would also
+    /// treat `-0.0` as equal to `0.0`, so compare the raw bits instead.
+    fn assert_equity_points_bit_identical(left: &[EquityPoint], right: &[EquityPoint]) {
+        assert_eq!(left.len(), right.len(), "point count changed");
+        for (index, (expected, actual)) in left.iter().zip(right).enumerate() {
+            assert_eq!(expected.time_ms, actual.time_ms, "time drift at {index}");
+            for (label, expected_value, actual_value) in [
+                ("equity", expected.equity_usdt, actual.equity_usdt),
+                (
+                    "cash",
+                    expected.realized_cash_usdt,
+                    actual.realized_cash_usdt,
+                ),
+                (
+                    "unrealized",
+                    expected.unrealized_pnl_usdt,
+                    actual.unrealized_pnl_usdt,
+                ),
+            ] {
+                assert_eq!(
+                    expected_value.to_bits(),
+                    actual_value.to_bits(),
+                    "{label} at {index} changed bits: {expected_value:?} -> {actual_value:?}"
+                );
+            }
+        }
+    }
+
+    fn decode_equity_series(chunks: &[EquitySeriesChunk]) -> Vec<EquityPoint> {
+        chunks
+            .iter()
+            .flat_map(|chunk| {
+                decode_equity_chunk(chunk.start_ms, chunk.step_ms, chunk.codec, &chunk.payload)
+                    .expect("chunk decodes")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn equity_series_codec_round_trips_uniform_curves_bit_for_bit() {
+        // Spans several chunks and includes values whose decimal text is not a
+        // faithful round trip, plus the edge cases a naive encoder loses.
+        let points = (0..EQUITY_SERIES_CHUNK_BARS * 2 + 37)
+            .map(|index| EquityPoint {
+                time_ms: 1_755_100_800_000 + index as i64 * ONE_MINUTE_MS,
+                equity_usdt: 10_000.0 + (index as f64) / 3.0,
+                realized_cash_usdt: if index == 5 { -0.0 } else { 9_997.504_554_390_676 },
+                unrealized_pnl_usdt: match index {
+                    0 => f64::MIN_POSITIVE,
+                    1 => -1.797_693_134_862_315_7e308,
+                    2 => 1e-300,
+                    _ => (index as f64) * 0.1 - 7.0,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let chunks = encode_equity_series(&points);
+        assert_eq!(chunks.len(), 3, "expected one chunk per {EQUITY_SERIES_CHUNK_BARS} bars");
+        assert!(chunks
+            .iter()
+            .all(|chunk| chunk.codec == EQUITY_SERIES_CODEC_UNIFORM));
+        assert_eq!(chunks[0].from_bar, 0);
+        assert_eq!(chunks[0].to_bar, EQUITY_SERIES_CHUNK_BARS - 1);
+        assert_eq!(chunks[2].to_bar, points.len() - 1);
+        // Uniform spacing means the timestamp column is not stored at all.
+        assert!(chunks.iter().all(|chunk| chunk.step_ms == ONE_MINUTE_MS));
+
+        assert_equity_points_bit_identical(&points, &decode_equity_series(&chunks));
+    }
+
+    #[test]
+    fn equity_series_codec_stores_explicit_times_for_irregular_curves() {
+        // A gap (a missing bar) makes the step non-constant, so the implied
+        // timestamp shortcut would silently relabel every later point.
+        let times = [0_i64, 60_000, 120_000, 300_000, 360_000];
+        let points = times
+            .iter()
+            .enumerate()
+            .map(|(index, time_ms)| EquityPoint {
+                time_ms: *time_ms,
+                equity_usdt: 10_000.0 + index as f64,
+                realized_cash_usdt: 10_000.0,
+                unrealized_pnl_usdt: index as f64 / 7.0,
+            })
+            .collect::<Vec<_>>();
+
+        let chunks = encode_equity_series(&points);
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].codec, EQUITY_SERIES_CODEC_IRREGULAR);
+        assert_eq!(chunks[0].step_ms, 0);
+        assert_equity_points_bit_identical(&points, &decode_equity_series(&chunks));
+    }
+
+    #[test]
+    fn equity_series_codec_handles_empty_and_single_point_curves() {
+        assert!(encode_equity_series(&[]).is_empty());
+
+        let single = vec![EquityPoint {
+            time_ms: 1_755_100_800_000,
+            equity_usdt: 10_000.0,
+            realized_cash_usdt: 10_000.0,
+            unrealized_pnl_usdt: 0.0,
+        }];
+        let chunks = encode_equity_series(&single);
+        assert_eq!(chunks.len(), 1);
+        // One point has no measurable step, so it must not claim uniformity.
+        assert_eq!(chunks[0].codec, EQUITY_SERIES_CODEC_IRREGULAR);
+        assert_equity_points_bit_identical(&single, &decode_equity_series(&chunks));
+    }
+
+    #[test]
+    fn equity_series_codec_rejects_unknown_and_truncated_payloads() {
+        let points = (0..4)
+            .map(|index| EquityPoint {
+                time_ms: index as i64 * ONE_MINUTE_MS,
+                equity_usdt: index as f64,
+                realized_cash_usdt: 0.0,
+                unrealized_pnl_usdt: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let chunk = encode_equity_series(&points).remove(0);
+
+        let unknown = decode_equity_chunk(chunk.start_ms, chunk.step_ms, "f64x9+lzma", &chunk.payload);
+        assert!(unknown.is_err(), "unknown codec must not be guessed");
+
+        let truncated = deflate_bytes(&[0u8; 20]);
+        let error = decode_equity_chunk(0, ONE_MINUTE_MS, EQUITY_SERIES_CODEC_UNIFORM, &truncated)
+            .expect_err("a partial column must be rejected");
+        assert!(error.contains("truncated"), "unexpected error: {error}");
+    }
+
+    #[test]
+    fn equity_series_survives_a_sqlite_round_trip_and_legacy_runs_fall_back() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+
+        let points = (0..EQUITY_SERIES_CHUNK_BARS + 11)
+            .map(|index| EquityPoint {
+                time_ms: 1_755_100_800_000 + index as i64 * ONE_MINUTE_MS,
+                equity_usdt: 10_000.0 + (index as f64) / 3.0,
+                realized_cash_usdt: 9_997.504_554_390_676,
+                unrealized_pnl_usdt: (index as f64) * 0.1 - 7.0,
+            })
+            .collect::<Vec<_>>();
+
+        {
+            let mut insert = conn
+                .prepare(
+                    "INSERT INTO systematic_backtest_series
+                     (run_id,chunk_index,from_bar,to_bar,start_ms,step_ms,codec,payload)
+                     VALUES(?1,?2,?3,?4,?5,?6,?7,?8)",
+                )
+                .expect("insert statement");
+            for (index, chunk) in encode_equity_series(&points).iter().enumerate() {
+                insert
+                    .execute(params![
+                        "run-series",
+                        index as i64,
+                        chunk.from_bar as i64,
+                        chunk.to_bar as i64,
+                        chunk.start_ms,
+                        chunk.step_ms,
+                        chunk.codec,
+                        chunk.payload,
+                    ])
+                    .expect("chunk insert");
+            }
+        }
+
+        let loaded = load_equity_series(&conn, "run-series")
+            .expect("series loads")
+            .expect("series exists");
+        assert_equity_points_bit_identical(&points, &loaded);
+
+        // A run with no chunks must report absence rather than an empty curve,
+        // so the caller keeps whatever is still inline in `report_json`.
+        assert!(load_equity_series(&conn, "run-legacy")
+            .expect("legacy lookup")
+            .is_none());
+    }
+
+    #[test]
+    fn snapshot_window_pages_without_materialising_every_bar() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        conn.execute_batch(
+            "CREATE TABLE candles (
+               symbol TEXT NOT NULL, interval TEXT NOT NULL, open_time INTEGER NOT NULL,
+               close_time INTEGER NOT NULL, open TEXT NOT NULL, high TEXT NOT NULL,
+               low TEXT NOT NULL, close TEXT NOT NULL, volume TEXT NOT NULL,
+               volume_ccy TEXT, volume_quote TEXT, confirm INTEGER NOT NULL,
+               source TEXT NOT NULL, updated_at INTEGER NOT NULL,
+               PRIMARY KEY (symbol, interval, open_time)
+             );",
+        )
+        .expect("candles table");
+
+        let total = 500usize;
+        let preload = 3usize;
+        let base = 1_755_100_800_000_i64;
+        for index in 0..total {
+            let open = base + index as i64 * ONE_MINUTE_MS;
+            let price = 100.0 + index as f64;
+            conn.execute(
+                "INSERT INTO candles(symbol,interval,open_time,close_time,open,high,low,close,volume,confirm,source,updated_at)
+                 VALUES('BTC-USDT-SWAP','1m',?1,?2,?3,?4,?5,?6,'7',1,'test',0)",
+                params![
+                    open,
+                    open + ONE_MINUTE_MS - 1,
+                    price.to_string(),
+                    (price + 2.0).to_string(),
+                    (price - 2.0).to_string(),
+                    (price + 1.0).to_string(),
+                ],
+            )
+            .expect("seed candle");
+        }
+        conn.execute(
+            "INSERT INTO systematic_data_snapshots(
+               id,inst_id,interval,start_at,end_at,bar_count,data_hash,bars_json,source,created_at
+             ) VALUES('snap-window','BTC-USDT-SWAP','1m',?1,?2,?3,'hash','','test',0)",
+            params![
+                base,
+                base + total as i64 * ONE_MINUTE_MS,
+                total as i64
+            ],
+        )
+        .expect("insert snapshot");
+
+        let window = load_backtest_snapshot_window(&conn, "snap-window", preload, |count| {
+            assert_eq!(count, total - preload, "evaluation count from bar_count");
+            (10, 25)
+        })
+        .expect("window loads");
+        assert_eq!(window.total_bar_count, total);
+        assert_eq!(window.bars.len(), 15, "only the requested page is read");
+        assert_eq!(
+            window.bars.first().map(|bar| bar.open_time_ms),
+            Some(base + (preload + 10) as i64 * ONE_MINUTE_MS)
+        );
+        assert_eq!(
+            window.evaluation_start_open_ms,
+            Some(base + preload as i64 * ONE_MINUTE_MS)
+        );
+        assert_eq!(
+            window.evaluation_end_close_ms,
+            Some(base + total as i64 * ONE_MINUTE_MS)
+        );
+
+        // An empty page must not query a reversed range.
+        let empty = load_backtest_snapshot_window(&conn, "snap-window", preload, |_| (5, 5))
+            .expect("empty window");
+        assert!(empty.bars.is_empty());
+
+        // A snapshot that still inlines its bars keeps working and pages the
+        // same way, without touching `candles`.
+        let inline_bars = (0..20)
+            .map(|index| {
+                ClosedBar::new(
+                    index as i64 * ONE_MINUTE_MS,
+                    (index as i64 + 1) * ONE_MINUTE_MS,
+                    100.0,
+                    101.0,
+                    99.0,
+                    100.5,
+                    1.0,
+                )
+                .expect("bar")
+            })
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO systematic_data_snapshots(
+               id,inst_id,interval,start_at,end_at,bar_count,data_hash,bars_json,source,created_at
+             ) VALUES('snap-inline','BTC-USDT-SWAP','1m',0,?1,20,'hash',?2,'test',0)",
+            params![
+                20 * ONE_MINUTE_MS,
+                serde_json::to_string(&inline_bars).expect("serialize")
+            ],
+        )
+        .expect("insert inline snapshot");
+        let inline = load_backtest_snapshot_window(&conn, "snap-inline", 2, |count| {
+            assert_eq!(count, 18);
+            (0, 5)
+        })
+        .expect("inline window");
+        assert_eq!(inline.total_bar_count, 20);
+        assert_eq!(inline.bars, inline_bars[2..7]);
+
+        // A recorded preload longer than the snapshot is a corrupt record.
+        assert!(load_backtest_snapshot_window(&conn, "snap-inline", 99, |_| (0, 1)).is_err());
+        assert!(load_backtest_snapshot_window(&conn, "snap-window", 9_999, |_| (0, 1)).is_err());
+
+        // `bars_json` carries three "no inline bars" spellings across versions:
+        // `''` (written today), `'[]'` (the column default) and whitespace from
+        // older rows. None is a parse failure — each must fall through to the
+        // rebuild path rather than being reported as a corrupt snapshot.
+        for (id, empty) in [("snap-default", "[]"), ("snap-blank", " ")] {
+            conn.execute(
+                "INSERT INTO systematic_data_snapshots(
+                   id,inst_id,interval,start_at,end_at,bar_count,data_hash,bars_json,source,created_at
+                 ) VALUES(?1,'BTC-USDT-SWAP','1m',?2,?3,?4,'hash',?5,'test',0)",
+                params![
+                    id,
+                    base,
+                    base + total as i64 * ONE_MINUTE_MS,
+                    total as i64,
+                    empty
+                ],
+            )
+            .expect("insert snapshot");
+            let window = load_backtest_snapshot_window(&conn, id, preload, |_| (0, 3))
+                .unwrap_or_else(|error| panic!("{id} must rebuild, got: {error}"));
+            assert_eq!(window.total_bar_count, total, "{id}");
+            assert_eq!(window.bars.len(), 3, "{id}");
+        }
+    }
+
+    #[test]
+    fn archiving_backtest_series_keeps_recent_and_in_flight_runs() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+
+        let total_runs = RETAINED_BACKTEST_SERIES_RUNS + 4;
+        for index in 0..total_runs {
+            let run_id = format!("run-{index:03}");
+            // Oldest first, so the highest indexes are the newest runs.
+            conn.execute(
+                "INSERT INTO systematic_backtests(
+                   id,strategy_id,strategy_version,inst_id,status,progress_pct,data_snapshot_id,
+                   bar_count,request_json,report_json,created_at,updated_at,finished_at
+                 ) VALUES(?1,'s','1','BTC-USDT-SWAP','completed',100.0,'snap',1,'{}','{}',?2,?2,?2)",
+                params![run_id, index as i64 + 1],
+            )
+            .expect("insert run");
+            conn.execute(
+                "INSERT INTO systematic_backtest_series
+                 VALUES(?1,0,0,0,0,60000,'f64x3+zlib',x'00')",
+                params![run_id],
+            )
+            .expect("insert series");
+        }
+        // A running backtest must keep its series even though it has no report
+        // yet, otherwise maintenance would delete rows still being written.
+        conn.execute(
+            "INSERT INTO systematic_backtests(
+               id,strategy_id,strategy_version,inst_id,status,progress_pct,data_snapshot_id,
+               bar_count,request_json,created_at,updated_at
+             ) VALUES('run-live','s','1','BTC-USDT-SWAP','running',10.0,'snap',1,'{}',0,0)",
+            [],
+        )
+        .expect("insert live run");
+        conn.execute(
+            "INSERT INTO systematic_backtest_series
+             VALUES('run-live',0,0,0,0,60000,'f64x3+zlib',x'00')",
+            [],
+        )
+        .expect("insert live series");
+
+        let archived = archive_backtest_series(&conn).expect("archive");
+        assert_eq!(archived, 4, "only the oldest runs beyond the window archive");
+
+        let remaining: Vec<String> = conn
+            .prepare("SELECT DISTINCT run_id FROM systematic_backtest_series ORDER BY run_id")
+            .expect("query")
+            .query_map([], |row| row.get(0))
+            .expect("rows")
+            .collect::<Result<_, _>>()
+            .expect("collect");
+        assert_eq!(remaining.len(), RETAINED_BACKTEST_SERIES_RUNS + 1);
+        assert!(remaining.contains(&"run-live".to_string()));
+        assert!(remaining.contains(&format!("run-{:03}", total_runs - 1)));
+        assert!(!remaining.contains(&"run-000".to_string()));
+
+        // Idempotent: a second pass has nothing left to archive.
+        assert_eq!(archive_backtest_series(&conn).expect("archive again"), 0);
+    }
+
+    #[test]
+    fn equity_series_codec_shrinks_a_realistic_flat_curve() {
+        // A run that is flat and out of the market for most of its length is the
+        // common case; column-major order is what makes it compress.
+        let points = (0..50_000)
+            .map(|index| EquityPoint {
+                time_ms: 1_755_100_800_000 + index as i64 * ONE_MINUTE_MS,
+                equity_usdt: 10_000.0,
+                realized_cash_usdt: 10_000.0,
+                unrealized_pnl_usdt: 0.0,
+            })
+            .collect::<Vec<_>>();
+        let json_bytes = serde_json::to_string(&points).expect("curve serializes").len();
+        let stored_bytes = encode_equity_series(&points)
+            .iter()
+            .map(|chunk| chunk.payload.len())
+            .sum::<usize>();
+        assert!(
+            stored_bytes * 20 < json_bytes,
+            "expected a large reduction, got {json_bytes} -> {stored_bytes}"
+        );
+    }
+
     #[test]
     fn strategy_view_normalizes_legacy_rule_fields_for_the_desktop_contract() {
         let conn = Connection::open_in_memory().expect("database");
@@ -13699,6 +14756,8 @@ def on_bar(ctx):
         persist_prepared_backtest(&conn, &request, &strategy, &data_hash, 120)
             .expect("persist snapshot");
 
+        // The window is no longer copied into the snapshot row; it is rebuilt
+        // from the confirmed `candles` rows and checked against `data_hash`.
         let bars_json: String = conn
             .query_row(
                 "SELECT bars_json FROM systematic_data_snapshots WHERE id=?1",
@@ -13706,10 +14765,52 @@ def on_bar(ctx):
                 |row| row.get(0),
             )
             .expect("stored bars");
+        assert!(bars_json.is_empty(), "bars must not be duplicated");
+        // `candles` belongs to the main schema, not the systematic migration.
+        conn.execute_batch(
+            "CREATE TABLE candles (
+               symbol TEXT NOT NULL, interval TEXT NOT NULL, open_time INTEGER NOT NULL,
+               close_time INTEGER NOT NULL, open TEXT NOT NULL, high TEXT NOT NULL,
+               low TEXT NOT NULL, close TEXT NOT NULL, volume TEXT NOT NULL,
+               volume_ccy TEXT, volume_quote TEXT, confirm INTEGER NOT NULL,
+               source TEXT NOT NULL, updated_at INTEGER NOT NULL,
+               PRIMARY KEY (symbol, interval, open_time)
+             );",
+        )
+        .expect("candles table");
+        for bar in &bars {
+            conn.execute(
+                "INSERT INTO candles(symbol,interval,open_time,close_time,open,high,low,close,volume,confirm,source,updated_at)
+                 VALUES('BTC-USDT-SWAP','1m',?1,?2,?3,?4,?5,?6,?7,1,'test',0)",
+                params![
+                    bar.open_time_ms,
+                    bar.close_time_ms - 1,
+                    bar.open.to_string(),
+                    bar.high.to_string(),
+                    bar.low.to_string(),
+                    bar.close.to_string(),
+                    bar.volume.to_string(),
+                ],
+            )
+            .expect("seed candle");
+        }
         assert_eq!(
-            serde_json::from_str::<Vec<ClosedBar>>(&bars_json).expect("decode stored bars"),
+            load_backtest_snapshot_bars(&conn, "candle-snapshot-test").expect("rebuild bars"),
             bars
         );
+
+        // A corrected candle changes the hash, and an irreproducible replay must
+        // fail loudly rather than silently substitute different history.
+        // Stay inside the bar's own high/low so the row is still a valid
+        // K-line; only the hash should reject it.
+        conn.execute(
+            "UPDATE candles SET close='102.5' WHERE symbol='BTC-USDT-SWAP' AND open_time=?1",
+            params![bars[1].open_time_ms],
+        )
+        .expect("corrupt candle");
+        let error = load_backtest_snapshot_bars(&conn, "candle-snapshot-test")
+            .expect_err("mismatched history must be rejected");
+        assert!(error.contains("no longer matches"), "unexpected: {error}");
         let input_json: String = conn
             .query_row(
                 "SELECT request_json FROM systematic_backtests WHERE id=?1",

@@ -1993,11 +1993,17 @@ function TradingTerminal({
       const last = recentErrors.get(key) ?? 0;
       if (now - last < 10_000) return;
       recentErrors.set(key, now);
-      const detail = entry.error?.split("\n")[0] ?? "";
+      const lines = entry.error?.split("\n") ?? [];
+      const detail = lines[0] ?? "";
+      // A bare message like "Value is null" from inside a bundled dependency is
+      // not actionable on its own. Append the first frame that points at real
+      // code so a report identifies where the throw came from.
+      const origin = lines.slice(1).find((line) => /\.(t|j)sx?|\.mjs/.test(line))?.trim();
+      const summary = detail && origin ? `${detail} @ ${origin}` : detail;
       pushNotification({
         kind: "error",
         title: entry.level === "fatal" ? uiText("前端致命异常", "Fatal frontend error") : uiText("前端代码异常", "Frontend error"),
-        message: detail ? `${entry.message}${chineseUi ? "：" : ": "}${detail}` : entry.message
+        message: summary ? `${entry.message}${chineseUi ? "：" : ": "}${summary}` : entry.message
       });
     });
   }, [chineseUi, pushNotification, uiText]);

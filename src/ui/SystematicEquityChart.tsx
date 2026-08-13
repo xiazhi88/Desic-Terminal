@@ -15,7 +15,9 @@ function pointAtOrBefore(points: readonly SystematicEquityPoint[], cursorTimeMs:
   let high = points.length - 1;
   let result: SystematicEquityPoint | null = null;
   while (low <= high) {
-    const middle = low + Math.floor((low + high) / 2);
+    // `low + (low + high) / 2` overshoots as soon as `low > 0` and can index
+    // past the end, which returned the wrong point or none at all.
+    const middle = low + Math.floor((high - low) / 2);
     const point = points[middle];
     if (!point) break;
     if (point.timeMs <= cursorTimeMs) {

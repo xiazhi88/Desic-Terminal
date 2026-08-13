@@ -283,6 +283,8 @@ export type SystematicBacktestReport = {
   closedTrades: SystematicClosedTrade[];
   strategyActions?: SystematicStrategyActionEvent[];
   limitOrderFillModel?: string | null;
+  /** Storage maintenance dropped this run's per-bar curve; metrics stay exact. */
+  equitySeriesArchived?: boolean;
   reportHash: string;
 };
 
