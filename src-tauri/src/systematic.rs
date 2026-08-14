@@ -98,7 +98,7 @@ const SYSTEMATIC_PYTHON_VENV_DIR: &str = "venv";
 const SYSTEMATIC_PYTHON_ENVIRONMENT_MANIFEST: &str = ".desic-runtime.json";
 const SYSTEMATIC_PYTHON_ENVIRONMENT_SCHEMA: &str = "desic.systematic.local-python/v1";
 const SYSTEMATIC_PYTHON_RUNTIME_MANIFEST_SCHEMA: &str = "desic.systematic.python-runtime/v1";
-const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 10;
+const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 12;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMATIC_PYTHON_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
@@ -10770,7 +10770,7 @@ fn local_python_environment_failure_view(
         (
             "missingVenvModule",
             format!(
-                "{label} is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.10-3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then retry.\n{error}"
+                "{label} is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12-3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then retry.\n{error}"
             ),
         )
     } else {
@@ -13774,7 +13774,7 @@ mod tests {
             .join("systematic-python")
             .join("python")
             .join("bin")
-            .join("python3.11");
+            .join("python3.13");
         if !interpreter.is_file() {
             return; // bundled runtime not staged (SKIP_DOWNLOAD builds)
         }

@@ -14,23 +14,25 @@ const skipDownload = process.env.DESIC_SYSTEMATIC_PYTHON_SKIP_DOWNLOAD === "1";
 const MANIFEST_SCHEMA = "desic.systematic.python-runtime/v1";
 
 // Pinned bundled CPython: python-build-standalone install_only_stripped,
-// 3.11.16, release 20260814. The SHA-256 digests come from the official
-// GitHub release and are the redistribution integrity boundary.
+// 3.13.15, release 20260814. The SHA-256 digests come from the official
+// GitHub release and are the redistribution integrity boundary. The version
+// must stay >= 3.12: scipy 1.18.0, the newest pinned scientific dependency,
+// requires Python 3.12 or newer.
 const BUNDLED = {
-  version: "3.11.16",
+  version: "3.13.15",
   releaseTag: "20260814",
   targets: {
     "darwin|arm64": {
       triple: "aarch64-apple-darwin",
-      sha256: "a394f2bf78a48990fc88e7c5586c7e1be5e69f0c9bd027883211b68b768e11c5"
+      sha256: "6d472fc49a4d95e58214a992c4c92aa73fe2a935837a01a9a36bab0bec6d72f3"
     },
     "darwin|x64": {
       triple: "x86_64-apple-darwin",
-      sha256: "4d60589b702aff21379ddf6bd648e75c7023a257a078fdd71df4c148cf609cc2"
+      sha256: "bf87354efcd9ae517da606fcda4e3a3f0d73a6f05ca7cba3c6d3c5270074bfc8"
     },
     "win32|x64": {
       triple: "x86_64-pc-windows-msvc",
-      sha256: "c6de1a7781580d13f68dece33ac10b7a608c7ac21fc08cf0f4e0678a7d134905"
+      sha256: "07c977bbe4abad07e3bbc314608633e6c74eab482a7bae81f4361cda970b45e6"
     }
   }
 };
@@ -180,7 +182,7 @@ async function* walkFiles(directory) {
 async function writeManifestForTree(sourceRoot) {
   const pythonRelativePath = targetPlatform === "win32"
     ? "python/python.exe"
-    : "python/bin/python3.11";
+    : "python/bin/python3.13";
   if (!await isRegularFile(safeJoin(sourceRoot, pythonRelativePath, "bundled interpreter"))) {
     throw new Error(`bundled interpreter is missing from the artifact: ${pythonRelativePath}`);
   }
@@ -244,7 +246,7 @@ async function ensureBundledArtifact() {
     await writeFile(archive, buffer);
   }
   const extractDir = path.join(cacheRoot, `${BUNDLED.version}-${pin.triple}`);
-  if (!await isRegularFile(path.join(extractDir, targetPlatform === "win32" ? "python/python.exe" : "python/bin/python3.11"))) {
+  if (!await isRegularFile(path.join(extractDir, targetPlatform === "win32" ? "python/python.exe" : "python/bin/python3.13"))) {
     await rm(extractDir, { recursive: true, force: true });
     await mkdir(extractDir, { recursive: true });
     try {
