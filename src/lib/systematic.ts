@@ -376,11 +376,19 @@ export type SystematicOptimizationView = {
   status: string;
   candidateCount: number;
   completedCount: number;
+  strategyVersion?: number | null;
+  candidateBudget?: number | null;
+  samplingMode?: "grid" | "sampled" | string | null;
+  workerCount?: number | null;
   trainEndAt: number;
   validationStartAt: number;
   validationEndAt: number;
   bestParameters?: Record<string, unknown> | null;
   bestValidationCalmar?: number | null;
+  baselineValidationCalmar?: number | null;
+  startedAt?: number | null;
+  elapsedMs?: number | null;
+  estimatedRemainingMs?: number | null;
   createdAt: number;
   finishedAt?: number | null;
   error?: string | null;
@@ -500,6 +508,12 @@ export type SystematicEvent = {
   inserted?: number;
   progressPct?: number;
   timing?: SystematicBacktestTiming;
+  optimizationId?: string;
+  completed?: number;
+  total?: number;
+  workerCount?: number;
+  elapsedMs?: number;
+  estimatedRemainingMs?: number | null;
   timestamp?: number;
 };
 
@@ -640,6 +654,7 @@ export function deleteSystematicBacktest(runId: string) {
 
 export function startSystematicOptimization(request: {
   strategyId: string;
+  strategyVersion?: number;
   instId: string;
   startAt?: number;
   endAt?: number;
@@ -650,8 +665,15 @@ export function startSystematicOptimization(request: {
   marginSafetyMultiplier?: number;
   positionSizing?: SystematicPositionSizing;
   endOfRunPolicy?: "markToMarket" | "closeAtLastClose";
+  candidateBudget?: 30 | 100 | 300;
 }) {
   return invokeDesktop<SystematicOptimizationView>("systematic_optimization_start", { request });
+}
+
+export function cancelSystematicOptimization(optimizationId: string) {
+  return invokeDesktop<SystematicOptimizationView>("systematic_optimization_cancel", {
+    request: { optimizationId },
+  });
 }
 
 export function saveSystematicProfile(request: {

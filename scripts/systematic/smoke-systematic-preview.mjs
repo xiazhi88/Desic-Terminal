@@ -281,9 +281,7 @@ async function main() {
     await page.waitForSelector(".systematic-strategy-lab", { timeout: 30_000 });
     const strategyLayout = await page.evaluate(() => {
       const documentOverflow = document.documentElement.scrollWidth - document.documentElement.clientWidth;
-      const table = document.querySelector(".systematic-lab-parameter-tuning__table")?.getBoundingClientRect();
-      const fields = Array.from(document.querySelectorAll(".systematic-lab-parameter-tuning__row input"))
-        .map((input) => input.getBoundingClientRect());
+      const tuningLink = document.querySelector(".systematic-lab-strategy-inspector__tuning-link");
       const strategyList = document.querySelector(".systematic-lab-strategy-list__scroll");
       const firstStrategy = strategyList?.querySelector(".systematic-lab-strategy-row")?.getBoundingClientRect();
       const strategyListStyle = strategyList ? getComputedStyle(strategyList) : null;
@@ -291,7 +289,7 @@ async function main() {
       const strategySearchStyle = strategySearchInput ? getComputedStyle(strategySearchInput) : null;
       return {
         documentOverflow,
-        allTuningFieldsVisible: Boolean(table) && fields.length === 9 && fields.every((field) => field.left >= table.left && field.right <= table.right),
+        tuningLinkVisible: Boolean(tuningLink && tuningLink.getBoundingClientRect().width > 0),
         strategySearchHasNoInnerFrame: Boolean(strategySearchStyle)
           && strategySearchStyle.borderTopWidth === "0px"
           && strategySearchStyle.backgroundColor === "rgba(0, 0, 0, 0)",
@@ -302,10 +300,32 @@ async function main() {
       };
     });
     assert(strategyLayout.documentOverflow <= 2, `strategy view has horizontal overflow: ${strategyLayout.documentOverflow}`);
-    assert(strategyLayout.allTuningFieldsVisible, "parameter tuning min/max/step fields must all fit the inspector");
+    assert(strategyLayout.tuningLinkVisible, "strategy inspector must expose the tuning workbench entry point");
     assert(strategyLayout.strategySearchHasNoInnerFrame, "strategy search input must not paint an inner border over its wrapper");
     assert(strategyLayout.strategyListIsVertical, `desktop strategy rows must stay vertically stacked in the strategy list: ${JSON.stringify(strategyLayout)}`);
 
+    await page.getByRole("button", { name: "Parameter optimization" }).click();
+    await page.waitForSelector(".systematic-lab-tuning-view", { timeout: 10_000 });
+    const tuningLayout = await page.evaluate(() => {
+      const root = document.querySelector(".systematic-lab-tuning-view")?.getBoundingClientRect();
+      const main = document.querySelector(".systematic-lab-tuning-main")?.getBoundingClientRect();
+      const parameterRows = Array.from(document.querySelectorAll(".systematic-lab-tuning-parameter"));
+      const budgets = Array.from(document.querySelectorAll(".systematic-lab-tuning-budget"));
+      return {
+        documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        workbenchVisible: Boolean(root && root.width > 600 && root.height > 300),
+        parameterRows: parameterRows.length,
+        selectedParameters: document.querySelectorAll(".systematic-lab-tuning-parameter.is-selected").length,
+        budgetsFit: Boolean(main) && budgets.length === 3 && budgets.every((budget) => budget.getBoundingClientRect().right <= main.right + 1),
+      };
+    });
+    assert(tuningLayout.documentOverflow <= 2, `tuning workbench has horizontal overflow: ${JSON.stringify(tuningLayout)}`);
+    assert(tuningLayout.workbenchVisible, "parameter tuning workbench must occupy a usable canvas");
+    assert(tuningLayout.parameterRows === 3 && tuningLayout.selectedParameters > 0, `tuning workbench must show numeric parameters and a default selection: ${JSON.stringify(tuningLayout)}`);
+    assert(tuningLayout.budgetsFit, `tuning budgets must fit the workbench: ${JSON.stringify(tuningLayout)}`);
+
+    await page.getByRole("button", { name: "Strategy" }).click();
+    await page.waitForSelector(".systematic-python-editor", { timeout: 10_000 });
     await page.getByRole("button", { name: "Development guide" }).click();
     await page.waitForSelector(".systematic-lab-strategy-docs", { timeout: 10_000 });
     const documentationLayout = await page.evaluate(() => {
@@ -355,7 +375,7 @@ async function main() {
     const leverageValues = await page.locator(".systematic-lab-backtest-view input[type='number']").evaluateAll((inputs) => inputs.map((input) => Number(input.value)));
     assert(leverageValues.includes(10) && leverageValues.includes(1), "backtest must expose default leverage and margin safety multiplier");
 
-    await page.locator(".systematic-strategy-lab__tabs button").nth(2).click();
+    await page.getByRole("button", { name: "Results & replay" }).click();
     await page.waitForSelector(".systematic-lab-review-main", { timeout: 20_000 });
     const reviewLayout = await page.evaluate(() => {
       const sizeOf = (selector) => {
@@ -480,7 +500,7 @@ async function main() {
     assert(profileEstimate.includes("The host converts this to contracts at execution"), `Profile budget explanation is missing: ${profileEstimate}`);
     assert(profileLayout.documentOverflow <= 2 && profileLayout.hintRight <= profileLayout.editorRight + 1, `Profile estimate must fit its editor: ${JSON.stringify(profileLayout)}`);
     assert(errors.length === 0, `systematic preview raised errors: ${errors.join(" | ")}`);
-    process.stdout.write(`[systematic-preview] ok: bars=${barCount}, tuning=9, range=30d, review-tabs=${reviewLayout.accountTabs.length}, compact=1280x720, ai-panel=visible, profile-estimate=visible\n`);
+    process.stdout.write(`[systematic-preview] ok: bars=${barCount}, tuning=workbench, range=30d, review-tabs=${reviewLayout.accountTabs.length}, compact=1280x720, ai-panel=visible, profile-estimate=visible\n`);
   } finally {
     await browser.close();
   }

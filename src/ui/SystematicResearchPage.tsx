@@ -28,6 +28,24 @@ function isChineseLocale(locale: string) {
 }
 
 /**
+ * Backtest and optimization lifecycle events are a convenience, not a
+ * guarantee: a busy WebView can miss one, and a missed `backtestFinished`
+ * leaves a finished run rendered as "queued"/"running" forever, with the
+ * elapsed-time readout counting up against `Date.now()`. Poll while any run is
+ * in flight so a dropped event costs seconds of staleness instead of the whole
+ * session.
+ */
+const IN_FLIGHT_POLL_MS = 2_500;
+const IN_FLIGHT_RUN_STATES = new Set(["queued", "running", "cancelling"]);
+
+function hasInFlightWork(overview: SystematicOverview | null) {
+  if (!overview) return false;
+  const runs = overview.backtestsPage?.items ?? overview.backtests ?? [];
+  if (runs.some((run) => IN_FLIGHT_RUN_STATES.has(run.status))) return true;
+  return (overview.optimizations ?? []).some((optimization) => IN_FLIGHT_RUN_STATES.has(optimization.status));
+}
+
+/**
  * Systematic research deliberately enters through strategy work, not contract
  * filtering. Factors and visual rules remain persisted compatibility assets;
  * this page makes the time-series strategy -> backtest -> replay workflow the
@@ -54,6 +72,32 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
       });
     }
   }, [chinese, onNotify]);
+
+  // The poll reads the newest `refresh` through a ref so its interval is not
+  // torn down and recreated whenever the callback identity changes.
+  const refreshRef = useRef(refresh);
+  refreshRef.current = refresh;
+
+  const inFlight = hasInFlightWork(overview);
+
+  useEffect(() => {
+    if (!inFlight) return;
+    let active = true;
+    let running = false;
+    // A slow overview query must not stack requests; skip a tick that arrives
+    // while the previous one is still in flight.
+    const timer = window.setInterval(() => {
+      if (!active || running) return;
+      running = true;
+      void refreshRef.current().finally(() => {
+        running = false;
+      });
+    }, IN_FLIGHT_POLL_MS);
+    return () => {
+      active = false;
+      window.clearInterval(timer);
+    };
+  }, [inFlight]);
 
   useEffect(() => {
     let active = true;
@@ -100,11 +144,20 @@ export function SystematicResearchPage({ selectedSymbol, watchlist, marketAssets
           message: event.error || event.runId || "--"
         });
       }
-      // Progress events are throttled, not debounced. A fast backtest emits one
-      // every ~170 ms, and rescheduling a 350 ms delay on each arrival meant the
-      // timer was always cleared before it fired: the bar sat at 0% and then
-      // jumped straight to the finished state. Everything else refreshes at once.
+      // Progress events are throttled, not debounced. A fast backtest or
+      // optimization emits frequent updates, and rescheduling a 350 ms delay
+      // on each arrival would leave the UI at 0% until the finished event.
       if (event.type === "backtestProgress") {
+        if (refreshTimer.current !== null) return;
+        const wait = Math.max(0, nextRefreshAt.current - Date.now());
+        refreshTimer.current = window.setTimeout(() => {
+          refreshTimer.current = null;
+          nextRefreshAt.current = Date.now() + 350;
+          void refresh();
+        }, wait);
+        return;
+      }
+      if (event.type === "optimizationProgress" || event.type === "optimizationRunning" || event.type === "optimizationCancelling") {
         if (refreshTimer.current !== null) return;
         const wait = Math.max(0, nextRefreshAt.current - Date.now());
         refreshTimer.current = window.setTimeout(() => {

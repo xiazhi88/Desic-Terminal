@@ -329,24 +329,16 @@ expectPolicy(
   disabled
 );
 
-// strategy.getBacktestResult is a bounded-wait poll: it returns timedOut=true and
-// must be re-called with identical input until the run reaches a terminal state.
-// Cline's generic repeat-call guard hard-stops at the 5th identical call, so the
-// strategy session opts out. Assert the opt-out stays wired and stays scoped.
+// Tool polling and idempotent retries may legitimately repeat an identical call.
+// The generic Cline repeat-call guard is disabled globally; tool permissions and
+// backend validation remain the actual safety boundaries.
 {
   const sidecar = readFileSync(new URL("./cline-sidecar.mjs", import.meta.url), "utf8");
-  if (!/loopDetection:\s*false/.test(sidecar)) {
-    failures.push("sidecar no longer disables loop detection for poll-shaped tools");
+  if (!/execution:\s*\{\s*loopDetection:\s*false\s*\}/.test(sidecar)) {
+    failures.push("sidecar must disable generic loop detection for every session");
   }
-  if (!/boolConfig\(command\.config\.disableLoopDetection,\s*false\)/.test(sidecar)) {
-    failures.push("loop detection opt-out must default to off so other sessions keep the guard");
-  }
-  const systematic = readFileSync(
-    new URL("../src-tauri/src/systematic.rs", import.meta.url),
-    "utf8"
-  );
-  if (!/disable_loop_detection:\s*Some\(true\)/.test(systematic)) {
-    failures.push("strategy session must opt out of loop detection for its polling tool");
+  if (/disableLoopDetection/.test(sidecar)) {
+    failures.push("sidecar must not retain a per-session loop detection switch");
   }
 }
 

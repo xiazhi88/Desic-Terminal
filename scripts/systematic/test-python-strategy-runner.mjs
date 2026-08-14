@@ -259,6 +259,9 @@ assert.throws(
 
 const validBarRequest = barInvocation();
 validateInvokeRequest(validBarRequest);
+const hostValidatedRequest = barInvocation();
+hostValidatedRequest.event.hostValidated = true;
+validateInvokeRequest(hostValidatedRequest);
 assert.deepEqual(validateStrategyParameters({ fastPeriod: 10, label: "closed bar" }), {
   fastPeriod: 10,
   label: "closed bar"
@@ -1039,6 +1042,47 @@ if (testPython) {
     assert.equal(rawOutput[9].code, "forbidden_api");
     assert.match(rawOutput[9].message, /^line 2: getattr is not permitted; use documented fixed fields directly, for example position\.averageEntryPrice$/);
     assert.equal(rawOutput[10].type, "shutdown");
+
+    // `hostValidated` fast path: the runtime trusts the host's field-level
+    // checks (an injected unknown field is accepted), but the future-data and
+    // time-monotonicity invariants are still enforced.
+    const fastFieldRequest = strategyEvent("bar", { requestId: "fast-injected-field" });
+    fastFieldRequest.event.hostValidated = true;
+    fastFieldRequest.event.market.series[0].bars[1].nextClose = 999;
+    const fastFutureRequest = strategyEvent("bar", { requestId: "fast-future-bar" });
+    fastFutureRequest.event.hostValidated = true;
+    fastFutureRequest.event.market.series[0].bars[1].closeTimeMs = cutoffMs + 60_000;
+    fastFutureRequest.event.bar = fastFutureRequest.event.market.series[0].bars[1];
+    const fastOutOfOrderRequest = strategyEvent("bar", { requestId: "fast-out-of-order" });
+    fastOutOfOrderRequest.event.hostValidated = true;
+    // Move the whole event back in time (bars included) so only the runtime's
+    // monotonicity check, not the future-data guard, can fire against the
+    // already-dispatched cutoff.
+    fastOutOfOrderRequest.event.asOfMs = cutoffMs - 60_000;
+    fastOutOfOrderRequest.event.market.series[0].bars[1].closeTimeMs = cutoffMs - 60_000;
+    fastOutOfOrderRequest.event.bar = fastOutOfOrderRequest.event.market.series[0].bars[1];
+    const fastOutput = await runRawRuntime(path.resolve(testPython), [
+      {
+        protocol: PYTHON_STRATEGY_PROTOCOL,
+        type: "load",
+        requestId: "raw-load-fast-path",
+        source: validBarSource
+      },
+      fastFieldRequest,
+      fastFutureRequest,
+      fastOutOfOrderRequest,
+      {
+        protocol: PYTHON_STRATEGY_PROTOCOL,
+        type: "shutdown",
+        requestId: "raw-shutdown-fast-path"
+      }
+    ]);
+    assert.equal(fastOutput[0].type, "ready");
+    assert.equal(fastOutput[1].type, "loaded");
+    assert.equal(fastOutput[2].type, "result", "hostValidated field-level shape errors must be trusted");
+    assert.equal(fastOutput[3].code, "future_data", "hostValidated future bars must still be rejected");
+    assert.equal(fastOutput[4].code, "out_of_order_event", "hostValidated backward time must still be rejected");
+    assert.equal(fastOutput[5].type, "shutdown");
   } finally {
     await runner.close();
   }

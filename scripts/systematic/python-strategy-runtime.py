@@ -423,6 +423,53 @@ def validate_active_instrument_event(event, cutoff_ms, kind):
 
 def validate_event(event):
     value = plain_dict(event, "event")
+    if value.get("hostValidated") is True:
+        return validate_event_host_validated(value)
+    return validate_event_full(value)
+
+
+def validate_event_host_validated(value):
+    """Lightweight path for events the Rust host already validated.
+
+    The host serialises every bar, portfolio row, and timestamp after its own
+    field-level, chronology, and cutoff checks, so the runtime only re-checks
+    the invariants that would corrupt its own state or silently leak look-ahead
+    data. Everything else is trusted to keep a long backtest from re-walking
+    the same payload on every minute.
+    """
+    kind = value.get("kind")
+    if kind not in {"start", "bar", "rebalance"}:
+        raise ProtocolFailure("invalid_event_kind", "event.kind must be start, bar, or rebalance")
+    cutoff_ms = positive_int(value.get("asOfMs"), "event.asOfMs")
+    nonempty_string(value.get("snapshotId"), "event.snapshotId", 128, REQUEST_ID_PATTERN)
+    market = value.get("market")
+    if not isinstance(market, dict):
+        raise ProtocolFailure("invalid_market", "event.market must be an object")
+    series = market.get("series")
+    if not isinstance(series, list) or not series:
+        raise ProtocolFailure("invalid_market", "event.market.series must contain 1 to 256 series")
+    for index, item in enumerate(series):
+        if not isinstance(item, dict):
+            raise ProtocolFailure("invalid_series", f"event.market.series[{index}] must be an object")
+        bars = item.get("bars")
+        if not isinstance(bars, list) or not bars:
+            raise ProtocolFailure("invalid_series", f"event.market.series[{index}].bars must contain 1 to 20000 closed bars")
+        latest = bars[-1]
+        if not isinstance(latest, dict):
+            raise ProtocolFailure("invalid_bar", f"event.market.series[{index}].bars[-1] must be an object")
+        close_time = latest.get("closeTimeMs")
+        if close_time is None or not isinstance(close_time, int) or isinstance(close_time, bool):
+            raise ProtocolFailure("invalid_bar", f"event.market.series[{index}].bars[-1].closeTimeMs must be a positive safe integer")
+        # A confirmed bar must not close after the event cutoff. An in-progress
+        # higher-timeframe bucket (confirmed=False) may carry a nominal close
+        # ahead of the cutoff, matching the full validator's partial-bucket rule.
+        if latest.get("confirmed") is not False and close_time > cutoff_ms:
+            raise ProtocolFailure("future_data", f"event.market.series[{index}].bars[-1].closeTimeMs is later than event.asOfMs")
+    return value
+
+
+def validate_event_full(event):
+    value = plain_dict(event, "event")
     kind = value.get("kind")
     if kind not in {"start", "bar", "rebalance"}:
         raise ProtocolFailure("invalid_event_kind", "event.kind must be start, bar, or rebalance")
@@ -432,7 +479,7 @@ def validate_event(event):
     if "portfolio" in value:
         validate_portfolio(value["portfolio"], cutoff_ms)
     if kind in {"start", "bar"}:
-        allowed = {"kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio"}
+        allowed = {"kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio", "hostValidated"}
         if kind == "bar":
             allowed.add("bar")
         reject_unknown_fields(value, allowed, "event")
@@ -440,7 +487,7 @@ def validate_event(event):
         if kind == "start" and "portfolio" not in value:
             raise ProtocolFailure("invalid_portfolio", f"{kind} events require event.portfolio")
     else:
-        reject_unknown_fields(value, {"kind", "snapshotId", "asOfMs", "market", "portfolio", "universe"}, "event")
+        reject_unknown_fields(value, {"kind", "snapshotId", "asOfMs", "market", "portfolio", "universe", "hostValidated"}, "event")
         universe = value.get("universe")
         if not isinstance(universe, list) or not universe or len(universe) > 1_000:
             raise ProtocolFailure("invalid_universe", "rebalance event requires 1 to 1000 universe rows")

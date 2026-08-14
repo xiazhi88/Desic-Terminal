@@ -13,7 +13,7 @@ use std::{
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command as StdCommand, Stdio},
     sync::{
-        atomic::{AtomicBool, AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
         mpsc, Arc, Mutex,
     },
     time::Instant,
@@ -77,6 +77,7 @@ const MAX_AI_STRATEGY_DRAFT_SOURCE_BYTES: usize = 48 * 1024;
 const MAX_AI_STRATEGY_DRAFT_PROMPT_BYTES: usize = 8 * 1024;
 const MAX_PYTHON_TUNING_PARAMETERS: usize = 64;
 const MAX_PYTHON_TUNING_CANDIDATES: usize = 300;
+const DEFAULT_PYTHON_TUNING_BUDGET: usize = 100;
 const MAX_FACTOR_CODE_BYTES: usize = 32;
 const MAX_RUN_ID_BYTES: usize = 160;
 const FRESH_UNIVERSE_WINDOW_MS: i64 = 5 * ONE_MINUTE_MS;
@@ -839,11 +840,19 @@ pub(crate) struct SystematicOptimizationView {
     pub status: String,
     pub candidate_count: usize,
     pub completed_count: usize,
+    pub strategy_version: Option<u32>,
+    pub candidate_budget: Option<usize>,
+    pub sampling_mode: Option<String>,
+    pub worker_count: Option<usize>,
+    pub baseline_validation_calmar: Option<f64>,
     pub train_end_at: i64,
     pub validation_start_at: i64,
     pub validation_end_at: i64,
     pub best_parameters: Option<Value>,
     pub best_validation_calmar: Option<f64>,
+    pub started_at: Option<i64>,
+    pub elapsed_ms: Option<i64>,
+    pub estimated_remaining_ms: Option<i64>,
     pub created_at: i64,
     pub finished_at: Option<i64>,
     pub error: Option<String>,
@@ -1401,6 +1410,13 @@ pub(crate) struct SystematicOptimizationStartRequest {
     #[serde(default)] pub margin_safety_multiplier: Option<f64>,
     #[serde(default)] pub position_sizing: Option<PositionSizing>,
     #[serde(default)] pub end_of_run_policy: Option<EndOfRunPolicy>,
+    #[serde(default)] pub candidate_budget: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicOptimizationCancelRequest {
+    pub optimization_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1750,6 +1766,10 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
           best_validation_calmar REAL,
           error TEXT,
           created_at INTEGER NOT NULL,
+          started_at INTEGER,
+          elapsed_ms INTEGER,
+          estimated_remaining_ms INTEGER,
+          worker_count INTEGER,
           finished_at INTEGER,
           updated_at INTEGER NOT NULL
         );
@@ -1874,6 +1894,20 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
     ensure_systematic_column(conn, "systematic_backtests", "timing_json", "TEXT")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "strategy_version", "INTEGER")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "candidate_budget", "INTEGER")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "sampling_mode", "TEXT")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "sampling_seed", "TEXT")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "baseline_validation_calmar", "REAL")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "started_at", "INTEGER")?;
+    ensure_systematic_column(conn, "systematic_optimizations", "elapsed_ms", "INTEGER")?;
+    ensure_systematic_column(
+        conn,
+        "systematic_optimizations",
+        "estimated_remaining_ms",
+        "INTEGER",
+    )?;
+    ensure_systematic_column(conn, "systematic_optimizations", "worker_count", "INTEGER")?;
     ensure_systematic_column(
         conn,
         "systematic_profiles",
@@ -2193,6 +2227,22 @@ pub(crate) fn start_systematic_worker(
                      finished_at=?1, updated_at=?1
                  WHERE status IN ('queued','running','cancelling')",
                 params![now_ms()],
+            )
+            .map_err(|error| error.to_string())?;
+            let restart_error = "The application restarted before this parameter optimization could finish.";
+            conn.execute(
+                "UPDATE systematic_optimization_candidates
+                 SET status='failed', error=COALESCE(error,?1), updated_at=?2
+                 WHERE status IN ('queued','running','cancelling')
+                   AND optimization_id IN (SELECT id FROM systematic_optimizations WHERE status IN ('queued','running','cancelling'))",
+                params![restart_error, now_ms()],
+            )
+            .map_err(|error| error.to_string())?;
+            conn.execute(
+                "UPDATE systematic_optimizations
+                 SET status='failed', error=COALESCE(error,?1), finished_at=?2, updated_at=?2
+                 WHERE status IN ('queued','running','cancelling')",
+                params![restart_error, now_ms()],
             )
             .map_err(|error| error.to_string())?;
             Ok(())
@@ -2575,6 +2625,60 @@ pub(crate) async fn systematic_optimization_start(
     start_strategy_ai_optimization(app, runtime.inner().clone(), request).await
 }
 
+#[tauri::command]
+pub(crate) async fn systematic_optimization_cancel(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, SystematicRuntime>,
+    request: SystematicOptimizationCancelRequest,
+) -> Result<SystematicOptimizationView, String> {
+    validate_id(&request.optimization_id, "Optimization ID")?;
+    if let Some(control) = runtime
+        .jobs
+        .lock()
+        .map_err(|_| "Systematic optimization queue lock is unavailable".to_string())?
+        .get(&request.optimization_id)
+        .cloned()
+    {
+        control.request_cancel();
+    }
+    let optimization_id = request.optimization_id.clone();
+    let view = run_systematic_blocking({
+        let app = app.clone();
+        move || {
+            let conn = open_database(&app)?;
+            let updated = conn
+                .execute(
+                    "UPDATE systematic_optimizations
+                     SET status='cancelling', updated_at=?2
+                     WHERE id=?1 AND status IN ('queued','running','cancelling')",
+                    params![optimization_id, now_ms()],
+                )
+                .map_err(|error| error.to_string())?;
+            if updated == 0 {
+                return Err("Only queued or running optimizations can be cancelled".to_string());
+            }
+            load_optimization_views(&conn)?
+                .into_iter()
+                .find(|item| item.id == optimization_id)
+                .ok_or_else(|| "Optimization was not found".to_string())
+        }
+    })
+    .await?;
+    emit_systematic_event(
+        &app,
+        json!({
+            "type": "optimizationCancelling",
+            "optimizationId": request.optimization_id,
+            "status": "cancelling",
+            "completed": view.completed_count,
+            "total": view.candidate_count,
+            "workerCount": view.worker_count,
+            "timestamp": now_ms(),
+        }),
+    );
+    Ok(view)
+}
+
 /// Shared bounded train/validation parameter research entry point. Candidates
 /// come exclusively from desktop-owned saved tuning ranges and never affect a
 /// Profile or exchange execution path.
@@ -2594,8 +2698,10 @@ async fn start_strategy_ai_optimization(
     let definition = prepared.strategy.0.definition.clone();
     let interpreter = prepared.strategy.0.interpreter.clone();
     let base_request = prepared.request;
-    let candidates = optimization_parameter_candidates(&definition)?;
-    if candidates.is_empty() { return Err("Mark at least one top-level numeric parameter with a valid tuning range before optimization".to_string()); }
+    let pinned_strategy_version = base_request.strategy_version.parse::<u32>().ok();
+    let candidate_budget = normalize_optimization_budget(request.candidate_budget)?;
+    let candidate_plan = optimization_parameter_candidates(&definition, candidate_budget, &request.strategy_id, pinned_strategy_version)?;
+    if candidate_plan.candidates.is_empty() { return Err("Select at least one numeric parameter to test before starting optimization".to_string()); }
     let split_index = base_request.preload_bars + ((base_request.bars.len() - base_request.preload_bars) * 7 / 10);
     if split_index <= base_request.preload_bars || split_index >= base_request.bars.len().saturating_sub(10) { return Err("The requested range is too short for a 70/30 train-validation optimization split".to_string()); }
     let temporary_run_id = base_request.run_id.clone();
@@ -2603,23 +2709,50 @@ async fn start_strategy_ai_optimization(
     let validation_start_at = base_request.bars[split_index].open_time_ms;
     let validation_end_at = base_request.bars.last().map(|bar| bar.close_time_ms).unwrap_or(0);
     let optimization_id = systematic_id("optimization");
+    let control = BacktestJobControl::new(candidate_plan.candidates.len() as u64);
+    {
+        let mut jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic optimization queue lock is unavailable".to_string())?;
+        jobs.insert(optimization_id.clone(), control.clone());
+    }
     let now = now_ms();
-    let view = run_systematic_blocking({
-        let app = app.clone(); let optimization_id = optimization_id.clone(); let candidates = candidates.clone(); let request_json = serde_json::to_string(&request).map_err(|error| error.to_string())?;
+    let view = match run_systematic_blocking({
+        let app = app.clone(); let optimization_id = optimization_id.clone(); let candidates = candidate_plan.candidates.clone(); let request_json = serde_json::to_string(&request).map_err(|error| error.to_string())?;
         let strategy_id = request.strategy_id.clone(); let inst_id = request.inst_id.clone();
+        let strategy_version = pinned_strategy_version;
+        let sampling_mode = candidate_plan.mode.clone();
+        let sampling_seed = candidate_plan.seed.clone();
         move || {
             let conn = open_database(&app)?;
             // prepare_backtest uses its normal persistence path; optimization candidates are separate and the temporary run must never surface as a user backtest.
             conn.execute("DELETE FROM systematic_backtests WHERE id=?1", [&temporary_run_id]).map_err(|error| error.to_string())?;
-            conn.execute("INSERT INTO systematic_optimizations(id,strategy_id,inst_id,status,request_json,candidate_count,completed_count,train_end_at,validation_start_at,validation_end_at,created_at,updated_at) VALUES(?1,?2,?3,'queued',?4,?5,0,?6,?7,?8,?9,?9)",
-                params![optimization_id, strategy_id, inst_id, request_json, candidates.len() as i64, train_end_at, validation_start_at, validation_end_at, now]).map_err(|error| error.to_string())?;
+            conn.execute("INSERT INTO systematic_optimizations(id,strategy_id,inst_id,status,request_json,candidate_count,completed_count,train_end_at,validation_start_at,validation_end_at,strategy_version,candidate_budget,sampling_mode,sampling_seed,created_at,updated_at) VALUES(?1,?2,?3,'queued',?4,?5,0,?6,?7,?8,?9,?10,?11,?12,?13,?13)",
+                params![optimization_id, strategy_id, inst_id, request_json, candidates.len() as i64, train_end_at, validation_start_at, validation_end_at, strategy_version.map(i64::from), candidate_budget as i64, sampling_mode, sampling_seed, now]).map_err(|error| error.to_string())?;
             for (index, parameters) in candidates.iter().enumerate() {
                 conn.execute("INSERT INTO systematic_optimization_candidates(optimization_id,candidate_index,parameters_json,status,created_at,updated_at) VALUES(?1,?2,?3,'queued',?4,?4)", params![optimization_id, index as i64, serde_json::to_string(parameters).map_err(|error| error.to_string())?, now]).map_err(|error| error.to_string())?;
             }
             load_optimization_views(&conn)?.into_iter().find(|item| item.id == optimization_id).ok_or_else(|| "Optimization was not persisted".to_string())
         }
-    }).await?;
-    spawn_optimization_worker(app, runtime, optimization_id.clone(), base_request, definition, interpreter, candidates, split_index);
+    }).await {
+        Ok(view) => view,
+        Err(error) => {
+            remove_job(&runtime, &optimization_id);
+            return Err(error);
+        }
+    };
+    spawn_optimization_worker(
+        app,
+        runtime,
+        optimization_id.clone(),
+        base_request,
+        definition,
+        interpreter,
+        candidate_plan.candidates,
+        split_index,
+        control,
+    );
     Ok(view)
 }
 
@@ -3192,11 +3325,6 @@ pub(crate) async fn systematic_strategy_ai_send_message(
             // the Skill to a slash command that this prompt never triggers,
             // silently dropping the entire authoring contract.
             disable_skills_tool: Some(false),
-            // strategy.getBacktestResult is a bounded-wait poll: it returns
-            // timedOut=true and must be re-called with identical input until the
-            // run finishes. That is the documented contract, not a loop, so the
-            // generic repeat-call guard must not hard-stop this conversation.
-            disable_loop_detection: Some(true),
             enable_spawn_agent: Some(false),
             enable_agent_teams: Some(false),
             stream_fallback_text: true,
@@ -3741,6 +3869,7 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
                 margin_safety_multiplier: None,
                 position_sizing: None,
                 end_of_run_policy: None,
+                candidate_budget: None,
             };
             let view = start_strategy_ai_optimization(app.clone(), runtime.inner().clone(), optimization_request).await?;
             Ok(json!({ "optimization": view, "queued": true, "split": "70/30 train-validation" }))
@@ -4603,6 +4732,17 @@ fn sample_equity_context(points: &[EquityPoint], maximum_points: usize) -> Vec<E
 }
 
 /// Completed runs that keep their replayable per-bar equity series.
+/// How often a running backtest forwards a progress event to the UI. The engine
+/// reports every 256 bars; this thins that stream without making the bar jumpy.
+const BACKTEST_PROGRESS_EVENT_INTERVAL_BARS: u64 = 1_024;
+
+/// How often a running backtest writes its progress *row*.
+///
+/// Persisting every forwarded event puts a write on the shared lock ~127 times
+/// for a 130k-bar run, for a number only the history list reads. Events keep
+/// their own cadence, so the progress bar resolution is unchanged.
+const BACKTEST_PROGRESS_PERSIST_INTERVAL_BARS: u64 = 8_192;
+
 const RETAINED_BACKTEST_SERIES_RUNS: usize = 20;
 
 /// Drops the per-bar equity series of the oldest completed backtests.
@@ -4650,6 +4790,111 @@ pub(crate) fn archive_backtest_series(conn: &Connection) -> Result<usize, String
         }
     }
     Ok(archived)
+}
+
+/// A `report_json` above this size predates the report-slimming work and still
+/// carries one row per bar in `replaySnapshots` / `strategyEvents` /
+/// `strategyActions` / `equityCurve`.
+const LEGACY_REPORT_COMPACT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
+
+/// Per-bar arrays the current engine no longer persists. Dropping them from a
+/// legacy row leaves exactly what a slim run stores today.
+const LEGACY_REPORT_PER_BAR_KEYS: [&str; 4] = [
+    "replaySnapshots",
+    "strategyEvents",
+    "strategyActions",
+    "equityCurve",
+];
+
+/// Reclaims the per-bar arrays of pre-slimming `report_json` rows.
+///
+/// These rows reach 100-270 MB each. `report_json` sits ahead of
+/// `metrics_json`, `equity_preview_json` and `timing_json` in the row, so
+/// SQLite must walk its overflow pages to read any of them — which made the
+/// backtest history page take seconds to return a few KB. Runs still
+/// `queued`/`running` and the newest `RETAINED_BACKTEST_SERIES_RUNS` are left
+/// alone; everything else keeps `metrics` / `statistics` / `fills` /
+/// `closedTrades` / `reproducibility` and loses only the bar-by-bar replay,
+/// which is the same trade-off `archive_backtest_series` already makes. Setting
+/// `equitySeriesBarCount` makes the read path report the run as archived rather
+/// than rendering an empty chart. Returns the number of rows compacted.
+pub(crate) fn compact_legacy_backtest_reports(conn: &Connection) -> Result<usize, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT id, report_json FROM systematic_backtests
+             WHERE report_json IS NOT NULL
+               AND LENGTH(report_json) > ?1
+               AND id NOT IN (
+                 SELECT id FROM systematic_backtests
+                 WHERE status IN ('queued','running')
+                 UNION ALL
+                 SELECT id FROM (
+                   SELECT id FROM systematic_backtests
+                   WHERE report_json IS NOT NULL
+                   ORDER BY COALESCE(finished_at, updated_at, created_at) DESC
+                   LIMIT ?2
+                 )
+               )",
+        )
+        .map_err(|error| error.to_string())?;
+    let candidates = statement
+        .query_map(
+            params![
+                LEGACY_REPORT_COMPACT_THRESHOLD_BYTES,
+                RETAINED_BACKTEST_SERIES_RUNS as i64
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    drop(statement);
+
+    let mut compacted = 0usize;
+    for (run_id, report_json) in candidates {
+        let Ok(Value::Object(mut report)) = serde_json::from_str::<Value>(&report_json) else {
+            // A row that does not parse is left untouched rather than rewritten
+            // into a different kind of broken.
+            continue;
+        };
+        let bar_count = report
+            .get("equityCurve")
+            .and_then(Value::as_array)
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        let mut changed = false;
+        for key in LEGACY_REPORT_PER_BAR_KEYS {
+            if report
+                .get(key)
+                .and_then(Value::as_array)
+                .is_some_and(|rows| !rows.is_empty())
+            {
+                report.insert(key.to_string(), Value::Array(Vec::new()));
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        // The read path distinguishes "archived" from "empty run" by a positive
+        // bar count with no stored chunks, and `report_hash` must stay the value
+        // the engine computed over the full report.
+        if bar_count > 0 && !report.contains_key("equitySeriesBarCount") {
+            report.insert(
+                "equitySeriesBarCount".to_string(),
+                Value::from(bar_count as u64),
+            );
+        }
+        let compact = serde_json::to_string(&Value::Object(report))
+            .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE systematic_backtests SET report_json=?2 WHERE id=?1",
+            params![run_id, compact],
+        )
+        .map_err(|error| error.to_string())?;
+        compacted += 1;
+    }
+    Ok(compacted)
 }
 
 /// Reads and verifies every confirmed bar a backtest ran on.
@@ -5298,7 +5543,15 @@ fn prepare_backtest(
     app: &tauri::AppHandle,
     request: SystematicBacktestStartRequest,
 ) -> Result<PreparedBacktest, String> {
-    let conn = open_database(app)?;
+    // Everything up to `persist_prepared_backtest` is a read: the strategy
+    // version, the data window, and the whole one-minute bar range. Holding a
+    // *write* connection across that range made queuing a run contend with the
+    // progress UPDATE that an already-running backtest issues every 1024 bars,
+    // so preparing a 130k-bar window could sit in `busy_timeout` retries for
+    // minutes while the caller's button stayed on "queuing" and no row existed
+    // yet for the run list. A read-only connection never blocks on the writer
+    // under WAL.
+    let conn = open_read_database(app)?;
     let (strategy, strategy_snapshot) = load_backtest_strategy_version(
         &conn,
         &request.strategy_id,
@@ -5377,7 +5630,11 @@ fn prepare_backtest(
         preload_bars: window.preload_bars,
         end_of_run_policy,
     };
-    persist_prepared_backtest(&conn, &backtest_request, &strategy, &data_hash, created_at)?;
+    // Drop the read connection before taking the write lock so the two are
+    // never held at once.
+    drop(conn);
+    let write_conn = open_database(app)?;
+    persist_prepared_backtest(&write_conn, &backtest_request, &strategy, &data_hash, created_at)?;
     Ok(PreparedBacktest {
         request: backtest_request,
         strategy,
@@ -5439,6 +5696,18 @@ fn spawn_backtest_worker(
             let worker_started = Instant::now();
             let PreparedBacktest { request, strategy } = prepared;
             let token = control_for_run.cancellation_token();
+            // One write connection for the whole run, opened lazily.
+            //
+            // This used to call `open_database` for every progress write, which
+            // at one write per 1024 bars is ~127 connections for a 130k-bar run.
+            // Reopening costs ~7.3 ms against ~0.06 ms on a reused handle (120x),
+            // and each new writer competes for the same lock — enough to push
+            // unrelated commands (`okx_list_algo_orders`) into their
+            // `busy_timeout` and surface "database is locked". A run that could
+            // not open the connection still emits its progress events, so the UI
+            // keeps moving even when persistence is unavailable.
+            let mut progress_conn: Option<Connection> = None;
+            let mut progress_conn_failed = false;
             let report_progress = |completed_steps: u64, total_steps: u64| {
                 control_for_run.record_progress(completed_steps);
                 let progress_pct = if total_steps == 0 {
@@ -5446,11 +5715,37 @@ fn spawn_backtest_worker(
                 } else {
                     (completed_steps as f64 / total_steps as f64 * 100.0).clamp(0.0, 100.0)
                 };
-                if completed_steps % 1_024 == 0
-                    || completed_steps == total_steps
-                    || token.is_cancelled()
-                {
-                    let _ = persist_backtest_progress(&app_for_run, &run_id_for_run, progress_pct);
+                let terminal = completed_steps == total_steps || token.is_cancelled();
+                if completed_steps % BACKTEST_PROGRESS_EVENT_INTERVAL_BARS == 0 || terminal {
+                    // The row is written less often than the event is emitted: the
+                    // UI reads progress from the event stream, and the persisted
+                    // value only has to be roughly current plus exact at the end.
+                    let persist = terminal
+                        || completed_steps % BACKTEST_PROGRESS_PERSIST_INTERVAL_BARS == 0;
+                    if persist && progress_conn.is_none() && !progress_conn_failed {
+                        match open_database(&app_for_run) {
+                            Ok(conn) => progress_conn = Some(conn),
+                            Err(error) => {
+                                // Do not retry every tick; one failure per run is
+                                // enough to know persistence is unavailable.
+                                progress_conn_failed = true;
+                                eprintln!(
+                                    "systematic_backtest_progress_connection_failed run={run_id_for_run} error={error}"
+                                );
+                            }
+                        }
+                    }
+                    if persist {
+                        if let Some(conn) = progress_conn.as_ref() {
+                            if let Err(error) =
+                                persist_backtest_progress_on(conn, &run_id_for_run, progress_pct)
+                            {
+                                eprintln!(
+                                    "systematic_backtest_progress_persist_failed run={run_id_for_run} error={error}"
+                                );
+                            }
+                        }
+                    }
                     emit_systematic_event(
                         &app_for_run,
                         json!({
@@ -5565,7 +5860,41 @@ fn spawn_backtest_worker(
     });
 }
 
-fn optimization_parameter_candidates(definition: &PythonStrategyDefinition) -> Result<Vec<Value>, String> {
+#[derive(Debug, Clone)]
+struct OptimizationCandidatePlan {
+    candidates: Vec<Value>,
+    mode: String,
+    seed: String,
+}
+
+fn normalize_optimization_budget(value: Option<usize>) -> Result<usize, String> {
+    match value.unwrap_or(DEFAULT_PYTHON_TUNING_BUDGET) {
+        30 | 100 | 300 => Ok(value.unwrap_or(DEFAULT_PYTHON_TUNING_BUDGET)),
+        other => Err(format!("Optimization test size must be 30, 100, or 300 candidates (received {other})")),
+    }
+}
+
+fn optimization_seed(
+    definition: &PythonStrategyDefinition,
+    budget: usize,
+    strategy_id: &str,
+    strategy_version: Option<u32>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(strategy_id.as_bytes());
+    hasher.update([0]);
+    hasher.update(strategy_version.unwrap_or_default().to_le_bytes());
+    hasher.update(budget.to_le_bytes());
+    hasher.update(serde_json::to_vec(&definition.parameter_tuning).unwrap_or_default());
+    format!("{:x}", hasher.finalize())
+}
+
+fn optimization_parameter_candidates(
+    definition: &PythonStrategyDefinition,
+    budget: usize,
+    strategy_id: &str,
+    strategy_version: Option<u32>,
+) -> Result<OptimizationCandidatePlan, String> {
     let parameters = definition.parameters.as_object().ok_or_else(|| "Strategy parameters must be an object".to_string())?;
     let mut dimensions = Vec::new();
     for (key, range) in &definition.parameter_tuning {
@@ -5578,19 +5907,74 @@ fn optimization_parameter_candidates(definition: &PythonStrategyDefinition) -> R
         if !values.iter().any(|value| (*value - current).abs() < 1e-10) { values.push(current); }
         dimensions.push((key.clone(), values));
     }
-    if dimensions.is_empty() { return Ok(Vec::new()); }
-    let mut candidates = vec![parameters.clone()];
-    for (key, values) in dimensions {
-        let mut next = Vec::new();
-        for candidate in candidates {
-            for value in &values {
-                if next.len() >= MAX_PYTHON_TUNING_CANDIDATES { return Err(format!("Optimization exceeds the {} candidate limit", MAX_PYTHON_TUNING_CANDIDATES)); }
-                let mut item = candidate.clone(); item.insert(key.clone(), json!(value)); next.push(item);
-            }
-        }
-        candidates = next;
+    if dimensions.is_empty() {
+        return Ok(OptimizationCandidatePlan { candidates: Vec::new(), mode: "grid".to_string(), seed: String::new() });
     }
-    Ok(candidates.into_iter().map(Value::Object).collect())
+    let mut baseline = parameters.clone();
+    for (key, values) in &dimensions {
+        let current = parameters.get(key).and_then(Value::as_f64).ok_or_else(|| format!("Tuned parameter {key} must be numeric"))?;
+        baseline.insert(key.clone(), json!(values.iter().copied().find(|value| (*value - current).abs() < 1e-10).unwrap_or(current)));
+    }
+    let seed = optimization_seed(definition, budget, strategy_id, strategy_version);
+    let mut total = 1usize;
+    for (_, values) in &dimensions {
+        total = total.saturating_mul(values.len());
+        if total > budget { break; }
+    }
+    let mut candidates = vec![baseline.clone()];
+    let mode = if total <= budget { "grid" } else { "sampled" };
+    if mode == "sampled" {
+        let mut seen = HashSet::new();
+        seen.insert(serde_json::to_string(&baseline).map_err(|error| error.to_string())?);
+        let seed_bytes = hex_to_bytes(&seed);
+        let mut state = seed_bytes.iter().take(8).fold(0_u64, |acc, byte| (acc << 8) | u64::from(*byte));
+        let target = budget.min(MAX_PYTHON_TUNING_CANDIDATES);
+        let max_attempts = target.saturating_mul(2_000).max(2_000);
+        for _ in 0..max_attempts {
+            if candidates.len() >= target { break; }
+            let mut item = baseline.clone();
+            for (key, values) in &dimensions {
+                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                let index = (state as usize) % values.len();
+                item.insert(key.clone(), json!(values[index]));
+            }
+            let encoded = serde_json::to_string(&item).map_err(|error| error.to_string())?;
+            if seen.insert(encoded) { candidates.push(item); }
+        }
+        if candidates.len() < target {
+            return Err("Unable to build a unique deterministic candidate set for this tuning plan".to_string());
+        }
+    } else {
+        let mut grid = vec![baseline.clone()];
+        for (key, values) in dimensions {
+            let mut next = Vec::new();
+            for candidate in grid {
+                for value in &values {
+                    if next.len() >= budget { return Err(format!("Optimization exceeds the selected {budget}-candidate budget")); }
+                    let mut item = candidate.clone(); item.insert(key.clone(), json!(value)); next.push(item);
+                }
+            }
+            grid = next;
+        }
+        let mut seen = HashSet::new();
+        seen.insert(serde_json::to_string(&baseline).map_err(|error| error.to_string())?);
+        candidates.clear();
+        candidates.push(baseline);
+        for item in grid {
+            if candidates.len() >= budget { break; }
+            let encoded = serde_json::to_string(&item).map_err(|error| error.to_string())?;
+            if seen.insert(encoded) { candidates.push(item); }
+        }
+    }
+    Ok(OptimizationCandidatePlan { candidates: candidates.into_iter().map(Value::Object).collect(), mode: mode.to_string(), seed })
+}
+
+fn hex_to_bytes(value: &str) -> Vec<u8> {
+    value.as_bytes().chunks(2).filter_map(|pair| {
+        let high = (*pair.first()? as char).to_digit(16)?;
+        let low = pair.get(1).and_then(|byte| (*byte as char).to_digit(16)).unwrap_or(0);
+        Some(((high << 4) | low) as u8)
+    }).collect()
 }
 
 fn spawn_optimization_worker(
@@ -5602,136 +5986,556 @@ fn spawn_optimization_worker(
     interpreter: PathBuf,
     candidates: Vec<Value>,
     split_index: usize,
+    control: BacktestJobControl,
 ) {
     tauri::async_runtime::spawn(async move {
-        let _ = run_systematic_blocking({ let app = app.clone(); let id = optimization_id.clone(); move || {
-            let conn = open_database(&app)?; conn.execute("UPDATE systematic_optimizations SET status='running',updated_at=?2 WHERE id=?1", params![id, now_ms()]).map_err(|error| error.to_string())?; Ok(())
-        }}).await;
-        let parallelism = runtime.worker_capacity().clamp(1, 2).min(candidates.len().max(1));
-        let slots = runtime.backtest_slots.clone();
-        let mut next_candidate = 0_usize;
+        let total = candidates.len();
+        // `worker_capacity` is derived from available logical CPUs and the
+        // shared semaphore applies the same cap to ordinary backtests. The
+        // old optimizer hard-coded two lanes, which left larger machines idle.
+        let parallelism = runtime.worker_capacity().max(1).min(total.max(1));
+        let started_at = now_ms();
+        let token = control.cancellation_token();
+        if !control.start() || token.is_cancelled() {
+            control.cancel_complete();
+            let _ = persist_optimization_terminal_state(
+                &app,
+                &optimization_id,
+                total,
+                0,
+                0,
+                parallelism,
+                started_at,
+                "cancelled",
+                Some("Optimization cancelled before workers started".to_string()),
+            )
+            .await;
+            emit_systematic_event(
+                &app,
+                json!({
+                    "type": "optimizationFinished",
+                    "optimizationId": optimization_id,
+                    "status": "cancelled",
+                    "completed": 0,
+                    "total": total,
+                    "workerCount": parallelism,
+                    "elapsedMs": now_ms().saturating_sub(started_at).max(0),
+                    "timestamp": now_ms(),
+                }),
+            );
+            remove_job(&runtime, &optimization_id);
+            return;
+        }
+
+        let running_persist = run_systematic_blocking({
+            let app = app.clone();
+            let id = optimization_id.clone();
+            move || {
+                let conn = open_database(&app)?;
+                conn.execute(
+                    "UPDATE systematic_optimizations
+                     SET status='running',started_at=COALESCE(started_at,?2),
+                         elapsed_ms=0,estimated_remaining_ms=NULL,worker_count=?,
+                         updated_at=?2 WHERE id=?1",
+                    params![id, started_at, parallelism as i64],
+                )
+                .map_err(|error| error.to_string())?;
+                Ok(())
+            }
+        })
+        .await;
+        if let Err(error) = running_persist {
+            control.fail();
+            emit_systematic_event(
+                &app,
+                json!({
+                    "type": "optimizationFinished",
+                    "optimizationId": optimization_id,
+                    "status": "failed",
+                    "completed": 0,
+                    "total": total,
+                    "workerCount": parallelism,
+                    "error": error,
+                    "timestamp": now_ms(),
+                }),
+            );
+            remove_job(&runtime, &optimization_id);
+            return;
+        }
+        emit_systematic_event(
+            &app,
+            json!({
+                "type": "optimizationRunning",
+                "optimizationId": optimization_id,
+                "status": "running",
+                "completed": 0,
+                "total": total,
+                "workerCount": parallelism,
+                "elapsedMs": 0,
+                "timestamp": now_ms(),
+            }),
+        );
+
+        // Each lane owns one process for its complete lifetime. The immutable
+        // candidate/data vectors are shared by Arc; only the two request
+        // templates are cloned once per lane, so K-lines and contract data are
+        // never fetched or copied once per candidate.
+        let shared_candidates = Arc::new(candidates);
+        let shared_definition = Arc::new(base_definition);
+        let shared_request = Arc::new(base_request);
+        let shared_interpreter = Arc::new(interpreter);
+        let next_candidate = Arc::new(AtomicUsize::new(0));
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
         let mut completed = 0_usize;
         let mut succeeded = 0_usize;
         let mut failures = Vec::new();
-        let mut tasks = tokio::task::JoinSet::new();
+        let mut lane_tasks = Vec::with_capacity(parallelism);
+        for _ in 0..parallelism {
+            let lane_candidates = shared_candidates.clone();
+            let lane_definition = shared_definition.clone();
+            let lane_request = shared_request.clone();
+            let lane_interpreter = shared_interpreter.clone();
+            let lane_next = next_candidate.clone();
+            let lane_control = control.clone();
+            let lane_id = optimization_id.clone();
+            let lane_sender = sender.clone();
+            let lane_slots = runtime.backtest_slots.clone();
+            lane_tasks.push(tauri::async_runtime::spawn(async move {
+                // A queued optimization must remain cancellable even when
+                // ordinary backtests currently occupy the shared pool.
+                let permit = loop {
+                    if lane_control.cancellation_token().is_cancelled() {
+                        return Ok::<(), String>(());
+                    }
+                    tokio::select! {
+                        permit = lane_slots.clone().acquire_owned() => {
+                            break permit.map_err(|_| "Backtest worker pool is unavailable".to_string())?;
+                        }
+                        _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+                    }
+                };
+                tokio::task::spawn_blocking(move || {
+                    run_optimization_lane(
+                        lane_next,
+                        lane_candidates,
+                        lane_definition,
+                        lane_interpreter,
+                        lane_request,
+                        split_index,
+                        lane_id,
+                        lane_control,
+                        lane_sender,
+                    );
+                    drop(permit);
+                    Ok::<(), String>(())
+                })
+                .await
+                .map_err(|error| format!("Optimization worker join failed: {error}"))??;
+                Ok::<(), String>(())
+            }));
+        }
+        drop(sender);
 
-        while next_candidate < candidates.len() || !tasks.is_empty() {
-            while next_candidate < candidates.len() && tasks.len() < parallelism {
-                let index = next_candidate;
-                next_candidate += 1;
-                let parameters = candidates[index].clone();
-                let candidate_definition = base_definition.clone();
-                let candidate_request = base_request.clone();
-                let candidate_interpreter = interpreter.clone();
-                let candidate_slots = slots.clone();
-                let optimization_label = optimization_id.clone();
-                tasks.spawn(async move {
-                    let result = match candidate_slots.acquire_owned().await {
-                        Ok(_permit) => tokio::task::spawn_blocking(move || {
-                            evaluate_optimization_candidate(
-                                index,
-                                parameters,
-                                candidate_definition,
-                                candidate_interpreter,
-                                candidate_request,
-                                split_index,
-                                &optimization_label,
-                            )
-                        })
-                        .await
-                        .map_err(|error| format!("Optimization worker join failed: {error}"))
-                        .and_then(|result| result),
-                        Err(_) => Err("Backtest worker pool is unavailable".to_string()),
-                    };
-                    (index, result)
-                });
+        while let Some(outcome) = receiver.recv().await {
+            record_optimization_outcome(
+                &app,
+                &optimization_id,
+                outcome,
+                &mut completed,
+                &mut succeeded,
+                &mut failures,
+                &control,
+                total,
+                started_at,
+                parallelism,
+            )
+            .await;
+        }
+        for task in lane_tasks {
+            match task.await {
+                Ok(Ok(())) => {}
+                Ok(Err(error)) => failures.push(error),
+                Err(error) => failures.push(format!("Optimization lane join failed: {error}")),
             }
-
-            let Some(outcome) = tasks.join_next().await else { break; };
-            completed += 1;
-            let (candidate_index, result) = match outcome {
-                Ok(result) => result,
-                Err(error) => (
-                    completed.saturating_sub(1),
-                    Err(format!("Optimization task join failed: {error}")),
-                ),
-            };
-            let app_for_persist = app.clone();
-            let optimization_for_persist = optimization_id.clone();
-            let error_for_record = result.as_ref().err().cloned();
-            let persist = run_systematic_blocking(move || {
-                let conn = open_database(&app_for_persist)?;
-                match result {
-                    Ok(candidate) => {
-                        conn.execute(
-                            "UPDATE systematic_optimization_candidates
-                             SET status='completed',train_metrics_json=?3,validation_metrics_json=?4,
-                                 validation_calmar=?5,updated_at=?6
-                             WHERE optimization_id=?1 AND candidate_index=?2",
-                            params![
-                                optimization_for_persist,
-                                candidate.index as i64,
-                                serde_json::to_string(&candidate.train_metrics).map_err(|error| error.to_string())?,
-                                serde_json::to_string(&candidate.validation_metrics).map_err(|error| error.to_string())?,
-                                candidate.validation_calmar,
-                                now_ms(),
-                            ],
-                        ).map_err(|error| error.to_string())?;
-                    }
-                    Err(error) => {
-                        conn.execute(
-                            "UPDATE systematic_optimization_candidates
-                             SET status='failed',error=?3,updated_at=?4
-                             WHERE optimization_id=?1 AND candidate_index=?2",
-                            params![optimization_for_persist, candidate_index as i64, truncate_text(&error, 2_000), now_ms()],
-                        ).map_err(|error| error.to_string())?;
-                    }
-                }
-                conn.execute(
-                    "UPDATE systematic_optimizations SET completed_count=?2,updated_at=?3 WHERE id=?1",
-                    params![optimization_for_persist, completed as i64, now_ms()],
-                ).map_err(|error| error.to_string())?;
-                Ok(())
-            }).await;
-            if let Err(error) = persist { failures.push(error); }
-            if let Some(error) = error_for_record { failures.push(error); } else { succeeded += 1; }
-            emit_systematic_event(&app, json!({"type":"optimizationProgress","optimizationId":optimization_id,"completed":completed,"total":candidates.len(),"timestamp":now_ms()}));
         }
 
-        let app_for_finish = app.clone();
-        let optimization_for_finish = optimization_id.clone();
-        let final_error = if succeeded == 0 {
-            Some(truncate_text(&failures.join("; "), 2_000))
+        let cancelled = control.cancellation_token().is_cancelled();
+        let status = if cancelled {
+            "cancelled"
+        } else if completed == total && succeeded > 0 {
+            "completed"
+        } else {
+            "failed"
+        };
+        let final_error = if cancelled {
+            Some("Optimization cancelled".to_string())
+        } else if status == "failed" {
+            Some(truncate_text(
+                &if failures.is_empty() {
+                    "Optimization workers stopped before all candidates completed".to_string()
+                } else {
+                    failures.join("; ")
+                },
+                2_000,
+            ))
         } else {
             None
         };
-        let _ = run_systematic_blocking(move || {
-            let conn = open_database(&app_for_finish)?;
-            let best: Option<(String, f64)> = conn.query_row(
-                "SELECT parameters_json,validation_calmar
-                 FROM systematic_optimization_candidates
-                 WHERE optimization_id=?1 AND status='completed'
-                 ORDER BY validation_calmar DESC,candidate_index ASC LIMIT 1",
-                [&optimization_for_finish],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            ).optional().map_err(|error| error.to_string())?;
-            let status = if best.is_some() { "completed" } else { "failed" };
+        let terminal = persist_optimization_terminal_state(
+            &app,
+            &optimization_id,
+            total,
+            completed,
+            succeeded,
+            parallelism,
+            started_at,
+            status,
+            final_error.clone(),
+        )
+        .await;
+        if let Err(error) = terminal {
+            failures.push(error);
+        }
+        match status {
+            "cancelled" => control.cancel_complete(),
+            "completed" => control.complete(),
+            _ => control.fail(),
+        }
+        let elapsed_ms = now_ms().saturating_sub(started_at).max(0);
+        emit_systematic_event(
+            &app,
+            json!({
+                "type": "optimizationFinished",
+                "optimizationId": optimization_id,
+                "status": status,
+                "completed": completed,
+                "total": total,
+                "workerCount": parallelism,
+                "elapsedMs": elapsed_ms,
+                "estimatedRemainingMs": 0,
+                "error": final_error,
+                "timestamp": now_ms(),
+            }),
+        );
+        remove_job(&runtime, &optimization_id);
+    });
+}
+
+#[derive(Debug)]
+struct OptimizationCandidateOutcome {
+    index: usize,
+    result: Result<OptimizationCandidateResult, String>,
+}
+
+fn run_optimization_lane(
+    next_candidate: Arc<AtomicUsize>,
+    candidates: Arc<Vec<Value>>,
+    base_definition: Arc<PythonStrategyDefinition>,
+    interpreter: Arc<PathBuf>,
+    base_request: Arc<BacktestRequest>,
+    split_index: usize,
+    optimization_id: String,
+    control: BacktestJobControl,
+    sender: tokio::sync::mpsc::UnboundedSender<OptimizationCandidateOutcome>,
+) {
+    let position_sizing = Some(BacktestPositionSizing {
+        sizing: base_request.position_sizing,
+        contract: base_request.contract,
+        leverage: base_request.margin.leverage,
+    });
+    let mut runner = match LocalPythonStrategyRunner::launch_with_sizing(
+        LocalPythonBacktestSpec {
+            interpreter: (*interpreter).clone(),
+            definition: (*base_definition).clone(),
+        },
+        &base_request.data_snapshot_id,
+        position_sizing,
+    ) {
+        Ok(runner) => runner,
+        Err(error) => {
+            // Report every candidate claimed by this lane as failed so the
+            // supervisor can advance progress instead of leaving rows queued.
+            let message = error.to_string();
+            loop {
+                if control.cancellation_token().is_cancelled() {
+                    break;
+                }
+                let index = next_candidate.fetch_add(1, Ordering::AcqRel);
+                if index >= candidates.len() {
+                    break;
+                }
+                if sender
+                    .send(OptimizationCandidateOutcome {
+                        index,
+                        result: Err(message.clone()),
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
+            return;
+        }
+    };
+
+    // These two owned request templates are built once per lane. Every
+    // candidate changes only its run id and strategy parameters; the loaded
+    // K-line window, funding data, contract rules, and execution assumptions
+    // stay in memory for the entire lane.
+    let mut train_request = (*base_request).clone();
+    train_request.bars = base_request.bars[..split_index].to_vec();
+    let mut validation_request = (*base_request).clone();
+    validation_request.preload_bars = split_index;
+    let train_bars: Arc<[ClosedBar]> = Arc::from(train_request.bars.clone());
+    let validation_bars: Arc<[ClosedBar]> = Arc::from(validation_request.bars.clone());
+
+    loop {
+        if control.cancellation_token().is_cancelled() {
+            break;
+        }
+        let index = next_candidate.fetch_add(1, Ordering::AcqRel);
+        if index >= candidates.len() {
+            break;
+        }
+        let mut definition = (*base_definition).clone();
+        definition.parameters = candidates[index].clone();
+        let result = evaluate_optimization_candidate_with_runner(
+            index,
+            definition,
+            &mut runner,
+            &mut train_request,
+            &mut validation_request,
+            &train_bars,
+            &validation_bars,
+            &optimization_id,
+            &control.cancellation_token(),
+        );
+        if sender
+            .send(OptimizationCandidateOutcome { index, result })
+            .is_err()
+        {
+            break;
+        }
+    }
+    runner.shutdown();
+}
+
+async fn record_optimization_outcome(
+    app: &tauri::AppHandle,
+    optimization_id: &str,
+    outcome: OptimizationCandidateOutcome,
+    completed: &mut usize,
+    succeeded: &mut usize,
+    failures: &mut Vec<String>,
+    control: &BacktestJobControl,
+    total: usize,
+    started_at: i64,
+    worker_count: usize,
+) {
+    *completed = completed.saturating_add(1);
+    control.record_progress(*completed as u64);
+    let candidate_index = outcome.index;
+    let succeeded_candidate = outcome.result.is_ok();
+    let error_for_record = outcome.result.as_ref().err().cloned();
+    let cancelled = control.cancellation_token().is_cancelled();
+    let candidate_status = if cancelled { "cancelled" } else { "failed" };
+    let persist = run_systematic_blocking({
+        let app = app.clone();
+        let optimization_id = optimization_id.to_string();
+        move || {
+            let conn = open_database(&app)?;
+            match outcome.result {
+                Ok(candidate) => {
+                    conn.execute(
+                        "UPDATE systematic_optimization_candidates
+                         SET status='completed',train_metrics_json=?3,validation_metrics_json=?4,
+                             validation_calmar=?5,updated_at=?6
+                         WHERE optimization_id=?1 AND candidate_index=?2",
+                        params![
+                            optimization_id,
+                            candidate.index as i64,
+                            serde_json::to_string(&candidate.train_metrics).map_err(|error| error.to_string())?,
+                            serde_json::to_string(&candidate.validation_metrics).map_err(|error| error.to_string())?,
+                            candidate.validation_calmar,
+                            now_ms(),
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+                Err(error) => {
+                    conn.execute(
+                        "UPDATE systematic_optimization_candidates
+                         SET status=?3,error=?4,updated_at=?5
+                         WHERE optimization_id=?1 AND candidate_index=?2",
+                        params![
+                            optimization_id,
+                            candidate_index as i64,
+                            candidate_status,
+                            truncate_text(&error, 2_000),
+                            now_ms(),
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+                }
+            }
+            Ok(())
+        }
+    })
+    .await;
+    if let Err(error) = persist {
+        failures.push(error);
+    }
+    if let Some(error) = error_for_record {
+        failures.push(error);
+    } else if succeeded_candidate {
+        *succeeded = succeeded.saturating_add(1);
+    }
+
+    let elapsed_ms = now_ms().saturating_sub(started_at).max(0);
+    let estimated_remaining_ms = if *completed > 0 && *completed < total {
+        let remaining = total.saturating_sub(*completed) as u128;
+        let estimate = (elapsed_ms as u128)
+            .saturating_mul(remaining)
+            .checked_div(*completed as u128)
+            .unwrap_or(0)
+            .min(i64::MAX as u128) as i64;
+        Some(estimate)
+    } else {
+        None
+    };
+    let completed_count = *completed;
+    let _ = run_systematic_blocking({
+        let app = app.clone();
+        let optimization_id = optimization_id.to_string();
+        move || {
+            let conn = open_database(&app)?;
+            conn.execute(
+                "UPDATE systematic_optimizations
+                 SET completed_count=?2,elapsed_ms=?3,estimated_remaining_ms=?4,
+                     updated_at=?5 WHERE id=?1",
+                params![
+                    optimization_id,
+                    completed_count as i64,
+                    elapsed_ms,
+                    estimated_remaining_ms,
+                    now_ms(),
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+            Ok(())
+        }
+    })
+    .await;
+    emit_systematic_event(
+        app,
+        json!({
+            "type": "optimizationProgress",
+            "optimizationId": optimization_id,
+            "status": if cancelled { "cancelling" } else { "running" },
+            "completed": completed_count,
+            "total": total,
+            "workerCount": worker_count,
+            "elapsedMs": elapsed_ms,
+            "estimatedRemainingMs": estimated_remaining_ms,
+            "timestamp": now_ms(),
+        }),
+    );
+}
+
+async fn persist_optimization_terminal_state(
+    app: &tauri::AppHandle,
+    optimization_id: &str,
+    total: usize,
+    completed: usize,
+    succeeded: usize,
+    worker_count: usize,
+    started_at: i64,
+    requested_status: &str,
+    requested_error: Option<String>,
+) -> Result<(), String> {
+    let optimization_id = optimization_id.to_string();
+    let requested_status = requested_status.to_string();
+    run_systematic_blocking({
+        let app = app.clone();
+        move || {
+            let conn = open_database(&app)?;
+            let cancelled = requested_status == "cancelled";
+            let residual_status = if cancelled { "cancelled" } else { "failed" };
+            if completed < total {
+                conn.execute(
+                    "UPDATE systematic_optimization_candidates
+                     SET status=?2,error=COALESCE(error,?3),updated_at=?4
+                     WHERE optimization_id=?1 AND status IN ('queued','running','cancelling')",
+                    params![
+                        optimization_id,
+                        residual_status,
+                        if cancelled { "Optimization cancelled" } else { "Optimization worker stopped before this candidate completed" },
+                        now_ms(),
+                    ],
+                )
+                .map_err(|error| error.to_string())?;
+            }
+            let best: Option<(String, f64)> = conn
+                .query_row(
+                    "SELECT parameters_json,validation_calmar
+                     FROM systematic_optimization_candidates
+                     WHERE optimization_id=?1 AND status='completed'
+                     ORDER BY validation_calmar DESC,candidate_index ASC LIMIT 1",
+                    [&optimization_id],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?;
+            let baseline_validation_calmar: Option<f64> = conn
+                .query_row(
+                    "SELECT validation_calmar FROM systematic_optimization_candidates
+                     WHERE optimization_id=?1 AND candidate_index=0 AND status='completed'",
+                    [&optimization_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(|error| error.to_string())?
+                .flatten();
+            let status = if cancelled {
+                "cancelled"
+            } else if completed == total && succeeded > 0 && best.is_some() {
+                "completed"
+            } else {
+                "failed"
+            };
+            let error = if status == "cancelled" {
+                requested_error.or_else(|| Some("Optimization cancelled".to_string()))
+            } else if status == "failed" {
+                requested_error.or_else(|| Some("Optimization did not complete all candidates".to_string()))
+            } else {
+                None
+            };
+            let finished_at = now_ms();
+            let elapsed_ms = finished_at.saturating_sub(started_at).max(0);
             conn.execute(
                 "UPDATE systematic_optimizations
                  SET status=?2,best_parameters_json=?3,best_validation_calmar=?4,error=?5,
-                     finished_at=?6,updated_at=?6 WHERE id=?1",
+                     baseline_validation_calmar=?6,started_at=COALESCE(started_at,?7),
+                     elapsed_ms=?8,estimated_remaining_ms=NULL,worker_count=?9,
+                     finished_at=?10,updated_at=?10 WHERE id=?1",
                 params![
-                    optimization_for_finish,
+                    optimization_id,
                     status,
                     best.as_ref().map(|item| item.0.as_str()),
                     best.as_ref().map(|item| item.1),
-                    final_error,
-                    now_ms(),
+                    error,
+                    baseline_validation_calmar,
+                    started_at,
+                    elapsed_ms,
+                    worker_count as i64,
+                    finished_at,
                 ],
-            ).map_err(|error| error.to_string())?;
+            )
+            .map_err(|error| error.to_string())?;
             Ok(())
-        }).await;
-    });
+        }
+    })
+    .await
 }
 
 #[derive(Debug)]
@@ -5742,25 +6546,34 @@ struct OptimizationCandidateResult {
     validation_calmar: f64,
 }
 
-fn evaluate_optimization_candidate(
+fn evaluate_optimization_candidate_with_runner(
     index: usize,
-    parameters: Value,
-    mut definition: PythonStrategyDefinition,
-    interpreter: PathBuf,
-    base_request: BacktestRequest,
-    split_index: usize,
+    definition: PythonStrategyDefinition,
+    runner: &mut LocalPythonStrategyRunner,
+    train_request: &mut BacktestRequest,
+    validation_request: &mut BacktestRequest,
+    train_bars: &Arc<[ClosedBar]>,
+    validation_bars: &Arc<[ClosedBar]>,
     optimization_id: &str,
+    cancellation: &desic_systematic::CancellationToken,
 ) -> Result<OptimizationCandidateResult, String> {
-    definition.parameters = parameters;
-    let mut train_request = base_request.clone();
     train_request.run_id = format!("{optimization_id}-train-{index}");
-    train_request.bars = base_request.bars[..split_index].to_vec();
-    let mut validation_request = base_request;
     validation_request.run_id = format!("{optimization_id}-validation-{index}");
     // The complete prefix is visible only as warm-up. Metrics begin at the 30% validation boundary.
-    validation_request.preload_bars = split_index;
-    let train_report = run_python_backtest_once(&interpreter, definition.clone(), &train_request)?;
-    let validation_report = run_python_backtest_once(&interpreter, definition, &validation_request)?;
+    let train_report = run_python_backtest_with_runner(
+        runner,
+        &definition,
+        train_request,
+        train_bars,
+        cancellation,
+    )?;
+    let validation_report = run_python_backtest_with_runner(
+        runner,
+        &definition,
+        validation_request,
+        validation_bars,
+        cancellation,
+    )?;
     let validation_calmar = if validation_report.metrics.closed_trade_count >= 10
         && validation_report.metrics.max_drawdown_pct > 0.0
     {
@@ -5777,20 +6590,32 @@ fn evaluate_optimization_candidate(
     })
 }
 
-fn run_python_backtest_once(interpreter: &Path, definition: PythonStrategyDefinition, request: &BacktestRequest) -> Result<BacktestReport, String> {
-    let mut strategy = LocalPythonStrategyRunner::launch_with_sizing(
-        LocalPythonBacktestSpec { interpreter: interpreter.to_path_buf(), definition },
-        &request.data_snapshot_id,
-        Some(BacktestPositionSizing {
-            sizing: request.position_sizing,
-            contract: request.contract,
-            leverage: request.margin.leverage,
-        }),
-    ).map_err(|error| error.to_string())?;
-    let control = BacktestJobControl::new(request.bars.len() as u64);
-    let result = BacktestEngine::run_stateful_with_progress(request, &mut strategy, &control.cancellation_token(), |_done, _total| {});
-    strategy.shutdown();
-    result.map(|value| value.report).map_err(|error| error.to_string())
+fn run_python_backtest_with_runner(
+    runner: &mut LocalPythonStrategyRunner,
+    definition: &PythonStrategyDefinition,
+    request: &BacktestRequest,
+    shared_bars: &Arc<[ClosedBar]>,
+    cancellation: &desic_systematic::CancellationToken,
+) -> Result<BacktestReport, String> {
+    if cancellation.is_cancelled() {
+        return Err("Optimization cancelled".to_string());
+    }
+    runner
+        .load_definition(definition)
+        .map_err(|error| error.to_string())?;
+    let result = BacktestEngine::run_stateful_with_progress_shared_bars(
+        request,
+        shared_bars.clone(),
+        runner,
+        cancellation,
+        |_done, _total| {},
+    )
+    .map(|value| value.report)
+    .map_err(|error| error.to_string())?;
+    if cancellation.is_cancelled() {
+        return Err("Optimization cancelled".to_string());
+    }
+    Ok(result)
 }
 
 fn remove_job(runtime: &SystematicRuntime, run_id: &str) {
@@ -5902,12 +6727,11 @@ fn persist_backtest_running(app: &tauri::AppHandle, run_id: &str) -> Result<(), 
     Ok(())
 }
 
-fn persist_backtest_progress(
-    app: &tauri::AppHandle,
+fn persist_backtest_progress_on(
+    conn: &Connection,
     run_id: &str,
     progress_pct: f64,
 ) -> Result<(), String> {
-    let conn = open_database(app)?;
     conn.execute(
         "UPDATE systematic_backtests
          SET progress_pct=MAX(progress_pct,?2), updated_at=?3
@@ -5917,6 +6741,7 @@ fn persist_backtest_progress(
     .map_err(|error| error.to_string())?;
     Ok(())
 }
+
 
 fn backtest_timing_value(
     run: &desic_systematic::BacktestRunResult,
@@ -7070,14 +7895,31 @@ fn load_backtest_page(
     let total_pages = total.div_ceil(usize::from(page_size)).max(1) as u32;
     let page = requested_page.max(1).min(total_pages);
     let offset = i64::from(page.saturating_sub(1)) * i64::from(page_size);
+    // Page the IDs first, then join back for the wide columns.
+    //
+    // `report_json` sits at column index 9, ahead of `metrics_json`,
+    // `equity_preview_json` and `timing_json`. SQLite stores a row compactly, so
+    // reading any later column has to walk past `report_json`'s overflow pages.
+    // Runs recorded before the report-slimming work carry 100-270 MB there, and
+    // sorting the joined rows directly made this query touch those pages for
+    // every candidate row: 1.8 s on a cold cache to return 0.07 MB. Selecting
+    // the page keys from the narrow index first keeps the overflow reads down to
+    // the rows actually returned (measured 1.81 s -> 0.39 s, byte-identical
+    // results).
     let mut statement = conn
         .prepare(
             "SELECT b.id,b.strategy_id,COALESCE(s.name,b.strategy_id),b.strategy_version,b.status,b.progress_pct,b.inst_id,
                     b.data_snapshot_id,b.bar_count,b.created_at,b.started_at,b.finished_at,b.error,
                     b.metrics_json,b.equity_preview_json,b.timing_json
-             FROM systematic_backtests b
-             INNER JOIN systematic_strategies s ON s.id=b.strategy_id AND s.kind='python'
-             ORDER BY b.created_at DESC LIMIT ?1 OFFSET ?2",
+             FROM (
+                 SELECT b2.id AS id, b2.created_at AS created_at
+                 FROM systematic_backtests b2
+                 INNER JOIN systematic_strategies s2 ON s2.id=b2.strategy_id AND s2.kind='python'
+                 ORDER BY b2.created_at DESC LIMIT ?1 OFFSET ?2
+             ) picked
+             INNER JOIN systematic_backtests b ON b.id=picked.id
+             INNER JOIN systematic_strategies s ON s.id=b.strategy_id
+             ORDER BY picked.created_at DESC",
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
@@ -7097,16 +7939,26 @@ fn load_backtest_page(
 
 fn load_optimization_views(conn: &Connection) -> Result<Vec<SystematicOptimizationView>, String> {
     let mut statement = conn.prepare(
-        "SELECT id,strategy_id,inst_id,status,candidate_count,completed_count,train_end_at,validation_start_at,validation_end_at,best_parameters_json,best_validation_calmar,created_at,finished_at,error FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30"
+        "SELECT id,strategy_id,inst_id,status,candidate_count,completed_count,
+                strategy_version,candidate_budget,sampling_mode,worker_count,
+                train_end_at,validation_start_at,validation_end_at,best_parameters_json,
+                best_validation_calmar,baseline_validation_calmar,created_at,finished_at,error,
+                started_at,elapsed_ms,estimated_remaining_ms
+         FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30"
     ).map_err(|error| error.to_string())?;
     let rows = statement.query_map([], |row| {
-        let best_parameters_json: Option<String> = row.get(9)?;
+        let best_parameters_json: Option<String> = row.get(13)?;
         Ok(SystematicOptimizationView {
             id: row.get(0)?, strategy_id: row.get(1)?, inst_id: row.get(2)?, status: row.get(3)?,
             candidate_count: row.get::<_, i64>(4)?.max(0) as usize, completed_count: row.get::<_, i64>(5)?.max(0) as usize,
-            train_end_at: row.get(6)?, validation_start_at: row.get(7)?, validation_end_at: row.get(8)?,
-            best_parameters: best_parameters_json.and_then(|value| serde_json::from_str(&value).ok()), best_validation_calmar: row.get(10)?,
-            created_at: row.get(11)?, finished_at: row.get(12)?, error: row.get(13)?,
+            strategy_version: row.get::<_, Option<i64>>(6)?.map(|value| value.max(1) as u32),
+            candidate_budget: row.get::<_, Option<i64>>(7)?.map(|value| value.max(1) as usize),
+            sampling_mode: row.get(8)?,
+            worker_count: row.get::<_, Option<i64>>(9)?.map(|value| value.max(1) as usize),
+            train_end_at: row.get(10)?, validation_start_at: row.get(11)?, validation_end_at: row.get(12)?,
+            best_parameters: best_parameters_json.and_then(|value| serde_json::from_str(&value).ok()), best_validation_calmar: row.get(14)?, baseline_validation_calmar: row.get(15)?,
+            created_at: row.get(16)?, finished_at: row.get(17)?, error: row.get(18)?,
+            started_at: row.get(19)?, elapsed_ms: row.get(20)?, estimated_remaining_ms: row.get(21)?,
         })
     }).map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
@@ -10574,11 +11426,37 @@ impl LocalPythonStrategyRunner {
             timing: PythonRunnerTiming::default(),
         };
         runner.wait_for_ready()?;
-        let loaded = runner.request(
+        runner.load_definition(&specification.definition)?;
+        Ok(runner)
+    }
+
+    /// Reloads one immutable strategy definition inside the existing Python
+    /// process. The private runtime resets its namespace, market/portfolio
+    /// caches, and lifecycle state for every `load`, while the Rust cursor is
+    /// reset here before the first event of the new simulation.
+    fn load_definition(
+        &mut self,
+        definition: &PythonStrategyDefinition,
+    ) -> Result<(), SystematicError> {
+        self.handlers.clear();
+        self.action_sites.clear();
+        self.market_intervals = STRATEGY_TIMEFRAMES
+            .iter()
+            .map(|(interval, _)| (*interval).to_string())
+            .collect();
+        self.started = false;
+        self.initial_market_sent = false;
+        self.market_series = PythonMarketSeriesCursor::default();
+        self.portfolio_ledger = PythonPortfolioLedgerCursor::default();
+        self.adaptive_no_action_batch_size = 1;
+        self.direct_empty_no_action_streak = 0;
+        self.timing = PythonRunnerTiming::default();
+
+        let loaded = self.request(
             "load",
             json!({
-                "source": specification.definition.source,
-                "params": specification.definition.parameters,
+                "source": &definition.source,
+                "params": &definition.parameters,
             }),
         )?;
         let handlers = loaded
@@ -10615,16 +11493,15 @@ impl LocalPythonStrategyRunner {
                     .collect()
             });
         if !handlers.iter().any(|handler| handler == "on_bar") {
-            runner.shutdown();
             return Err(python_runtime_error(
                 "A Python backtest strategy must define on_bar(ctx)",
             ));
         }
-        runner.handlers = handlers;
-        runner.action_sites = action_sites;
-        runner.market_intervals = market_intervals;
-        runner.market_series = PythonMarketSeriesCursor::for_intervals(&runner.market_intervals);
-        Ok(runner)
+        self.handlers = handlers;
+        self.action_sites = action_sites;
+        self.market_intervals = market_intervals;
+        self.market_series = PythonMarketSeriesCursor::for_intervals(&self.market_intervals);
+        Ok(())
     }
 
     fn wait_for_ready(&mut self) -> Result<(), SystematicError> {
@@ -11271,6 +12148,10 @@ fn python_event_from_snapshot(
         "asOfMs": snapshot.market.as_of_ms,
         "instrumentId": snapshot.market.inst_id,
         "interval": "1m",
+        // The host already validated field-level shape, chronology, and cutoff
+        // above, so the Python runtime can skip its mirror deep validation and
+        // keep only time monotonicity and future-data invariants.
+        "hostValidated": true,
         "market": {
             "series": series,
         },
@@ -11309,6 +12190,10 @@ fn python_event_from_parts(
         "asOfMs": market.as_of_ms(),
         "instrumentId": market.inst_id(),
         "interval": "1m",
+        // Host-authoritative event: the Python runtime skips mirroring the
+        // field-level validation it already performed and keeps only the
+        // time monotonicity and future-data invariants.
+        "hostValidated": true,
         "market": {
             "series": series,
         },
@@ -14133,6 +15018,9 @@ def on_bar(ctx):
 
     #[test]
     fn optimization_candidates_are_deterministic_and_bounded() {
+        assert_eq!(normalize_optimization_budget(None).expect("default budget"), 100);
+        assert_eq!(normalize_optimization_budget(Some(30)).expect("fast budget"), 30);
+        assert!(normalize_optimization_budget(Some(31)).is_err());
         let mut tuning = BTreeMap::new();
         tuning.insert(
             "fastPeriod".to_string(),
@@ -14158,12 +15046,14 @@ def on_bar(ctx):
             parameters: json!({ "fastPeriod": 10, "stopLossPct": 0.01 }),
             parameter_tuning: tuning,
         };
-        let candidates = optimization_parameter_candidates(&definition).expect("candidate grid");
+        let candidates = optimization_parameter_candidates(&definition, 100, "test", Some(1)).expect("candidate grid").candidates;
         assert_eq!(candidates.len(), 4);
-        assert_eq!(candidates[0]["fastPeriod"], 8.0);
+        assert_eq!(candidates[0]["fastPeriod"], 10.0);
         assert_eq!(candidates[0]["stopLossPct"], 0.01);
-        assert_eq!(candidates[3]["fastPeriod"], 10.0);
-        assert_eq!(candidates[3]["stopLossPct"], 0.02);
+        assert!(candidates.iter().any(|candidate| candidate["fastPeriod"] == 8.0));
+        assert!(candidates.iter().any(|candidate| candidate["stopLossPct"] == 0.02));
+        let repeated = optimization_parameter_candidates(&definition, 100, "test", Some(1)).expect("same candidate grid").candidates;
+        assert_eq!(candidates, repeated);
 
         let mut oversized = definition.clone();
         oversized.parameter_tuning.insert(
@@ -14174,7 +15064,7 @@ def on_bar(ctx):
                 step: 1.0,
             },
         );
-        assert!(optimization_parameter_candidates(&oversized).is_err());
+        assert!(optimization_parameter_candidates(&oversized, 100, "test", Some(1)).is_err());
     }
 
     #[test]
@@ -14638,6 +15528,114 @@ def on_bar(ctx):
 
         // Idempotent: a second pass has nothing left to archive.
         assert_eq!(archive_backtest_series(&conn).expect("archive again"), 0);
+    }
+
+    #[test]
+    fn compacting_legacy_reports_keeps_results_and_spares_recent_runs() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+
+        // A pre-slimming report: one row per bar in every per-bar array, plus the
+        // result fields a user still compares against.
+        let legacy_report = |bars: usize| {
+            let rows = (0..bars)
+                .map(|index| json!({ "timeMs": index as i64 * ONE_MINUTE_MS, "equityUsdt": 10_000.0 }))
+                .collect::<Vec<_>>();
+            json!({
+                "metrics": { "netReturnPct": -8.6, "closedTradeCount": 87 },
+                "statistics": { "annualizedSharpe": -0.84 },
+                "fills": [{ "id": "fill-1" }],
+                "closedTrades": [{ "id": "trade-1" }],
+                "reproducibility": { "dataHash": "abc" },
+                "reportHash": "hash-value",
+                "equityCurve": rows.clone(),
+                "replaySnapshots": rows.clone(),
+                "strategyEvents": rows.clone(),
+                "strategyActions": rows,
+            })
+            .to_string()
+        };
+        // Large enough to clear LEGACY_REPORT_COMPACT_THRESHOLD_BYTES across the
+        // four per-bar arrays.
+        const LEGACY_BARS: usize = 50_000;
+        let big = legacy_report(LEGACY_BARS);
+        assert!(big.len() as i64 > LEGACY_REPORT_COMPACT_THRESHOLD_BYTES);
+
+        let total_runs = RETAINED_BACKTEST_SERIES_RUNS + 3;
+        for index in 0..total_runs {
+            conn.execute(
+                "INSERT INTO systematic_backtests(
+                   id,strategy_id,strategy_version,inst_id,status,progress_pct,data_snapshot_id,
+                   bar_count,request_json,report_json,created_at,updated_at,finished_at
+                 ) VALUES(?1,'s','1','BTC-USDT-SWAP','completed',100.0,'snap',1,'{}',?2,?3,?3,?3)",
+                params![format!("run-{index:03}"), big, index as i64 + 1],
+            )
+            .expect("insert run");
+        }
+        // A running run is never rewritten, even though it is old and large.
+        conn.execute(
+            "INSERT INTO systematic_backtests(
+               id,strategy_id,strategy_version,inst_id,status,progress_pct,data_snapshot_id,
+               bar_count,request_json,report_json,created_at,updated_at
+             ) VALUES('run-live','s','1','BTC-USDT-SWAP','running',10.0,'snap',1,'{}',?1,0,0)",
+            params![big],
+        )
+        .expect("insert live run");
+
+        let compacted = compact_legacy_backtest_reports(&conn).expect("compact");
+        assert_eq!(compacted, 3, "only runs older than the retention window compact");
+
+        let report_of = |id: &str| -> Value {
+            let raw: String = conn
+                .query_row(
+                    "SELECT report_json FROM systematic_backtests WHERE id=?1",
+                    params![id],
+                    |row| row.get(0),
+                )
+                .expect("read report");
+            serde_json::from_str(&raw).expect("parse report")
+        };
+
+        let compacted_report = report_of("run-000");
+        for key in LEGACY_REPORT_PER_BAR_KEYS {
+            assert_eq!(
+                compacted_report[key].as_array().map(Vec::len),
+                Some(0),
+                "{key} must be emptied"
+            );
+        }
+        // The result a user reads stays byte-identical.
+        let original: Value = serde_json::from_str(&big).expect("parse original");
+        for key in [
+            "metrics",
+            "statistics",
+            "fills",
+            "closedTrades",
+            "reproducibility",
+            "reportHash",
+        ] {
+            assert_eq!(compacted_report[key], original[key], "{key} must survive");
+        }
+        // Without this the read path cannot tell an archived run from an empty
+        // one and renders a blank chart instead of an explanation.
+        assert_eq!(
+            compacted_report["equitySeriesBarCount"].as_u64(),
+            Some(LEGACY_BARS as u64)
+        );
+
+        // The newest runs and the in-flight run keep their full reports.
+        assert!(report_of(&format!("run-{:03}", total_runs - 1))["equityCurve"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()));
+        assert!(report_of("run-live")["replaySnapshots"]
+            .as_array()
+            .is_some_and(|rows| !rows.is_empty()));
+
+        // Idempotent: nothing is left to compact on a second pass.
+        assert_eq!(
+            compact_legacy_backtest_reports(&conn).expect("compact again"),
+            0
+        );
     }
 
     #[test]

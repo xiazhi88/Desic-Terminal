@@ -34,6 +34,7 @@ import {
 } from "lucide-react";
 import {
   createSystematicPythonStrategy,
+  cancelSystematicOptimization,
   deleteSystematicBacktest,
   deleteSystematicStrategy,
   deleteSystematicProfile,
@@ -67,6 +68,7 @@ import {
   type SystematicPythonRuntimeView,
   type SystematicPythonParameterTuning,
   type SystematicPythonStrategyDefinition,
+  type SystematicPythonStrategySaveResult,
   type SystematicReplaySnapshot,
   type SystematicProfileSignalsPageView,
   type SystematicProtectionCapabilities,
@@ -108,7 +110,7 @@ type Props = Readonly<{
   openAiStrategyRequest?: { strategyId: string; runId?: string; optimizationId?: string } | null;
 }>;
 
-type Tab = "strategy" | "backtest" | "review" | "profiles" | "signals";
+type Tab = "strategy" | "backtest" | "tuning" | "review" | "profiles" | "signals";
 type BacktestQuickRange = "recentMonth" | "recentThreeMonths" | "recentYear" | "thisYear" | "lastYear" | "yearBeforeLast";
 
 type PythonDraft = {
@@ -245,6 +247,9 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [templatePickerOpen, setTemplatePickerOpen] = useState(false);
   const [startingBacktest, setStartingBacktest] = useState(false);
   const [startingOptimization, setStartingOptimization] = useState(false);
+  const [cancellingOptimizationId, setCancellingOptimizationId] = useState<string | null>(null);
+  const [applyingOptimizationId, setApplyingOptimizationId] = useState<string | null>(null);
+  const [optimizationBudget, setOptimizationBudget] = useState<30 | 100 | 300>(100);
   const [retryingRunId, setRetryingRunId] = useState<string | null>(null);
   const [editingRunId, setEditingRunId] = useState<string | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
@@ -314,11 +319,74 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const runs = backtestPage?.items ?? overview?.backtests ?? [];
   const pythonRuntime = runtimePreparation ?? overview?.pythonRuntime;
 
+  // A refresh must not walk a run's progress backwards. The engine throttles the
+  // progress *row* far more than the event stream, so a freshly loaded page can
+  // legitimately carry a lower percentage than the events already showed. Keep
+  // the higher value for runs that are still in flight; a terminal run always
+  // takes the persisted value, which is authoritative.
+  const mergeBacktestPage = useCallback((next: SystematicBacktestsPageView) => {
+    setBacktestPage((current) => {
+      if (!current) return next;
+      const previous = new Map(current.items.map((item) => [item.id, item]));
+      return {
+        ...next,
+        items: next.items.map((item) => {
+          if (item.status !== "running" && item.status !== "queued" && item.status !== "cancelling") return item;
+          const before = previous.get(item.id);
+          if (!before || before.progressPct <= item.progressPct) return item;
+          return { ...item, progressPct: before.progressPct };
+        }),
+      };
+    });
+  }, []);
+
   useEffect(() => {
     const next = overview?.backtestsPage;
-    if (next) setBacktestPage(next);
-    else if (overview) setBacktestPage({ ...EMPTY_BACKTEST_PAGE, items: overview.backtests, total: overview.backtests.length });
-  }, [overview]);
+    if (next) mergeBacktestPage(next);
+    else if (overview) mergeBacktestPage({ ...EMPTY_BACKTEST_PAGE, items: overview.backtests, total: overview.backtests.length });
+  }, [mergeBacktestPage, overview]);
+
+  // The run row renders `run.progressPct`, which only ever came from the
+  // persisted row. So the percentage could not move until an overview refresh
+  // landed *and* the engine had managed to write that row — and the row write
+  // competes for the same lock the run itself is hammering. The result was a bar
+  // frozen at 0% right up to the completion notification. Apply progress straight
+  // from the event stream instead; the persisted value is the same number and
+  // simply arrives later.
+  useEffect(() => {
+    if (!desktop) return;
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listenSystematicEvents((event) => {
+      if (!active) return;
+      if (event.type !== "backtestProgress" && event.type !== "backtestRunning") return;
+      const runId = event.runId;
+      const pct = event.progressPct;
+      if (!runId || typeof pct !== "number" || !Number.isFinite(pct)) return;
+      const status = event.status;
+      setBacktestPage((current) => {
+        if (!current) return current;
+        let changed = false;
+        const items = current.items.map((item) => {
+          if (item.id !== runId) return item;
+          // Progress never moves backward, so a late event cannot undo a newer one.
+          const nextPct = Math.max(item.progressPct, pct);
+          const nextStatus = status && status !== item.status ? status : item.status;
+          if (nextPct === item.progressPct && nextStatus === item.status) return item;
+          changed = true;
+          return { ...item, progressPct: nextPct, status: nextStatus };
+        });
+        return changed ? { ...current, items } : current;
+      });
+    }).then((next) => {
+      if (!active) next?.();
+      else unlisten = next;
+    });
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, [desktop]);
 
   const loadBacktestPage = useCallback(async (page: number) => {
     if (!desktop) return;
@@ -511,12 +579,32 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     setTab("review");
   }, []);
 
-  const applyOptimization = useCallback((parameters: Record<string, unknown>) => {
-    if (!selectedPython) return;
-    setDraft((current) => ({ ...current, parameters: JSON.stringify(parameters, null, 2) }));
-    setTab("strategy");
-    onNotify({ kind: "info", title: text.optimizationApplied, message: text.optimizationAppliedDetail });
-  }, [onNotify, selectedPython, text]);
+  const applyOptimization = useCallback(async (optimizationId: string, parameters: Record<string, unknown>) => {
+    if (!desktop || !selectedPython) return;
+    const tuning = parseParameterTuning(draft.parameterTuning) ?? {};
+    setApplyingOptimizationId(optimizationId);
+    try {
+      const result = await saveSystematicPythonStrategy({
+        id: selectedPython.id,
+        name: draft.name,
+        description: draft.description,
+        source: draft.source,
+        parameters,
+        parameterTuning: tuning,
+      });
+      if (!result) throw new Error(text.desktopOnlyDetail);
+      setDraft((current) => ({ ...current, parameters: JSON.stringify(parameters, null, 2) }));
+      setBacktestStrategyVersion(result.strategy.version);
+      await refresh();
+      setTab("backtest");
+      const summary = Object.entries(parameters).map(([key, value]) => `${key}=${String(value)}`).join(" · ");
+      onNotify({ kind: "success", title: text.optimizationApplied, message: `${text.optimizationAppliedDetailSaved} · v${result.strategy.version}${summary ? ` · ${summary}` : ""}` });
+    } catch (error) {
+      onNotify({ kind: "error", title: text.strategySaveFailed, message: messageOf(error) });
+    } finally {
+      setApplyingOptimizationId(null);
+    }
+  }, [desktop, draft.description, draft.name, draft.parameterTuning, draft.source, onNotify, refresh, selectedPython, text]);
 
   const deleteStrategy = useCallback(async (strategy: SystematicStrategyView) => {
     if (!desktop) return;
@@ -642,11 +730,11 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     void createPython(template);
   }, [createPython]);
 
-  const savePython = useCallback(async () => {
-    if (!desktop || !selectedPython) return;
+  const savePython = useCallback(async (): Promise<SystematicPythonStrategySaveResult | null> => {
+    if (!desktop || !selectedPython) return null;
     if (hasStrategyNameConflict(strategies, draft.name, selectedPython.id)) {
       onNotify({ kind: "warning", title: text.strategyNameInUse, message: text.strategyNameInUseDetail });
-      return;
+      return null;
     }
     let parameters: Record<string, unknown>;
     let parameterTuning: Record<string, SystematicPythonParameterTuning>;
@@ -659,7 +747,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       parameterTuning = parsedTuning;
     } catch (error) {
       onNotify({ kind: "error", title: text.invalidParameters, message: messageOf(error) });
-      return;
+      return null;
     }
     setSaving(true);
     try {
@@ -679,8 +767,10 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         title: result.createdVersion ? text.strategySaved : text.strategyUnchanged,
         message: result.createdVersion ? text.strategySavedDetail : text.strategyUnchangedDetail,
       });
+      return result;
     } catch (error) {
       onNotify({ kind: "error", title: text.strategySaveFailed, message: messageOf(error) });
+      return null;
     } finally {
       setSaving(false);
     }
@@ -736,10 +826,25 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         endOfRunPolicy: endPolicy
       });
       if (!run) throw new Error(text.desktopOnlyDetail);
-      await refresh();
+      // The command already returned the persisted run, so show it immediately
+      // and let the overview catch up on its own. Awaiting `refresh()` here kept
+      // the button on "queuing" for as long as the overview query took, which on
+      // a large history could outlast the backtest itself: the completion
+      // notification arrived while the button still read "queuing" and the run
+      // was not yet in the list.
+      setBacktestPage((current) => {
+        if (!current) return current;
+        if (current.page !== 1 || current.items.some((item) => item.id === run.id)) return current;
+        return {
+          ...current,
+          items: [run, ...current.items].slice(0, current.pageSize || current.items.length + 1),
+          total: current.total + 1,
+        };
+      });
       setSelectedRunId(run.id);
       setTab("review");
       onNotify({ kind: "info", title: text.backtestQueued, message: `${backtestSymbol} · ${formatLocalizedNumber(run.barCount)} × 1m` });
+      void refresh();
     } catch (error) {
       onNotify({ kind: "error", title: text.backtestFailed, message: backtestErrorMessage(error, text) });
     } finally {
@@ -753,10 +858,27 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     if (!execution || !equity || !preload || !selectedLeverage || !safety || !perEntryBudget || !sameSideTotalBudget || perEntryBudget > sameSideTotalBudget || (backtestPositionSizingMode === "equityPercent" && sameSideTotalBudget > 100) || (startAt && !start) || (endAt && !end) || dateRangeMessage) { onNotify({ kind: "warning", title: text.invalidBacktest, message: dateRangeMessage ?? text.invalidBacktestDetail }); return; }
     setStartingOptimization(true);
     try {
-      const optimization = await startSystematicOptimization({ strategyId: selectedPython.id, instId: backtestSymbol, startAt: start ?? undefined, endAt: end ?? undefined, initialEquityUsdt: equity, preloadBars: preload, execution, leverage: selectedLeverage, marginSafetyMultiplier: safety, positionSizing: { mode: backtestPositionSizingMode, perEntryBudget, sameSideTotalBudget }, endOfRunPolicy: endPolicy });
-      if (!optimization) throw new Error(text.desktopOnlyDetail); await refresh(); onNotify({ kind: "info", title: text.optimizationQueued, message: `${optimization.candidateCount} · ${backtestSymbol}` });
+      const saved = await savePython();
+      if (!saved) return;
+      const optimization = await startSystematicOptimization({ strategyId: saved.strategy.id, strategyVersion: saved.strategy.version, instId: backtestSymbol, startAt: start ?? undefined, endAt: end ?? undefined, initialEquityUsdt: equity, preloadBars: preload, execution, leverage: selectedLeverage, marginSafetyMultiplier: safety, positionSizing: { mode: backtestPositionSizingMode, perEntryBudget, sameSideTotalBudget }, endOfRunPolicy: endPolicy, candidateBudget: optimizationBudget });
+      if (!optimization) throw new Error(text.desktopOnlyDetail); onNotify({ kind: "info", title: text.optimizationQueued, message: `${optimization.candidateCount} · ${backtestSymbol}` }); void refresh();
     } catch (error) { onNotify({ kind: "error", title: text.optimizationFailed, message: backtestErrorMessage(error, text) }); } finally { setStartingOptimization(false); }
-  }, [backtestEndLimitAt, backtestPositionSizingMode, backtestPerEntryBudget, backtestSameSideTotalBudget, backtestSymbol, desktop, endAt, endPolicy, entryFee, entrySlippage, exitFee, exitSlippage, initialEquity, leverage, marginSafetyMultiplier, onNotify, preloadBars, pythonRuntime?.available, refresh, selectedPython, startAt, text]);
+  }, [backtestEndLimitAt, backtestPositionSizingMode, backtestPerEntryBudget, backtestSameSideTotalBudget, backtestSymbol, desktop, endAt, endPolicy, entryFee, entrySlippage, exitFee, exitSlippage, initialEquity, leverage, marginSafetyMultiplier, onNotify, optimizationBudget, preloadBars, pythonRuntime?.available, refresh, savePython, selectedPython, startAt, text]);
+
+  const cancelOptimization = useCallback(async (optimizationId: string) => {
+    if (!desktop || !optimizationId || cancellingOptimizationId) return;
+    setCancellingOptimizationId(optimizationId);
+    try {
+      const view = await cancelSystematicOptimization(optimizationId);
+      if (!view) throw new Error(text.desktopOnlyDetail);
+      await refresh();
+      onNotify({ kind: "info", title: text.optimizationCancelling, message: text.optimizationCancelRequested });
+    } catch (error) {
+      onNotify({ kind: "error", title: text.optimizationCancelFailed, message: messageOf(error) });
+    } finally {
+      setCancellingOptimizationId(null);
+    }
+  }, [cancellingOptimizationId, desktop, onNotify, refresh, text]);
 
   const applyBacktestQuickRange = useCallback((range: BacktestQuickRange) => {
     const safeEndMs = dateTimeInput(backtestEndLimitAt) ?? dateTimeInput(endAt);
@@ -1063,6 +1185,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       <nav className="systematic-strategy-lab__tabs" aria-label={text.workflow}>
         <TabButton active={tab === "strategy"} icon={<Code2 size={14} />} label={text.strategy} onClick={() => setTab("strategy")} />
         <TabButton active={tab === "backtest"} icon={<WalletCards size={14} />} label={text.backtest} onClick={() => setTab("backtest")} />
+        <TabButton active={tab === "tuning"} icon={<SlidersHorizontal size={14} />} label={text.optimization} onClick={() => setTab("tuning")} />
         <TabButton active={tab === "review"} icon={<BarChart3 size={14} />} label={text.review} count={backtestPage?.total ?? runs.length} onClick={() => setTab("review")} />
         <TabButton active={tab === "profiles"} icon={<Bot size={14} />} label={text.profiles} count={overview?.profiles.length} onClick={() => setTab("profiles")} />
         <TabButton active={tab === "signals"} icon={<History size={14} />} label={text.profileSignals} onClick={() => setTab("signals")} />
@@ -1095,6 +1218,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
             onRetryPythonEnvironment={refreshPythonEnvironment}
             bestRunsByStrategy={bestRunsByStrategy}
             onOpenBacktest={openBacktest}
+            onOpenTuning={() => setTab("tuning")}
             onUseVersionForBacktest={(version) => {
               setBacktestStrategyVersion(version);
               setTab("backtest");
@@ -1146,10 +1270,35 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
             onQuickRange={applyBacktestQuickRange}
             onEndPolicy={setEndPolicy}
             onRun={() => void startBacktest()}
-            onOptimize={() => void startOptimization()}
+            onOpenTuning={() => setTab("tuning")}
             onRetryPythonEnvironment={refreshPythonEnvironment}
             optimizations={overview?.optimizations ?? []}
             onApplyOptimization={applyOptimization}
+            onCancelOptimization={cancelOptimization}
+            cancellingOptimizationId={cancellingOptimizationId}
+            applyingOptimizationId={applyingOptimizationId}
+          />
+        ) : null}
+        {tab === "tuning" ? (
+          <TuningView
+            text={text}
+            strategy={selectedPython}
+            draft={draft}
+            selectedSymbol={backtestSymbol}
+            strategyVersion={backtestStrategyVersion ?? selectedStrategy?.version ?? null}
+            budget={optimizationBudget}
+            onBudget={setOptimizationBudget}
+            onDraftChange={setDraft}
+            onStart={() => void startOptimization()}
+            starting={startingOptimization}
+            desktop={desktop}
+            pythonRuntime={pythonRuntime}
+            onOpenBacktest={() => setTab("backtest")}
+            optimizations={(overview?.optimizations ?? []).filter((item) => item.strategyId === selectedPython?.id && item.instId === backtestSymbol)}
+            onApplyOptimization={applyOptimization}
+            onCancelOptimization={cancelOptimization}
+            cancellingOptimizationId={cancellingOptimizationId}
+            applyingOptimizationId={applyingOptimizationId}
           />
         ) : null}
         {tab === "review" ? (
@@ -1233,6 +1382,7 @@ function StrategyView({
   onRetryPythonEnvironment,
   bestRunsByStrategy,
   onOpenBacktest,
+  onOpenTuning,
   onUseVersionForBacktest,
 }: Readonly<{
   text: Copy;
@@ -1256,6 +1406,7 @@ function StrategyView({
   onRetryPythonEnvironment: () => void;
   bestRunsByStrategy: ReadonlyMap<string, SystematicBacktestView>;
   onOpenBacktest: (run: SystematicBacktestView) => void;
+  onOpenTuning: () => void;
   onUseVersionForBacktest: (version: number) => void;
 }>) {
   const runtimeAvailable = Boolean(pythonRuntime?.available);
@@ -1528,12 +1679,9 @@ function StrategyView({
           <div className="systematic-lab__pane-head"><span>{text.strategyParameters}</span></div>
           <div className="systematic-lab-strategy-inspector__params">
             <VisualParameterEditor text={text} value={draft.parameters} onChange={(parameters) => onDraftChange({ ...draft, parameters })} />
-            <ParameterTuningEditor
-              text={text}
-              parameters={draft.parameters}
-              parameterTuning={draft.parameterTuning}
-              onChange={(parameterTuning) => onDraftChange({ ...draft, parameterTuning })}
-            />
+            <button className="systematic-lab__command-button systematic-lab-strategy-inspector__tuning-link" type="button" onClick={onOpenTuning}>
+              <SlidersHorizontal size={13} />{text.configureOptimization}
+            </button>
             {bestRunsByStrategy.get(selectedPython.id) ? <button className="systematic-lab__command-button systematic-lab-strategy-inspector__backtest-link" type="button" onClick={() => onOpenBacktest(bestRunsByStrategy.get(selectedPython.id)!)}><BarChart3 size={13} />{text.openBestBacktest}</button> : null}
           </div>
         </aside>
@@ -1782,6 +1930,155 @@ function VisualParameterEditor({ text, value, onChange }: Readonly<{ text: Copy;
       </div> : null}
     </section>
   );
+}
+
+type OptimizationBudget = 30 | 100 | 300;
+
+function TuningView({
+  text,
+  strategy,
+  draft,
+  selectedSymbol,
+  strategyVersion,
+  budget,
+  onBudget,
+  onDraftChange,
+  onStart,
+  starting,
+  desktop,
+  pythonRuntime,
+  onOpenBacktest,
+  optimizations,
+  onApplyOptimization,
+  onCancelOptimization,
+  cancellingOptimizationId,
+  applyingOptimizationId,
+}: Readonly<{
+  text: Copy;
+  strategy: SystematicStrategyView | null;
+  draft: PythonDraft;
+  selectedSymbol: string;
+  strategyVersion: number | null;
+  budget: OptimizationBudget;
+  onBudget: (value: OptimizationBudget) => void;
+  onDraftChange: (value: PythonDraft) => void;
+  onStart: () => void;
+  starting: boolean;
+  desktop: boolean;
+  pythonRuntime?: SystematicPythonRuntimeView | null;
+  onOpenBacktest: () => void;
+  optimizations: SystematicOverview["optimizations"];
+  onApplyOptimization: (optimizationId: string, parameters: Record<string, unknown>) => void;
+  onCancelOptimization: (optimizationId: string) => void;
+  cancellingOptimizationId: string | null;
+  applyingOptimizationId: string | null;
+}>) {
+  const parameters = parseJsonRecord(draft.parameters);
+  const tuning = parseParameterTuning(draft.parameterTuning) ?? {};
+  const numericParameters = useMemo(() => parameters
+    ? Object.entries(parameters).filter((entry): entry is [string, number] => typeof entry[1] === "number" && Number.isFinite(entry[1]))
+    : [], [parameters]);
+  const recommendations = useMemo(() => recommendedParameterNames(numericParameters.map(([name]) => name)), [numericParameters]);
+  const [advanced, setAdvanced] = useState(false);
+  const hasGeneratedDefaultRanges = numericParameters.length > 0
+    && Object.keys(tuning).length === numericParameters.length
+    && numericParameters.every(([name, value]) => sameTuningRange(tuning[name], defaultTuningForNumber(value)));
+
+  useEffect(() => {
+    if (!strategy || !numericParameters.length || (!hasGeneratedDefaultRanges && Object.keys(tuning).length)) return;
+    const initial = Object.fromEntries(recommendations.map((name) => [name, defaultTuningForNumber(parameters?.[name] as number)]));
+    if (Object.keys(initial).length) onDraftChange({ ...draft, parameterTuning: JSON.stringify(initial, null, 2) });
+  }, [draft.id, draft.parameterTuning, draft.parameters, hasGeneratedDefaultRanges, numericParameters.length, onDraftChange, recommendations, strategy, tuning]);
+
+  const selectedEntries = numericParameters.filter(([name]) => Boolean(tuning[name]));
+  const rangeIssues = selectedEntries.flatMap(([name, value]) => {
+    const range = tuning[name];
+    if (!range || range.min >= range.max || range.step <= 0 || value < range.min || value > range.max) return [name];
+    const steps = (range.max - range.min) / range.step;
+    return Math.abs(steps - Math.round(steps)) > 1e-8 * Math.max(1, Math.abs(steps)) ? [name] : [];
+  });
+  const fullCandidateCount = selectedEntries.reduce((total, [name]) => {
+    const range = tuning[name];
+    if (!range || range.step <= 0 || range.max < range.min) return total;
+    return Math.min(1_000_000, total * (Math.floor((range.max - range.min) / range.step) + 1));
+  }, selectedEntries.length ? 1 : 0);
+  const candidateCount = fullCandidateCount > budget ? budget : fullCandidateCount;
+  const canStart = Boolean(desktop && strategy && pythonRuntime?.available && selectedEntries.length && !rangeIssues.length && candidateCount);
+  const updateTuning = (name: string, field: keyof SystematicPythonParameterTuning, raw: string) => {
+    const value = Number(raw);
+    if (!Number.isFinite(value)) return;
+    const current = tuning[name] ?? defaultTuningForNumber(parameters?.[name] as number);
+    onDraftChange({ ...draft, parameterTuning: JSON.stringify({ ...tuning, [name]: { ...current, [field]: value } }, null, 2) });
+  };
+  const toggleParameter = (name: string, checked: boolean) => {
+    const next = { ...tuning };
+    if (checked) next[name] = next[name] ?? defaultTuningForNumber(parameters?.[name] as number);
+    else delete next[name];
+    onDraftChange({ ...draft, parameterTuning: JSON.stringify(next, null, 2) });
+  };
+
+  if (!strategy) {
+    return <EmptyState icon={<SlidersHorizontal size={20} />} title={text.noStrategy} detail={text.noStrategyDetail} />;
+  }
+  return (
+    <div className="systematic-lab-tuning-view">
+      <main className="systematic-lab-tuning-main">
+        <div className="systematic-lab-view-heading">
+          <div>
+            <span className="systematic-lab__eyebrow">{text.optimization}</span>
+            <h2>{text.tuningWorkbench}</h2>
+            <p>{text.tuningWorkbenchHint}</p>
+          </div>
+          <button className="systematic-lab__command-button" type="button" onClick={onOpenBacktest}><WalletCards size={13} />{text.editBacktestSettings}</button>
+        </div>
+        <section className="systematic-lab-tuning-context" aria-label={text.tuningContext}>
+          <strong>{strategy.name}</strong><span>v{strategyVersion ?? strategy.version}</span><span>{selectedSymbol}</span><span>{text.immutableResearchVersion}</span>
+        </section>
+        <section className="systematic-lab-tuning-section">
+          <div className="systematic-lab-tuning-section__head"><div><strong>{text.recommendedParameters}</strong><small>{text.recommendedParametersHint}</small></div><span>{selectedEntries.length} / {numericParameters.length}</span></div>
+          <div className="systematic-lab-tuning-parameters">
+            {numericParameters.map(([name, value]) => {
+              const selected = Boolean(tuning[name]);
+              const range = tuning[name] ?? defaultTuningForNumber(value);
+              const issue = selected && rangeIssues.includes(name);
+              return <div className={clsx("systematic-lab-tuning-parameter", selected && "is-selected", issue && "is-invalid")} key={name}>
+                <label className="systematic-lab-tuning-parameter__toggle"><input type="checkbox" checked={selected} onChange={(event) => toggleParameter(name, event.target.checked)} /><span /></label>
+                <div className="systematic-lab-tuning-parameter__name"><strong>{name}</strong>{recommendations.includes(name) ? <small>{text.recommended}</small> : null}</div>
+                <strong className="systematic-lab-tuning-parameter__current">{formatLocalizedNumber(value, { maximumFractionDigits: 6 })}</strong>
+                <span className="systematic-lab-tuning-parameter__range">{formatLocalizedNumber(range.min, { maximumFractionDigits: 6 })} - {formatLocalizedNumber(range.max, { maximumFractionDigits: 6 })} · {formatLocalizedNumber(range.step, { maximumFractionDigits: 6 })}</span>
+                {issue ? <small className="systematic-lab-tuning-parameter__error">{text.tuningRangeNeedsFix}</small> : null}
+                {advanced && selected ? <div className="systematic-lab-tuning-parameter__fields">
+                  {(["min", "max", "step"] as const).map((field) => <label key={field}><span>{text[`tuning${field[0].toUpperCase()}${field.slice(1)}` as "tuningMin" | "tuningMax" | "tuningStep"]}</span><input type="number" step="any" value={String(range[field])} onChange={(event) => updateTuning(name, field, event.target.value)} /></label>)}
+                </div> : null}
+              </div>;
+            })}
+            {!numericParameters.length ? <div className="systematic-lab-tuning-empty"><strong>{text.noNumericParameters}</strong><span>{text.noNumericParametersHint}</span></div> : null}
+          </div>
+          {numericParameters.length ? <button className="systematic-lab-tuning-advanced" type="button" onClick={() => setAdvanced((value) => !value)}><ChevronDown size={13} className={advanced ? "is-open" : ""} />{advanced ? text.hideAdvancedRanges : text.showAdvancedRanges}</button> : null}
+        </section>
+        <section className="systematic-lab-tuning-section">
+          <div className="systematic-lab-tuning-section__head"><div><strong>{text.tuningIntensity}</strong><small>{text.tuningIntensityHint}</small></div><span>{candidateCount ? `${candidateCount} ${text.candidates}` : "--"}</span></div>
+          <div className="systematic-lab-tuning-budgets" role="group" aria-label={text.tuningIntensity}>
+            {([30, 100, 300] as const).map((value) => <button key={value} type="button" className={clsx("systematic-lab-tuning-budget", budget === value && "is-active")} onClick={() => onBudget(value)}><strong>{value === 30 ? text.tuningFast : value === 100 ? text.tuningStandard : text.tuningDeep}</strong><span>{value} {text.candidates}</span></button>)}
+          </div>
+        </section>
+      </main>
+      <aside className="systematic-lab-tuning-summary">
+        <div className="systematic-lab-tuning-summary__head"><span>{text.tuningPlan}</span><strong>{strategy.name}</strong></div>
+        <dl><div><dt>{text.selectedParameters}</dt><dd>{selectedEntries.length}</dd></div><div><dt>{text.candidatePlan}</dt><dd>{fullCandidateCount > budget ? `${budget} · ${text.deterministicSampling}` : `${candidateCount} · ${text.fullGrid}`}</dd></div><div><dt>{text.validationSplit}</dt><dd>70 / 30</dd></div><div><dt>{text.version}</dt><dd>v{strategyVersion ?? strategy.version}</dd></div></dl>
+        <p>{text.tuningSaveHint}</p>
+        <button className="systematic-lab__command-button is-primary systematic-lab-tuning-summary__start" type="button" disabled={!canStart || starting} onClick={onStart}>{starting ? <LoaderCircle size={14} className="is-spinning" /> : <SlidersHorizontal size={14} />}{starting ? text.queuing : text.startTuning}</button>
+        {!desktop ? <small className="systematic-lab-tuning-summary__guard">{text.desktopOnlyDetail}</small> : null}
+      </aside>
+      <div className="systematic-lab-tuning-results"><OptimizationPanel text={text} optimizations={optimizations} onApply={onApplyOptimization} onCancel={onCancelOptimization} cancellingOptimizationId={cancellingOptimizationId} applyingOptimizationId={applyingOptimizationId} /></div>
+    </div>
+  );
+}
+
+function recommendedParameterNames(names: string[]) {
+  const preferred = ["fastPeriod", "slowPeriod", "bandPeriod", "bandWidth", "signalPeriod", "volumeWindow", "atrPeriod"];
+  const safe = names.filter((name) => !/(stop|take|loss|risk|size|margin|leverage)/i.test(name));
+  return preferred.filter((name) => safe.includes(name)).slice(0, 2).concat(safe.filter((name) => !preferred.includes(name)).sort((a, b) => a.localeCompare(b)).slice(0, 2)).slice(0, 2);
 }
 
 function StrategyDevelopmentGuide({
@@ -2825,10 +3122,13 @@ function BacktestView({
   onQuickRange,
   onEndPolicy,
   onRun,
-  onOptimize,
+  onOpenTuning,
   onRetryPythonEnvironment,
   optimizations,
-  onApplyOptimization
+  onApplyOptimization,
+  onCancelOptimization,
+  cancellingOptimizationId,
+  applyingOptimizationId
 }: Readonly<{
   text: Copy;
   strategies: SystematicStrategyView[];
@@ -2873,10 +3173,13 @@ function BacktestView({
   onQuickRange: (range: BacktestQuickRange) => void;
   onEndPolicy: (value: "markToMarket" | "closeAtLastClose") => void;
   onRun: () => void;
-  onOptimize: () => void;
+  onOpenTuning: () => void;
   onRetryPythonEnvironment: () => void;
   optimizations: SystematicOverview["optimizations"];
-  onApplyOptimization: (parameters: Record<string, unknown>) => void;
+  onApplyOptimization: (optimizationId: string, parameters: Record<string, unknown>) => void;
+  onCancelOptimization: (optimizationId: string) => void;
+  cancellingOptimizationId: string | null;
+  applyingOptimizationId: string | null;
 }>) {
   const runtimeAvailable = Boolean(pythonRuntime?.available);
   const contractOptions = useMemo(
@@ -3013,7 +3316,7 @@ function BacktestView({
         <div className="systematic-lab-backtest-config__footer">
           <span>{text.fillModel}</span>
           <div className="systematic-lab__head-actions">
-            {selectedStrategy?.kind === "python" ? <button className="systematic-lab__command-button" type="button" disabled={!canRun} onClick={onOptimize}>{optimizing ? <LoaderCircle size={14} className="is-spinning" /> : <SlidersHorizontal size={14} />}{text.optimize}</button> : null}
+            {selectedStrategy?.kind === "python" ? <button className="systematic-lab__command-button" type="button" disabled={!canRun} onClick={onOpenTuning}>{optimizing ? <LoaderCircle size={14} className="is-spinning" /> : <SlidersHorizontal size={14} />}{text.optimize}</button> : null}
             <button className="systematic-lab__command-button is-primary" type="button" disabled={!canRun} onClick={onRun}>{starting ? <LoaderCircle size={14} className="is-spinning" /> : <Play size={14} />}{starting ? text.queuing : text.runBacktest}</button>
           </div>
         </div>
@@ -3053,16 +3356,19 @@ function BacktestView({
             <div><strong>{runtimeAvailable ? text.runtimeReady : text.runtimeGuarded}</strong><small>{text.pythonBacktestGuard}</small></div>
           </div>
         </section>
-        {selectedStrategy?.kind === "python" ? <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} /> : null}
+        {selectedStrategy?.kind === "python" ? <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} onCancel={onCancelOptimization} cancellingOptimizationId={cancellingOptimizationId} applyingOptimizationId={applyingOptimizationId} /> : null}
       </aside>
     </div>
   );
 }
 
-function OptimizationPanel({ text, optimizations, onApply }: Readonly<{
+function OptimizationPanel({ text, optimizations, onApply, onCancel, cancellingOptimizationId, applyingOptimizationId }: Readonly<{
   text: Copy;
   optimizations: SystematicOverview["optimizations"];
-  onApply: (parameters: Record<string, unknown>) => void;
+  onApply: (optimizationId: string, parameters: Record<string, unknown>) => void;
+  onCancel: (optimizationId: string) => void;
+  cancellingOptimizationId: string | null;
+  applyingOptimizationId: string | null;
 }>) {
   if (!optimizations.length) return null;
   return (
@@ -3075,10 +3381,32 @@ function OptimizationPanel({ text, optimizations, onApply }: Readonly<{
           const progress = optimization.candidateCount > 0 ? optimization.completedCount / optimization.candidateCount * 100 : 0;
           const completed = optimization.status === "completed";
           const failed = optimization.status === "failed";
+          const cancelled = optimization.status === "cancelled";
+          const active = optimization.status === "queued" || optimization.status === "running" || optimization.status === "cancelling";
+          const statusLabel = optimization.status === "running"
+            ? text.running
+            : optimization.status === "cancelling"
+              ? text.optimizationCancelling
+              : optimization.status === "queued" ? text.queued : optimization.status === "cancelled" ? text.cancelled : optimization.status;
+          const cancelling = cancellingOptimizationId === optimization.id || optimization.status === "cancelling";
           return <article key={optimization.id} className="systematic-lab-optimization-row">
             <div>
               <strong>{optimization.instId}</strong>
               <small>{formatBacktestDateRange(optimization.validationStartAt, optimization.validationEndAt)}</small>
+              <small>{optimization.strategyVersion ? `${text.version} v${optimization.strategyVersion}` : ""}{optimization.candidateBudget ? ` · ${optimization.candidateBudget} ${text.candidates}` : ""}{optimization.samplingMode ? ` · ${optimization.samplingMode === "sampled" ? text.deterministicSampling : text.fullGrid}` : ""}</small>
+              {completed && optimization.bestParameters ? (
+                <small className="systematic-lab-optimization-row__params">
+                  {Object.entries(optimization.bestParameters).map(([key, value]) => (
+                    <span key={key}><b>{key}</b>=<i>{String(value)}</i></span>
+                  ))}
+                </small>
+              ) : null}
+              <small className="systematic-lab-optimization-row__meta">
+                <span>{statusLabel}</span>
+                {optimization.workerCount ? <span>{optimization.workerCount} {text.optimizationWorkers}</span> : null}
+                {optimization.elapsedMs !== null && optimization.elapsedMs !== undefined ? <span>{text.optimizationElapsed} {formatOptimizationDuration(optimization.elapsedMs)}</span> : null}
+                {active && optimization.estimatedRemainingMs !== null && optimization.estimatedRemainingMs !== undefined ? <span>{text.optimizationEta} {formatOptimizationDuration(optimization.estimatedRemainingMs)}</span> : null}
+              </small>
             </div>
             <div className="systematic-lab-optimization-row__progress">
               <span><b style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} /></span>
@@ -3087,13 +3415,18 @@ function OptimizationPanel({ text, optimizations, onApply }: Readonly<{
             <div className="systematic-lab-optimization-row__score">
               <span>{text.validationCalmar}</span>
               <strong className={clsx((optimization.bestValidationCalmar ?? 0) >= 0 ? "positive" : "negative")}>{formatRatio(optimization.bestValidationCalmar)}</strong>
+              {optimization.baselineValidationCalmar !== null && optimization.baselineValidationCalmar !== undefined ? <small>{text.baselineCalmar} {formatRatio(optimization.baselineValidationCalmar)}</small> : null}
             </div>
-            {completed && optimization.bestParameters ? <button className="systematic-lab__command-button" type="button" onClick={() => onApply(optimization.bestParameters!)}><SlidersHorizontal size={13} />{text.applyToDraft}</button> : null}
-            {failed ? <small className="systematic-lab__error-notice"><AlertTriangle size={12} />{optimization.error || text.optimizationFailed}</small> : null}
+            <div className="systematic-lab-optimization-row__actions">
+              {active ? <button className="systematic-lab__command-button is-quiet" type="button" disabled={cancelling} onClick={() => onCancel(optimization.id)} title={text.cancelOptimization} aria-label={text.cancelOptimization}>{cancelling ? <LoaderCircle size={13} className="is-spinning" /> : <Square size={12} />}{cancelling ? text.optimizationCancelling : text.cancelOptimization}</button> : null}
+              {completed && optimization.bestParameters ? <button className="systematic-lab__command-button" type="button" disabled={applyingOptimizationId === optimization.id} onClick={() => onApply(optimization.id, optimization.bestParameters!)}>{applyingOptimizationId === optimization.id ? <LoaderCircle size={13} className="is-spinning" /> : <SlidersHorizontal size={13} />}{applyingOptimizationId === optimization.id ? text.savingOptimization : text.applyBestParameters}</button> : null}
+              {failed ? <small className="systematic-lab__error-notice"><AlertTriangle size={12} />{optimization.error || text.optimizationFailed}</small> : null}
+              {cancelled ? <small className="systematic-lab-optimization-row__cancelled">{text.optimizationCancelled}</small> : null}
+            </div>
           </article>;
         })}
       </div>
-      <small className="systematic-lab-optimization-panel__note">{text.optimizationNote}</small>
+      <small className="systematic-lab-optimization-panel__note">{text.optimizationResultNote}</small>
     </section>
   );
 }
@@ -3304,7 +3637,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 <span className={clsx("systematic-lab-run-row__state", `is-${run.status}`)} />
                 <span>
                   <strong>{run.strategyName}</strong>
-                  <small className="systematic-lab-run-row__instrument"><SymbolIcon base={symbolBase(run.instId)} /><span>{run.instId}</span><b>v{run.strategyVersion}</b><i>·</i>{formatRunTime(run.finishedAt ?? run.createdAt)}<i>·</i><span className="systematic-lab-run-row__duration" title={formatBacktestTimingTitle(run.timing) ?? text.backtestDuration}>{formatBacktestDuration(run.startedAt, run.finishedAt)}</span></small>
+                  <small className="systematic-lab-run-row__instrument"><SymbolIcon base={symbolBase(run.instId)} /><span>{run.instId}</span><b>v{run.strategyVersion}</b><i>·</i>{formatRunTime(run.finishedAt ?? run.createdAt)}<i>·</i><span className="systematic-lab-run-row__duration" title={formatBacktestTimingTitle(run.timing) ?? text.backtestDuration}>{formatBacktestDuration(run.startedAt, run.finishedAt, run.status)}</span></small>
                   <RunEquityPreview points={run.equityPreview} negative={completed && (returnPct ?? 0) < 0} />
                 </span>
                 <em className={clsx(
@@ -3377,7 +3710,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
             <div className="systematic-lab-review-main__head">
               <div><span className="systematic-lab__eyebrow">{selectedRun.instId} · 1m{detail?.preloadBarCount ? ` · ${formatLocalizedNumber(detail.preloadBarCount)} ${text.preloadHistory}` : ""}</span><h2>{selectedRun.strategyName}</h2></div>
               {detail ? <div className="systematic-lab-review-main__date-range" title={evaluationRange}><span>{text.evaluationRange}</span><strong>{evaluationRange}</strong></div> : null}
-              {selectedRun.startedAt ? <div className="systematic-lab-review-main__date-range systematic-lab-review-main__duration" title={formatBacktestTimingTitle(selectedRun.timing) ?? text.backtestDuration}><span>{text.backtestDuration}</span><strong>{formatBacktestDuration(selectedRun.startedAt, selectedRun.finishedAt)}</strong></div> : null}
+              {selectedRun.startedAt ? <div className="systematic-lab-review-main__date-range systematic-lab-review-main__duration" title={formatBacktestTimingTitle(selectedRun.timing) ?? text.backtestDuration}><span>{text.backtestDuration}</span><strong>{formatBacktestDuration(selectedRun.startedAt, selectedRun.finishedAt, selectedRun.status)}</strong></div> : null}
               <RunStatus run={selectedRun} text={text} />
             </div>
             {loading ? <div className="systematic-lab-loading"><LoaderCircle size={18} className="is-spinning" /> {text.loadingResult}</div> : null}
@@ -3942,6 +4275,7 @@ function ProfilesView({ text, profiles, strategies, watchlist, instruments, acco
       unlisten?.();
     };
   }, [desktop, refresh, selectedProfileId]);
+
   useEffect(() => {
     if (!desktop || !draft?.strategyId) {
       setStrategyVersions(null);
@@ -4700,6 +5034,10 @@ function defaultTuningForNumber(value: number): SystematicPythonParameterTuning 
   };
 }
 
+function sameTuningRange(left: SystematicPythonParameterTuning | undefined, right: SystematicPythonParameterTuning) {
+  return left !== undefined && left.min === right.min && left.max === right.max && left.step === right.step;
+}
+
 function defaultParameterTuning(parameters: Record<string, unknown>): Record<string, SystematicPythonParameterTuning> {
   return Object.fromEntries(
     Object.entries(parameters)
@@ -4960,8 +5298,23 @@ function formatBacktestDays(barCount?: number | null) {
   return formatLocalizedNumber(days, { maximumFractionDigits: days < 10 ? 1 : 0 });
 }
 
-function formatBacktestDuration(startedAt?: number | null, finishedAt?: number | null) {
+const LIVE_DURATION_RUN_STATES = new Set(["queued", "running", "cancelling"]);
+
+/**
+ * Falls back to `Date.now()` only while the run is genuinely in flight. A
+ * terminal run without a `finishedAt` used to render a stopwatch that counted
+ * up forever, which reads as "this backtest took 18 minutes" when the engine
+ * actually finished in seconds and only the lifecycle event was lost.
+ */
+function formatBacktestDuration(startedAt?: number | null, finishedAt?: number | null, status?: string | null) {
+  // `Number(null)` is 0, which is finite, so a run that never started would
+  // otherwise measure from the Unix epoch and render six-digit hours.
+  if (startedAt === null || startedAt === undefined) return "--";
   const start = Number(startedAt);
+  const live = status === undefined || status === null || LIVE_DURATION_RUN_STATES.has(status);
+  if (finishedAt === null || finishedAt === undefined) {
+    if (!live) return "--";
+  }
   const end = finishedAt === null || finishedAt === undefined ? Date.now() : Number(finishedAt);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return "--";
   const totalSeconds = Math.max(0, Math.round((end - start) / 1_000));
@@ -4969,6 +5322,17 @@ function formatBacktestDuration(startedAt?: number | null, finishedAt?: number |
   const minutes = Math.floor((totalSeconds % 3_600) / 60);
   const seconds = totalSeconds % 60;
   if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m ${String(seconds).padStart(2, "0")}s`;
+  if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
+  return `${seconds}s`;
+}
+
+function formatOptimizationDuration(value?: number | null) {
+  if (value === undefined || value === null || !Number.isFinite(value) || value < 0) return "--";
+  const totalSeconds = Math.max(0, Math.round(value / 1_000));
+  const hours = Math.floor(totalSeconds / 3_600);
+  const minutes = Math.floor((totalSeconds % 3_600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return `${hours}h ${String(minutes).padStart(2, "0")}m`;
   if (minutes > 0) return `${minutes}m ${String(seconds).padStart(2, "0")}s`;
   return `${seconds}s`;
 }
@@ -5100,7 +5464,9 @@ function copy(chinese: boolean) {
       entrySlippage: "开仓滑点", exitSlippage: "平仓滑点", entryFee: "开仓费率", exitFee: "平仓费率", endOfRun: "期末处理",
       markToMarket: "按最后收盘价盯市", forceClose: "按最后收盘价平仓", fillModel: "预加载数据只用于策略上下文；正式评估中，已收线决策在下一根开盘成交。",
       pythonBacktestGuard: "Python 回测需要本地环境准备完成。",
-      runBacktest: "运行回测", queuing: "正在排队", backtestQueued: "回测已排队", backtestFailed: "无法启动回测", optimize: "参数调优", optimizeUnavailable: "无法开始调优", optimizationQueued: "参数调优已排队", optimizationFailed: "无法启动参数调优", optimization: "参数调优", optimizationResults: "调优结果", validationCalmar: "验证 Calmar", applyToDraft: "应用到草稿", optimizationNote: "参数只写入当前未保存草稿；请审阅并保存为新版本后再运行独立回测。", optimizationApplied: "调优参数已应用", optimizationAppliedDetail: "最佳参数已写入当前策略草稿，尚未保存。", invalidBacktest: "回测参数无效", invalidBacktestDetail: "请输入正数的本金、预加载长度和成交假设；杠杆为 1-50x，安全系数为 1-20x，时间范围必须有效。", invalidBacktestRange: "正式评估开始必须早于评估结束。", backtestRangeTooLong: "正式评估区间最多支持近一年。", backtestEndDelay: "评估结束时间必须至少早于当前时间 1 小时，以等待本地 K 线同步完成。",
+      applyBestParameters: "采用最佳参数并保存版本", savingOptimization: "正在保存…", optimizationResultNote: "最佳参数会保存为新的策略版本，并自动带入回测设置。", optimizationAppliedDetailSaved: "最佳参数已保存为新的策略版本。", baselineCalmar: "基线",
+      configureOptimization: "配置调优", tuningWorkbench: "参数调优工作台", tuningWorkbenchHint: "选择要测试的参数和测试规模，开始时会自动保存一个研究版本。", editBacktestSettings: "编辑回测设置", tuningContext: "调优上下文", immutableResearchVersion: "研究版本固定", recommendedParameters: "推荐参数", recommendedParametersHint: "先测试信号参数；止损、止盈和仓位参数默认不选。", recommended: "推荐", tuningRangeNeedsFix: "当前值不在范围内，或步长不能整除范围。", noNumericParametersHint: "请先在策略参数中添加数值参数。", showAdvancedRanges: "编辑范围与步长", hideAdvancedRanges: "收起范围设置", tuningIntensity: "测试规模", tuningIntensityHint: "组合超过预算时会使用可复现的确定性抽样。", candidates: "组", tuningFast: "快速", tuningStandard: "标准", tuningDeep: "深入", tuningPlan: "调优计划", selectedParameters: "已选参数", candidatePlan: "测试组合", deterministicSampling: "确定性抽样", fullGrid: "完整组合", validationSplit: "训练 / 验证", version: "版本", startTuning: "开始调优", tuningSaveHint: "开始后自动保存当前参数和范围，并固定 70 / 30 训练验证区间。",
+      runBacktest: "运行回测", queuing: "正在排队", backtestQueued: "回测已排队", backtestFailed: "无法启动回测", optimize: "参数调优", optimizeUnavailable: "无法开始调优", optimizationQueued: "参数调优已排队", optimizationFailed: "无法启动参数调优", optimization: "参数调优", optimizationResults: "调优结果", validationCalmar: "验证 Calmar", applyToDraft: "应用到草稿", optimizationNote: "参数只写入当前未保存草稿；请审阅并保存为新版本后再运行独立回测。", optimizationApplied: "调优参数已应用", optimizationAppliedDetail: "最佳参数已写入当前策略草稿，尚未保存。", optimizationCancelling: "正在取消调优", optimizationCancelRequested: "已发送取消请求，正在停止当前回测。", optimizationCancelFailed: "无法取消调优", optimizationCancelled: "调优已取消", cancelOptimization: "取消调优", optimizationEta: "预计剩余", optimizationElapsed: "已用时", optimizationWorkers: "并发", invalidBacktest: "回测参数无效", invalidBacktestDetail: "请输入正数的本金、预加载长度和成交假设；杠杆为 1-50x，安全系数为 1-20x，时间范围必须有效。", invalidBacktestRange: "正式评估开始必须早于评估结束。", backtestRangeTooLong: "正式评估区间最多支持近一年。", backtestEndDelay: "评估结束时间必须至少早于当前时间 1 小时，以等待本地 K 线同步完成。",
       timeline: "时间线", replayContract: "虚拟账户回放", preloadHistoryDetail: "只加载正式评估开始前的已确认 1 分钟 K 线，不进入权益、回放或统计。", barCloses: "K 线收线", barClosesDetail: "正式评估中，策略只能读取当前及过去数据；高周期末根会明确标记是否已收线。",
       strategyReads: "策略读取状态", strategyReadsDetail: "读取多周期市场、虚拟持仓、成交、保证金与保护价。", nextOpen: "下一根开盘成交", nextOpenDetail: "开平仓及保护变更会在下一根开盘按滑点和费用记账。",
       ledgerUpdates: "账本更新", ledgerUpdatesDetail: "权益、成交、保证金、资金费用与保护性/保证金退出进入报告。",
@@ -5146,7 +5512,9 @@ function copy(chinese: boolean) {
     entrySlippage: "Entry slippage", exitSlippage: "Exit slippage", entryFee: "Entry fee", exitFee: "Exit fee", endOfRun: "End-of-run treatment",
     markToMarket: "Mark to last close", forceClose: "Close at last close", fillModel: "Preloaded history supplies strategy context only; evaluation decisions fill at the following open.",
     pythonBacktestGuard: "Python backtests need the local environment to finish preparing.",
-    runBacktest: "Run backtest", queuing: "Queuing", backtestQueued: "Backtest queued", backtestFailed: "Could not start backtest", optimize: "Optimize parameters", optimizeUnavailable: "Could not optimize", optimizationQueued: "Parameter optimization queued", optimizationFailed: "Could not start parameter optimization", optimization: "Parameter optimization", optimizationResults: "Optimization results", validationCalmar: "Validation Calmar", applyToDraft: "Apply to draft", optimizationNote: "Best parameters change only the current unsaved draft. Review, save a new version, then run an independent backtest.", optimizationApplied: "Optimization parameters applied", optimizationAppliedDetail: "Best parameters now exist in the current strategy draft and are not saved yet.", invalidBacktest: "Invalid backtest settings", invalidBacktestDetail: "Use positive capital, preload length, and execution assumptions; leverage is 1-50x, safety multiplier 1-20x, and time bounds must be valid.", invalidBacktestRange: "The evaluation start must be before the evaluation end.", backtestRangeTooLong: "The formal evaluation range can cover at most about one year.", backtestEndDelay: "The evaluation end must be at least one hour before the current time so local K-line synchronization can complete.",
+    applyBestParameters: "Adopt best parameters and save version", savingOptimization: "Saving…", optimizationResultNote: "Best parameters are saved as a new strategy version and carried into backtest settings.", optimizationAppliedDetailSaved: "Best parameters were saved as a new strategy version.", baselineCalmar: "Baseline",
+    configureOptimization: "Configure tuning", tuningWorkbench: "Parameter tuning workbench", tuningWorkbenchHint: "Choose what to test and how deeply. Starting creates a fixed research version automatically.", editBacktestSettings: "Edit backtest settings", tuningContext: "Tuning context", immutableResearchVersion: "Pinned research version", recommendedParameters: "Recommended parameters", recommendedParametersHint: "Start with signal parameters; protection and sizing parameters stay off by default.", recommended: "Recommended", tuningRangeNeedsFix: "The current value is outside this range, or the step does not divide it evenly.", noNumericParametersHint: "Add a numeric strategy parameter before tuning.", showAdvancedRanges: "Edit ranges and steps", hideAdvancedRanges: "Hide range settings", tuningIntensity: "Test size", tuningIntensityHint: "When the full combination is larger than the budget, Desic uses reproducible deterministic sampling.", candidates: "candidates", tuningFast: "Fast", tuningStandard: "Standard", tuningDeep: "Deep", tuningPlan: "Tuning plan", selectedParameters: "Selected parameters", candidatePlan: "Test set", deterministicSampling: "Deterministic sample", fullGrid: "Full grid", validationSplit: "Train / validation", version: "Version", startTuning: "Start tuning", tuningSaveHint: "Starting saves the current parameters and ranges, then fixes a 70 / 30 train-validation split.",
+    runBacktest: "Run backtest", queuing: "Queuing", backtestQueued: "Backtest queued", backtestFailed: "Could not start backtest", optimize: "Optimize parameters", optimizeUnavailable: "Could not optimize", optimizationQueued: "Parameter optimization queued", optimizationFailed: "Could not start parameter optimization", optimization: "Parameter optimization", optimizationResults: "Optimization results", validationCalmar: "Validation Calmar", applyToDraft: "Apply to draft", optimizationNote: "Best parameters change only the current unsaved draft. Review, save a new version, then run an independent backtest.", optimizationApplied: "Optimization parameters applied", optimizationAppliedDetail: "Best parameters now exist in the current strategy draft and are not saved yet.", optimizationCancelling: "Cancelling optimization", optimizationCancelRequested: "The cancel request was sent; the current backtests are stopping.", optimizationCancelFailed: "Could not cancel optimization", optimizationCancelled: "Optimization cancelled", cancelOptimization: "Cancel optimization", optimizationEta: "ETA", optimizationElapsed: "Elapsed", optimizationWorkers: "workers", invalidBacktest: "Invalid backtest settings", invalidBacktestDetail: "Use positive capital, preload length, and execution assumptions; leverage is 1-50x, safety multiplier 1-20x, and time bounds must be valid.", invalidBacktestRange: "The evaluation start must be before the evaluation end.", backtestRangeTooLong: "The formal evaluation range can cover at most about one year.", backtestEndDelay: "The evaluation end must be at least one hour before the current time so local K-line synchronization can complete.",
     timeline: "TIMELINE", replayContract: "Virtual-account replay", preloadHistoryDetail: "Confirmed 1-minute history before evaluation start is context only, never equity, replay, or statistics.", barCloses: "Bar closes", barClosesDetail: "The host exposes only current and earlier data; the final higher-timeframe bar states whether it is confirmed.",
     strategyReads: "Strategy reads state", strategyReadsDetail: "Reads multi-timeframe market data, virtual positions, fills, margin, and protection.", nextOpen: "Next open fills", nextOpenDetail: "Open, close, and protection changes apply at the following open with costs recorded.",
     ledgerUpdates: "Ledger updates", ledgerUpdatesDetail: "Equity, fills, margin, funding, and protective or margin exits enter the report.",

@@ -503,7 +503,7 @@ export function validateInvokeRequest(message) {
   validatePortfolio(event.portfolio, asOfMs);
 
   if (event.kind === "bar" || event.kind === "start") {
-    const allowed = new Set(["kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio"]);
+    const allowed = new Set(["kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio", "hostValidated"]);
     if (event.kind === "bar") allowed.add("bar");
     rejectUnknownFields(event, allowed, "event");
     validateActiveInstrumentEvent(event, asOfMs, event.kind);
@@ -511,7 +511,7 @@ export function validateInvokeRequest(message) {
       fail("invalid_portfolio", `${event.kind} events require event.portfolio`);
     }
   } else {
-    rejectUnknownFields(event, new Set(["kind", "snapshotId", "asOfMs", "market", "portfolio", "universe"]), "event");
+    rejectUnknownFields(event, new Set(["kind", "snapshotId", "asOfMs", "market", "portfolio", "universe", "hostValidated"]), "event");
     if (!Array.isArray(event.universe) || event.universe.length === 0 || event.universe.length > 1_000) {
       fail("invalid_universe", "rebalance events must include 1 to 1000 universe rows");
     }

@@ -864,6 +864,7 @@ impl BacktestEngine {
                     action: None,
                 })
             },
+            None,
         )
     }
 
@@ -886,6 +887,50 @@ impl BacktestEngine {
         request: &BacktestRequest,
         strategy: &mut S,
         cancellation: &CancellationToken,
+        on_progress: F,
+    ) -> Result<BacktestRunResult, SystematicError>
+    where
+        S: StatefulEventDrivenStrategy,
+        F: FnMut(u64, u64),
+    {
+        Self::run_stateful_with_progress_internal(
+            request,
+            None,
+            strategy,
+            cancellation,
+            on_progress,
+        )
+    }
+
+    /// Stateful backtest entry point for callers that already own an
+    /// immutable bar slice. The shared slice must contain the same ordered
+    /// bars as `request.bars`; using it avoids rebuilding the engine's market
+    /// window for every independent research run.
+    pub fn run_stateful_with_progress_shared_bars<S, F>(
+        request: &BacktestRequest,
+        shared_bars: Arc<[ClosedBar]>,
+        strategy: &mut S,
+        cancellation: &CancellationToken,
+        on_progress: F,
+    ) -> Result<BacktestRunResult, SystematicError>
+    where
+        S: StatefulEventDrivenStrategy,
+        F: FnMut(u64, u64),
+    {
+        Self::run_stateful_with_progress_internal(
+            request,
+            Some(shared_bars),
+            strategy,
+            cancellation,
+            on_progress,
+        )
+    }
+
+    fn run_stateful_with_progress_internal<S, F>(
+        request: &BacktestRequest,
+        shared_bars: Option<Arc<[ClosedBar]>>,
+        strategy: &mut S,
+        cancellation: &CancellationToken,
         mut on_progress: F,
     ) -> Result<BacktestRunResult, SystematicError>
     where
@@ -894,6 +939,14 @@ impl BacktestEngine {
     {
         let incremental_ledger_batch = strategy.uses_incremental_ledger_batch();
         let inst_id: Arc<str> = request.inst_id.as_str().into();
+        let strategy_bars = shared_bars
+            .clone()
+            .unwrap_or_else(|| Arc::from(request.bars.clone()));
+        if strategy_bars.len() != request.bars.len() {
+            return Err(SystematicError::InvalidState {
+                reason: "shared backtest bars do not match the request".to_string(),
+            });
+        }
         let mut queued_actions = VecDeque::<(i64, StrategyAction)>::new();
         Self::run_with_progress_internal(
             request,
@@ -919,8 +972,7 @@ impl BacktestEngine {
                     }
                     action
                 } else {
-                    let current_index = request
-                        .bars
+                    let current_index = strategy_bars
                         .partition_point(|bar| bar.close_time_ms <= context.market().as_of_ms())
                         .checked_sub(1);
                     // A managed runtime may shrink its next batch after an
@@ -933,7 +985,7 @@ impl BacktestEngine {
                         && state.open_orders.is_empty();
                     if can_batch {
                         let current_index = current_index.expect("batch index was checked");
-                        let end = (current_index + batch_size).min(request.bars.len());
+                        let end = (current_index + batch_size).min(strategy_bars.len());
                         let mut snapshots = Vec::with_capacity(end - current_index);
                         // Each batch event carries only the single bar that is
                         // new at its own cutoff. Accumulating the batch window
@@ -946,7 +998,7 @@ impl BacktestEngine {
                         // cursor that skips already-seen close times, and every
                         // other consumer only reads the tail bar.
                         for index in current_index..end {
-                            let bar = &request.bars[index];
+                            let bar = &strategy_bars[index];
                             let include_ledger = index == current_index || !incremental_ledger_batch;
                             snapshots.push(StrategyContextSnapshot {
                                 market: CurrentDataSnapshot {
@@ -996,6 +1048,7 @@ impl BacktestEngine {
                     action: Some(action),
                 })
             },
+            Some(strategy_bars.clone()),
         )
     }
 
@@ -1005,6 +1058,7 @@ impl BacktestEngine {
         mut on_progress: P,
         schema_version: &str,
         mut on_bar: F,
+        shared_bars: Option<Arc<[ClosedBar]>>,
     ) -> Result<BacktestRunResult, SystematicError>
     where
         F: FnMut(&MarketDataWindow, &SimulationState) -> Result<CallbackOutcome, SystematicError>,
@@ -1013,7 +1067,12 @@ impl BacktestEngine {
         let setup_started = Instant::now();
         validate_request(request)?;
         let request_hash = hash_value(request)?;
-        let bars: Arc<[ClosedBar]> = Arc::from(request.bars.clone());
+        let bars = shared_bars.unwrap_or_else(|| Arc::from(request.bars.clone()));
+        if bars.len() != request.bars.len() {
+            return Err(SystematicError::InvalidState {
+                reason: "shared backtest bars do not match the request".to_string(),
+            });
+        }
         let inst_id: Arc<str> = request.inst_id.as_str().into();
         let total_steps = request.bars.len() as u64;
         let evaluation_steps = request.bars.len().saturating_sub(request.preload_bars);
@@ -4459,6 +4518,20 @@ mod tests {
             "fixture must exercise repeated round trips, got {}",
             baseline.closed_trades.len()
         );
+
+        let shared_request = request(data.clone());
+        let shared_bars: Arc<[ClosedBar]> = Arc::from(shared_request.bars.clone());
+        let mut shared_strategy = MarketOnlyCycleStrategy::new(8);
+        let shared_report = BacktestEngine::run_stateful_with_progress_shared_bars(
+            &shared_request,
+            shared_bars,
+            &mut shared_strategy,
+            &CancellationToken::default(),
+            |_, _| {},
+        )
+        .expect("shared-bar run")
+        .report;
+        assert_eq!(shared_report, baseline, "shared bars changed the report");
 
         // Every batch size must reproduce the baseline exactly, including the
         // sizes that span many entry/exit cycles.

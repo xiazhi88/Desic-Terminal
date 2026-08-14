@@ -1604,6 +1604,10 @@ fn storage_maintenance_blocking(app: tauri::AppHandle) -> Result<StorageMaintena
         .map_err(|err| err.to_string())?;
     let deleted_ai_messages = trim_ai_messages(&conn, 200)?;
     let archived_backtest_series = crate::systematic::archive_backtest_series(&conn)?;
+    // Runs recorded before report slimming still hold 100-270 MB of per-bar
+    // arrays each, which slows every read of the backtest history page.
+    let compacted_legacy_reports = crate::systematic::compact_legacy_backtest_reports(&conn)?;
+    let archived_backtest_series = archived_backtest_series + compacted_legacy_reports;
     let intelligence_settings = desic_intelligence::load_settings(&conn)?;
     let deleted_intelligence_rows =
         desic_intelligence::run_retention(&conn, now_ms(), &intelligence_settings)?;

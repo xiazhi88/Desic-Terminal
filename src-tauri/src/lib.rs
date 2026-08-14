@@ -115,7 +115,7 @@ use crate::systematic::{
     systematic_python_run_sample, systematic_strategy_ai_cancel_session,
     systematic_strategy_ai_execute_tool, systematic_strategy_ai_send_message,
     systematic_strategy_ai_tool_respond,
-    systematic_optimization_start, systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
+    systematic_optimization_cancel, systematic_optimization_start, systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
     systematic_profile_signals,
     systematic_strategy_create_python, systematic_strategy_delete, systematic_strategy_save_python,
     systematic_strategy_version_detail, systematic_strategy_versions,
@@ -1194,7 +1194,6 @@ struct AiStreamOptions {
     runtime_scoped_skills: Vec<crate::storage_config::AiSkillBundle>,
     clear_skill_definitions: bool,
     disable_skills_tool: Option<bool>,
-    disable_loop_detection: Option<bool>,
     enable_spawn_agent: Option<bool>,
     enable_agent_teams: Option<bool>,
     stream_fallback_text: bool,
@@ -2472,7 +2471,6 @@ fn ai_generate_chart_indicator(
             runtime_scoped_skills: Vec::new(),
             clear_skill_definitions: true,
             disable_skills_tool: Some(true),
-            disable_loop_detection: None,
             enable_spawn_agent: Some(false),
             enable_agent_teams: Some(false),
             stream_fallback_text: false,
@@ -13019,10 +13017,6 @@ async fn run_ai_stream(
         .trim()
         .to_string();
     }
-    let disable_loop_detection = options
-        .as_ref()
-        .and_then(|value| value.disable_loop_detection)
-        .unwrap_or(false);
     let disable_skills_tool = options
         .as_ref()
         .and_then(|value| value.disable_skills_tool)
@@ -13178,10 +13172,6 @@ async fn run_ai_stream(
     // json! macro's recursion limit, so one more inline key fails to compile.
     let mut payload = payload;
     if let Some(config_payload) = payload.get_mut("config").and_then(|value| value.as_object_mut()) {
-        config_payload.insert(
-            "disableLoopDetection".to_string(),
-            serde_json::Value::Bool(disable_loop_detection),
-        );
         config_payload.insert(
             "openAgent".to_string(),
             serde_json::Value::Bool(config.open_agent && run_context.is_none()),
@@ -22752,6 +22742,7 @@ pub fn run() {
             systematic_backtest_delete,
             systematic_backtest_detail,
             systematic_optimization_start,
+            systematic_optimization_cancel,
             systematic_strategy_delete,
             systematic_profile_save,
             systematic_profile_delete,

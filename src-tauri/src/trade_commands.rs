@@ -7877,7 +7877,14 @@ pub async fn okx_list_algo_orders(
     if let Some(inst_id) = optional_non_empty(&request.inst_id) {
         orders.retain(|order| order.inst_id == inst_id);
     }
-    upsert_algo_order_summaries(&app, &account, &orders)?;
+    // Caching the summaries locally is a side effect: the orders above already
+    // came from the exchange and are what the caller asked for. A busy write lock
+    // (a long backtest holds one) used to fail the whole command with "database
+    // is locked" and blank the algo order panel, even though the fresh data was
+    // in hand. Downgrade the cache write to a warning and still return it.
+    if let Err(error) = upsert_algo_order_summaries(&app, &account, &orders) {
+        eprintln!("okx_algo_order_cache_write_failed account={} error={error}", account.id);
+    }
     Ok(AlgoOrdersResponse {
         account_id: account.id,
         environment: account.environment,

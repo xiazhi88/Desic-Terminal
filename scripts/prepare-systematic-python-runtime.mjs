@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { copyFile, lstat, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -37,7 +37,15 @@ function safeJoin(rootPath, relativePath, label) {
 }
 
 async function resetOutput() {
-  await rm(outputRoot, { recursive: true, force: true });
+  // The output directory also holds git-tracked strategy templates
+  // (`templates/*.py`) that are product source, not build output. Clear only
+  // the managed-runtime staging artifacts and keep those files; an earlier
+  // unconditional `rm -rf` deleted the tracked templates on every build.
+  const entries = await readdir(outputRoot).catch(() => []);
+  for (const name of entries) {
+    if (name === "templates" || name === ".gitkeep") continue;
+    await rm(path.join(outputRoot, name), { recursive: true, force: true });
+  }
   await mkdir(outputRoot, { recursive: true });
   await writeFile(path.join(outputRoot, ".gitkeep"), "");
 }
