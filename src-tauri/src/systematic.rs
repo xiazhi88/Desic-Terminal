@@ -11234,6 +11234,9 @@ struct LocalPythonStrategyRunner {
     child: Child,
     stdin: ChildStdin,
     responses: mpsc::Receiver<Result<String, String>>,
+    /// Bounded tail of the Python process stderr, captured so a process that
+    /// exits without a protocol error can still explain itself.
+    stderr_tail: Arc<std::sync::Mutex<String>>,
     working_dir: PathBuf,
     snapshot_id: String,
     request_sequence: u64,
@@ -11522,7 +11525,7 @@ impl LocalPythonStrategyRunner {
             .current_dir(&working_dir)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null());
+            .stderr(Stdio::piped());
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
@@ -11578,10 +11581,47 @@ impl LocalPythonStrategyRunner {
                 }
             }
         });
+        // The Python process stderr used to be discarded, which made every
+        // unexpected exit ("closed its output stream") undiagnosable on user
+        // machines. Keep a bounded tail so the next error can quote the real
+        // interpreter message.
+        let stderr_tail = Arc::new(std::sync::Mutex::new(String::new()));
+        if let Some(stderr) = child.stderr.take() {
+            let capture = Arc::clone(&stderr_tail);
+            std::thread::spawn(move || {
+                let mut buffer = [0_u8; 512];
+                let mut reader = BufReader::new(stderr);
+                let mut collected = Vec::<u8>::new();
+                loop {
+                    use std::io::Read;
+                    match reader.read(&mut buffer) {
+                        Ok(0) => break,
+                        Ok(read) => {
+                            collected.extend_from_slice(&buffer[..read]);
+                            const LIMIT: usize = 8 * 1024;
+                            if collected.len() > LIMIT {
+                                let drain = collected.len() - LIMIT;
+                                collected.drain(..drain);
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                if !collected.is_empty() {
+                    let tail = String::from_utf8_lossy(&collected).trim().to_string();
+                    if !tail.is_empty() {
+                        if let Ok(mut guard) = capture.lock() {
+                            *guard = tail;
+                        }
+                    }
+                }
+            });
+        }
         let mut runner = Self {
             child,
             stdin,
             responses,
+            stderr_tail,
             working_dir,
             snapshot_id: data_snapshot_id.to_string(),
             request_sequence: 0,
@@ -11864,21 +11904,44 @@ impl LocalPythonStrategyRunner {
             Ok(Ok(line)) => line,
             Ok(Err(error)) => {
                 self.abort();
-                return Err(python_runtime_error(error));
+                return Err(python_runtime_error(self.explain_runner_failure(&error)));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                let detail = self.explain_runner_failure("the Python process did not answer in time");
                 self.abort();
-                return Err(python_runtime_error(
-                    "Local Python strategy exceeded the per-event time limit",
-                ));
+                return Err(python_runtime_error(detail));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 self.abort();
-                return Err(python_runtime_error("Local Python runner disconnected"));
+                return Err(python_runtime_error(self.explain_runner_failure("the Python runner disconnected")));
             }
         };
         serde_json::from_str::<Value>(raw.trim())
             .map_err(|_| python_runtime_error("Local Python runner emitted invalid JSON"))
+    }
+
+    /// Appends the captured Python stderr tail and the child exit status to a
+    /// runner failure so an unexpected interpreter exit is diagnosable without
+    /// reproducing it on the developer machine.
+    fn explain_runner_failure(&mut self, base: &str) -> String {
+        let stderr_tail = self
+            .stderr_tail
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+        let exit = match self.child.try_wait() {
+            Ok(Some(status)) => match status.code() {
+                Some(code) => format!("exit code {code}"),
+                None => "exited by signal".to_string(),
+            },
+            Ok(None) => "exit status not yet available".to_string(),
+            Err(_) => "exit status unknown".to_string(),
+        };
+        if stderr_tail.is_empty() {
+            format!("{base} (Python process: {exit})")
+        } else {
+            format!("{base} (Python process: {exit})\nPython stderr: {stderr_tail}")
+        }
     }
 
     fn abort(&mut self) {
