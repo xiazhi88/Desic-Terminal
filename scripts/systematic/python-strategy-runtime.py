@@ -1636,6 +1636,19 @@ def merge_market_snapshot(cache, market):
 
 
 def main():
+    # The host always speaks UTF-8 over the JSONL pipes. The runner is started
+    # with `-I`, which implies `-E` and therefore ignores PYTHONUTF8, so on a
+    # non-UTF-8 locale (e.g. Chinese Windows, cp936) stdin would decode the
+    # host bytes with the wrong codec and crash on surrogate escapes. Force the
+    # codec here instead of relying on the environment.
+    try:
+        sys.stdin.reconfigure(encoding="utf-8")
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except (AttributeError, ValueError):
+        # No-op on runtimes without reconfigure support; the ordinary UTF-8
+        # environment still works there.
+        pass
     namespace = None
     handlers = []
     strategy_started = False
@@ -1646,7 +1659,9 @@ def main():
     strategy_params = {}
     emit({"type": "ready", "apiVersion": 2})
     for raw_line in sys.stdin:
-        if len(raw_line.encode("utf-8")) > MAX_LINE_BYTES:
+        # surrogatepass keeps the size check alive even if the stream ever
+        # carries undecodable bytes; json.loads below still rejects them.
+        if len(raw_line.encode("utf-8", "surrogatepass")) > MAX_LINE_BYTES:
             emit({"type": "error", "requestId": None, "code": "message_too_large", "message": "JSONL request exceeds runtime limit"})
             continue
         try:

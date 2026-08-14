@@ -1083,6 +1083,32 @@ if (testPython) {
     assert.equal(fastOutput[3].code, "future_data", "hostValidated future bars must still be rejected");
     assert.equal(fastOutput[4].code, "out_of_order_event", "hostValidated backward time must still be rejected");
     assert.equal(fastOutput[5].type, "shutdown");
+
+    // Chinese source round-trip: the runner must force UTF-8 itself because
+    // `-I` implies `-E` and drops PYTHONUTF8. A cp936 locale would otherwise
+    // decode the host bytes into surrogates and crash on the size check.
+    const chineseSource = "def on_bar(ctx):\n    # 双 EMA 交叉趋势策略\n    return ctx.no_action(\"中文原因\")\n";
+    const chineseOutput = await runRawRuntime(path.resolve(testPython), [
+      {
+        protocol: PYTHON_STRATEGY_PROTOCOL,
+        type: "load",
+        requestId: "raw-load-chinese",
+        source: chineseSource
+      },
+      strategyEvent("bar", { requestId: "raw-chinese-bar" }),
+      {
+        protocol: PYTHON_STRATEGY_PROTOCOL,
+        type: "shutdown",
+        requestId: "raw-shutdown-chinese"
+      }
+    ]);
+    assert.equal(chineseOutput[0].type, "ready");
+    assert.equal(chineseOutput[1].type, "loaded");
+    assert.deepEqual(chineseOutput[1].handlers, ["on_bar"]);
+    assert.equal(chineseOutput[2].type, "result");
+    assert.equal(chineseOutput[2].output.kind, "no_action");
+    assert.equal(chineseOutput[2].output.reason, "中文原因");
+    assert.equal(chineseOutput[3].type, "shutdown");
   } finally {
     await runner.close();
   }
