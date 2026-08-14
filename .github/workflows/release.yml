@@ -82,6 +82,12 @@ jobs:
       - name: Verify packaged AI sidecar runtime
         run: npm run smoke:ai-packaged-ready
 
+      - name: Cache bundled Python runtime
+        uses: actions/cache@v4
+        with:
+          path: cache/systematic-python-runtime
+          key: systematic-python-${{ matrix.sidecar_platform }}-${{ matrix.sidecar_arch }}-3.11.16-20260814
+
       - name: Build and publish desktop artifacts
         uses: tauri-apps/tauri-action@v1
         env:
@@ -90,6 +96,8 @@ jobs:
           APPLE_SIGNING_IDENTITY: ${{ matrix.apple_signing_identity }}
           DESIC_SIDECAR_TARGET_PLATFORM: ${{ matrix.sidecar_platform }}
           DESIC_SIDECAR_TARGET_ARCH: ${{ matrix.sidecar_arch }}
+          DESIC_SYSTEMATIC_PYTHON_TARGET_PLATFORM: ${{ matrix.sidecar_platform }}
+          DESIC_SYSTEMATIC_PYTHON_TARGET_ARCH: ${{ matrix.sidecar_arch }}
         with:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__

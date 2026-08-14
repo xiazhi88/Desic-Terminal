@@ -10,7 +10,7 @@ The JSONL protocol version remains `desic.systematic.python/v1`. Parent and chil
 
 Events the host itself serialises carry a top-level `hostValidated: true` marker. It declares that the host has already performed the field-level, chronology, and cutoff checks for every bar, portfolio row, and timestamp in the payload. For a marked event the private runtime runs only the invariants that would otherwise corrupt its own state or leak look-ahead data — `asOfMs` monotonicity, the presence and shape of the market series, and that a confirmed bar never closes after the event cutoff — and skips re-walking field-level validation on every minute of a long backtest. An event without the marker (for example an older host or a test harness) is still fully validated by the runtime. The strategy-visible contract is identical in both paths; the marker only changes how much redundant validation the runtime repeats.
 
-For local research, Desic detects a compatible Python 3.10-3.13 interpreter on PATH, creates an application-owned virtual environment when absent, and installs only the pinned dependencies associated with the source-policy allowlist. The strategy process starts with a clean Python environment and an empty private working directory. This venv isolates dependencies but is not an operating-system sandbox; static source policy is defense in depth. Only activate a Profile for source you trust and have reviewed. A future release-managed runtime should additionally use a bundled, checksum-verified CPython executable and a platform-level restricted-process sandbox on macOS and Windows.
+For local research, Desic ships a bundled, checksum-verified CPython 3.11 runtime inside the application resources (a python-build-standalone distribution staged by the build-time prepare script) and creates an application-owned virtual environment from it when absent, falling back to a compatible Python 3.10-3.13 interpreter on `PATH` for development builds. The environment installs only the pinned dependencies associated with the source-policy allowlist. The strategy process starts with a clean Python environment and an empty private working directory. This venv isolates dependencies but is not an operating-system sandbox; static source policy is defense in depth. Only activate a Profile for source you trust and have reviewed. A future release-managed runtime should additionally use a platform-level restricted-process sandbox on macOS and Windows.
 
 No output from this protocol is an exchange order. In particular, the runtime has no account credentials, network access, exchange API access, or direct order-placement function. The Profile executor receives the action after the Python process returns, fetches the account state itself, applies the Profile risk boundary, and then calls the existing terminal order adapter.
 
@@ -198,9 +198,10 @@ This source policy and the local venv are not a security boundary by themselves.
 
 User-authored Python strategy execution is available for local historical backtests after the research panel prepares its environment:
 
-- On first use, Desic looks for Python 3.10 through 3.13 on `PATH`. If found, it creates `systematic-python/venv` under the writable Desic runtime workspace and installs the pinned allowlist dependency set.
-- If the venv and its manifest are already present, the panel shows no setup guidance and Python backtests can run immediately.
-- If Python cannot be found, the panel keeps Python backtests unavailable and tells the user to install a supported version and add it to `PATH`, then recheck.
+- On first use, Desic creates `systematic-python/venv` under the writable Desic runtime workspace from the bundled CPython runtime shipped in the application resources. The bundled runtime is a checksum-verified python-build-standalone distribution, so release users never install Python themselves.
+- Development builds without a staged bundled runtime fall back to a compatible Python 3.10 through 3.13 interpreter on `PATH`; the venv layout and the pinned allowlist dependency set are identical.
+- If the venv and its manifest are already present, the panel shows no setup guidance and Python backtests can run immediately. When an app update ships a newer bundled runtime, the venv is rebuilt from the new interpreter.
+- If neither the bundled runtime nor a compatible system Python can be used, the panel keeps Python backtests unavailable and tells the user to install a supported version and add it to `PATH`, then recheck.
 - A Python strategy always receives only the point-in-time K-line and read-only portfolio contract; it never receives account credentials, proxy settings, arbitrary data APIs, or any exchange-order function.
 
 The older "Run Python sample" command remains a compatibility diagnostic for an interpreter selected through the native file picker. It runs only an application-owned fixture and does not choose the interpreter used by local strategy backtests.
@@ -219,7 +220,7 @@ npm run test:systematic-python
 
 For an explicit command-line development smoke only, set `DESIC_SYSTEMATIC_TEST_PYTHON` to the absolute path of a known interpreter. The application does not use this environment variable; it independently detects compatible Python installations on `PATH` for the local research environment.
 
-The desktop app does not install Python itself. It creates a venv and invokes `pip` only after finding a compatible user-installed interpreter. First-time dependency installation needs access to the configured Python package index. The fixed dependency list is [python-runtime-requirements.txt](../scripts/systematic/python-runtime-requirements.txt); all direct and transitive packages are version-pinned, but this is not a hash-verified binary supply-chain boundary.
+The desktop app does not require the user to install Python. Release builds bundle a checksum-verified CPython runtime; only development builds without a staged bundle fall back to a user-installed interpreter. First-time dependency installation needs access to the configured Python package index. The fixed dependency list is [python-runtime-requirements.txt](../scripts/systematic/python-runtime-requirements.txt); all direct and transitive packages are version-pinned, but this is not a hash-verified binary supply-chain boundary.
 
 ## AI Strategy Authoring
 

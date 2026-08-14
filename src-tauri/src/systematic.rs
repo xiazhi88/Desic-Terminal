@@ -97,6 +97,7 @@ const SYSTEMATIC_PYTHON_LOCAL_ENVIRONMENT_DIR: &str = "systematic-python";
 const SYSTEMATIC_PYTHON_VENV_DIR: &str = "venv";
 const SYSTEMATIC_PYTHON_ENVIRONMENT_MANIFEST: &str = ".desic-runtime.json";
 const SYSTEMATIC_PYTHON_ENVIRONMENT_SCHEMA: &str = "desic.systematic.local-python/v1";
+const SYSTEMATIC_PYTHON_RUNTIME_MANIFEST_SCHEMA: &str = "desic.systematic.python-runtime/v1";
 const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 10;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
@@ -957,12 +958,36 @@ struct LocalPythonEnvironmentManifest {
     python_version: String,
     requirements_hash: String,
     created_at: i64,
+    /// Which interpreter created this environment: the bundled runtime id
+    /// (`bundled:<source>`) or `system:<version>`. A mismatch with the
+    /// currently available bundled runtime triggers a rebuild.
+    #[serde(default)]
+    python_source: String,
 }
 
 #[derive(Debug, Clone)]
 struct LocalPythonInterpreter {
     program: String,
     leading_args: Vec<String>,
+    version: String,
+}
+
+/// The bundled CPython runtime shipped inside the application resources.
+/// Read from `resources/systematic-python/runtime-manifest.json`, which the
+/// build-time prepare script generates from a checksum-verified
+/// python-build-standalone distribution.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BundledPythonRuntimeManifest {
+    schema_version: String,
+    python_relative_path: String,
+    source: String,
+}
+
+#[derive(Debug, Clone)]
+struct BundledPythonRuntime {
+    interpreter: PathBuf,
+    source_id: String,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -2460,10 +2485,11 @@ pub(crate) async fn systematic_python_run_sample(
 /// scientific stack. It is deliberately unavailable to exchange execution.
 #[tauri::command]
 pub(crate) async fn systematic_python_prepare_environment(
+    app: tauri::AppHandle,
     runtime: tauri::State<'_, SystematicRuntime>,
 ) -> Result<SystematicPythonRuntimeView, String> {
     let _setup_guard = runtime.python_environment_setup.lock().await;
-    ensure_local_python_environment().await
+    ensure_local_python_environment(&app).await
 }
 
 /// Creates a local Python strategy package. Creating or saving a package does
@@ -10675,9 +10701,116 @@ fn local_python_runtime_unavailable_view(
     }
 }
 
-async fn ensure_local_python_environment() -> Result<SystematicPythonRuntimeView, String> {
+fn read_bundled_python_runtime(app: &tauri::AppHandle) -> Option<BundledPythonRuntime> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let runtime_root = resource_dir.join("systematic-python");
+    let manifest_path = runtime_root.join("runtime-manifest.json");
+    let raw = fs::read_to_string(&manifest_path).ok()?;
+    let manifest = serde_json::from_str::<BundledPythonRuntimeManifest>(&raw).ok()?;
+    if manifest.schema_version != SYSTEMATIC_PYTHON_RUNTIME_MANIFEST_SCHEMA {
+        return None;
+    }
+    let interpreter = runtime_root.join(&manifest.python_relative_path);
+    if !interpreter.is_file() {
+        return None;
+    }
+    Some(BundledPythonRuntime {
+        interpreter,
+        source_id: format!("bundled:{}", manifest.source),
+    })
+}
+
+/// Verifies a bundled interpreter actually launches and reports a supported
+/// version. A corrupted or platform-mismatched bundle falls back to the
+/// system-Python detection path instead of failing the whole panel.
+async fn verify_bundled_python_interpreter(
+    interpreter_path: &Path,
+) -> Option<LocalPythonInterpreter> {
+    let mut command = Command::new(interpreter_path);
+    command.arg("--version");
+    hide_local_python_command_window(&mut command);
+    let output = match timeout(SYSTEMATIC_PYTHON_COMMAND_TIMEOUT, command.output()).await {
+        Ok(Ok(output)) if output.status.success() => output,
+        Ok(Ok(_)) | Ok(Err(_)) | Err(_) => return None,
+    };
+    let version_output = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let (major, minor, _) = parse_local_python_version(&version_output)?;
+    if major == 3
+        && (SYSTEMATIC_PYTHON_MIN_MINOR_VERSION..=SYSTEMATIC_PYTHON_MAX_MINOR_VERSION)
+            .contains(&minor)
+    {
+        Some(LocalPythonInterpreter {
+            program: interpreter_path.to_string_lossy().to_string(),
+            leading_args: Vec::new(),
+            version: format!("{major}.{minor}"),
+        })
+    } else {
+        None
+    }
+}
+
+/// Turns a failed environment-creation step into a structured runtime view.
+///
+/// The raw command error is kept at the end of `reason` for diagnostics, but
+/// known failure modes get an actionable classification instead of surfacing
+/// as a failed Tauri command. A Python without its standard `venv` module
+/// (common with stripped or incomplete Windows installations) is the most
+/// frequent first-install case.
+fn local_python_environment_failure_view(
+    interpreter: &LocalPythonInterpreter,
+    error: &str,
+) -> SystematicPythonRuntimeView {
+    let label = format!("Python {} ({})", interpreter.version, interpreter.program);
+    let lowercase = error.to_lowercase();
+    let (state, reason) = if lowercase.contains("no module named venv") {
+        (
+            "missingVenvModule",
+            format!(
+                "{label} is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.10-3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then retry.\n{error}"
+            ),
+        )
+    } else {
+        (
+            "invalidEnvironment",
+            format!(
+                "Could not create the local research environment with {label}. Check that the Python installation is complete and not corrupted, then retry.\n{error}"
+            ),
+        )
+    };
+    local_python_runtime_unavailable_view(state, reason, false, Some(label))
+}
+
+async fn ensure_local_python_environment(
+    app: &tauri::AppHandle,
+) -> Result<SystematicPythonRuntimeView, String> {
     let current = local_python_runtime_view();
-    if current.available || current.state == "invalidEnvironment" {
+    let bundled = read_bundled_python_runtime(app);
+
+    // A healthy environment is reused as-is, unless the bundled runtime that
+    // shipped with the app changed: the venv must then be rebuilt by the new
+    // interpreter so it never silently runs a stale runtime.
+    if current.available {
+        if let Some(bundled) = bundled.as_ref() {
+            let venv_path = local_python_venv_path();
+            let rebuild = read_local_python_environment_manifest(&venv_path)
+                .map(|manifest| {
+                    !manifest.python_source.is_empty()
+                        && manifest.python_source != bundled.source_id
+                })
+                .unwrap_or(false);
+            if rebuild {
+                let _ = fs::remove_dir_all(&venv_path);
+            } else {
+                return Ok(current);
+            }
+        } else {
+            return Ok(current);
+        }
+    } else if current.state == "invalidEnvironment" {
         return Ok(current);
     }
 
@@ -10691,20 +10824,51 @@ async fn ensure_local_python_environment() -> Result<SystematicPythonRuntimeView
     let python_version = if interpreter_path.is_file() {
         install_local_python_dependencies(&interpreter_path).await?
     } else {
-        let Some(interpreter) = detect_local_python_interpreter().await? else {
-            return Ok(local_python_runtime_unavailable_view(
-                "missingPython",
-                format!(
-                    "Python {}.{} to {}.{} was not found on PATH. Install a supported Python version and add it to PATH, then refresh this panel.",
-                    3,
-                    SYSTEMATIC_PYTHON_MIN_MINOR_VERSION,
-                    3,
-                    SYSTEMATIC_PYTHON_MAX_MINOR_VERSION,
-                ),
-                false,
-                None,
-            ));
-        };
+        // Creation source: the bundled CPython shipped in the app resources
+        // first, then the machine PATH as a fallback for development builds
+        // and corrupted bundles.
+        let (interpreter, python_source): (LocalPythonInterpreter, String) =
+            if let Some(bundled) = bundled.as_ref() {
+                if let Some(verified) =
+                    verify_bundled_python_interpreter(&bundled.interpreter).await
+                {
+                    (verified, bundled.source_id.clone())
+                } else {
+                    let Some(system) = detect_local_python_interpreter().await? else {
+                        return Ok(local_python_runtime_unavailable_view(
+                            "missingPython",
+                            format!(
+                                "Python {}.{} to {}.{} was not found on PATH. Install a supported Python version and add it to PATH, then refresh this panel.",
+                                3,
+                                SYSTEMATIC_PYTHON_MIN_MINOR_VERSION,
+                                3,
+                                SYSTEMATIC_PYTHON_MAX_MINOR_VERSION,
+                            ),
+                            false,
+                            None,
+                        ));
+                    };
+                    let source_id = format!("system:{}", system.version);
+                    (system, source_id)
+                }
+            } else {
+                let Some(system) = detect_local_python_interpreter().await? else {
+                    return Ok(local_python_runtime_unavailable_view(
+                        "missingPython",
+                        format!(
+                            "Python {}.{} to {}.{} was not found on PATH. Install a supported Python version and add it to PATH, then refresh this panel.",
+                            3,
+                            SYSTEMATIC_PYTHON_MIN_MINOR_VERSION,
+                            3,
+                            SYSTEMATIC_PYTHON_MAX_MINOR_VERSION,
+                        ),
+                        false,
+                        None,
+                    ));
+                };
+                let source_id = format!("system:{}", system.version);
+                (system, source_id)
+            };
         let staging = environment_root.join(format!(
             "venv-building-{}",
             SYSTEMATIC_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -10713,17 +10877,22 @@ async fn ensure_local_python_environment() -> Result<SystematicPythonRuntimeView
         let created = create_local_python_venv(&interpreter, &staging).await;
         if let Err(error) = created {
             let _ = fs::remove_dir_all(&staging);
-            return Err(error);
+            // A detected interpreter can still fail to create an environment:
+            // a Python installed without its standard `venv` module is the
+            // common Windows case. Return a structured view with an actionable
+            // diagnosis instead of surfacing the raw command error as a failed
+            // Tauri command.
+            return Ok(local_python_environment_failure_view(&interpreter, &error));
         }
         let staged_interpreter = local_python_venv_interpreter_path(&staging);
         let version = match install_local_python_dependencies(&staged_interpreter).await {
             Ok(version) => version,
             Err(error) => {
                 let _ = fs::remove_dir_all(&staging);
-                return Err(error);
+                return Ok(local_python_environment_failure_view(&interpreter, &error));
             }
         };
-        write_local_python_environment_manifest(&staging, &version)?;
+        write_local_python_environment_manifest(&staging, &version, &python_source)?;
         match fs::rename(&staging, &venv_path) {
             Ok(()) => version,
             Err(error) if venv_path.exists() => {
@@ -10749,7 +10918,11 @@ async fn ensure_local_python_environment() -> Result<SystematicPythonRuntimeView
     };
 
     if !local_python_environment_manifest_path(&venv_path).is_file() {
-        write_local_python_environment_manifest(&venv_path, &python_version)?;
+        let source = bundled
+            .as_ref()
+            .map(|runtime| runtime.source_id.clone())
+            .unwrap_or_else(|| format!("system:{python_version}"));
+        write_local_python_environment_manifest(&venv_path, &python_version, &source)?;
     }
     Ok(local_python_runtime_view())
 }
@@ -10790,6 +10963,7 @@ async fn detect_local_python_interpreter() -> Result<Option<LocalPythonInterpret
                     .iter()
                     .map(|value| (*value).to_string())
                     .collect(),
+                version: format!("{major}.{minor}"),
             }));
         }
     }
@@ -10915,13 +11089,18 @@ async fn install_local_python_dependencies(interpreter: &Path) -> Result<String,
         .ok_or_else(|| "The local Python environment returned an invalid version".to_string())
 }
 
-fn write_local_python_environment_manifest(venv_path: &Path, version: &str) -> Result<(), String> {
+fn write_local_python_environment_manifest(
+    venv_path: &Path,
+    version: &str,
+    python_source: &str,
+) -> Result<(), String> {
     let manifest = LocalPythonEnvironmentManifest {
         schema_version: SYSTEMATIC_PYTHON_ENVIRONMENT_SCHEMA.to_string(),
         protocol: SYSTEMATIC_PYTHON_PROTOCOL.to_string(),
         python_version: version.to_string(),
         requirements_hash: sha256_bytes(SYSTEMATIC_PYTHON_REQUIREMENTS.as_bytes()),
         created_at: now_ms(),
+        python_source: python_source.to_string(),
     };
     let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
     fs::write(local_python_environment_manifest_path(venv_path), encoded)
@@ -13514,6 +13693,107 @@ mod tests {
 
         // A process that failed without saying anything keeps the generic hint.
         assert!(local_python_command_failure_detail(b"", b"   \n  \n").is_none());
+    }
+
+    #[test]
+    fn environment_failure_view_classifies_missing_venv_module() {
+        let interpreter = LocalPythonInterpreter {
+            program: "python".to_string(),
+            leading_args: Vec::new(),
+            version: "3.11".to_string(),
+        };
+        let missing = local_python_environment_failure_view(
+            &interpreter,
+            "Could not create the local Python environment (Python exited with exit code: 1). C:\\Python311\\python.exe: No module named venv",
+        );
+        assert_eq!(missing.state, "missingVenvModule");
+        assert!(
+            missing.reason.contains("venv module"),
+            "must name the missing module: {}",
+            missing.reason
+        );
+        assert!(
+            missing.reason.contains("python.org"),
+            "must point at the official installer: {}",
+            missing.reason
+        );
+        assert!(
+            missing.reason.contains("No module named venv"),
+            "must keep the raw diagnostic: {}",
+            missing.reason
+        );
+        assert_eq!(missing.interpreter_label.as_deref(), Some("Python 3.11 (python)"));
+    }
+
+    #[test]
+    fn environment_failure_view_keeps_unknown_failures_generic() {
+        let interpreter = LocalPythonInterpreter {
+            program: "python".to_string(),
+            leading_args: Vec::new(),
+            version: "3.11".to_string(),
+        };
+        let generic = local_python_environment_failure_view(
+            &interpreter,
+            "Could not create the local Python environment (Python exited with exit code: 1).",
+        );
+        assert_eq!(generic.state, "invalidEnvironment");
+        assert!(
+            generic.reason.contains("not corrupted"),
+            "must guide the user to check the installation: {}",
+            generic.reason
+        );
+    }
+
+    #[test]
+    fn bundled_python_runtime_manifest_parses() {
+        let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("systematic-python")
+            .join("runtime-manifest.json");
+        let raw = match fs::read_to_string(&manifest_path) {
+            Ok(raw) => raw,
+            Err(_) => return, // bundled runtime not staged (SKIP_DOWNLOAD builds)
+        };
+        let manifest = serde_json::from_str::<BundledPythonRuntimeManifest>(&raw)
+            .expect("staged runtime manifest must parse");
+        assert_eq!(
+            manifest.schema_version, SYSTEMATIC_PYTHON_RUNTIME_MANIFEST_SCHEMA,
+            "manifest schema must stay compatible"
+        );
+        assert!(
+            !manifest.python_relative_path.is_empty(),
+            "manifest must name its interpreter"
+        );
+        assert!(manifest.source.contains("python-build-standalone"));
+    }
+
+    #[test]
+    fn bundled_python_interpreter_runs_and_reports_supported_version() {
+        let interpreter = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("systematic-python")
+            .join("python")
+            .join("bin")
+            .join("python3.11");
+        if !interpreter.is_file() {
+            return; // bundled runtime not staged (SKIP_DOWNLOAD builds)
+        }
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let verified = runtime
+            .block_on(verify_bundled_python_interpreter(&interpreter))
+            .expect("staged bundled interpreter must launch and verify");
+        assert!(
+            verified.version.starts_with("3."),
+            "verified version must be a Python 3 line: {}",
+            verified.version
+        );
+        assert!(
+            verified.leading_args.is_empty(),
+            "bundled interpreter needs no leading args"
+        );
     }
 
     #[test]

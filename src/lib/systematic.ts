@@ -465,7 +465,7 @@ export type SystematicRegistryPackageView = {
 
 export type SystematicPythonRuntimeView = {
   available: boolean;
-  state: "ready" | "setupRequired" | "missingPython" | "invalidEnvironment" | string;
+  state: "ready" | "setupRequired" | "missingPython" | "missingVenvModule" | "invalidEnvironment" | string;
   reason: string;
   setupRequired: boolean;
   environmentExists: boolean;
