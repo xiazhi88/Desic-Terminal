@@ -623,14 +623,140 @@ pub(crate) async fn ai_skill_install_git(app: tauri::AppHandle, url: String) -> 
     let repo = url.rsplit('/').next().unwrap_or("skill").trim_end_matches(".git");
     let target = runtime_work_dir().join(".cline").join("imported-git-skills").join(format!("{}-{}", sanitize_skill_dir_name(repo), now_ms()));
     if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|err| err.to_string())?; }
-    let output = Command::new("git").args(["clone", "--depth", "1", url]).arg(&target).output().await
-        .map_err(|_| "未找到 git，请先安装 Git 后重试".to_string())?;
-    if !output.status.success() {
-        return Err(format!("Git 安装失败：{}", String::from_utf8_lossy(&output.stderr).trim()));
+
+    // 优先系统 git（支持私有仓库与 SSH 地址）。用户未安装 git 时自动
+    // 降级为托管平台的源码包接口，GitHub/GitLab 公开仓库无需 git 即可安装。
+    match Command::new("git").args(["clone", "--depth", "1", url]).arg(&target).output().await {
+        Ok(output) if output.status.success() => {}
+        Ok(output) => {
+            // git 可用但克隆失败（认证、网络或仓库问题）：保留 git 的原始诊断。
+            return Err(format!("Git 安装失败：{}", String::from_utf8_lossy(&output.stderr).trim()));
+        }
+        Err(_) => {
+            // 系统没有 git：走 HTTP 源码包下载。
+            let _ = fs::remove_dir_all(&target);
+            download_skill_source_archive(url, &target).await?;
+        }
     }
+
     let markdown = read_imported_skill_markdown(&target)?;
     let fallback = target.file_name().and_then(|value| value.to_str()).unwrap_or("imported-skill");
     persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
+}
+
+/// 无 Git 时按顺序尝试的源码包下载地址。
+///
+/// 只支持公开的 GitHub / GitLab https 仓库：GitHub 用官方 API tarball
+/// （跟随重定向，默认分支），GitLab 依次尝试 main 与 master 分支的
+/// archive 接口。其余托管平台或 git@ 地址无法无 git 下载。
+fn skill_source_archive_candidates(url: &str) -> Result<Vec<String>, String> {
+    let parsed = reqwest::Url::parse(url).map_err(|_| "无法解析 Git 地址".to_string())?;
+    let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+    let segments: Vec<String> = parsed
+        .path_segments()
+        .map(|values| values.map(|value| value.to_string()).collect())
+        .unwrap_or_default();
+    if host == "github.com" && segments.len() >= 2 {
+        let owner = &segments[0];
+        let repo = segments[1].trim_end_matches(".git");
+        if owner.is_empty() || repo.is_empty() {
+            return Err("Git 地址缺少仓库所有者或名称".to_string());
+        }
+        return Ok(vec![format!("https://api.github.com/repos/{owner}/{repo}/tarball")]);
+    }
+    if host == "gitlab.com" && segments.len() >= 2 {
+        let repo = segments
+            .last()
+            .map(|value| value.trim_end_matches(".git"))
+            .unwrap_or("")
+            .to_string();
+        let group = segments[..segments.len() - 1].join("/");
+        if group.is_empty() || repo.is_empty() {
+            return Err("Git 地址缺少仓库组或名称".to_string());
+        }
+        let base = format!("https://gitlab.com/{group}/{repo}");
+        return Ok(vec![
+            format!("{base}/-/archive/main/{repo}-main.tar.gz"),
+            format!("{base}/-/archive/master/{repo}-master.tar.gz"),
+        ]);
+    }
+    Err(format!(
+        "未检测到 Git，且 {} 不是 GitHub 或 GitLab 仓库。请安装 Git 后重试，或改用 GitHub/GitLab 的 https 地址。",
+        if host.is_empty() { "该地址" } else { host.as_str() }
+    ))
+}
+
+async fn download_skill_source_archive(url: &str, target: &Path) -> Result<(), String> {
+    let candidates = skill_source_archive_candidates(url)?;
+    let mut failures = Vec::<String>::new();
+    for candidate in candidates {
+        match http_download_skill_archive(&candidate).await {
+            Ok(bytes) => return extract_skill_archive(&bytes, target),
+            Err(error) => failures.push(error),
+        }
+    }
+    Err(format!(
+        "未检测到 Git，且无法从源码包接口下载该仓库（{}）。请确认仓库公开可访问，或安装 Git 后重试。",
+        failures.join(" | ")
+    ))
+}
+
+async fn http_download_skill_archive(url: &str) -> Result<Vec<u8>, String> {
+    let response = reqwest::Client::new()
+        .get(url)
+        .header(reqwest::header::USER_AGENT, "Desic-Terminal")
+        .timeout(std::time::Duration::from_secs(120))
+        .send()
+        .await
+        .map_err(|error| format!("下载失败：{error}"))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(format!("HTTP {status}"));
+    }
+    response
+        .bytes()
+        .await
+        .map(|bytes| bytes.to_vec())
+        .map_err(|error| format!("读取下载内容失败：{error}"))
+}
+
+/// 解压 tar.gz 源码包到 target。
+///
+/// tar crate 的 unpack 会拒绝绝对路径与父目录穿越条目（目录穿越是
+/// 恶意源码包最危险的向量之一）。GitHub/GitLab 源码包在顶层包了一层
+/// 目录（`repo-sha/` 或 `repo-branch/`），这里把唯一的顶层目录提升为
+/// target，让导入逻辑直接看到 SKILL.md。
+fn extract_skill_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
+    let decoder = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(decoder);
+    let staging_parent = target.parent().ok_or_else(|| "Skill 目标路径无效".to_string())?;
+    let staging = staging_parent.join(format!(".skill-unpack-{}", now_ms()));
+    fs::create_dir_all(&staging).map_err(|error| format!("创建解压目录失败：{error}"))?;
+    if let Err(error) = archive.unpack(&staging) {
+        let _ = fs::remove_dir_all(&staging);
+        return Err(format!("解压源码包失败：{error}"));
+    }
+    let promoted = match fs::read_dir(&staging) {
+        Ok(mut entries) => {
+            let first = entries.next();
+            let second = entries.next();
+            match (first, second) {
+                (Some(Ok(first)), None)
+                    if first.file_type().map(|kind| kind.is_dir()).unwrap_or(false) =>
+                {
+                    first.path()
+                }
+                _ => staging.clone(),
+            }
+        }
+        Err(_) => staging.clone(),
+    };
+    let _ = fs::remove_dir_all(target);
+    fs::rename(&promoted, target).map_err(|error| format!("移动解压内容失败：{error}"))?;
+    if promoted != staging {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    Ok(())
 }
 
 /// One on-demand file inside a Skill directory, addressed by a relative path.
@@ -3497,5 +3623,129 @@ wire_api = "responses"
             b"history"
         );
         fs::remove_dir_all(&root).expect("remove identifier migration test directory");
+    }
+
+    #[test]
+    fn skill_source_archives_cover_github_and_gitlab_urls() {
+        let github = skill_source_archive_candidates("https://github.com/owner/my-skill")
+            .expect("github url must be supported");
+        assert_eq!(
+            github,
+            vec!["https://api.github.com/repos/owner/my-skill/tarball"]
+        );
+        let github_git = skill_source_archive_candidates("https://github.com/owner/my-skill.git")
+            .expect("github .git suffix must be supported");
+        assert_eq!(
+            github_git,
+            vec!["https://api.github.com/repos/owner/my-skill/tarball"]
+        );
+        let gitlab = skill_source_archive_candidates("https://gitlab.com/group/subgroup/repo.git")
+            .expect("nested gitlab groups must be supported");
+        assert_eq!(
+            gitlab,
+            vec![
+                "https://gitlab.com/group/subgroup/repo/-/archive/main/repo-main.tar.gz",
+                "https://gitlab.com/group/subgroup/repo/-/archive/master/repo-master.tar.gz",
+            ]
+        );
+        let unsupported = skill_source_archive_candidates("https://bitbucket.org/owner/repo.git");
+        assert!(unsupported.is_err(), "non-GitHub/GitLab hosts must be rejected");
+        let ssh = skill_source_archive_candidates("git@github.com:owner/repo.git");
+        assert!(ssh.is_err(), "ssh-style urls cannot be downloaded without git");
+    }
+
+    #[test]
+    fn skill_source_archive_extraction_promotes_the_single_top_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "desic-skill-archive-test-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create archive test directory");
+
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut encoder);
+            let skill_md = b"---\nname: demo\ndescription: demo\n---\n";
+            let guide_md = b"# guide\n\n";
+            let mut header = tar::Header::new_gnu();
+            header.set_size(skill_md.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "owner-repo-abc123/SKILL.md", skill_md.as_slice())
+                .expect("append SKILL.md");
+            let mut header = tar::Header::new_gnu();
+            header.set_size(guide_md.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder
+                .append_data(&mut header, "owner-repo-abc123/docs/guide.md", guide_md.as_slice())
+                .expect("append nested resource");
+            builder.finish().expect("finish tar");
+        }
+        let bytes = encoder.finish().expect("finish gzip");
+
+        let target = root.join("installed");
+        extract_skill_archive(&bytes, &target).expect("extract archive");
+        assert_eq!(
+            fs::read_to_string(target.join("SKILL.md")).expect("read SKILL.md"),
+            "---\nname: demo\ndescription: demo\n---\n"
+        );
+        assert!(target.join("docs").join("guide.md").is_file());
+        fs::remove_dir_all(&root).expect("remove archive test directory");
+    }
+
+    /// Builds one raw tar entry, bypassing tar::Builder's own refusal to
+    /// write `..` paths so the test can simulate a hostile archive.
+    fn raw_tar_entry(name: &str, contents: &[u8]) -> Vec<u8> {
+        let mut header = [0_u8; 512];
+        let name_bytes = name.as_bytes();
+        assert!(name_bytes.len() < 100, "test entry name must fit the ustar name field");
+        header[..name_bytes.len()].copy_from_slice(name_bytes);
+        let mode = format!("{:07o}\0", 0o644);
+        header[100..108].copy_from_slice(mode.as_bytes());
+        let size = format!("{:011o}\0", contents.len());
+        header[124..136].copy_from_slice(size.as_bytes());
+        header[156] = b'0'; // typeflag: regular file
+        header[257..263].copy_from_slice(b"ustar\0");
+        for byte in header[148..156].iter_mut() {
+            *byte = b' ';
+        }
+        let sum: u32 = header.iter().map(|byte| u32::from(*byte)).sum();
+        let checksum = format!("{:06o}\0 ", sum);
+        header[148..156].copy_from_slice(checksum.as_bytes());
+        let mut out = header.to_vec();
+        out.extend_from_slice(contents);
+        let padding = (512 - contents.len() % 512) % 512;
+        out.extend(std::iter::repeat_n(0, padding));
+        out
+    }
+
+    #[test]
+    fn skill_source_archive_skips_parent_traversal_entries() {
+        let mut raw = raw_tar_entry("repo/../escape.txt", b"evil");
+        raw.extend(std::iter::repeat_n(0, 1024)); // end-of-archive blocks
+        let mut encoder =
+            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&raw).expect("gzip raw tar");
+        let bytes = encoder.finish().expect("finish gzip");
+        let root = std::env::temp_dir().join(format!(
+            "desic-skill-archive-escape-{}-{}",
+            std::process::id(),
+            ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create escape test directory");
+        let target = root.join("installed");
+        // The tar unpacker skips `..` entries instead of failing (its CVE
+        // mitigation since bsdtar); the archive still extracts cleanly and
+        // nothing may land outside the staging directory.
+        extract_skill_archive(&bytes, &target).expect("traversal entries are skipped, not fatal");
+        assert!(
+            !root.join("escape.txt").exists(),
+            "no file may escape the staging directory"
+        );
+        fs::remove_dir_all(&root).expect("remove escape test directory");
     }
 }

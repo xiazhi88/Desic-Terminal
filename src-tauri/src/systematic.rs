@@ -10820,9 +10820,18 @@ async fn ensure_local_python_environment(
     fs::create_dir_all(&environment_root).map_err(|error| {
         format!("Could not create the local Python environment directory: {error}")
     })?;
+    emit_systematic_event(
+        app,
+        json!({
+            "type": "pythonEnvironmentStage",
+            "stage": "venv",
+            "mirror": null,
+            "timestamp": now_ms(),
+        }),
+    );
 
     let python_version = if interpreter_path.is_file() {
-        install_local_python_dependencies(&interpreter_path).await?
+        install_local_python_dependencies(&interpreter_path, app).await?
     } else {
         // Creation source: the bundled CPython shipped in the app resources
         // first, then the machine PATH as a fallback for development builds
@@ -10885,7 +10894,7 @@ async fn ensure_local_python_environment(
             return Ok(local_python_environment_failure_view(&interpreter, &error));
         }
         let staged_interpreter = local_python_venv_interpreter_path(&staging);
-        let version = match install_local_python_dependencies(&staged_interpreter).await {
+        let version = match install_local_python_dependencies(&staged_interpreter, app).await {
             Ok(version) => version,
             Err(error) => {
                 let _ = fs::remove_dir_all(&staging);
@@ -10898,9 +10907,10 @@ async fn ensure_local_python_environment(
             Err(error) if venv_path.exists() => {
                 let _ = fs::remove_dir_all(&staging);
                 if local_python_venv_interpreter_path(&venv_path).is_file() {
-                    install_local_python_dependencies(&local_python_venv_interpreter_path(
-                        &venv_path,
-                    ))
+                    install_local_python_dependencies(
+                        &local_python_venv_interpreter_path(&venv_path),
+                        app,
+                    )
                     .await?
                 } else {
                     return Err(format!(
@@ -11006,7 +11016,10 @@ async fn create_local_python_venv(
     .map(|_| ())
 }
 
-async fn install_local_python_dependencies(interpreter: &Path) -> Result<String, String> {
+async fn install_local_python_dependencies(
+    interpreter: &Path,
+    app: &tauri::AppHandle,
+) -> Result<String, String> {
     if !interpreter.is_file() {
         return Err("The local Python environment has no interpreter".to_string());
     }
@@ -11022,6 +11035,15 @@ async fn install_local_python_dependencies(interpreter: &Path) -> Result<String,
     let mut failures = Vec::<String>::new();
     let mut installed_from = None;
     for (label, index_url) in SYSTEMATIC_PYTHON_PACKAGE_INDEXES {
+        emit_systematic_event(
+            app,
+            json!({
+                "type": "pythonEnvironmentStage",
+                "stage": "dependencies",
+                "mirror": label,
+                "timestamp": now_ms(),
+            }),
+        );
         let mut command = Command::new(interpreter);
         command
             .arg("-m")

@@ -1,4 +1,5 @@
 import type {
+  ChartTradeSources,
   AccountSummary,
   AccountConfigDraft,
   AccountBillSummary,
@@ -338,6 +339,10 @@ export async function fetchHistoricalOrders(request: HistoricalOrdersRequest): P
 
 export async function fetchHistoricalFills(request: HistoricalFillsRequest): Promise<HistoricalFillSummary[] | null> {
   return invokeDesktop<HistoricalFillSummary[]>("historical_fills", { request });
+}
+
+export async function fetchChartTradeSources(): Promise<ChartTradeSources | null> {
+  return invokeDesktop<ChartTradeSources>("chart_trade_sources");
 }
 
 export async function fetchAccountBills(request: AccountBillsRequest): Promise<AccountBillSummary[] | null> {

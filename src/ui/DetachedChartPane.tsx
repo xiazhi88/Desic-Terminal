@@ -7,6 +7,7 @@ import type {
   Candle,
   AccountSummary,
   ChartOrderLine,
+  ChartTradeSources,
   ChartOrderLineEdit,
   ChartPositionRange,
   FundingRate,
@@ -25,6 +26,7 @@ import type {
 import {
   deleteChartAlert,
   fetchCandles,
+  fetchChartTradeSources,
   fetchFundingRate,
   fetchHistoricalCandlesBefore,
   fetchHistoricalFills,
@@ -105,10 +107,12 @@ const DEFAULT_LAYER_VISIBILITY: ChartLayerVisibility = {
   signals: true,
   fills: true,
   tools: true,
+  priceLines: true,
 };
 
 const LAYER_LABELS: readonly [ChartLayerKey, string, string][] = [
   ["indicators", "Indicators", "指标"],
+  ["priceLines", "Price lines", "价格线"],
   ["drawings", "Drawings", "绘图"],
   ["signals", "Analysis", "分析观点"],
   ["fills", "Fills", "真实成交"],
@@ -297,6 +301,7 @@ export function DetachedChartPane({
   const [privateSnapshot, setPrivateSnapshot] = useState<PrivateAccountSnapshot | null>(null);
   const [algoOrders, setAlgoOrders] = useState<OkxAlgoOrder[]>(EMPTY_ORDERS);
   const [fills, setFills] = useState<HistoricalFillSummary[]>(EMPTY_FILLS);
+  const [tradeSources, setTradeSources] = useState<ChartTradeSources | null>(null);
   const [loading, setLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [status, setStatus] = useState(() => paneText("Initializing chart", "初始化图表"));
@@ -345,14 +350,15 @@ export function DetachedChartPane({
     setLoading(true);
     setPaneStatus(paneText("Loading chart data", "加载图表数据"));
     try {
-      const [snapshot, nextCandles, nextTicker, nextFunding, accountSnapshot, nextFills, algos] = await Promise.all([
+      const [snapshot, nextCandles, nextTicker, nextFunding, accountSnapshot, nextFills, algos, nextTradeSources] = await Promise.all([
         fetchMarketSnapshot(),
         fetchCandles(symbol, timeframe, 300),
         fetchTicker(symbol),
         fetchFundingRate(symbol),
         accountId ? fetchPrivateSnapshot(accountId) : Promise.resolve(null),
         accountId ? fetchHistoricalFills({ accountId, instId: symbol, limit: 240 }) : Promise.resolve(null),
-        accountId ? fetchOkxAlgoOrders({ accountId, environment, instId: symbol, includeHistory: false }) : Promise.resolve(null)
+        accountId ? fetchOkxAlgoOrders({ accountId, environment, instId: symbol, includeHistory: false }) : Promise.resolve(null),
+        accountId ? fetchChartTradeSources() : Promise.resolve(null)
       ]);
       if (version !== requestVersionRef.current) return;
       const cachedTicker = snapshot?.tickers?.[symbol] ?? (snapshot?.ticker?.instId === symbol ? snapshot.ticker : null);
@@ -365,6 +371,7 @@ export function DetachedChartPane({
       setFundingRate(nextFunding ?? snapshot?.fundingRates?.[symbol] ?? null);
       setPrivateSnapshot(accountSnapshot ?? snapshot?.privateSnapshot ?? null);
       setFills(nextFills ?? EMPTY_FILLS);
+      setTradeSources(nextTradeSources);
       setAlgoOrders(algos?.orders ?? EMPTY_ORDERS);
       setPaneStatus(paneText("Live monitoring", "实时监听中"));
     } catch (error) {
@@ -564,6 +571,7 @@ export function DetachedChartPane({
           fundingRate={fundingRate}
           orderLines={orderLines}
           fills={fillMarkers}
+          tradeSources={tradeSources}
           positionRanges={positionRanges}
           onNeedMoreHistory={loadMoreHistory}
           onChartCrosshairTime={onCrosshairTime}

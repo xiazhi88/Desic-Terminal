@@ -17,6 +17,7 @@ import {
   Send,
   Slash,
   Trash2,
+  ChevronRight,
   TrendingDown,
   TrendingUp,
   Undo2,
@@ -65,7 +66,7 @@ import {
   formatChartAmount,
   resolveChartTradeAction,
 } from "../lib/chartTradeSemantics";
-import type { Candle, ChartFillMarker, ChartOrderLine, ChartOrderLineEdit, ChartPositionRange, ChartRiskRewardTradeIntent, ChartSignalMarker, FundingRate, OrderBook, PositionLineTradeIntent, Ticker, Trade } from "../types";
+import type { Candle, ChartFillMarker, ChartOrderLine, ChartTradeSources, ChartOrderLineEdit, ChartPositionRange, ChartRiskRewardTradeIntent, ChartSignalMarker, FundingRate, OrderBook, PositionLineTradeIntent, Ticker, Trade } from "../types";
 
 const ChartScriptEditor = lazy(() =>
   import("./ChartScriptEditor").then((module) => ({ default: module.ChartScriptEditor }))
@@ -124,6 +125,7 @@ type Props = {
   onLayerVisibilityChange?: (visibility: ChartLayerVisibility) => void;
   onDrawingHistoryChange?: (history: { canUndo: boolean; canRedo: boolean }) => void;
   onRiskRewardTradeIntent?: (payload: ChartRiskRewardTradeIntent) => void;
+  tradeSources?: ChartTradeSources | null;
 };
 
 type HoverStats = {
@@ -289,10 +291,38 @@ type ReplayViewportTarget = {
   expiresAt: number;
 };
 
-export type ChartLayerKey = "indicators" | "alerts" | "drawings" | "signals" | "fills" | "tools";
+export type ChartLayerKey = "indicators" | "alerts" | "drawings" | "signals" | "fills" | "tools" | "priceLines";
 export type ChartLayerVisibility = Record<ChartLayerKey, boolean>;
 
+type FillSourceFilter = {
+  ai: boolean;
+  strategy: boolean;
+  user: boolean;
+  /** Empty record means "all profiles of that source are shown". */
+  aiProfiles: Record<string, boolean>;
+  strategyProfiles: Record<string, boolean>;
+};
+
+function fillPassesSourceFilter(marker: ChartFillMarker, filter: FillSourceFilter): boolean {
+  const operator = marker.operator ?? "user";
+  if (operator === "ai") {
+    if (!filter.ai) return false;
+    const selected = Object.keys(filter.aiProfiles);
+    if (selected.length === 0) return true;
+    return marker.aiProfileId != null && filter.aiProfiles[marker.aiProfileId] === true;
+  }
+  if (operator === "strategy") {
+    if (!filter.strategy) return false;
+    const selected = Object.keys(filter.strategyProfiles);
+    if (selected.length === 0) return true;
+    return marker.strategyId != null && filter.strategyProfiles[marker.strategyId] === true;
+  }
+  // user, system, and legacy fills without an operator ride the user toggle.
+  return filter.user;
+}
+
 const CHART_LAYER_MENU_ITEMS: ReadonlyArray<readonly [Exclude<ChartLayerKey, "indicators">, string, string]> = [
+  ["priceLines", "Price lines", "价格线"],
   ["drawings", "Drawings", "绘图"],
   ["signals", "Analysis", "分析观点"],
   ["fills", "Fills", "真实成交"],
@@ -403,7 +433,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -539,8 +569,21 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     drawings: true,
     signals: true,
     fills: true,
-    tools: true
+    tools: true,
+    priceLines: true
   });
+  const [fillSourceFilter, setFillSourceFilter] = useState<FillSourceFilter>({
+    ai: true,
+    strategy: true,
+    user: true,
+    aiProfiles: {},
+    strategyProfiles: {}
+  });
+  // The fill-source hierarchy stays collapsed by default; each level can be
+  // expanded independently while the parent checkbox keeps working.
+  const [fillMenuExpanded, setFillMenuExpanded] = useState(false);
+  const [aiMenuExpanded, setAiMenuExpanded] = useState(false);
+  const [strategyMenuExpanded, setStrategyMenuExpanded] = useState(false);
   const [scriptPanelOpen, setScriptPanelOpen] = useState(false);
   const initialScriptsRef = useRef<ChartScriptDefinition[] | null>(null);
   if (initialScriptsRef.current === null) initialScriptsRef.current = loadChartScripts();
@@ -624,19 +667,23 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     ? `${candles[0]?.time ?? ""}:${candles[candles.length - 1]?.time ?? ""}`
     : "";
   const orderBookPressure = useMemo(() => calculateOrderBookPressure(orderBook, recentTrades), [orderBook, recentTrades]);
+  const visibleFills = useMemo(
+    () => fills.filter((marker) => fillPassesSourceFilter(marker, fillSourceFilter)),
+    [fillSourceFilter, fills]
+  );
   const markerDisplayMode = useMemo(() => {
     if (!visibleLogicalRange || candles.length === 0) {
-      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: fills.length + signals.length };
+      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: visibleFills.length + signals.length };
     }
     const fromIndex = Math.max(0, Math.floor(visibleLogicalRange.from));
     const toIndex = Math.min(candles.length - 1, Math.ceil(visibleLogicalRange.to));
     if (fromIndex > toIndex) {
-      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: fills.length + signals.length };
+      return { expanded: false, visibleBarSpan: candles.length, visibleEventCount: visibleFills.length + signals.length };
     }
     const fromTime = candles[fromIndex]?.time ?? candles[0]?.time;
     const toTime = candles[toIndex]?.time ?? candles[candles.length - 1]?.time;
     const isVisible = (time: number) => time >= Number(fromTime) && time <= Number(toTime);
-    const visibleEventCount = fills.filter((fill) => isVisible(Number(fill.time))).length
+    const visibleEventCount = visibleFills.filter((fill) => isVisible(Number(fill.time))).length
       + signals.filter((signal) => isVisible(Number(signal.time))).length;
     const visibleBarSpan = Math.max(1, toIndex - fromIndex + 1);
     return {
@@ -645,8 +692,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       visibleBarSpan,
       visibleEventCount
     };
-  }, [candles, fills, signals, visibleLogicalRange]);
-  const displayFillMarkers = useMemo(() => aggregateFillMarkers(candles, fills), [candles, fills]);
+  }, [candles, signals, visibleFills, visibleLogicalRange]);
+  const displayFillMarkers = useMemo(() => aggregateFillMarkers(candles, visibleFills), [candles, visibleFills]);
   const signalMarkers = useMemo(
     () => buildSignalMarkers(candles, signals, localizedTradeOpinion, markerDisplayMode.expanded),
     [candles, localizedTradeOpinion, markerDisplayMode.expanded, signals]
@@ -678,7 +725,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   }, [coordinateVersion, latest]);
   const positionRangeOverlays = useMemo(() => {
     const chart = chartRef.current;
-    if (!chart) return [];
+    if (!chart || !layerVisibility.priceLines) return [];
     coordinateVersion;
     return positionRanges
       .map((range): PositionRangeOverlay | null => {
@@ -701,11 +748,11 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         };
       })
       .filter((item): item is PositionRangeOverlay => Boolean(item));
-  }, [coordinateVersion, positionRanges]);
+  }, [coordinateVersion, layerVisibility.priceLines, positionRanges]);
   const cancellableOrderLineOverlays = useMemo(() => {
     const chart = chartRef.current;
     const container = containerRef.current;
-    if (!chart || !container || !orderLineCancellationEnabled) return [];
+    if (!chart || !container || !orderLineCancellationEnabled || !layerVisibility.priceLines) return [];
     coordinateVersion;
     const height = container.clientHeight;
     return orderLines
@@ -716,7 +763,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         return { line, y: Math.max(24, Math.min(height - 14, Number(y))) };
       })
       .filter((item): item is { line: ChartOrderLine; y: number } => Boolean(item));
-  }, [coordinateVersion, orderLineCancellationEnabled, orderLines]);
+  }, [coordinateVersion, layerVisibility.priceLines, orderLineCancellationEnabled, orderLines]);
   const drawingOverlays = useMemo(() => {
     const chart = chartRef.current;
     if (!chart) return [];
@@ -1979,7 +2026,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const orderLineAtPointer = (clientY: number) => {
     const chart = chartRef.current;
     const container = containerRef.current;
-    if (!chart || !container) return null;
+    if (!chart || !container || !layerVisibility.priceLines) return null;
     const box = container.getBoundingClientRect();
     const y = clientY - box.top;
     let match: { line: ChartOrderLine; y: number; distance: number } | null = null;
@@ -1997,7 +2044,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
 
   const positionHandleAtPointer = (clientY: number) => {
     const container = containerRef.current;
-    if (!container) return null;
+    if (!container || !layerVisibility.priceLines) return null;
     const box = container.getBoundingClientRect();
     const y = clientY - box.top;
     let match: { range: ChartPositionRange; y: number; distance: number } | null = null;
@@ -2725,16 +2772,143 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
           </button>
           {layerMenuOpen && (
             <div className="chart-layer-menu" role="menu" aria-label={chartText("Layer visibility", "图层显示设置")}>
-              {CHART_LAYER_MENU_ITEMS.map(([key, english, chinese]) => (
-                <label key={key}>
-                  <input
-                    type="checkbox"
-                    checked={layerVisibility[key]}
-                    onChange={() => setLayerVisibility((items) => ({ ...items, [key]: !items[key] }))}
-                  />
-                  <span>{chartText(english, chinese)}</span>
-                </label>
-              ))}
+              {CHART_LAYER_MENU_ITEMS.map(([key, english, chinese]) => {
+                if (key === "fills") {
+                  return (
+                    <div className="chart-layer-group" key={key}>
+                      <div className="chart-layer-row">
+                        <label>
+                          <input
+                            type="checkbox"
+                            checked={layerVisibility.fills}
+                            onChange={() => setLayerVisibility((items) => ({ ...items, fills: !items.fills }))}
+                          />
+                          <span>{chartText(english, chinese)}</span>
+                        </label>
+                        <button
+                          type="button"
+                          className={clsx("chart-layer-expander", fillMenuExpanded && "is-expanded")}
+                          aria-expanded={fillMenuExpanded}
+                          aria-label={chartText("Expand fill source filter", "展开成交来源筛选")}
+                          onClick={() => setFillMenuExpanded((value) => !value)}
+                        >
+                          <ChevronRight size={12} />
+                        </button>
+                      </div>
+                      {layerVisibility.fills && fillMenuExpanded && (
+                        <div className="chart-layer-submenu" role="group" aria-label={chartText("Fill source filter", "成交来源筛选")}>
+                          <div className="chart-layer-row chart-layer-row--sub">
+                            <label className="chart-layer-subitem">
+                              <input
+                                type="checkbox"
+                                checked={fillSourceFilter.ai}
+                                onChange={() => setFillSourceFilter((items) => ({ ...items, ai: !items.ai }))}
+                              />
+                              <span>{chartText("AI orders", "AI 下单")}</span>
+                            </label>
+                            <button
+                              type="button"
+                              className={clsx("chart-layer-expander", aiMenuExpanded && "is-expanded")}
+                              aria-expanded={aiMenuExpanded}
+                              aria-label={chartText("Expand AI profile filter", "展开 AI Profile 筛选")}
+                              onClick={() => setAiMenuExpanded((value) => !value)}
+                            >
+                              <ChevronRight size={12} />
+                            </button>
+                          </div>
+                          {fillSourceFilter.ai && aiMenuExpanded && (
+                            <div className="chart-layer-submenu chart-layer-submenu--deep" role="group">
+                              <label className="chart-layer-subitem">
+                                <input
+                                  type="checkbox"
+                                  checked={Object.keys(fillSourceFilter.aiProfiles).length === 0}
+                                  onChange={() => setFillSourceFilter((items) => ({ ...items, aiProfiles: {} }))}
+                                />
+                                <span>{chartText("All AI", "全部 AI")}</span>
+                              </label>
+                              {(tradeSources?.aiProfiles ?? []).map((profile) => (
+                                <label className="chart-layer-subitem" key={profile.id}>
+                                  <input
+                                    type="checkbox"
+                                    checked={fillSourceFilter.aiProfiles[profile.id] === true}
+                                    onChange={() => setFillSourceFilter((items) => ({
+                                      ...items,
+                                      aiProfiles: { ...items.aiProfiles, [profile.id]: items.aiProfiles[profile.id] !== true }
+                                    }))}
+                                  />
+                                  <span title={profile.id}>{profile.name}</span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                          <div className="chart-layer-row chart-layer-row--sub">
+                            <label className="chart-layer-subitem">
+                              <input
+                                type="checkbox"
+                                checked={fillSourceFilter.strategy}
+                                onChange={() => setFillSourceFilter((items) => ({ ...items, strategy: !items.strategy }))}
+                              />
+                              <span>{chartText("Strategy orders", "策略下单")}</span>
+                            </label>
+                            <button
+                              type="button"
+                              className={clsx("chart-layer-expander", strategyMenuExpanded && "is-expanded")}
+                              aria-expanded={strategyMenuExpanded}
+                              aria-label={chartText("Expand strategy profile filter", "展开策略 Profile 筛选")}
+                              onClick={() => setStrategyMenuExpanded((value) => !value)}
+                            >
+                              <ChevronRight size={12} />
+                            </button>
+                          </div>
+                          {fillSourceFilter.strategy && strategyMenuExpanded && (
+                            <div className="chart-layer-submenu chart-layer-submenu--deep" role="group">
+                              <label className="chart-layer-subitem">
+                                <input
+                                  type="checkbox"
+                                  checked={Object.keys(fillSourceFilter.strategyProfiles).length === 0}
+                                  onChange={() => setFillSourceFilter((items) => ({ ...items, strategyProfiles: {} }))}
+                                />
+                                <span>{chartText("All strategies", "全部策略")}</span>
+                              </label>
+                              {(tradeSources?.strategyProfiles ?? []).map((profile) => (
+                                <label className="chart-layer-subitem" key={profile.id}>
+                                  <input
+                                    type="checkbox"
+                                    checked={fillSourceFilter.strategyProfiles[profile.id] === true}
+                                    onChange={() => setFillSourceFilter((items) => ({
+                                      ...items,
+                                      strategyProfiles: { ...items.strategyProfiles, [profile.id]: items.strategyProfiles[profile.id] !== true }
+                                    }))}
+                                  />
+                                  <span title={profile.id}>{profile.name}</span>
+                                </label>
+                              ))}
+                            </div>
+                          )}
+                          <label className="chart-layer-subitem">
+                            <input
+                              type="checkbox"
+                              checked={fillSourceFilter.user}
+                              onChange={() => setFillSourceFilter((items) => ({ ...items, user: !items.user }))}
+                            />
+                            <span>{chartText("User orders", "用户下单")}</span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
+                return (
+                  <label key={key}>
+                    <input
+                      type="checkbox"
+                      checked={layerVisibility[key]}
+                      onChange={() => setLayerVisibility((items) => ({ ...items, [key]: !items[key] }))}
+                    />
+                    <span>{chartText(english, chinese)}</span>
+                  </label>
+                );
+              })}
             </div>
           )}
         </div>

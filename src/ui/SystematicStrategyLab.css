@@ -55,11 +55,50 @@
 .systematic-lab-replay-controls { display: flex; align-items: center; }
 
 .systematic-strategy-lab__header {
+  position: relative;
   justify-content: space-between;
   gap: 16px;
   padding: 0 14px;
   border-bottom: 1px solid var(--lab-line);
   background: #0a0d12;
+}
+
+/* Python environment preparation track pinned under the workspace header, so
+   the "creating environment / installing dependencies" stages stay visible on
+   every tab instead of only inside the strategy view. */
+.systematic-strategy-lab__prepare-track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -1px;
+  height: 3px;
+  overflow: hidden;
+  background: rgba(148, 163, 184, 0.12);
+  pointer-events: none;
+}
+
+.systematic-strategy-lab__prepare-track > span {
+  position: relative;
+  height: 100%;
+  display: block;
+  border-radius: 0 2px 2px 0;
+  background: linear-gradient(90deg, #7c5cff, #b58dff 55%, #6fc3df);
+  box-shadow: 0 0 10px rgba(181, 141, 255, 0.55);
+  transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.systematic-strategy-lab__prepare-track > span::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.42) 50%, transparent 80%);
+  background-size: 220% 100%;
+  animation: systematic-lab-prepare-shimmer 1.7s linear infinite;
+}
+
+@keyframes systematic-lab-prepare-shimmer {
+  from { background-position: 130% 0; }
+  to { background-position: -90% 0; }
 }
 
 .systematic-strategy-lab__identity { min-width: 0; gap: 9px; }
@@ -524,27 +563,222 @@
 .systematic-lab-backtest-config__footer > span { max-width: 480px; color: var(--lab-weak); font-size: 10px; line-height: 1.45; }
 .systematic-lab-optimization-panel { width: min(980px, 100%); margin: 0 auto; padding: 0 20px 24px; }
 .systematic-lab-optimization-panel .systematic-lab-view-heading { margin: 10px 0; padding-top: 16px; border-top: 1px solid var(--lab-line); }
-.systematic-lab-optimization-list { display: grid; border: 1px solid var(--lab-line); }
-.systematic-lab-optimization-row { min-width: 0; display: grid; grid-template-columns: minmax(170px, 1.1fr) minmax(170px, 1fr) 110px auto; gap: 10px; align-items: center; padding: 10px; border-bottom: 1px solid var(--lab-line-soft); background: rgba(255,255,255,0.012); }
-.systematic-lab-optimization-row:last-child { border-bottom: 0; }
-.systematic-lab-optimization-row > div:first-child { min-width: 0; display: grid; gap: 3px; }
-.systematic-lab-optimization-row strong { overflow: hidden; color: var(--lab-text); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
-.systematic-lab-optimization-row small { overflow: hidden; color: var(--lab-weak); font-size: 9px; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
-.systematic-lab-optimization-row__meta { display: flex; flex-wrap: wrap; gap: 3px 8px; white-space: normal !important; }
-.systematic-lab-optimization-row__meta span { white-space: nowrap; }
-.systematic-lab-optimization-row__params { display: flex; flex-wrap: wrap; gap: 3px 8px; white-space: normal !important; }
-.systematic-lab-optimization-row__params span { display: inline-flex; align-items: baseline; gap: 2px; white-space: nowrap; }
-.systematic-lab-optimization-row__params b { color: var(--lab-text); font-weight: 750; }
-.systematic-lab-optimization-row__params i { color: var(--lab-accent); font-style: normal; font-weight: 700; }
-.systematic-lab-optimization-row__progress { min-width: 0; display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 7px; align-items: center; }
-.systematic-lab-optimization-row__progress > span { height: 5px; overflow: hidden; border-radius: 1px; background: rgba(255,255,255,0.1); }
-.systematic-lab-optimization-row__progress b { height: 100%; display: block; background: var(--lab-accent); transition: width 180ms ease-out; }
-.systematic-lab-optimization-row__score { display: grid; gap: 2px; text-align: right; }
-.systematic-lab-optimization-row__score span { color: var(--lab-weak); font-size: 8px; font-weight: 750; text-transform: uppercase; }
-.systematic-lab-optimization-row__score strong { font-size: 11px; }
-.systematic-lab-optimization-row__actions { min-width: 0; display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 6px; }
-.systematic-lab-optimization-row__actions .systematic-lab__command-button { min-width: 0; min-height: 27px; padding: 0 7px; font-size: 9px; white-space: nowrap; }
-.systematic-lab-optimization-row__actions .systematic-lab__error-notice { max-width: 180px; white-space: normal; }
+.systematic-lab-optimization-list { display: grid; gap: 10px; }
+
+/* Optimization result cards: status badge, headline Calmar, parameter chips,
+   progress track and actions in one compact card per run. */
+.systematic-lab-optimization-card {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--lab-line-soft);
+  border-radius: 10px;
+  background: linear-gradient(160deg, rgba(255, 255, 255, 0.028), rgba(255, 255, 255, 0.008) 55%), rgba(10, 13, 18, 0.72);
+  transition: border-color 160ms ease, box-shadow 160ms ease, transform 160ms ease;
+}
+
+.systematic-lab-optimization-card:hover {
+  border-color: rgba(181, 141, 255, 0.34);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24), 0 0 0 1px rgba(181, 141, 255, 0.06);
+}
+
+.systematic-lab-optimization-card.is-completed {
+  border-color: rgba(94, 234, 212, 0.16);
+}
+
+.systematic-lab-optimization-card__head {
+  min-width: 0;
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.systematic-lab-optimization-card__title {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+.systematic-lab-optimization-card__title strong {
+  overflow: hidden;
+  color: var(--lab-text);
+  font-size: 12px;
+  font-weight: 750;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systematic-lab-optimization-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 999px;
+  color: var(--lab-weak);
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+
+.systematic-lab-optimization-badge.is-active {
+  border-color: rgba(181, 141, 255, 0.45);
+  color: #c9b4ff;
+  background: rgba(139, 92, 246, 0.1);
+}
+
+.systematic-lab-optimization-badge.is-done {
+  border-color: rgba(94, 234, 212, 0.32);
+  color: #7de6d2;
+  background: rgba(45, 212, 191, 0.07);
+}
+
+.systematic-lab-optimization-badge.is-failed {
+  border-color: rgba(251, 113, 133, 0.4);
+  color: #fda4af;
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.systematic-lab-optimization-badge.is-cancelled {
+  border-color: rgba(148, 163, 184, 0.24);
+  color: rgba(203, 213, 225, 0.55);
+}
+
+.systematic-lab-optimization-card__calmar {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 1px;
+  justify-items: end;
+}
+
+.systematic-lab-optimization-card__calmar span {
+  color: var(--lab-weak);
+  font-size: 8px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.systematic-lab-optimization-card__calmar strong {
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+
+.systematic-lab-optimization-card__calmar small {
+  color: var(--lab-weak);
+  font-size: 9px;
+}
+
+.systematic-lab-optimization-card__params {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.systematic-lab-optimization-card__params span {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 3px;
+  padding: 2px 8px;
+  border: 1px solid rgba(181, 141, 255, 0.22);
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.07);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.systematic-lab-optimization-card__params b {
+  color: var(--lab-weak);
+  font-weight: 650;
+}
+
+.systematic-lab-optimization-card__params i {
+  color: var(--lab-accent);
+  font-style: normal;
+  font-weight: 750;
+}
+
+.systematic-lab-optimization-card__range {
+  overflow: hidden;
+  color: var(--lab-weak);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systematic-lab-optimization-card__progress {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.systematic-lab-optimization-card__progress > span {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.systematic-lab-optimization-card__progress > span b {
+  height: 100%;
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7c5cff, #b58dff 65%, #6fc3df);
+  box-shadow: 0 0 8px rgba(181, 141, 255, 0.5);
+  transition: width 220ms ease-out;
+}
+
+.systematic-lab-optimization-card__progress small {
+  color: var(--lab-weak);
+  font-size: 9px;
+}
+
+.systematic-lab-optimization-card__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  color: var(--lab-weak);
+  font-size: 9px;
+}
+
+.systematic-lab-optimization-card__meta span {
+  white-space: nowrap;
+}
+
+.systematic-lab-optimization-card__cancelled {
+  color: rgba(203, 213, 225, 0.55);
+  font-size: 9px;
+}
+
+.systematic-lab-optimization-card__actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.systematic-lab-optimization-card__actions .systematic-lab__command-button {
+  min-height: 28px;
+  padding: 0 12px;
+  font-size: 10px;
+}
+
+.systematic-lab-optimization-card .systematic-lab__error-notice {
+  padding: 7px 10px;
+  border: 1px solid rgba(251, 113, 133, 0.28);
+  border-radius: 8px;
+  background: rgba(244, 63, 94, 0.06);
+  font-size: 10px;
+  line-height: 1.45;
+  white-space: normal;
+}
 .systematic-lab-optimization-row__cancelled { color: var(--lab-weak) !important; }
 .systematic-lab-optimization-panel__note { display: block; margin-top: 8px; color: var(--lab-weak); font-size: 9px; line-height: 1.4; }
 

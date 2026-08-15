@@ -519,6 +519,9 @@ export type HistoricalFillSummary = {
   executionKey?: string | null;
   okxTs?: number | null;
   syncedAt: number;
+  aiProfileId?: string | null;
+  strategyName?: string | null;
+  aiProfileName?: string | null;
 };
 
 export type AccountBillSummary = {
@@ -1298,11 +1301,24 @@ export type ChartFillMarker = {
   executionKey?: string | null;
   operator?: string | null;
   strategyId?: string | null;
+  aiProfileId?: string | null;
+  strategyName?: string | null;
+  aiProfileName?: string | null;
   /** UI-only aggregation metadata; raw fills and audit records remain unchanged. */
   groupCount?: number;
   groupStartTime?: number;
   groupEndTime?: number;
   label: string;
+};
+
+export type ChartTradeSourceProfile = {
+  id: string;
+  name: string;
+};
+
+export type ChartTradeSources = {
+  aiProfiles: ChartTradeSourceProfile[];
+  strategyProfiles: ChartTradeSourceProfile[];
 };
 
 export type ChartPositionRange = {
@@ -2055,7 +2071,7 @@ export type AiSession = {
   id: string;
   title: string;
   status: string;
-  origin: "user" | "automation";
+  origin: "user" | "automation" | "indicator" | "strategy";
   createdAt: number;
   updatedAt: number;
 };

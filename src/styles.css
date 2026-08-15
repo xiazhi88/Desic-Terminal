@@ -856,7 +856,13 @@ button {
   padding: 0 18px;
   gap: 18px;
   box-shadow: inset 0 -1px rgba(255, 255, 255, 0.025);
+  /* The frameless main window drags from the title bar. The right-hand
+     action cluster keeps pointer events for its buttons. */
+  -webkit-app-region: drag;
 }
+
+.topbar .top-actions,
+.topbar button { -webkit-app-region: no-drag; }
 
 .topbar::before {
   content: "";
@@ -3346,7 +3352,9 @@ button {
   top: calc(100% + 7px);
   right: 0;
   z-index: 110;
-  width: 148px;
+  width: 186px;
+  max-height: 72vh;
+  overflow-y: auto;
   padding: 6px;
   border: 1px solid rgba(183, 146, 255, 0.2);
   border-radius: 6px;
@@ -3373,6 +3381,79 @@ button {
   width: 14px;
   height: 14px;
   accent-color: #8b5cf6;
+}
+
+/* Fill-source filter: two indent levels under the "Fills" layer entry. */
+.chart-layer-menu .chart-layer-group {
+  border-top: 1px solid rgba(148, 163, 184, 0.14);
+  padding-top: 4px;
+  margin-top: 4px;
+}
+
+.chart-layer-menu .chart-layer-group:first-child {
+  border-top: none;
+  padding-top: 0;
+  margin-top: 0;
+}
+
+.chart-layer-menu .chart-layer-row {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chart-layer-menu .chart-layer-row > label {
+  flex: 1;
+  min-width: 0;
+}
+
+.chart-layer-menu .chart-layer-expander {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  cursor: pointer;
+}
+
+.chart-layer-menu .chart-layer-expander:hover {
+  background: rgba(139, 92, 246, 0.18);
+  color: rgba(255, 255, 255, 0.9);
+}
+
+.chart-layer-menu .chart-layer-expander svg {
+  transition: transform 160ms ease;
+}
+
+.chart-layer-menu .chart-layer-expander.is-expanded svg {
+  transform: rotate(90deg);
+}
+
+.chart-layer-menu .chart-layer-submenu {
+  margin-left: 18px;
+  padding-left: 8px;
+  border-left: 1px solid rgba(148, 163, 184, 0.2);
+}
+
+.chart-layer-menu .chart-layer-submenu--deep {
+  margin-left: 16px;
+}
+
+.chart-layer-menu .chart-layer-subitem {
+  min-height: 26px;
+}
+
+.chart-layer-menu .chart-layer-subitem span {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 118px;
+  color: rgba(255, 255, 255, 0.68);
 }
 
 .chart-script-panel {
@@ -26793,4 +26874,24 @@ button {
   .workspace-surface {
     --workspace-compact-gap: 10px;
   }
+}
+
+/* Open-source license viewer: full-height iframe inside the modal shell. */
+.licenses-modal {
+  width: min(860px, calc(100vw - 48px));
+  height: min(680px, calc(100vh - 120px));
+}
+
+.licenses-modal .settings-status-text {
+  padding: 18px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.licenses-frame {
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+  border: none;
+  background: #0b0e14;
 }

@@ -175,6 +175,9 @@ export function buildHistoricalFillMarkers(
         executionKey: fill.executionKey,
         operator: fill.operator,
         strategyId: fill.strategyId,
+        aiProfileId: fill.aiProfileId,
+        strategyName: fill.strategyName,
+        aiProfileName: fill.aiProfileName,
         label: [chartTradeActionLabel(action, t), formatChartQuantity(fill.fillSz, t), pnlLabel].filter(Boolean).join(" "),
       };
     })

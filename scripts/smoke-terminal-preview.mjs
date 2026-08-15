@@ -24,12 +24,16 @@ const marketAssetsSeed = {
   ]
 };
 
+// Sub-pixel rendering can leave rects 0.001-0.01px "overlapping" on a shared
+// edge; a half-pixel tolerance keeps the assertion about real layout overlap.
+const RECT_OVERLAP_EPSILON = 0.5;
+
 function rectsOverlap(a, b) {
   return !(
-    a.x + a.width <= b.x ||
-    b.x + b.width <= a.x ||
-    a.y + a.height <= b.y ||
-    b.y + b.height <= a.y
+    a.x + a.width <= b.x + RECT_OVERLAP_EPSILON ||
+    b.x + b.width <= a.x + RECT_OVERLAP_EPSILON ||
+    a.y + a.height <= b.y + RECT_OVERLAP_EPSILON ||
+    b.y + b.height <= a.y + RECT_OVERLAP_EPSILON
   );
 }
 

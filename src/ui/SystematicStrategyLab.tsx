@@ -280,6 +280,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [endPolicy, setEndPolicy] = useState<"markToMarket" | "closeAtLastClose">("markToMarket");
   const [runtimePreparation, setRuntimePreparation] = useState<SystematicPythonRuntimeView | null>(null);
   const [preparingPython, setPreparingPython] = useState(false);
+  const [pythonPrepareStage, setPythonPrepareStage] = useState<{ stage: string; mirror: string | null } | null>(null);
   const pythonPreparationAttemptedRef = useRef(false);
   const backtestDefaultRangeSymbolRef = useRef<string | null>(null);
   const backtestReproductionSymbolRef = useRef<string | null>(null);
@@ -359,6 +360,12 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     let unlisten: (() => void) | null = null;
     void listenSystematicEvents((event) => {
       if (!active) return;
+      if (event.type === "pythonEnvironmentStage") {
+        if (event.stage) {
+          setPythonPrepareStage({ stage: event.stage, mirror: event.mirror ?? null });
+        }
+        return;
+      }
       if (event.type !== "backtestProgress" && event.type !== "backtestRunning") return;
       const runId = event.runId;
       const pct = event.progressPct;
@@ -441,6 +448,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     pythonPreparationAttemptedRef.current = true;
     let active = true;
     setPreparingPython(true);
+    setPythonPrepareStage(null);
     void prepareSystematicPythonEnvironment().then(async (next) => {
       if (!active) return;
       if (next) setRuntimePreparation(next);
@@ -457,7 +465,10 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         sampleTestConfigured: false,
       });
     }).finally(() => {
-      if (active) setPreparingPython(false);
+      if (active) {
+        setPreparingPython(false);
+        setPythonPrepareStage(null);
+      }
     });
     return () => { active = false; };
   }, [desktop, pythonRuntime?.environmentExists, pythonRuntime?.setupRequired, refresh]);
@@ -1175,11 +1186,16 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
           </div>
         </div>
         <div className="systematic-strategy-lab__statusline">
-          <RuntimeState runtime={pythonRuntime} preparing={preparingPython} text={text} />
+          <RuntimeState runtime={pythonRuntime} preparing={preparingPython} stage={pythonPrepareStage} text={text} />
           <button className="systematic-lab__icon-button" type="button" onClick={refreshPythonEnvironment} title={text.refresh} aria-label={text.refresh}>
             <RefreshCw size={14} />
           </button>
         </div>
+        {preparingPython ? (
+          <div className="systematic-strategy-lab__prepare-track" role="progressbar" aria-label={text.runtimePreparing}>
+            <span style={{ width: `${pythonPrepareProgressPct(pythonPrepareStage)}%` }} />
+          </div>
+        ) : null}
       </header>
 
       <nav className="systematic-strategy-lab__tabs" aria-label={text.workflow}>
@@ -3321,43 +3337,11 @@ function BacktestView({
           </div>
         </div>
       </section>
-      <aside className="systematic-lab-backtest-rail">
-        <section className="systematic-lab-backtest-summary">
-          <div className="systematic-lab__pane-head"><span>{text.backtest}</span><span>{text.evaluationRange}</span></div>
-          <div className="systematic-lab-backtest-summary__identity">
-            <SymbolIcon base={symbolBase(selectedSymbol)} />
-            <div><strong>{selectedStrategy?.name ?? text.noStrategy}</strong><span>{selectedSymbol} · {text.python}</span></div>
-          </div>
-          <div className="systematic-lab-backtest-plan" aria-label={text.backtest}>
-            <div className="systematic-lab-backtest-plan__step is-context">
-              <span>01</span>
-              <div><strong>{text.preloadHistory}</strong><small>{preloadBars} 1m · {text.preloadBeforeStart}</small></div>
-            </div>
-            <div className="systematic-lab-backtest-plan__connector" aria-hidden="true" />
-            <div className="systematic-lab-backtest-plan__step is-active">
-              <span>02</span>
-              <div><strong>{text.evaluationRange}</strong><small>{formatBacktestDateRange(dateTimeInput(startAt), dateTimeInput(endAt))}</small></div>
-            </div>
-            <div className="systematic-lab-backtest-plan__connector" aria-hidden="true" />
-            <div className="systematic-lab-backtest-plan__step">
-              <span>03</span>
-              <div><strong>{text.endOfRun}</strong><small>{endPolicy === "markToMarket" ? text.markToMarket : text.forceClose}</small></div>
-            </div>
-          </div>
-          <dl className="systematic-lab-backtest-summary__facts">
-            <div><dt>{text.strategyVersion}</dt><dd>{strategyVersion ? `v${strategyVersion}` : "--"}</dd></div>
-            <div><dt>{text.evaluationRange}</dt><dd>{formatBacktestDateRange(dateTimeInput(startAt), dateTimeInput(endAt))}</dd></div>
-            <div><dt>{text.initialEquity}</dt><dd>{initialEquity} USDT</dd></div>
-            <div><dt>{text.leverage}</dt><dd>{leverage}x</dd></div>
-            <div><dt>{text.preloadHistory}</dt><dd>{preloadBars} 1m</dd></div>
-          </dl>
-          <div className="systematic-lab-backtest-summary__state">
-            <span className={runtimeAvailable ? "is-ready" : "is-guarded"} />
-            <div><strong>{runtimeAvailable ? text.runtimeReady : text.runtimeGuarded}</strong><small>{text.pythonBacktestGuard}</small></div>
-          </div>
-        </section>
-        {selectedStrategy?.kind === "python" ? <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} onCancel={onCancelOptimization} cancellingOptimizationId={cancellingOptimizationId} applyingOptimizationId={applyingOptimizationId} /> : null}
-      </aside>
+      {selectedStrategy?.kind === "python" && optimizations.filter((item) => item.strategyId === selectedStrategy?.id && item.instId === selectedSymbol).length > 0 ? (
+        <aside className="systematic-lab-backtest-rail">
+          <OptimizationPanel text={text} optimizations={optimizations.filter((item) => item.strategyId === selectedStrategy.id && item.instId === selectedSymbol)} onApply={onApplyOptimization} onCancel={onCancelOptimization} cancellingOptimizationId={cancellingOptimizationId} applyingOptimizationId={applyingOptimizationId} />
+        </aside>
+      ) : null}
     </div>
   );
 }
@@ -3389,40 +3373,54 @@ function OptimizationPanel({ text, optimizations, onApply, onCancel, cancellingO
               ? text.optimizationCancelling
               : optimization.status === "queued" ? text.queued : optimization.status === "cancelled" ? text.cancelled : optimization.status;
           const cancelling = cancellingOptimizationId === optimization.id || optimization.status === "cancelling";
-          return <article key={optimization.id} className="systematic-lab-optimization-row">
-            <div>
-              <strong>{optimization.instId}</strong>
-              <small>{formatBacktestDateRange(optimization.validationStartAt, optimization.validationEndAt)}</small>
-              <small>{optimization.strategyVersion ? `${text.version} v${optimization.strategyVersion}` : ""}{optimization.candidateBudget ? ` · ${optimization.candidateBudget} ${text.candidates}` : ""}{optimization.samplingMode ? ` · ${optimization.samplingMode === "sampled" ? text.deterministicSampling : text.fullGrid}` : ""}</small>
-              {completed && optimization.bestParameters ? (
-                <small className="systematic-lab-optimization-row__params">
-                  {Object.entries(optimization.bestParameters).map(([key, value]) => (
-                    <span key={key}><b>{key}</b>=<i>{String(value)}</i></span>
-                  ))}
+          return <article key={optimization.id} className={clsx("systematic-lab-optimization-card", completed && "is-completed")}>
+            <header className="systematic-lab-optimization-card__head">
+              <div className="systematic-lab-optimization-card__title">
+                <strong>{optimization.instId}</strong>
+                <span className={clsx("systematic-lab-optimization-badge", active && "is-active", completed && "is-done", failed && "is-failed", cancelled && "is-cancelled")}>
+                  {active && <LoaderCircle size={10} className="is-spinning" />}
+                  {statusLabel}
+                </span>
+              </div>
+              <div className="systematic-lab-optimization-card__calmar">
+                <span>{text.validationCalmar}</span>
+                <strong className={(optimization.bestValidationCalmar ?? 0) >= 0 ? "positive" : "negative"}>{formatRatio(optimization.bestValidationCalmar)}</strong>
+                {optimization.baselineValidationCalmar !== null && optimization.baselineValidationCalmar !== undefined ? <small>{text.baselineCalmar} {formatRatio(optimization.baselineValidationCalmar)}</small> : null}
+              </div>
+            </header>
+            {completed && optimization.bestParameters ? (
+              <div className="systematic-lab-optimization-card__params">
+                {Object.entries(optimization.bestParameters).map(([key, value]) => (
+                  <span key={key}><b>{key}</b><i>{String(value)}</i></span>
+                ))}
+              </div>
+            ) : null}
+            <div className="systematic-lab-optimization-card__range">
+              {formatBacktestDateRange(optimization.validationStartAt, optimization.validationEndAt)}
+            </div>
+            {active ? (
+              <div className="systematic-lab-optimization-card__progress">
+                <span><b style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} /></span>
+                <small>
+                  {formatLocalizedNumber(optimization.completedCount)} / {formatLocalizedNumber(optimization.candidateCount)}
+                  {optimization.elapsedMs !== null && optimization.elapsedMs !== undefined ? ` · ${text.optimizationElapsed} ${formatOptimizationDuration(optimization.elapsedMs)}` : ""}
+                  {optimization.estimatedRemainingMs !== null && optimization.estimatedRemainingMs !== undefined ? ` · ${text.optimizationEta} ${formatOptimizationDuration(optimization.estimatedRemainingMs)}` : ""}
                 </small>
-              ) : null}
-              <small className="systematic-lab-optimization-row__meta">
-                <span>{statusLabel}</span>
+              </div>
+            ) : (
+              <div className="systematic-lab-optimization-card__meta">
+                <span>{optimization.strategyVersion ? `${text.version} v${optimization.strategyVersion}` : ""}</span>
+                <span>{optimization.candidateBudget ? `${optimization.candidateBudget} ${text.candidates}` : ""}{optimization.samplingMode ? ` · ${optimization.samplingMode === "sampled" ? text.deterministicSampling : text.fullGrid}` : ""}</span>
                 {optimization.workerCount ? <span>{optimization.workerCount} {text.optimizationWorkers}</span> : null}
                 {optimization.elapsedMs !== null && optimization.elapsedMs !== undefined ? <span>{text.optimizationElapsed} {formatOptimizationDuration(optimization.elapsedMs)}</span> : null}
-                {active && optimization.estimatedRemainingMs !== null && optimization.estimatedRemainingMs !== undefined ? <span>{text.optimizationEta} {formatOptimizationDuration(optimization.estimatedRemainingMs)}</span> : null}
-              </small>
-            </div>
-            <div className="systematic-lab-optimization-row__progress">
-              <span><b style={{ width: `${Math.min(100, Math.max(0, progress))}%` }} /></span>
-              <small>{formatLocalizedNumber(optimization.completedCount)} / {formatLocalizedNumber(optimization.candidateCount)}</small>
-            </div>
-            <div className="systematic-lab-optimization-row__score">
-              <span>{text.validationCalmar}</span>
-              <strong className={clsx((optimization.bestValidationCalmar ?? 0) >= 0 ? "positive" : "negative")}>{formatRatio(optimization.bestValidationCalmar)}</strong>
-              {optimization.baselineValidationCalmar !== null && optimization.baselineValidationCalmar !== undefined ? <small>{text.baselineCalmar} {formatRatio(optimization.baselineValidationCalmar)}</small> : null}
-            </div>
-            <div className="systematic-lab-optimization-row__actions">
+              </div>
+            )}
+            {failed ? <div className="systematic-lab__error-notice"><AlertTriangle size={12} />{optimization.error || text.optimizationFailed}</div> : null}
+            {cancelled ? <div className="systematic-lab-optimization-card__cancelled">{text.optimizationCancelled}</div> : null}
+            <footer className="systematic-lab-optimization-card__actions">
               {active ? <button className="systematic-lab__command-button is-quiet" type="button" disabled={cancelling} onClick={() => onCancel(optimization.id)} title={text.cancelOptimization} aria-label={text.cancelOptimization}>{cancelling ? <LoaderCircle size={13} className="is-spinning" /> : <Square size={12} />}{cancelling ? text.optimizationCancelling : text.cancelOptimization}</button> : null}
-              {completed && optimization.bestParameters ? <button className="systematic-lab__command-button" type="button" disabled={applyingOptimizationId === optimization.id} onClick={() => onApply(optimization.id, optimization.bestParameters!)}>{applyingOptimizationId === optimization.id ? <LoaderCircle size={13} className="is-spinning" /> : <SlidersHorizontal size={13} />}{applyingOptimizationId === optimization.id ? text.savingOptimization : text.applyBestParameters}</button> : null}
-              {failed ? <small className="systematic-lab__error-notice"><AlertTriangle size={12} />{optimization.error || text.optimizationFailed}</small> : null}
-              {cancelled ? <small className="systematic-lab-optimization-row__cancelled">{text.optimizationCancelled}</small> : null}
-            </div>
+              {completed && optimization.bestParameters ? <button className="systematic-lab__command-button is-primary" type="button" disabled={applyingOptimizationId === optimization.id} onClick={() => onApply(optimization.id, optimization.bestParameters!)}>{applyingOptimizationId === optimization.id ? <LoaderCircle size={13} className="is-spinning" /> : <SlidersHorizontal size={13} />}{applyingOptimizationId === optimization.id ? text.savingOptimization : text.applyBestParameters}</button> : null}
+            </footer>
           </article>;
         })}
       </div>
@@ -4566,16 +4564,29 @@ function ProfileSignalsView({ text, profiles, desktop, refresh, chinese, onOpenP
   </section>;
 }
 
-function RuntimeState({ runtime, preparing, text }: Readonly<{
+function pythonPrepareProgressPct(stage: { stage: string; mirror: string | null } | null): number {
+  if (!stage) return 14;
+  if (stage.stage === "venv") return 34;
+  if (stage.stage === "dependencies") return 68;
+  return 14;
+}
+
+function RuntimeState({ runtime, preparing, stage, text }: Readonly<{
   runtime?: SystematicPythonRuntimeView | null;
   preparing: boolean;
+  stage?: { stage: string; mirror: string | null } | null;
   text: Copy;
 }>) {
   if (runtime?.available) {
     return null;
   }
   if (preparing || runtime?.state === "setupRequired") {
-    return <span className="systematic-lab__status is-muted"><LoaderCircle size={12} className="is-spinning" />{text.runtimePreparing}</span>;
+    const label = stage?.stage === "venv"
+      ? text.runtimeCreatingVenv
+      : stage?.stage === "dependencies"
+        ? (stage.mirror ? `${text.runtimeInstallingDeps} · ${stage.mirror}` : text.runtimeInstallingDeps)
+        : text.runtimePreparing;
+    return <span className="systematic-lab__status is-muted"><LoaderCircle size={12} className="is-spinning" />{label}</span>;
   }
   return <span className="systematic-lab__status is-guarded"><AlertTriangle size={12} />{runtime?.state === "missingPython" ? text.runtimeMissingPython : runtime?.state === "missingVenvModule" ? text.runtimeMissingVenvModule : text.runtimeGuarded}</span>;
 }
@@ -4589,13 +4600,15 @@ function PythonEnvironmentNotice({ runtime, preparing, text, onRetry }: Readonly
   const missingPython = runtime?.state === "missingPython";
   const missingVenvModule = runtime?.state === "missingVenvModule";
   const preparingEnvironment = preparing || runtime?.state === "setupRequired";
-  const detail = preparingEnvironment
-    ? text.runtimePreparingDetail
-    : missingPython
-      ? text.runtimeMissingPythonDetail
-      : missingVenvModule
-        ? text.runtimeMissingVenvModuleDetail
-        : runtime?.reason || text.runtimeUnavailableDetail;
+  // The preparing state lives in the workspace header (progress track + stage
+  // label) so it stays visible on every tab; this inline notice only carries
+  // the failure states that need their full explanation and retry.
+  if (preparingEnvironment) return null;
+  const detail = missingPython
+    ? text.runtimeMissingPythonDetail
+    : missingVenvModule
+      ? text.runtimeMissingVenvModuleDetail
+      : runtime?.reason || text.runtimeUnavailableDetail;
   return (
     <div className="systematic-lab__guard-notice" role="status">
       {preparingEnvironment ? <LoaderCircle size={15} className="is-spinning" /> : <AlertTriangle size={15} />}
@@ -5443,7 +5456,7 @@ function copy(chinese: boolean) {
       strategy: "策略", backtest: "回测", review: "结果与回放", forward: "前向模拟", profiles: "Profiles", allProfiles: "全部 Profiles", profileFilter: "Profile", openProfile: "打开 Profile",
       python: "Python", myStrategies: "我的策略", newStrategy: "新建 Python 策略", searchStrategies: "搜索策略", noStrategyMatches: "未找到匹配的策略", searchContract: "搜索合约", noMatchingContract: "没有匹配的合约",
       noStrategies: "还没有策略", noStrategiesDetail: "新建策略后，在每根已收线 K 线上定义动作。",
-      pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
+      pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimeCreatingVenv: "正在创建本地 Python 环境…", runtimeInstallingDeps: "正在安装策略依赖", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
       save: "保存版本", name: "名称", description: "说明", source: "策略源码", strategyParameters: "策略参数", parameters: "参数", parameterTuning: "参数调优范围", parameterTuningHint: "平台固定支持顶层数值参数；仅调整范围与步长", parameterTuningUnavailable: "策略参数数据无效。", noNumericParameters: "当前参数中没有可调优的顶层数值。", noVisualParameters: "没有可视化的标量参数。", parameter: "参数", parameterDefault: "当前值", tuningMin: "最小", tuningMax: "最大", tuningStep: "步长", bestBacktest: "最佳回测", backtestDays: "回测 {days} 天", openBestBacktest: "查看最佳回测", deleteStrategy: "删除策略", deleteStrategyConfirm: "删除策略“{name}”及其所有本地回测、报告和调优记录？此操作不可撤销。", strategyDeleted: "策略已删除", strategyDeleteFailed: "无法删除策略", deleteBacktest: "删除回测", deleteBacktestConfirm: "删除“{name}”的该回测记录和本地回放数据？此操作不可撤销。", backtestDeleted: "回测已删除", backtestDeleteFailed: "无法删除回测", strategyUnchanged: "策略没有变更", strategyUnchangedDetail: "名称、说明、源码、参数和调优范围均未变化，未创建新版本。",
       versionHistory: "版本历史", closeVersionHistory: "关闭版本历史", versionHistoryHint: "历史快照不可修改；载入后只会写入当前未保存草稿。", versionLabel: "版本 {version}", latestVersion: "最新", versionUsage: "回测 {backtests} · Profiles {profiles}", noVersions: "没有可用版本", noVersionsDetail: "保存策略后会在此保留不可变版本。", loading: "正在加载", setCompareBaseline: "设为对比基线", compareBaseline: "对比基线：{version}", compareVersions: "比较版本", compareDraft: "与当前草稿比较", currentDraft: "当前草稿", loadVersionToDraft: "载入到草稿", versionLoadedToDraft: "版本已载入草稿", versionLoadedToDraftDetail: "{version} 已载入编辑器，尚未保存，也不会覆盖历史版本。", backtestThisVersion: "回测此版本", selectVersion: "选择一个版本以审阅、比较或载入草稿。", versionBacktests: "回测", versionProfiles: "Profiles", versionHash: "源码哈希", noDescription: "没有说明", closeComparison: "关闭比较", compareSections: "比较内容", historicalVersion: "历史版本",
       aiAssistant: "AI 策略助手", closeAiAssistant: "关闭 AI 策略助手", aiSourceApplied: "AI 已写入源码", aiSourceAppliedDetail: "只写入当前未保存草稿；请审阅后手动保存版本。", aiSourceWriteCancelled: "你已手动编辑源码，已停止 AI 写入。", aiAssistantFailed: "AI 策略助手不可用", aiChatConnecting: "正在连接策略助手", aiSourceWriting: "正在写入编辑器", aiChatWorking: "正在处理", aiChatReady: "可继续对话", aiChatEmpty: "说明要修改、解释或审阅的策略逻辑。AI 会先读取当前编辑器内容；只有使用写入工具时才会修改当前未保存源码。", aiChatSession: "策略 AI 会话", aiChatNewSession: "新建会话", you: "你", ai: "AI", aiChatPlaceholder: "例如：解释当前入场条件，并将止损改为以 ATR 为基础", aiChatPrompt: "向 AI 策略助手提问", aiChatStop: "停止生成", aiChatSend: "发送",
@@ -5491,7 +5504,7 @@ function copy(chinese: boolean) {
     strategy: "Strategy", backtest: "Backtest", review: "Results & replay", forward: "Forward simulation", profiles: "Profiles", allProfiles: "All Profiles", profileFilter: "Profile", openProfile: "Open Profile",
     python: "Python", myStrategies: "My strategies", newStrategy: "New Python strategy", searchStrategies: "Search strategies", noStrategyMatches: "No matching strategy", searchContract: "Search contract", noMatchingContract: "No matching contract",
     noStrategies: "No strategy yet", noStrategiesDetail: "Create one to define an action on each confirmed bar.",
-    pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",
+    pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimeCreatingVenv: "Creating the local Python environment…", runtimeInstallingDeps: "Installing strategy dependencies", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",
     save: "Save version", name: "Name", description: "Description", source: "Strategy source", strategyParameters: "Strategy parameters", parameters: "Parameters", parameterTuning: "Parameter tuning ranges", parameterTuningHint: "The platform recognizes top-level numeric parameters; adjust only range and step", parameterTuningUnavailable: "Strategy parameters are invalid.", noNumericParameters: "This strategy has no top-level numeric parameters to tune.", noVisualParameters: "No scalar parameters can be edited visually.", parameter: "Parameter", parameterDefault: "Current", tuningMin: "Min", tuningMax: "Max", tuningStep: "Step", bestBacktest: "Best backtest", backtestDays: "{days}d backtest", openBestBacktest: "Open best backtest", deleteStrategy: "Delete strategy", deleteStrategyConfirm: "Delete strategy “{name}” with all of its local backtests, reports, and optimization records? This cannot be undone.", strategyDeleted: "Strategy deleted", strategyDeleteFailed: "Could not delete strategy", deleteBacktest: "Delete backtest", deleteBacktestConfirm: "Delete this backtest record and local replay data for “{name}”? This cannot be undone.", backtestDeleted: "Backtest deleted", backtestDeleteFailed: "Could not delete backtest", strategyUnchanged: "No strategy changes", strategyUnchangedDetail: "Name, description, source, parameters, and tuning ranges are unchanged, so no version was created.",
     versionHistory: "Version history", closeVersionHistory: "Close version history", versionHistoryHint: "Historical snapshots are immutable. Loading one writes only to the current unsaved draft.", versionLabel: "Version {version}", latestVersion: "Latest", versionUsage: "Backtests {backtests} · Profiles {profiles}", noVersions: "No saved version", noVersionsDetail: "Saved strategies keep immutable snapshots here.", loading: "Loading", setCompareBaseline: "Set comparison baseline", compareBaseline: "Baseline: {version}", compareVersions: "Compare versions", compareDraft: "Compare with draft", currentDraft: "Current draft", loadVersionToDraft: "Load into draft", versionLoadedToDraft: "Version loaded into draft", versionLoadedToDraftDetail: "{version} is now in the editor, unsaved, and did not replace historical snapshots.", backtestThisVersion: "Backtest this version", selectVersion: "Select a version to review, compare, or load into the draft.", versionBacktests: "Backtests", versionProfiles: "Profiles", versionHash: "Source hash", noDescription: "No description", closeComparison: "Close comparison", compareSections: "Comparison section", historicalVersion: "Historical version",
     aiAssistant: "AI strategy assistant", closeAiAssistant: "Close AI strategy assistant", aiSourceApplied: "AI source written", aiSourceAppliedDetail: "Only the current unsaved draft changed. Review it, then save a version manually.", aiSourceWriteCancelled: "You edited the source, so AI writing stopped.", aiAssistantFailed: "AI strategy assistant unavailable", aiChatConnecting: "Connecting strategy assistant", aiSourceWriting: "Writing into the editor", aiChatWorking: "Working", aiChatReady: "Ready for another message", aiChatEmpty: "Ask to change, explain, or review the strategy. AI reads the current editor first and can change only this unsaved source through its write tool.", aiChatSession: "Strategy AI session", aiChatNewSession: "New session", you: "You", ai: "AI", aiChatPlaceholder: "For example: explain the current entry logic and use an ATR-based stop", aiChatPrompt: "Ask the AI strategy assistant", aiChatStop: "Stop generation", aiChatSend: "Send",

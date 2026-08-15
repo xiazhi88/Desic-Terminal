@@ -1133,6 +1133,8 @@ struct AiSession {
 enum AiSessionOrigin {
     User,
     Automation,
+    Indicator,
+    Strategy,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -1502,6 +1504,12 @@ struct HistoricalFillSummary {
     execution_key: Option<String>,
     okx_ts: Option<i64>,
     synced_at: i64,
+    /// Resolved identifiers for the chart's fill-source filter: the AI
+    /// automation profile that ran the agent, and the human-readable names
+    /// of the AI and strategy profiles behind this fill.
+    ai_profile_id: Option<String>,
+    strategy_name: Option<String>,
+    ai_profile_name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Default)]
@@ -1995,12 +2003,95 @@ fn historical_orders(
     )
 }
 
+fn escape_license_html(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// Builds the in-app open-source license page: the cargo-about Rust
+/// dependency report plus a compact npm dependency table, read from the
+/// bundled `third-party-licenses` resources.
+#[tauri::command]
+fn open_source_licenses(app: tauri::AppHandle) -> Result<String, String> {
+    let resource_dir = app.path().resource_dir().map_err(|err| err.to_string())?;
+    let root = resource_dir.join("third-party-licenses");
+    let rust_html = fs::read_to_string(root.join("THIRD-PARTY-LICENSES.html"))
+        .map_err(|err| format!("Could not read the Rust license list: {err}"))?;
+    let npm_rows = fs::read_to_string(root.join("npm-licenses.json"))
+        .ok()
+        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok())
+        .map(|map| {
+            let mut rows: Vec<(String, String, String)> = map
+                .into_iter()
+                .map(|(name, meta)| {
+                    let licenses = meta
+                        .get("licenses")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("unknown")
+                        .to_string();
+                    let repository = meta
+                        .get("repository")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    (name, licenses, repository)
+                })
+                .collect();
+            rows.sort_by(|left, right| left.0.cmp(&right.0));
+            rows
+        })
+        .unwrap_or_default();
+    let npm_section = if npm_rows.is_empty() {
+        String::new()
+    } else {
+        let mut table = String::from(
+            "<h2>npm Dependencies</h2><table class=\"npm-licenses\"><thead><tr><th>Package</th><th>License</th><th>Repository</th></tr></thead><tbody>",
+        );
+        for (name, licenses, repository) in npm_rows {
+            table.push_str(&format!(
+                "<tr><td>{}</td><td>{}</td><td>{}</td></tr>",
+                escape_license_html(&name),
+                escape_license_html(&licenses),
+                escape_license_html(&repository)
+            ));
+        }
+        table.push_str("</tbody></table>");
+        table
+    };
+    let styles = "<style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; background: #0b0e14; color: #dbe2ee; margin: 0; }
+        main { max-width: 900px; margin: 0 auto; padding: 24px 20px 48px; }
+        h1 { font-size: 20px; color: #f1f5f9; }
+        h2 { font-size: 15px; color: #c9b4ff; margin-top: 26px; border-bottom: 1px solid rgba(148,163,184,0.2); padding-bottom: 6px; }
+        h3 { font-size: 13px; color: #f1f5f9; }
+        a { color: #7cc4e8; }
+        .intro p { color: #94a3b8; font-size: 12px; }
+        .licenses-list { list-style: none; padding: 0; }
+        .license-used-by { padding-left: 18px; color: #94a3b8; font-size: 12px; }
+        .license-text { max-height: 240px; overflow: auto; white-space: pre-wrap; background: rgba(255,255,255,0.03); border: 1px solid rgba(148,163,184,0.16); border-radius: 8px; padding: 10px; font-size: 11px; }
+        .npm-licenses { width: 100%; border-collapse: collapse; font-size: 11px; }
+        .npm-licenses th, .npm-licenses td { text-align: left; padding: 5px 8px; border-bottom: 1px solid rgba(148,163,184,0.14); vertical-align: top; }
+        .npm-licenses th { color: #94a3b8; font-weight: 700; position: sticky; top: 0; background: #0b0e14; }
+        .npm-licenses td { color: #cbd5e1; word-break: break-all; }
+        .npm-licenses td:first-child { width: 38%; }
+        .npm-licenses td:nth-child(2) { width: 18%; }
+    </style>";
+    let mut page = rust_html.replace("<head>", &format!("<head><meta charset=\"utf-8\">{styles}"));
+    page = page.replace(
+        "</body>",
+        &format!("{npm_section}</body>"),
+    );
+    Ok(page)
+}
+
 #[tauri::command]
 fn historical_fills(
     app: tauri::AppHandle,
     request: HistoricalFillsRequest,
-) -> Result<Vec<HistoricalFillSummary>, String> {
-    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
+) -> Result<Vec<HistoricalFillSummary>, String> {    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     let conn = open_database(&app)?;
     load_historical_fills(
         &conn,
@@ -2014,12 +2105,60 @@ fn historical_fills(
     )
 }
 
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartTradeSourceProfile {
+    id: String,
+    name: String,
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct ChartTradeSources {
+    ai_profiles: Vec<ChartTradeSourceProfile>,
+    strategy_profiles: Vec<ChartTradeSourceProfile>,
+}
+
+/// Profile lists behind the chart's fill-source filter (AI automation
+/// profiles and systematic strategy profiles), so the layer menu can offer
+/// per-profile toggles even when the current fills contain no fills from
+/// that profile yet.
+#[tauri::command]
+fn chart_trade_sources(app: tauri::AppHandle) -> Result<ChartTradeSources, String> {
+    let conn = open_database(&app)?;
+    Ok(ChartTradeSources {
+        ai_profiles: chart_trade_source_rows(
+            &conn,
+            "SELECT id,name FROM ai_agent_profiles ORDER BY name COLLATE NOCASE",
+        )?,
+        strategy_profiles: chart_trade_source_rows(
+            &conn,
+            "SELECT id,name FROM systematic_profiles ORDER BY name COLLATE NOCASE",
+        )?,
+    })
+}
+
+fn chart_trade_source_rows(
+    conn: &Connection,
+    sql: &str,
+) -> Result<Vec<ChartTradeSourceProfile>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ChartTradeSourceProfile {
+                id: row.get(0)?,
+                name: row.get(1)?,
+            })
+        })
+        .map_err(|err| err.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|err| err.to_string())
+}
+
 #[tauri::command]
 fn account_bills(
     app: tauri::AppHandle,
     request: AccountBillsRequest,
-) -> Result<Vec<AccountBillSummary>, String> {
-    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
+) -> Result<Vec<AccountBillSummary>, String> {    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     let conn = open_database(&app)?;
     load_account_bills(
         &conn,
@@ -11296,6 +11435,9 @@ fn load_review_episode_fills(
                     execution_key: row.get(21)?,
                     okx_ts: row.get(22)?,
                     synced_at: row.get(23)?,
+                    ai_profile_id: None,
+                    strategy_name: None,
+                    ai_profile_name: None,
                 })
             },
         )
@@ -11396,17 +11538,24 @@ fn load_historical_fills(
     inst_id: Option<&str>,
     limit: u16,
 ) -> Result<Vec<HistoricalFillSummary>, String> {
-    let mut sql = "SELECT account_id, environment, bill_id, ord_id, trade_id, inst_id, inst_type, side, pos_side,
-        sub_type, fill_px, fill_sz, fill_pnl, fee, fee_ccy, source_endpoint, operator, strategy_id,
-        session_id, opportunity_id, agent_run_id, execution_key, okx_ts, synced_at
+    let mut sql = "SELECT okx_fills.account_id, okx_fills.environment, okx_fills.bill_id, okx_fills.ord_id, okx_fills.trade_id,
+        okx_fills.inst_id, okx_fills.inst_type, okx_fills.side, okx_fills.pos_side,
+        okx_fills.sub_type, okx_fills.fill_px, okx_fills.fill_sz, okx_fills.fill_pnl, okx_fills.fee, okx_fills.fee_ccy,
+        okx_fills.source_endpoint, okx_fills.operator, okx_fills.strategy_id,
+        okx_fills.session_id, okx_fills.opportunity_id, okx_fills.agent_run_id, okx_fills.execution_key,
+        okx_fills.okx_ts, okx_fills.synced_at,
+        ar.profile_id AS ai_profile_id, sp.name AS strategy_name, ap.name AS ai_profile_name
         FROM okx_fills
-        WHERE account_id = ?1 AND environment = ?2"
+        LEFT JOIN ai_agent_runs ar ON ar.id = okx_fills.agent_run_id
+        LEFT JOIN ai_agent_profiles ap ON ap.id = ar.profile_id
+        LEFT JOIN systematic_profiles sp ON sp.id = okx_fills.strategy_id
+        WHERE okx_fills.account_id = ?1 AND okx_fills.environment = ?2"
         .to_string();
     if inst_id.is_some() {
-        sql.push_str(" AND inst_id = ?3");
-        sql.push_str(" ORDER BY COALESCE(okx_ts, synced_at) DESC LIMIT ?4");
+        sql.push_str(" AND okx_fills.inst_id = ?3");
+        sql.push_str(" ORDER BY COALESCE(okx_fills.okx_ts, okx_fills.synced_at) DESC LIMIT ?4");
     } else {
-        sql.push_str(" ORDER BY COALESCE(okx_ts, synced_at) DESC LIMIT ?3");
+        sql.push_str(" ORDER BY COALESCE(okx_fills.okx_ts, okx_fills.synced_at) DESC LIMIT ?3");
     }
 
     let mut stmt = conn.prepare(&sql).map_err(|err| err.to_string())?;
@@ -11437,6 +11586,9 @@ fn load_historical_fills(
             execution_key: row.get(21)?,
             okx_ts: row.get(22)?,
             synced_at: row.get(23)?,
+            ai_profile_id: row.get(24)?,
+            strategy_name: row.get(25)?,
+            ai_profile_name: row.get(26)?,
         })
     };
 
@@ -13604,6 +13756,20 @@ async fn run_ai_stream(
     Ok(())
 }
 
+/// Windows spawns a console window for a console subsystem executable
+/// (node.exe) unless the process is explicitly told not to allocate one. The
+/// AI sidecar's stdio is fully piped and never meant to show a terminal, so
+/// suppress it the same way the systematic Python runner does.
+#[cfg(windows)]
+fn hide_ai_sidecar_command_window(command: &mut Command) {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_ai_sidecar_command_window(_command: &mut Command) {}
+
 async fn ensure_ai_sidecar(
     app: &tauri::AppHandle,
     runtime: &AiRuntime,
@@ -13620,6 +13786,7 @@ async fn ensure_ai_sidecar(
     cleanup_legacy_desic_cline_sessions(app)?;
     let paths = cline_sidecar_runtime(app)?;
     let mut command = Command::new(paths.node_binary);
+    hide_ai_sidecar_command_window(&mut command);
     command
         .arg("--")
         .arg(paths.entry)
@@ -17961,6 +18128,9 @@ fn load_fills_for_order(
                     execution_key: row.get(21)?,
                     okx_ts: row.get(22)?,
                     synced_at: row.get(23)?,
+                    ai_profile_id: None,
+                    strategy_name: None,
+                    ai_profile_name: None,
                 })
             },
         )
@@ -19910,7 +20080,11 @@ fn load_or_create_ai_session(conn: &Connection, session_id: &str) -> Result<AiSe
 }
 
 fn ai_session_origin(session_id: &str) -> AiSessionOrigin {
-    if session_id.starts_with("background:") || session_id.starts_with("review:") {
+    if session_id.starts_with("chart-indicator-ai-") {
+        AiSessionOrigin::Indicator
+    } else if session_id.starts_with("systematic-strategy-ai-") {
+        AiSessionOrigin::Strategy
+    } else if session_id.starts_with("background:") || session_id.starts_with("review:") {
         AiSessionOrigin::Automation
     } else {
         AiSessionOrigin::User
@@ -22780,6 +22954,8 @@ pub fn run() {
             ai_automation_review_detail,
             historical_orders,
             historical_fills,
+            open_source_licenses,
+            chart_trade_sources,
             account_bills,
             account_performance_summary,
             trade_audit_events,
@@ -23364,6 +23540,98 @@ mod tests {
             .iter()
             .all(|session| session.id.starts_with("background:")
                 || session.id.starts_with("review:")));
+    }
+
+    #[test]
+    fn ai_session_origin_classifies_indicator_and_strategy_sessions() {
+        assert_eq!(
+            ai_session_origin("chart-indicator-ai-1723600000000-abc123"),
+            AiSessionOrigin::Indicator
+        );
+        assert_eq!(
+            ai_session_origin("systematic-strategy-ai-1723600000000-def456"),
+            AiSessionOrigin::Strategy
+        );
+        assert_eq!(
+            ai_session_origin("background:run-1"),
+            AiSessionOrigin::Automation
+        );
+        assert_eq!(
+            ai_session_origin("review:daily"),
+            AiSessionOrigin::Automation
+        );
+        assert_eq!(
+            ai_session_origin("plain-user-session"),
+            AiSessionOrigin::User
+        );
+    }
+
+    #[test]
+    fn historical_fills_join_profiles_without_ambiguity() {
+        let conn = Connection::open_in_memory().expect("open test database");
+        conn.execute_batch(
+            "CREATE TABLE okx_fills (
+                account_id TEXT, environment TEXT, bill_id TEXT, ord_id TEXT, trade_id TEXT,
+                inst_id TEXT, inst_type TEXT, side TEXT, pos_side TEXT, sub_type TEXT,
+                fill_px TEXT, fill_sz TEXT, fill_pnl TEXT, fee TEXT, fee_ccy TEXT,
+                source_endpoint TEXT, operator TEXT, strategy_id TEXT, session_id TEXT,
+                opportunity_id TEXT, agent_run_id TEXT, execution_key TEXT,
+                okx_ts INTEGER, synced_at INTEGER
+            );
+            CREATE TABLE ai_agent_runs (id TEXT PRIMARY KEY, profile_id TEXT);
+            CREATE TABLE ai_agent_profiles (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, account_id TEXT, environment TEXT
+            );
+            CREATE TABLE systematic_profiles (
+                id TEXT PRIMARY KEY, name TEXT NOT NULL, account_id TEXT, environment TEXT, inst_id TEXT
+            );",
+        )
+        .expect("create fill join tables");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles (id,name,account_id,environment) VALUES ('ai-p1','网格机器人','acc','demo')",
+            [],
+        )
+        .expect("insert ai profile");
+        conn.execute(
+            "INSERT INTO ai_agent_runs (id,profile_id) VALUES ('run-1','ai-p1')",
+            [],
+        )
+        .expect("insert ai run");
+        conn.execute(
+            "INSERT INTO systematic_profiles (id,name,account_id,environment,inst_id) VALUES ('sp-1','双EMA策略','acc','demo','BTC-USDT-SWAP')",
+            [],
+        )
+        .expect("insert strategy profile");
+        conn.execute(
+            "INSERT INTO okx_fills (account_id,environment,bill_id,inst_id,inst_type,source_endpoint,operator,strategy_id,agent_run_id,okx_ts,synced_at)
+             VALUES ('acc','demo','bill-ai','BTC-USDT-SWAP','SWAP','okx','ai',NULL,'run-1',1000,1000)",
+            [],
+        )
+        .expect("insert ai fill");
+        conn.execute(
+            "INSERT INTO okx_fills (account_id,environment,bill_id,inst_id,inst_type,source_endpoint,operator,strategy_id,agent_run_id,okx_ts,synced_at)
+             VALUES ('acc','demo','bill-sp','BTC-USDT-SWAP','SWAP','okx','strategy','sp-1',NULL,2000,2000)",
+            [],
+        )
+        .expect("insert strategy fill");
+        conn.execute(
+            "INSERT INTO okx_fills (account_id,environment,bill_id,inst_id,inst_type,source_endpoint,operator,strategy_id,agent_run_id,okx_ts,synced_at)
+             VALUES ('acc','demo','bill-user','BTC-USDT-SWAP','SWAP','okx','user',NULL,NULL,3000,3000)",
+            [],
+        )
+        .expect("insert user fill");
+
+        let fills = load_historical_fills(&conn, "acc", "demo", Some("BTC-USDT-SWAP"), 10)
+            .expect("fill query with joins must not be ambiguous");
+        assert_eq!(fills.len(), 3);
+        let ai = fills.iter().find(|fill| fill.bill_id == "bill-ai").expect("ai fill");
+        assert_eq!(ai.ai_profile_id.as_deref(), Some("ai-p1"));
+        assert_eq!(ai.ai_profile_name.as_deref(), Some("网格机器人"));
+        let strategy = fills.iter().find(|fill| fill.bill_id == "bill-sp").expect("strategy fill");
+        assert_eq!(strategy.strategy_name.as_deref(), Some("双EMA策略"));
+        let user = fills.iter().find(|fill| fill.bill_id == "bill-user").expect("user fill");
+        assert!(user.ai_profile_id.is_none());
+        assert!(user.strategy_name.is_none());
     }
 
     #[test]

@@ -514,6 +514,8 @@ export type SystematicEvent = {
   workerCount?: number;
   elapsedMs?: number;
   estimatedRemainingMs?: number | null;
+  stage?: string;
+  mirror?: string | null;
   timestamp?: number;
 };
 

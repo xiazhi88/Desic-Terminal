@@ -80,6 +80,7 @@ import type {
   ClassifiedOkxError,
   FeishuConfigSummary,
   FundingRate,
+  ChartTradeSources,
   HistoricalFillSummary,
   HistoricalOrderSummary,
   InstrumentOperationKind,
@@ -148,6 +149,7 @@ import {
   fetchFundingRate,
   fetchMarketSnapshot,
   fetchHistoricalCandlesBefore,
+  fetchChartTradeSources,
   fetchHistoricalFills,
   fetchHistoricalOrders,
   fetchActiveInstrumentOperations,
@@ -1445,6 +1447,7 @@ function TradingTerminal({
   const [historicalOrders, setHistoricalOrders] = useState<HistoricalOrderSummary[]>([]);
   const [historicalOrdersStatus, setHistoricalOrdersStatus] = useState("等待账号");
   const [historicalFills, setHistoricalFills] = useState<HistoricalFillSummary[]>([]);
+  const [chartTradeSources, setChartTradeSources] = useState<ChartTradeSources | null>(null);
   const [historicalFillsStatus, setHistoricalFillsStatus] = useState("等待账号");
   const [algoOrders, setAlgoOrders] = useState<OkxAlgoOrder[]>([]);
   const [algoOrdersStatus, setAlgoOrdersStatus] = useState("等待账号");
@@ -3218,6 +3221,9 @@ function TradingTerminal({
       try {
         setHistoricalFillsStatus("同步中");
         const fills = await fetchHistoricalFills({ accountId: account.id, instId: symbol, limit: 160 });
+        fetchChartTradeSources()
+          .then((sources) => { if (!cancelled && sources) setChartTradeSources(sources); })
+          .catch(() => undefined);
         if (cancelled) return;
         if (fills) {
           setHistoricalFills(fills);
@@ -3981,7 +3987,7 @@ function TradingTerminal({
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
+        <header className="topbar" data-tauri-drag-region>
           <div className="market-title">
             <SymbolIcon base={currentInstrument?.baseCcy || symbol.split("-")[0]} iconPath={currentInstrument?.iconPath} cached={currentInstrument?.iconCached} cacheDir={marketAssetCacheDir} />
             <strong>{symbol}</strong>
@@ -4354,6 +4360,7 @@ function TradingTerminal({
               <div className={clsx("chart-kline-presentation", chartPresentation !== "chart" && "is-hidden")} aria-hidden={chartPresentation !== "chart"}>
               <ErrorBoundary label={t("chart:chart")}>
                 <HotKlineChart
+                  tradeSources={chartTradeSources}
                   symbol={symbol}
                   timeframe={bar}
                   orderLines={chartOrderLines}
@@ -6195,17 +6202,6 @@ function PromptSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
           <span>{draft.openAgent !== false ? "已开启" : "已关闭"}</span>
         </label>
       </section>
-      <label className="settings-textarea-field compact" data-i18n-skip>
-        <span>Agent 工作区目录</span>
-        <textarea
-          value={(draft.workspaceRoots ?? []).join("\n")}
-          placeholder="每行一个绝对路径；留空使用 Desic 工作区"
-          onChange={(event) => setDraft((current) => ({
-            ...current,
-            workspaceRoots: event.target.value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean)
-          }))}
-        />
-      </label>
       <div className="modal-actions">
         <button className="primary-action" disabled={busy} onClick={() => void save(t("settings:promptConfigurationSaved"))}>
           {busy ? t("settings:saving") : t("settings:savePrompt")}
@@ -7498,15 +7494,61 @@ function formatSignedPercent(value?: number | null) {
   return `${numeric >= 0 ? "+" : ""}${numeric.toFixed(2)}%`;
 }
 
+function OpenSourceLicensesModal({ onClose }: { onClose: () => void }) {
+  const { t } = useTranslation("settings");
+  const [html, setHtml] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void invokeDesktop<string>("open_source_licenses")
+      .then((next) => {
+        if (!active) return;
+        if (next) setHtml(next);
+        else setFailed(true);
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => { active = false; };
+  }, []);
+  return (
+    <ModalShell
+      title={t("openSourceLicenses")}
+      description={t("openSourceLicensesDescription")}
+      className="licenses-modal"
+      onClose={onClose}
+    >
+      {failed ? (
+        <p className="settings-status-text">{t("licensesLoadFailed")}</p>
+      ) : html === null ? (
+        <p className="settings-status-text">{t("licensesLoading")}</p>
+      ) : (
+        <iframe className="licenses-frame" title={t("openSourceLicenses")} srcDoc={html} sandbox="allow-popups" />
+      )}
+    </ModalShell>
+  );
+}
+
 function GeneralSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void }) {
   const { t, i18n } = useTranslation(["settings", "common"]);
   const [preference, setPreference] = useState<LanguagePreference>(() => languagePreference());
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
+  const [licensesOpen, setLicensesOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState("");
 
   useEffect(() => {
     setPreference(languagePreference());
   }, [i18n.language]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let active = true;
+    void import("@tauri-apps/api/app").then(({ getVersion }) => getVersion().then((version) => {
+      if (active) setAppVersion(version);
+    }).catch(() => undefined));
+    return () => { active = false; };
+  }, []);
 
   const updateLanguage = useCallback(async (next: LanguagePreference) => {
     setPreference(next);
@@ -7549,6 +7591,16 @@ function GeneralSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNo
         <span>{selected.value === "system" ? t("settings:followSystem") : selected.nativeLabel} · {resolvedLocale()}</span>
         <small>{t("settings:fallbackNotice")}</small>
       </div>
+      <section className="settings-section">
+        <div>
+          <strong>{t("settings:about")}</strong>
+          <span>{appVersion ? `${t("settings:aboutDescription")} v${appVersion}` : t("settings:aboutDescription")}</span>
+        </div>
+        <button type="button" className="settings-secondary-button" onClick={() => setLicensesOpen(true)}>
+          {t("settings:openSourceLicenses")}
+        </button>
+      </section>
+      {licensesOpen ? <OpenSourceLicensesModal onClose={() => setLicensesOpen(false)} /> : null}
     </div>
   );
 }
@@ -8455,6 +8507,15 @@ function sortAiSessions(items: AiSession[]) {
 }
 
 type AiSessionHistoryTab = AiSession["origin"];
+
+function sessionEmptyCopyKey(tab: AiSessionHistoryTab): string {
+  switch (tab) {
+    case "user": return "automation:noUserSessions";
+    case "automation": return "automation:noAutomationSessions";
+    case "indicator": return "automation:noIndicatorSessions";
+    case "strategy": return "automation:noStrategySessions";
+  }
+}
 
 function statusLabel(status: string, t?: UiTranslation) {
   if (status === "connecting") return t ? t("automation:connecting") : "连接中";
@@ -9466,11 +9527,29 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
                 >
                   {t("automation:title")}
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sessionHistoryTab === "indicator"}
+                  className={clsx(sessionHistoryTab === "indicator" && "active")}
+                  onClick={() => setSessionHistoryTab("indicator")}
+                >
+                  {t("automation:indicatorSessions")}
+                </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={sessionHistoryTab === "strategy"}
+                  className={clsx(sessionHistoryTab === "strategy" && "active")}
+                  onClick={() => setSessionHistoryTab("strategy")}
+                >
+                  {t("automation:strategySessions")}
+                </button>
               </div>
               {sessionsStatus && <small>{sessionsStatus}</small>}
               <div className="ai-session-items" role="tabpanel">
                 {visibleSessions.length === 0 ? (
-                  <p>{t(sessionHistoryTab === "user" ? "automation:noUserSessions" : "automation:noAutomationSessions")}</p>
+                  <p>{t(sessionEmptyCopyKey(sessionHistoryTab))}</p>
                 ) : (
                   visibleSessions.map((session) => (
                     <div className={clsx("ai-session-item", session.id === sessionId && "active")} key={session.id}>

@@ -6,6 +6,7 @@ import clsx from "clsx";
 import type {
   Candle,
   ChartOrderLine,
+  ChartTradeSources,
   ChartPositionRange,
   ChartWindowState,
   FundingRate,
@@ -23,6 +24,7 @@ import type {
 import {
   fetchCandles,
   fetchFundingRate,
+  fetchChartTradeSources,
   fetchHistoricalCandlesBefore,
   fetchHistoricalFills,
   fetchMarketSnapshot,
@@ -354,6 +356,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
   const [privateSnapshot, setPrivateSnapshot] = useState<PrivateAccountSnapshot | null>(null);
   const [algoOrders, setAlgoOrders] = useState<OkxAlgoOrder[]>([]);
   const [fills, setFills] = useState<HistoricalFillSummary[]>([]);
+  const [tradeSources, setTradeSources] = useState<ChartTradeSources | null>(null);
   const [loading, setLoading] = useState(true);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [status, setStatus] = useState<"initializing" | "loading" | "live" | "failed">("initializing");
@@ -418,7 +421,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
     setLoading(true);
     setStatus("loading");
     try {
-      const [snapshot, nextCandles, nextTicker, nextFunding, accountSnapshot, nextFills, algos] = await Promise.all([
+      const [snapshot, nextCandles, nextTicker, nextFunding, accountSnapshot, nextFills, algos, nextTradeSources] = await Promise.all([
         fetchMarketSnapshot(),
         fetchCandles(symbol, timeframe, 300),
         fetchTicker(symbol),
@@ -427,7 +430,8 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
         accountIdRef.current ? fetchHistoricalFills({ accountId: accountIdRef.current, instId: symbol, limit: 240 }) : Promise.resolve(null),
         accountIdRef.current
           ? fetchOkxAlgoOrders({ accountId: accountIdRef.current, environment: environmentRef.current, instId: symbol, includeHistory: false })
-          : Promise.resolve(null)
+          : Promise.resolve(null),
+        accountIdRef.current ? fetchChartTradeSources() : Promise.resolve(null)
       ]);
       const cachedTicker = snapshot?.tickers?.[symbol] ?? (snapshot?.ticker?.instId === symbol ? snapshot.ticker : null);
       const cachedBook = snapshot?.orderbooks?.[symbol] ?? (snapshot?.orderbookInstId === symbol ? snapshot.orderbook : null);
@@ -440,6 +444,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
       setFundingRate(nextFunding ?? cachedFunding ?? null);
       setPrivateSnapshot(accountSnapshot ?? snapshot?.privateSnapshot ?? null);
       setFills(nextFills ?? []);
+      setTradeSources(nextTradeSources);
       setAlgoOrders(algos?.orders ?? []);
       setStatus("live");
     } catch (error) {
@@ -695,6 +700,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
           fundingRate={fundingRate}
           orderLines={orderLines}
           fills={fillMarkers}
+          tradeSources={tradeSources}
           positionRanges={positionRanges}
           onNeedMoreHistory={loadMoreHistory}
         />
