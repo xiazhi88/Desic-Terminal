@@ -3,10 +3,10 @@
 
   <h1>Desic Terminal</h1>
 
+  <p><a href="./README.en.md">English</a> · 简体中文（当前）</p>
+
   <p><strong>AI 原生的 OKX USDT 永续合约交易终端。</strong></p>
   <p>行情、图表、交易、情报、AI 助手、自动化与策略研究共享同一份实时状态与审计上下文。</p>
-
-  <p><sub>[English](./README.en.md) · 简体中文（当前）</sub></p>
 
   <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
@@ -221,9 +221,9 @@ QQ群：`781180447`
 
 通过 **[OKX 专属注册链接](https://www.okx.com/zh-hans/join/xiazhi?shortCode=6CngT5)** 注册并满足活动规则，可享 15% 返佣。具体资格、比例和有效期以 OKX 页面展示的规则为准。
 
-## 免责声明（Disclaimer）
+## 免责声明
 
-This software is for educational purposes only. USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS. Do not risk money that you are afraid to lose. There might be bugs in the code - this software DOES NOT come with ANY warranty.
+本软件仅供学习研究使用，使用风险由使用者自行承担。作者及所有关联方对您的交易结果不承担任何责任。请勿投入您无法承受损失的资金。代码可能存在缺陷——本软件不附带任何形式的保证。
 
 ## License
 

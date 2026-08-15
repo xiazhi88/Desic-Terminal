@@ -3,10 +3,10 @@
 
   <h1>Desic Terminal</h1>
 
+  <p>English (current) · <a href="./README.md">简体中文</a></p>
+
   <p><strong>An AI-native trading terminal for OKX USDT perpetual markets.</strong></p>
   <p>Market, charts, execution, intelligence, AI assistant, automation and systematic research share one real-time state and audit context.</p>
-
-  <p><sub>English (current) · [简体中文](./README.md)</sub></p>
 
   <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
