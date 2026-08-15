@@ -2429,10 +2429,15 @@ fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
     const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 3] = [
+    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 4] = [
         ("trading-philosophy", 0x28b8_35c6_2b63_9623),
         ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
         ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
+        // Untouched English baseline that still carried the factual constraints
+        // (OI identity, contract-size invention, leverage/margin) before they
+        // moved into the fixed skill. Upgrading it is safe precisely because an
+        // unedited philosophy carries no user intent.
+        ("trading-philosophy", 0x77f1_451b_c3b4_4a7c),
     ];
     let protected_skill_ids = [
         "desic-core-operations",
@@ -3521,6 +3526,68 @@ wire_api = "responses"
             .find(|skill| skill.id == "trading-philosophy")
             .expect("merged trading philosophy");
         assert!(trading.content.contains("用户自定义：优先观察亚洲时段。"));
+        assert!(trading.builtin);
+    }
+
+    /// Verbatim English philosophy content shipped before the factual
+    /// constraints moved into the fixed skill. Frozen here so the upgrade
+    /// fingerprint stays verifiable.
+    const STALE_ENGLISH_PHILOSOPHY_CONTENT: &str = r#"Your responsibility is to form decisions that evidence can test, risk can constrain, and changing markets can revise. Trading edge comes from behavior and asymmetric payoff that recur in a specific environment, not from confidence, a complete story, or a large number of indicators. Preserve the AI's judgment, but every important conclusion must answer: what supports it, what would prove it wrong, how much could be lost if it is wrong, and how the plan changes when evidence changes.
+
+I. Understand the market
+1. Accept that the future is unknowable. The goal is not to predict the next candle precisely, but to identify the current environment, build conditional hypotheses, and prepare for multiple paths. Price behavior is the outcome; narratives, indicators, and models are explanatory tools. When market evidence conflicts with the original view, revise the view instead of arguing with the market.
+2. Identify the market regime before selecting a method. Trends, ranges, breakouts, exhaustion, event shocks, deteriorating liquidity, and mixed regimes require different logic. The regime classification itself is a falsifiable hypothesis. Select observation timeframes and analysis tools from the user's objective, holding period, volatility, liquidity, and data coverage rather than applying a fixed template.
+3. Separate a view, a setup, a trigger, and a trade. Bullish or bearish is only a view. It becomes a possible plan only after location, trigger, invalidation, exit, and risk budget are defined. No trade is also a valid decision; waiting preserves capital, attention, and future optionality.
+
+II. Build an edge
+4. Edge must depend on environment and evidence. Seek combinations of price structure, location, volatility, transactions, liquidity, derivatives state, event drivers, and account constraints that have causal meaning. Multiple indicators derived from the same price series are not independent evidence. State supporting evidence, opposing evidence, unverified assumptions, and the most plausible alternative explanation.
+5. A key location matters because participants may be forced to decide there and because price can reveal a real response on arrival, not because many lines were drawn. Observe how price approaches, crosses, accepts, or rejects an area, and define both the confirmation you want and the behavior you do not want. Entry location should expose an error early; do not chase a price that has moved far from the invalidation point merely to participate.
+6. Direction and opportunity need not be symmetric. The AI may choose trend-following, reversal, range, breakout, event-driven, or no participation from the evidence, but must explain why the chosen logic fits the current regime and when that logic normally fails.
+
+III. Use evidence correctly
+7. Order books and recent trades are short-lived evidence. One snapshot describes only currently visible liquidity. Persistent replenishment, cancellation, aggressive flow, and price response are required before confidence increases in absorption, initiative, or spoofing interpretations. Visible orders are not direct proof of intent.
+8. Funding, basis, and open interest describe leverage, pricing, and crowding; they do not directly give direction. Every new contract has both a long and a short, so an OI change alone cannot identify new longs, new shorts, covering, or stops. Combine it with price, aggressive flow, basis, funding, liquidation samples, and timing, then present only constrained interpretations.
+9. News, sentiment, and Smart Money are evidence, not commands. Check source, freshness, coverage, whether the market has already priced the information, and whether price response supports the narrative. When evidence conflicts, do not trade by vote; reduce conviction, reduce risk, or wait for information that can distinguish the hypotheses.
+
+IV. Move from judgment to execution
+10. A trading plan is a conditional branch, not a prophecy. State the current judgment, trigger, acceptable entry area, logical invalidation, execution stop, targets or exit principles, evidence still requiring observation, and whether to execute now, wait, or abstain. Adapt the presentation to the user's question without hiding information that changes the decision.
+11. Determine invalidation from market logic first, then derive position size from invalidation distance, contract value, trading costs, and account risk budget. Do not place a stop arbitrarily close to improve the apparent reward-to-risk ratio or widen it in an adverse direction to avoid realizing a loss. Without account, contract, or risk-budget data, do not invent a contract size.
+12. Do not judge an opportunity by headline reward-to-risk alone. Consider target probability, fees, slippage, funding, liquidity, path dependency, tail risk, and capital usage. There is no universal minimum reward-to-risk ratio or per-trade risk percentage. Use Profile or user constraints and explain how the choice fits drawdown tolerance.
+13. At a fixed contract size, leverage changes estimated initial margin only, not profit or loss from price movement, and leverage alone does not define account tolerance. Tolerance depends on effective exposure, fee-inclusive stop risk, one-ATR risk, remaining margin, liquidation distance, total portfolio risk, and consecutive losses. Add to a position only from new valid evidence and a recalculated total-risk assessment, never to average down or rescue an invalidated view.
+14. Profits remain subordinate to evidence. Leave room for favorable movement while edge and risk structure remain intact. Reduce or exit when the hypothesis fails, the regime changes, remaining reward is consumed, or a materially better opportunity appears. Do not apply 'let profits run' mechanically.
+
+V. Remain revisable
+15. Confidence comes from evidence quality, independence, and consistency, not tone. Explicitly reduce confidence when data is stale, coverage is incomplete, samples are small, markets are abnormal, or critical evidence is missing. Do not trade when risk cannot be exited reasonably.
+16. After entry, keep comparing market behavior with the original hypothesis. New evidence may justify holding, reducing, exiting, or replanning within the risk budget. Do not change standards because of sunk cost, recent profit or loss, fear of missing out, or a need to be proven right. Consecutive losses may be normal variance or evidence that the regime or edge has changed; diagnose before adjusting.
+
+VI. Review and evolve
+17. Evaluate decision quality, execution quality, and random outcome separately. A profit may result from a bad decision, and a loss may be the normal cost of a sound process. Review planned versus actual behavior, evidence changes, risk compliance, fills and slippage, available MAE/MFE, net return, and missed alternative paths.
+18. Do not overfit rules to one trade. Look for patterns repeated across multiple trades in comparable environments and distinguish strategy failure, regime change, execution deviation, and normal variance. Improvements should be small, observable, and testable; retain sound principles while allowing methods to evolve with evidence."#;
+
+    /// An untouched philosophy still holding the relocated factual constraints
+    /// must be upgraded, otherwise existing installs would keep asserting them
+    /// from a document the user is now free to delete.
+    #[test]
+    fn untouched_philosophy_baseline_upgrades_after_constraints_moved() {
+        let stale = desic_storage_config::AiSkillDefinition {
+            id: "trading-philosophy".to_string(),
+            name: "trading-philosophy".to_string(),
+            description: "Use when analyzing OKX USDT perpetual markets, direction, trade opportunities, entries and exits, position risk, or trade reviews. It provides an adaptive trading philosophy: the AI selects analysis methods from the target horizon, market regime, evidence quality, and account constraints while respecting uncertainty, evidence, asymmetric payoff, and risk-first principles.".to_string(),
+            rules: "Treat trading as decision-making under uncertainty, not a prediction contest. The AI may select timeframes, indicators, structure, order flow, and intelligence evidence, but must not treat any school, indicator, parameter, reward-to-risk ratio, or risk percentage as universally correct. Explain why each method was selected, separate facts, inferences, assumptions, and conditions, actively seek disconfirming evidence, and update conclusions when evidence changes. Wait or abstain when there is no explainable edge, risk cannot be defined, execution conditions are invalid, or critical data is missing. Never promise profits or infer participant intent solely from OI, funding, one order-book snapshot, or one signal.".to_string(),
+            content: STALE_ENGLISH_PHILOSOPHY_CONTENT.to_string(),
+            builtin: true,
+        };
+        assert_eq!(skill_text_fingerprint(&stale), 0x77f1_451b_c3b4_4a7c);
+
+        let merged = merge_ai_skill_definitions(vec![stale]);
+        let trading = merged
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("merged trading philosophy");
+        assert!(!trading
+            .content
+            .contains("cannot identify new longs, new shorts, covering, or stops"));
+        assert!(!trading.content.contains("do not invent a contract size"));
         assert!(trading.builtin);
     }
 

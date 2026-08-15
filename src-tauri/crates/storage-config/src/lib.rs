@@ -558,8 +558,8 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0xd56c_4f91_c5db_550c_u64),
-            ("trading-philosophy", 0x5dcc_ea03_4c9f_cc2f_u64),
+            ("desic-core-operations", 0x6747_4642_2d8f_9554_u64),
+            ("trading-philosophy", 0x6d8a_3054_9b52_6d47_u64),
             ("okx-news-intelligence", 0x0cda_8f96_d93c_2722_u64),
             ("okx-smart-money-analysis", 0x6a14_843c_f028_1a8b_u64),
         ];
@@ -591,7 +591,6 @@ mod tests {
         for expected in [
             "The AI may select timeframes, indicators, structure, order flow, and intelligence evidence",
             "There is no universal minimum reward-to-risk ratio or per-trade risk percentage",
-            "an OI change alone cannot identify new longs, new shorts, covering, or stops",
             "Evaluate decision quality, execution quality, and random outcome separately",
         ] {
             assert!(
@@ -602,6 +601,40 @@ mod tests {
         assert!(!skill
             .content
             .contains("price up plus OI up proves new longs"));
+    }
+
+    /// Every factual constraint that stays correct regardless of the user's
+    /// trading style must live in the fixed skill, because `trading-philosophy`
+    /// is fully user-editable and may legitimately be rewritten or emptied.
+    #[test]
+    fn factual_constraints_live_in_the_fixed_skill_not_the_editable_philosophy() {
+        let definitions = default_ai_skill_definitions();
+        let fixed = definitions
+            .iter()
+            .find(|skill| skill.id == "desic-core-operations")
+            .expect("fixed skill");
+        let philosophy = definitions
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("trading philosophy");
+
+        for expected in [
+            "cannot identify new longs, new shorts, covering, or stops",
+            "not proof of participant intent",
+            "do not invent a contract size",
+            "leverage changes estimated initial margin only",
+            "infer participant intent solely from OI",
+        ] {
+            assert!(
+                fixed.rules.contains(expected) || fixed.content.contains(expected),
+                "factual constraint must be in the fixed skill: {expected}"
+            );
+            assert!(
+                !philosophy.rules.contains(expected)
+                    && !philosophy.content.contains(expected),
+                "factual constraint must not depend on the editable philosophy: {expected}"
+            );
+        }
     }
 
     #[test]
