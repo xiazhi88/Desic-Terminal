@@ -58,7 +58,8 @@
     ],
     "resources": {
       "resources/ai-sidecar/": "ai-sidecar/",
-      "resources/systematic-python/": "systematic-python/"
+      "resources/systematic-python/": "systematic-python/",
+      "resources/third-party-licenses": "third-party-licenses"
     },
     "macOS": {
       "minimumSystemVersion": "12.0",

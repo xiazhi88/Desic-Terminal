@@ -1,0 +1,1774 @@
+{
+ "@ai-sdk/amazon-bedrock@4.0.129": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/anthropic@3.0.93": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/gateway@3.0.143": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/google-vertex@4.0.156": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/google@3.0.88": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/mistral@3.0.45": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/openai-compatible@2.0.56": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/openai@3.0.80": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/provider-utils@3.0.28": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/provider-utils@4.0.35": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/provider@2.0.3": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@ai-sdk/provider@3.0.13": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "@anthropic-ai/claude-agent-sdk-darwin-arm64@0.3.201": {
+  "licenses": "Custom: https://www.npmjs.com/package/",
+  "repository": ""
+ },
+ "@anthropic-ai/claude-agent-sdk@0.3.201": {
+  "licenses": "Custom: https://img.shields.io/badge/Node.js-18",
+  "repository": "https://github.com/anthropics/claude-agent-sdk-typescript"
+ },
+ "@anthropic-ai/sdk@0.110.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/anthropics/anthropic-sdk-typescript"
+ },
+ "@aws-sdk/client-cognito-identity@3.1079.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/core@3.974.27": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-cognito-identity@3.972.52": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-env@3.972.53": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-http@3.972.55": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-ini@3.972.60": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-login@3.972.59": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-node@3.972.62": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-process@3.972.53": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-sso@3.972.59": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-provider-web-identity@3.972.59": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/credential-providers@3.1079.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/nested-clients@3.997.27": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/signature-v4-multi-region@3.996.38": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/token-providers@3.1079.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/types@3.973.15": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws-sdk/xml-builder@3.972.33": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/aws/aws-sdk-js-v3"
+ },
+ "@aws/lambda-invoke-store@0.3.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/awslabs/aws-lambda-invoke-store"
+ },
+ "@babel/runtime@7.29.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/babel/babel"
+ },
+ "@cline/agents@0.0.56": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/cline/cline"
+ },
+ "@cline/core@0.0.56": {
+  "licenses": "Custom: https://github.com/cline/sdk/tree/main/examples",
+  "repository": "https://github.com/cline/cline"
+ },
+ "@cline/llms@0.0.56": {
+  "licenses": "Custom: https://github.com/cline/cline/blob/main/README.md",
+  "repository": "https://github.com/cline/cline"
+ },
+ "@cline/sdk@0.0.56": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/cline/cline"
+ },
+ "@cline/shared@0.0.56": {
+  "licenses": "UNKNOWN",
+  "repository": "https://github.com/cline/cline"
+ },
+ "@codemirror/autocomplete@6.20.3": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/autocomplete"
+ },
+ "@codemirror/commands@6.10.4": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/commands"
+ },
+ "@codemirror/lang-javascript@6.2.5": {
+  "licenses": "MIT",
+  "repository": "https://github.com/codemirror/lang-javascript"
+ },
+ "@codemirror/lang-python@6.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/codemirror/lang-python"
+ },
+ "@codemirror/language@6.12.4": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/language"
+ },
+ "@codemirror/lint@6.9.7": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/lint"
+ },
+ "@codemirror/merge@6.12.2": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/merge"
+ },
+ "@codemirror/search@6.7.1": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/search"
+ },
+ "@codemirror/state@6.7.1": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/state"
+ },
+ "@codemirror/view@6.43.6": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/codemirror/view"
+ },
+ "@colors/colors@1.6.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DABH/colors.js"
+ },
+ "@dabh/diagnostics@2.0.8": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DABH/diagnostics"
+ },
+ "@gsap/react@2.1.2": {
+  "licenses": "MIT*",
+  "repository": "https://github.com/greensock/react"
+ },
+ "@hono/node-server@1.19.14": {
+  "licenses": "MIT",
+  "repository": "https://github.com/honojs/node-server"
+ },
+ "@jerome-benoit/sap-ai-provider@4.6.9": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/jerome-benoit/sap-ai-provider"
+ },
+ "@kwsites/file-exists@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/kwsites/file-exists"
+ },
+ "@kwsites/promise-deferred@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/kwsites/promise-deferred"
+ },
+ "@langfuse/core@4.6.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/langfuse/langfuse-js"
+ },
+ "@langfuse/otel@4.6.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/langfuse/langfuse-js"
+ },
+ "@lezer/common@1.5.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lezer-parser/common"
+ },
+ "@lezer/highlight@1.2.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lezer-parser/highlight"
+ },
+ "@lezer/javascript@1.5.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lezer-parser/javascript"
+ },
+ "@lezer/lr@1.4.10": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/lezer/lr"
+ },
+ "@lezer/python@1.1.19": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/lezer/python"
+ },
+ "@marijn/find-cluster-break@1.0.3": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/marijn/find-cluster-break"
+ },
+ "@modelcontextprotocol/sdk@1.29.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/modelcontextprotocol/typescript-sdk"
+ },
+ "@openai/codex@0.130.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/openai/codex"
+ },
+ "@openai/codex@0.130.0-darwin-arm64": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/openai/codex"
+ },
+ "@opencode-ai/sdk@1.17.13": {
+  "licenses": "MIT",
+  "repository": ""
+ },
+ "@opentelemetry/api-logs@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/api@1.9.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/context-async-hooks@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/core@2.6.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/core@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/exporter-logs-otlp-http@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/exporter-metrics-otlp-http@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/exporter-trace-otlp-http@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/otlp-exporter-base@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/otlp-transformer@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/resources@2.6.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/resources@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-logs@0.214.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-metrics@2.6.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-metrics@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-trace-base@2.6.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-trace-base@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-trace-node@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/sdk-trace@2.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@opentelemetry/semantic-conventions@1.41.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/open-telemetry/opentelemetry-js"
+ },
+ "@protobufjs/aspromise@1.1.2": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/base64@1.1.2": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/codegen@2.0.5": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/eventemitter@1.1.1": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/fetch@1.1.1": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/float@1.0.2": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/path@1.1.2": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/pool@1.1.0": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/dcodeIO/protobuf.js"
+ },
+ "@protobufjs/utf8@1.1.2": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/protobufjs/protobuf.js"
+ },
+ "@sap-ai-sdk/ai-api@2.12.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/ai-sdk-js"
+ },
+ "@sap-ai-sdk/core@2.12.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/ai-sdk-js"
+ },
+ "@sap-ai-sdk/foundation-models@2.12.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/ai-sdk-js"
+ },
+ "@sap-ai-sdk/orchestration@2.12.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/ai-sdk-js"
+ },
+ "@sap-ai-sdk/prompt-registry@2.12.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/ai-sdk-js"
+ },
+ "@sap-cloud-sdk/connectivity@4.7.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/cloud-sdk-js"
+ },
+ "@sap-cloud-sdk/http-client@4.7.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/cloud-sdk-js"
+ },
+ "@sap-cloud-sdk/openapi@4.7.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/cloud-sdk-js"
+ },
+ "@sap-cloud-sdk/resilience@4.7.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/cloud-sdk-js"
+ },
+ "@sap-cloud-sdk/util@4.7.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/SAP/cloud-sdk-js"
+ },
+ "@sap/xsenv@6.2.1": {
+  "licenses": "Custom: http://docs.cloudfoundry.org/devguide/deploy-apps/environment-variable.html",
+  "repository": ""
+ },
+ "@sap/xssec@4.13.1": {
+  "licenses": "Custom: https://www.sap.com/products/technology-platform.html",
+  "repository": ""
+ },
+ "@simple-git/args-pathspec@1.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/steveukx/git-js"
+ },
+ "@simple-git/argv-parser@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/steveukx/git-js"
+ },
+ "@smithy/core@3.29.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/credential-provider-imds@4.4.6": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/eventstream-codec@4.4.6": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/fetch-http-handler@5.6.3": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/node-http-handler@4.9.3": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/signature-v4@5.6.2": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/types@4.15.1": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@smithy/util-utf8@4.4.6": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/smithy-lang/smithy-typescript"
+ },
+ "@so-ric/colorspace@1.1.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/so-ric/colorspace"
+ },
+ "@stablelib/base64@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/StableLib/stablelib"
+ },
+ "@standard-schema/spec@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/standard-schema/standard-schema"
+ },
+ "@streamparser/json@0.0.21": {
+  "licenses": "MIT",
+  "repository": "https://github.com/juanjoDiaz/streamparser-json"
+ },
+ "@tauri-apps/api@2.11.1": {
+  "licenses": "Apache-2.0 OR MIT",
+  "repository": "https://github.com/tauri-apps/tauri"
+ },
+ "@tauri-apps/plugin-process@2.3.1": {
+  "licenses": "MIT OR Apache-2.0",
+  "repository": "https://github.com/tauri-apps/plugins-workspace"
+ },
+ "@tauri-apps/plugin-updater@2.10.1": {
+  "licenses": "MIT OR Apache-2.0",
+  "repository": "https://github.com/tauri-apps/plugins-workspace"
+ },
+ "@types/debug@4.1.13": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/estree-jsx@1.0.5": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/estree@1.0.9": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/hast@3.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/mdast@4.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/ms@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/node@26.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/react@19.2.17": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/triple-beam@1.3.5": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/unist@2.0.11": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@types/unist@3.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/DefinitelyTyped/DefinitelyTyped"
+ },
+ "@ungap/structured-clone@1.3.2": {
+  "licenses": "ISC",
+  "repository": "https://github.com/ungap/structured-clone"
+ },
+ "@vercel/oidc@3.2.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/vercel"
+ },
+ "accepts@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/accepts"
+ },
+ "agent-base@6.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/node-agent-base"
+ },
+ "agent-base@7.1.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/proxy-agents"
+ },
+ "ai-sdk-provider-claude-code@3.5.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ben-vargas/ai-sdk-provider-claude-code"
+ },
+ "ai-sdk-provider-codex-cli@1.2.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ben-vargas/ai-sdk-provider-codex-cli"
+ },
+ "ai-sdk-provider-opencode-sdk@3.0.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ben-vargas/ai-sdk-provider-opencode-sdk"
+ },
+ "ai@6.0.219": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/vercel/ai"
+ },
+ "ajv-formats@3.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ajv-validator/ajv-formats"
+ },
+ "ajv@8.20.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ajv-validator/ajv"
+ },
+ "asn1@0.2.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/joyent/node-asn1"
+ },
+ "assert-plus@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/mcavage/node-assert-plus"
+ },
+ "async-retry@1.3.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/vercel/async-retry"
+ },
+ "async@3.2.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/caolan/async"
+ },
+ "asynckit@0.4.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/alexindigo/asynckit"
+ },
+ "aws4fetch@1.0.20": {
+  "licenses": "MIT",
+  "repository": "https://github.com/mhart/aws4fetch"
+ },
+ "axios@1.18.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/axios/axios"
+ },
+ "bail@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/bail"
+ },
+ "base64-js@1.5.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/beatgammit/base64-js"
+ },
+ "bignumber.js@9.3.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/MikeMcl/bignumber.js"
+ },
+ "body-parser@2.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/expressjs/body-parser"
+ },
+ "bowser@2.14.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/bowser-js/bowser"
+ },
+ "buffer-equal-constant-time@1.0.1": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/goinstant/buffer-equal-constant-time"
+ },
+ "bytes@3.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/visionmedia/bytes.js"
+ },
+ "call-bind-apply-helpers@1.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/call-bind-apply-helpers"
+ },
+ "call-bound@1.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/call-bound"
+ },
+ "ccount@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/ccount"
+ },
+ "character-entities-html4@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/character-entities-html4"
+ },
+ "character-entities-legacy@3.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/character-entities-legacy"
+ },
+ "character-entities@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/character-entities"
+ },
+ "character-reference-invalid@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/character-reference-invalid"
+ },
+ "clone@2.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pvorb/node-clone"
+ },
+ "clsx@2.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lukeed/clsx"
+ },
+ "codemirror@6.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/codemirror/basic-setup"
+ },
+ "color-convert@3.1.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/Qix-/color-convert"
+ },
+ "color-name@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/colorjs/color-name"
+ },
+ "color-string@2.1.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/Qix-/color-string"
+ },
+ "color@5.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/Qix-/color"
+ },
+ "combined-stream@1.0.8": {
+  "licenses": "MIT",
+  "repository": "https://github.com/felixge/node-combined-stream"
+ },
+ "comma-separated-tokens@2.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/comma-separated-tokens"
+ },
+ "content-disposition@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/content-disposition"
+ },
+ "content-type@1.0.5": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/content-type"
+ },
+ "content-type@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/content-type"
+ },
+ "cookie-signature@1.2.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/visionmedia/node-cookie-signature"
+ },
+ "cookie@0.7.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/cookie"
+ },
+ "core-util-is@1.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/isaacs/core-util-is"
+ },
+ "cors@2.8.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/expressjs/cors"
+ },
+ "crelt@1.0.7": {
+  "licenses": "MIT",
+  "repository": "git+https://code.haverbeke.berlin/marijn/crelt"
+ },
+ "cross-spawn@7.0.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/moxystudio/node-cross-spawn"
+ },
+ "csstype@3.2.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/frenic/csstype"
+ },
+ "data-uri-to-buffer@4.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/node-data-uri-to-buffer"
+ },
+ "debug@4.4.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/debug-js/debug"
+ },
+ "decode-named-character-reference@1.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/decode-named-character-reference"
+ },
+ "delayed-stream@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/felixge/node-delayed-stream"
+ },
+ "depd@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/dougwilson/nodejs-depd"
+ },
+ "dequal@2.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lukeed/dequal"
+ },
+ "desic-terminal@0.1.18": {
+  "licenses": "UNLICENSED",
+  "repository": "https://github.com/xiazhi88/Desic-Terminal"
+ },
+ "devlop@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/devlop"
+ },
+ "dify-ai-provider@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/warmwind/dify-ai-provider"
+ },
+ "dunder-proto@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/es-shims/dunder-proto"
+ },
+ "ecdsa-sig-formatter@1.0.11": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/Brightspace/node-ecdsa-sig-formatter"
+ },
+ "ee-first@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jonathanong/ee-first"
+ },
+ "enabled@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/3rd-Eden/enabled"
+ },
+ "encodeurl@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/encodeurl"
+ },
+ "es-define-property@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/es-define-property"
+ },
+ "es-errors@1.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/es-errors"
+ },
+ "es-object-atoms@1.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/es-object-atoms"
+ },
+ "es-set-tostringtag@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/es-shims/es-set-tostringtag"
+ },
+ "escape-html@1.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/component/escape-html"
+ },
+ "escape-string-regexp@5.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/escape-string-regexp"
+ },
+ "estree-util-is-identifier-name@3.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/estree-util-is-identifier-name"
+ },
+ "etag@1.8.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/etag"
+ },
+ "eventsource-parser@3.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/rexxars/eventsource-parser"
+ },
+ "eventsource@3.0.7": {
+  "licenses": "MIT",
+  "repository": "git://git@github.com/EventSource/eventsource"
+ },
+ "express-rate-limit@8.5.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/express-rate-limit/express-rate-limit"
+ },
+ "express@5.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/expressjs/express"
+ },
+ "extend@3.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/justmoon/node-extend"
+ },
+ "extsprintf@1.4.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/davepacheco/node-extsprintf"
+ },
+ "fancy-canvas@2.1.0": {
+  "licenses": "MIT",
+  "repository": ""
+ },
+ "fast-deep-equal@3.1.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/epoberezkin/fast-deep-equal"
+ },
+ "fast-sha256@1.3.0": {
+  "licenses": "Unlicense",
+  "repository": "https://github.com/dchest/fast-sha256-js"
+ },
+ "fast-uri@3.1.3": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/fastify/fast-uri"
+ },
+ "fecha@4.2.3": {
+  "licenses": "MIT",
+  "repository": "git+https://taylorhakes@github.com/taylorhakes/fecha"
+ },
+ "fetch-blob@3.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/node-fetch/fetch-blob"
+ },
+ "finalhandler@2.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/finalhandler"
+ },
+ "fn.name@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/3rd-Eden/fn.name"
+ },
+ "follow-redirects@1.16.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/follow-redirects/follow-redirects"
+ },
+ "form-data@4.0.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/form-data/form-data"
+ },
+ "formdata-polyfill@4.0.10": {
+  "licenses": "MIT",
+  "repository": "git+https://jimmywarting@github.com/jimmywarting/FormData"
+ },
+ "forwarded@0.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/forwarded"
+ },
+ "fresh@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/fresh"
+ },
+ "function-bind@1.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/Raynos/function-bind"
+ },
+ "gaxios@7.1.5": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/googleapis/google-cloud-node-core"
+ },
+ "gcp-metadata@8.1.2": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/googleapis/google-cloud-node-core"
+ },
+ "get-intrinsic@1.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/get-intrinsic"
+ },
+ "get-proto@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/get-proto"
+ },
+ "google-auth-library@10.9.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/googleapis/google-cloud-node"
+ },
+ "google-logging-utils@1.1.3": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/googleapis/google-cloud-node-core"
+ },
+ "gopd@1.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/gopd"
+ },
+ "gsap@3.15.0": {
+  "licenses": "Custom: https://gsap.com/GSAP-share-image.png",
+  "repository": "https://github.com/greensock/GSAP"
+ },
+ "has-symbols@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/inspect-js/has-symbols"
+ },
+ "has-tostringtag@1.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/inspect-js/has-tostringtag"
+ },
+ "hasown@2.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/inspect-js/hasOwn"
+ },
+ "hast-util-to-jsx-runtime@2.3.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/hast-util-to-jsx-runtime"
+ },
+ "hast-util-whitespace@3.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/hast-util-whitespace"
+ },
+ "hono@4.12.27": {
+  "licenses": "MIT",
+  "repository": "https://github.com/honojs/hono"
+ },
+ "html-parse-stringify@3.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/henrikjoreteg/html-parse-stringify"
+ },
+ "html-url-attributes@3.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/rehypejs/rehype-minify/tree/main/packages/html-url-attributes"
+ },
+ "http-errors@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/http-errors"
+ },
+ "https-proxy-agent@5.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/node-https-proxy-agent"
+ },
+ "https-proxy-agent@7.0.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/proxy-agents"
+ },
+ "i18next@25.10.10": {
+  "licenses": "MIT",
+  "repository": "https://github.com/i18next/i18next"
+ },
+ "iconv-lite@0.7.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/iconv-lite"
+ },
+ "inherits@2.0.4": {
+  "licenses": "ISC",
+  "repository": "https://github.com/isaacs/inherits"
+ },
+ "inline-style-parser@0.2.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkablemark/inline-style-parser"
+ },
+ "ip-address@10.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/beaugunderson/ip-address"
+ },
+ "ipaddr.js@1.9.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/whitequark/ipaddr.js"
+ },
+ "is-alphabetical@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/is-alphabetical"
+ },
+ "is-alphanumerical@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/is-alphanumerical"
+ },
+ "is-decimal@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/is-decimal"
+ },
+ "is-hexadecimal@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/is-hexadecimal"
+ },
+ "is-plain-obj@4.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/is-plain-obj"
+ },
+ "is-promise@4.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/then/is-promise"
+ },
+ "is-stream@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/is-stream"
+ },
+ "isexe@2.0.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/isaacs/isexe"
+ },
+ "jiti@2.7.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/unjs/jiti"
+ },
+ "jks-js@1.1.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lenchv/jks-js"
+ },
+ "jose@6.2.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/panva/jose"
+ },
+ "json-bigint@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sidorares/json-bigint"
+ },
+ "json-schema-to-ts@3.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ThomasAribart/json-schema-to-ts"
+ },
+ "json-schema-traverse@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/epoberezkin/json-schema-traverse"
+ },
+ "json-schema-typed@8.0.2": {
+  "licenses": "BSD-2-Clause",
+  "repository": "https://github.com/RemyRylan/json-schema-typed"
+ },
+ "json-schema@0.4.0": {
+  "licenses": "(AFL-2.1 OR BSD-3-Clause)",
+  "repository": "https://github.com/kriszyp/json-schema"
+ },
+ "jsonc-parser@3.3.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/microsoft/node-jsonc-parser"
+ },
+ "jsonrepair@3.15.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/josdejong/jsonrepair"
+ },
+ "jsonwebtoken@9.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/auth0/node-jsonwebtoken"
+ },
+ "jwa@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/brianloveswords/node-jwa"
+ },
+ "jws@4.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/brianloveswords/node-jws"
+ },
+ "jwt-decode@4.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/auth0/jwt-decode"
+ },
+ "kuler@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/3rd-Eden/kuler"
+ },
+ "lightweight-charts@5.2.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/tradingview/lightweight-charts"
+ },
+ "lodash.includes@4.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.isboolean@3.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.isinteger@4.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.isnumber@3.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.isplainobject@4.0.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.isstring@4.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "lodash.once@4.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/lodash/lodash"
+ },
+ "logform@2.7.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/winstonjs/logform"
+ },
+ "long@5.3.2": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/dcodeIO/long.js"
+ },
+ "longest-streak@3.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/longest-streak"
+ },
+ "lucide-react@1.23.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/lucide-icons/lucide"
+ },
+ "markdown-table@3.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/markdown-table"
+ },
+ "math-intrinsics@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/es-shims/math-intrinsics"
+ },
+ "mdast-util-find-and-replace@3.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-find-and-replace"
+ },
+ "mdast-util-from-markdown@2.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-from-markdown"
+ },
+ "mdast-util-gfm-autolink-literal@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm-autolink-literal"
+ },
+ "mdast-util-gfm-footnote@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm-footnote"
+ },
+ "mdast-util-gfm-strikethrough@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm-strikethrough"
+ },
+ "mdast-util-gfm-table@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm-table"
+ },
+ "mdast-util-gfm-task-list-item@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm-task-list-item"
+ },
+ "mdast-util-gfm@3.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-gfm"
+ },
+ "mdast-util-mdx-expression@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-mdx-expression"
+ },
+ "mdast-util-mdx-jsx@3.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-mdx-jsx"
+ },
+ "mdast-util-mdxjs-esm@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-mdxjs-esm"
+ },
+ "mdast-util-phrasing@4.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-phrasing"
+ },
+ "mdast-util-to-hast@13.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-to-hast"
+ },
+ "mdast-util-to-markdown@2.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-to-markdown"
+ },
+ "mdast-util-to-string@4.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/mdast-util-to-string"
+ },
+ "media-typer@1.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/media-typer"
+ },
+ "merge-descriptors@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/merge-descriptors"
+ },
+ "micromark-core-commonmark@2.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-core-commonmark"
+ },
+ "micromark-extension-gfm-autolink-literal@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-autolink-literal"
+ },
+ "micromark-extension-gfm-footnote@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-footnote"
+ },
+ "micromark-extension-gfm-strikethrough@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-strikethrough"
+ },
+ "micromark-extension-gfm-table@2.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-table"
+ },
+ "micromark-extension-gfm-tagfilter@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-tagfilter"
+ },
+ "micromark-extension-gfm-task-list-item@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm-task-list-item"
+ },
+ "micromark-extension-gfm@3.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark-extension-gfm"
+ },
+ "micromark-factory-destination@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-factory-destination"
+ },
+ "micromark-factory-label@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-factory-label"
+ },
+ "micromark-factory-space@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-factory-space"
+ },
+ "micromark-factory-title@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-factory-title"
+ },
+ "micromark-factory-whitespace@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-factory-whitespace"
+ },
+ "micromark-util-character@2.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-character"
+ },
+ "micromark-util-chunked@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-chunked"
+ },
+ "micromark-util-classify-character@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-classify-character"
+ },
+ "micromark-util-combine-extensions@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-combine-extensions"
+ },
+ "micromark-util-decode-numeric-character-reference@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-numeric-character-reference"
+ },
+ "micromark-util-decode-string@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-string"
+ },
+ "micromark-util-encode@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-encode"
+ },
+ "micromark-util-html-tag-name@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-html-tag-name"
+ },
+ "micromark-util-normalize-identifier@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-normalize-identifier"
+ },
+ "micromark-util-resolve-all@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-resolve-all"
+ },
+ "micromark-util-sanitize-uri@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-sanitize-uri"
+ },
+ "micromark-util-subtokenize@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-subtokenize"
+ },
+ "micromark-util-symbol@2.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-symbol"
+ },
+ "micromark-util-types@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark-util-types"
+ },
+ "micromark@4.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/micromark/micromark/tree/main/packages/micromark"
+ },
+ "mime-db@1.52.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/mime-db"
+ },
+ "mime-db@1.54.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/mime-db"
+ },
+ "mime-types@2.1.35": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/mime-types"
+ },
+ "mime-types@3.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/mime-types"
+ },
+ "ms@2.1.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/vercel/ms"
+ },
+ "nanoid@5.1.16": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ai/nanoid"
+ },
+ "negotiator@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/negotiator"
+ },
+ "node-cache@5.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/node-cache/node-cache"
+ },
+ "node-domexception@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jimmywarting/node-domexception"
+ },
+ "node-fetch@3.3.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/node-fetch/node-fetch"
+ },
+ "node-forge@1.4.0": {
+  "licenses": "(BSD-3-Clause OR GPL-2.0)",
+  "repository": "https://github.com/digitalbazaar/forge"
+ },
+ "node-int64@0.4.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/broofa/node-int64"
+ },
+ "node-machine-id@1.1.12": {
+  "licenses": "MIT",
+  "repository": "https://github.com/automation-stack/node-machine-id"
+ },
+ "node-rsa@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/rzcoder/node-rsa"
+ },
+ "object-assign@4.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/object-assign"
+ },
+ "object-inspect@1.13.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/inspect-js/object-inspect"
+ },
+ "on-finished@2.4.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/on-finished"
+ },
+ "once@1.4.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/isaacs/once"
+ },
+ "one-time@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/3rd-Eden/one-time"
+ },
+ "opossum@9.0.0": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/nodeshift/opossum"
+ },
+ "parse-entities@4.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/parse-entities"
+ },
+ "parseurl@1.3.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/parseurl"
+ },
+ "path-key@3.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/path-key"
+ },
+ "path-to-regexp@8.4.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/path-to-regexp"
+ },
+ "pkce-challenge@5.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/crouchcd/pkce-challenge"
+ },
+ "property-information@7.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/property-information"
+ },
+ "protobufjs@7.6.5": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/protobufjs/protobuf.js"
+ },
+ "proxy-addr@2.0.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/proxy-addr"
+ },
+ "proxy-from-env@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/Rob--W/proxy-from-env"
+ },
+ "qs@6.15.3": {
+  "licenses": "BSD-3-Clause",
+  "repository": "https://github.com/ljharb/qs"
+ },
+ "range-parser@1.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/range-parser"
+ },
+ "raw-body@3.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/stream-utils/raw-body"
+ },
+ "react-dom@19.2.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/facebook/react"
+ },
+ "react-i18next@16.6.6": {
+  "licenses": "MIT",
+  "repository": "https://github.com/i18next/react-i18next"
+ },
+ "react-markdown@10.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkjs/react-markdown"
+ },
+ "react@19.2.7": {
+  "licenses": "MIT",
+  "repository": "https://github.com/facebook/react"
+ },
+ "readable-stream@3.6.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/nodejs/readable-stream"
+ },
+ "remark-gfm@4.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkjs/remark-gfm"
+ },
+ "remark-parse@11.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkjs/remark/tree/main/packages/remark-parse"
+ },
+ "remark-rehype@11.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkjs/remark-rehype"
+ },
+ "remark-stringify@11.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkjs/remark/tree/main/packages/remark-stringify"
+ },
+ "require-from-string@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/floatdrop/require-from-string"
+ },
+ "retry@0.13.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/tim-kos/node-retry"
+ },
+ "router@2.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/router"
+ },
+ "safe-buffer@5.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/feross/safe-buffer"
+ },
+ "safe-stable-stringify@2.5.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/BridgeAR/safe-stable-stringify"
+ },
+ "safer-buffer@2.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ChALkeR/safer-buffer"
+ },
+ "scheduler@0.27.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/facebook/react"
+ },
+ "semver@7.8.5": {
+  "licenses": "ISC",
+  "repository": "https://github.com/npm/node-semver"
+ },
+ "send@1.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pillarjs/send"
+ },
+ "serve-static@2.2.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/expressjs/serve-static"
+ },
+ "setprototypeof@1.2.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/wesleytodd/setprototypeof"
+ },
+ "shebang-command@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/kevva/shebang-command"
+ },
+ "shebang-regex@3.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/sindresorhus/shebang-regex"
+ },
+ "side-channel-list@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/side-channel-list"
+ },
+ "side-channel-map@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/side-channel-map"
+ },
+ "side-channel-weakmap@1.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/side-channel-weakmap"
+ },
+ "side-channel@1.1.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ljharb/side-channel"
+ },
+ "simple-git@3.36.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/steveukx/git-js"
+ },
+ "space-separated-tokens@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/space-separated-tokens"
+ },
+ "stack-trace@0.0.10": {
+  "licenses": "MIT",
+  "repository": "https://github.com/felixge/node-stack-trace"
+ },
+ "standardwebhooks@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/standard-webhooks/standard-webhooks"
+ },
+ "statuses@2.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/statuses"
+ },
+ "string_decoder@1.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/nodejs/string_decoder"
+ },
+ "stringify-entities@4.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/stringify-entities"
+ },
+ "style-mod@4.1.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/marijnh/style-mod"
+ },
+ "style-to-js@1.1.21": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkablemark/style-to-js"
+ },
+ "style-to-object@1.0.14": {
+  "licenses": "MIT",
+  "repository": "https://github.com/remarkablemark/style-to-object"
+ },
+ "text-hex@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/3rd-Eden/text-hex"
+ },
+ "toidentifier@1.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/component/toidentifier"
+ },
+ "trim-lines@3.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/trim-lines"
+ },
+ "triple-beam@1.4.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/winstonjs/triple-beam"
+ },
+ "trough@2.2.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/trough"
+ },
+ "ts-algebra@2.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/ThomasAribart/ts-algebra"
+ },
+ "tslib@2.8.1": {
+  "licenses": "0BSD",
+  "repository": "https://github.com/Microsoft/tslib"
+ },
+ "type-is@2.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/type-is"
+ },
+ "typescript@6.0.3": {
+  "licenses": "Apache-2.0",
+  "repository": "https://github.com/microsoft/TypeScript"
+ },
+ "undici-types@8.3.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/nodejs/undici"
+ },
+ "unified@11.0.5": {
+  "licenses": "MIT",
+  "repository": "https://github.com/unifiedjs/unified"
+ },
+ "unist-util-is@6.0.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/unist-util-is"
+ },
+ "unist-util-position@5.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/unist-util-position"
+ },
+ "unist-util-stringify-position@4.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/unist-util-stringify-position"
+ },
+ "unist-util-visit-parents@6.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/unist-util-visit-parents"
+ },
+ "unist-util-visit@5.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/syntax-tree/unist-util-visit"
+ },
+ "unpipe@1.0.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/stream-utils/unpipe"
+ },
+ "use-sync-external-store@1.6.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/facebook/react"
+ },
+ "util-deprecate@1.0.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/TooTallNate/util-deprecate"
+ },
+ "vary@1.1.2": {
+  "licenses": "MIT",
+  "repository": "https://github.com/jshttp/vary"
+ },
+ "verror@1.10.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/joyent/node-verror"
+ },
+ "vfile-message@4.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/vfile/vfile-message"
+ },
+ "vfile@6.0.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/vfile/vfile"
+ },
+ "voca@1.4.1": {
+  "licenses": "MIT",
+  "repository": "https://github.com/panzerdp/voca"
+ },
+ "void-elements@3.1.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pugjs/void-elements"
+ },
+ "w3c-keyname@2.2.8": {
+  "licenses": "MIT",
+  "repository": "https://github.com/marijnh/w3c-keyname"
+ },
+ "web-streams-polyfill@3.3.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/MattiasBuelens/web-streams-polyfill"
+ },
+ "which@2.0.2": {
+  "licenses": "ISC",
+  "repository": "https://github.com/isaacs/node-which"
+ },
+ "winston-transport@4.9.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/winstonjs/winston-transport"
+ },
+ "winston@3.19.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/winstonjs/winston"
+ },
+ "wrappy@1.0.2": {
+  "licenses": "ISC",
+  "repository": "https://github.com/npm/wrappy"
+ },
+ "ws@8.21.0": {
+  "licenses": "MIT",
+  "repository": "https://github.com/websockets/ws"
+ },
+ "yaml@2.9.0": {
+  "licenses": "ISC",
+  "repository": "https://github.com/eemeli/yaml"
+ },
+ "zod-to-json-schema@3.25.2": {
+  "licenses": "ISC",
+  "repository": "https://github.com/StefanTerdell/zod-to-json-schema"
+ },
+ "zod@3.25.76": {
+  "licenses": "MIT",
+  "repository": "https://github.com/colinhacks/zod"
+ },
+ "zod@4.4.3": {
+  "licenses": "MIT",
+  "repository": "https://github.com/colinhacks/zod"
+ },
+ "zustand@5.0.14": {
+  "licenses": "MIT",
+  "repository": "https://github.com/pmndrs/zustand"
+ },
+ "zwitch@2.0.4": {
+  "licenses": "MIT",
+  "repository": "https://github.com/wooorm/zwitch"
+ }
+}

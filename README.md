@@ -3,8 +3,10 @@
 
   <h1>Desic Terminal</h1>
 
-  <p><strong>An AI-native trading terminal for OKX USDT perpetual markets.</strong></p>
-  <p>专业图表、交易执行、市场情报与受控 AI 自动化，共享同一份实时状态与审计上下文。</p>
+  <p><strong>AI 原生的 OKX USDT 永续合约交易终端。</strong></p>
+  <p>行情、图表、交易、情报、AI 助手、自动化与策略研究共享同一份实时状态与审计上下文。</p>
+
+  <p><sub>[English](./README.en.md) · 简体中文（当前）</sub></p>
 
   <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
@@ -17,27 +19,15 @@
 
   <p>
     <a href="#安装">安装</a> ·
-    <a href="#软件演示">软件演示</a> ·
-    <a href="#交易工作站">交易工作站</a> ·
-    <a href="#ai-交易助手">AI 交易助手</a> ·
-    <a href="#支持的-ai-供应商">AI 供应商</a> ·
-    <a href="#自动化与多-agent">自动化</a> ·
-    <a href="#市场情报">市场情报</a> ·
-    <a href="#社区与支持">社区</a> ·
-    <a href="#开发">开发</a>
+    <a href="#文档">文档</a> ·
+    <a href="#核心能力">核心能力</a> ·
+    <a href="#安全与执行原则">安全</a> ·
+    <a href="#开发">开发</a> ·
+    <a href="#社区与支持">社区</a>
   </p>
 </div>
 
 ![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)
-
-## 软件演示
-
-https://github.com/user-attachments/assets/e5215d1a-26a3-497b-bba8-39c2daef917d
-
-Desic Terminal 面向需要持续观察、快速决策和严格执行边界的衍生品交易者。它不是将聊天窗口附加到行情软件，而是让模型通过受控工具读取终端中的实时行情、账户、历史、新闻和衍生品证据，再把分析、机会、执行与复盘连接成一条可追踪的工作流。
-
-> [!WARNING]
-> Desic Terminal 不构成投资建议，也不承诺收益。永续合约、杠杆和自动化交易可能造成快速且显著的损失。请先使用 OKX 模拟盘验证数量单位、保证金模式、止损、通知和执行恢复链路。
 
 ## 安装
 
@@ -52,56 +42,29 @@ Desic Terminal 面向需要持续观察、快速决策和严格执行边界的�
 也可以前往 **[GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases)** 查看版本说明和全部附件。
 
 > [!IMPORTANT]
-> 当前安装包尚未使用 Apple Developer ID 或 Windows Authenticode 签名。macOS 首次启动时，请将应用拖入“应用程序”，右键应用选择“打开”；如果仍被拦截，请前往“系统设置 → 隐私与安全性”选择“仍要打开”。Windows 首次安装可能显示 SmartScreen 提示，请确认下载地址属于本仓库后再选择继续运行。
+> 当前安装包尚未使用 Apple Developer ID 或 Windows Authenticode 签名。macOS 首次启动时，请将应用拖入"应用程序"，右键应用选择"打开"；如果仍被拦截，请前往"系统设置 → 隐私与安全性"选择"仍要打开"。Windows 首次安装可能显示 SmartScreen 提示，请确认下载地址属于本仓库后再选择继续运行。
+
+## 文档
+
+| 文档 | 内容 |
+| --- | --- |
+| 📖 [**入门教程**](docs/getting-started.md) | 从安装、配置模拟盘、第一笔交易到 AI 助手与情报，一步步上手 |
+| 🤖 [**AI 自动化指南**](docs/ai-automation-guide.md) | Profile、唤醒条件、Skill 版本、多 Agent、复盘与迭代的完整使用指导 |
+| 📈 [**系统化策略指南**](docs/systematic-strategy-guide.md) | Python 策略编程、回测、参数调优与实盘 Profile 的完整工作流 |
+| 🔧 [策略协议规范](docs/systematic-python-strategy-protocol.md) | 策略运行时协议、源码策略与安全边界的权威规范 |
+| 🏗 [产品规范](PRODUCT.md) | 产品边界与关键设计决策 |
 
 ## 核心能力
 
 | 工作域 | 能力 |
 | --- | --- |
 | **实时交易** | OKX Public / Business / Private WebSocket、深度与逐笔、交易票、限价/市价/计划委托、止盈止损、OCO、改单撤单、持仓管理 |
-| **专业图表** | 多周期 K 线、主副图指标、图层与绘图、图表快速交易、多图表独立窗口、K 线数据表与 CSV 导出 |
-| **AI 研究** | 流式推理、白名单工具、账户与市场证据读取、交易机会、图表动作、安全 DSL 自定义指标 |
-| **自动化** | Profile、类型化唤醒、受限自动执行、运行审计、多 Agent 编排、仓位复盘、Skill 版本与优化建议 |
+| **专业图表** | 多周期 K 线、20+ 主副图指标、图层与绘图、图表快速交易、多图表独立窗口、K 线数据表与 CSV 导出 |
+| **AI 助手** | 流式推理、白名单工具、账户与市场证据读取、交易机会、图表动作、安全 DSL 自定义指标、多供应商与官方 CLI 通道 |
+| **AI 自动化** | Profile、类型化唤醒条件、受限自动执行、运行审计、多 Agent 编排、仓位复盘、Skill 版本与优化建议 |
+| **系统化策略** | 免安装 Python、模板策略、129k-bar 级回测、参数调优工作台、实盘 Profile 与信号历史 |
 | **市场情报** | 新闻、事件聚类、币种情绪、经济日历、OI、主动流、拥挤度、资金费率、基差、Smart Money 与系统压力 |
 | **通知与恢复** | 应用内通知、飞书机器人、持久化执行状态、未知结果对账、幂等提交与启动恢复 |
-
-桌面端启动时会先显示轻量启动画面，数据库初始化和后台恢复在独立任务中执行；需要访问本地数据的命令会等待数据库就绪。Windows 主窗口会根据显示器工作区自动适配，较小窗口会固定盘口与下单列，并将自选面板改为可覆盖展开，避免压缩关键字段。
-
-## 交易工作站
-
-行情、盘口、逐笔、图表、账户与下单面板使用同一交易对和账户上下文。所有数量按 OKX 合约“张”提交，并同时呈现币数量、名义价值、预计保证金、费用与止损风险，避免把张数、币数量和 USDT 敞口混为一谈。
-
-- 支持模拟盘与实盘隔离、多个 OKX 账户、独立 Private WebSocket 和环境确认。
-- 支持限价、市价、计划委托、保护性止盈止损、OCO、改单、撤单和平仓。
-- 图表右键与风险收益对象可以直接形成做多、做空、平多、平空意图。
-- 委托线、策略线和持仓线支持拖拽调整；止盈止损修改时同步计算预计收益。
-- 交易动作统一经过数量规范化、预览确认、Rust 风控、幂等执行与审计记录。
-
-### 多图表独立视图
-
-原生图表窗口支持单图、双图、三图和四图布局。每个窗格可以独立选择交易对、周期、指标和图层，同时保持实时行情、委托、成交与持仓状态同步。图表快速交易菜单可直接在目标价格创建限价意图、市价交易或提醒。
-
-![Desic Terminal multi-chart workspace](docs/assets/readme/multi-chart-workspace.png)
-
-### 专业图表与 AI 自定义指标
-
-内置 MA、EMA、VWAP、Bollinger Bands、Supertrend、Ichimoku、MACD、RSI、KDJ、ATR、ADX/DMI、Stochastic、CCI、ROC、Williams %R、MFI、OBV 等常用指标，并支持重复实例、参数编辑、主副图分配、图层管理和组合模板。
-
-自定义指标使用资源受限的 JSON DSL，不执行任意 JavaScript，也不开放文件和网络访问。用户可以在 CodeMirror 编辑器中编写，也可以通过专用 AI 面板多轮讨论指标思路；只有明确要求创建或更新时才生成安全 DSL，再经过 Schema 校验、版本保存与本地计算后加入指标库。
-
-![AI-generated custom indicator](docs/assets/readme/ai-custom-indicator.png)
-
-## AI 交易助手
-
-![Desic Terminal AI trading assistant](docs/assets/readme/ai-trading-assistant.png)
-
-AI 助手可以读取实时行情、盘口、K 线、指标、账户、订单、历史、新闻、宏观日历和 Smart Money 数据。工具结果保留时间、来源、新鲜度与限制，让模型能够区分事实、推断和数据缺口。
-
-- 流式展示正文、reasoning、工具调用、耗时、审批和最终结果。
-- 支持 OpenAI、Anthropic、Gemini、Grok、DeepSeek、通义千问、KIMI、豆包、MiniMax、智谱及兼容接口。
-- 支持本机官方 Codex CLI 与 Claude Code 通道，仍服从 Desic Terminal 的工具权限。
-- 支持会话级、日期级和模型级 Token 统计，不把 Provider 未报告的 usage 伪装为零。
-- 支持受控图表绘图、提醒、交易机会、交易笔记与安全自定义指标。
 
 ### 权限不是提示词
 
@@ -111,7 +74,7 @@ AI 助手可以读取实时行情、盘口、K 线、指标、账户、订单、
 | `copilot` | 是 | 创建、修改、复用 | 必须由用户审批 |
 | `limited_auto` | 是 | 通过冻结候选提交 | 仅限 Profile 授权范围 |
 
-模型调用会依次经过 Sidecar 工具可见性、Agent runtime policy、Rust 账户与环境绑定、合约参数校验、交易预检、实盘确认、幂等控制和持久化审计。模型无法通过输出文本提升自己的权限。
+模型调用依次经过 Sidecar 工具可见性、Agent runtime policy、Rust 账户与环境绑定、合约参数校验、交易预检、实盘确认、幂等控制和持久化审计。
 
 ## 支持的 AI 供应商
 
@@ -137,53 +100,9 @@ Desic Terminal 可以通过 Provider API 使用下列模型服务，也支持通
   </tr>
 </table>
 
-## 自动化与多 Agent
-
-Profile 将模型、账户、权限、关注品种、风险范围、Skill 版本和唤醒条件冻结为一次可复现的后台运行。自动化可以按时间、价格、成交量、盘口、订单、持仓、机会状态和市场情报事件唤醒，并在结束时保存摘要、决策和下一组观察条件。
-
-![AI automation profile](docs/assets/readme/automation-profile.png)
-
-四个系统 Skill 始终随 Profile 加载：
-
-| Skill | 责任边界 |
-| --- | --- |
-| `desic-core-operations` | 工具、权限、交易机会、合约单位与执行规范 |
-| `trading-philosophy` | 证据、市场状态、失效条件、风险与复盘原则 |
-| `okx-news-intelligence` | 新闻、事件、情绪、宏观与市场反应 |
-| `okx-smart-money-analysis` | Smart Money、OI、主动流、拥挤度、资金费率与基差 |
-
-系统 Skill 在 Profile 中强制启用；用户自定义 Skill 可以独立选择。每次运行保存不可变版本快照，后续修改不会改变历史决策使用的规则。
-
-### 多 Agent 编排
-
-复杂任务可以选择自动分配或自定义专家团队。市场结构、情报资金、账户风险和反方审查等只读 Agent 并行取证，唯一的主 Agent 汇总证据并承担最终决策。专家无法创建机会、发送通知或执行交易；反方否决也必须有确定性预检结果支持。
-
-![Multi-agent orchestration](docs/assets/readme/multi-agent-orchestration.png)
-
-### 复盘与持续迭代
-
-完整平仓后，仓位会被整理为 Position Episode，并结合开仓前、持仓中和平仓后的市场路径生成复盘。决策质量、执行质量和随机结果分别评价，单笔盈亏不会直接被解释为规则优劣。
-
-只有证据指向可复用、可验证的 Skill 缺陷时，复盘才会提出优化建议。建议提供采用前后的逐行差异，用户确认后才发布新版本。Profile 运行、交易机会、复盘完成和异常可以通过飞书机器人投递。
-
-## 市场情报
-
-![Desic Terminal market intelligence](docs/assets/readme/market-intelligence.png)
-
-市场情报不是一组静态卡片，而是可被人工工作流和 AI 工具共同引用的时间序列证据层。
-
-- 新闻列表、全文、来源、事件聚类、重要性与多时间窗口市场反应。
-- 币种情绪快照、趋势、热度与多空排行。
-- 周历与月历形态的经济日历，包含地区、重要性、前值、预测值和公布值。
-- 价格与 OI 组合状态、主动买卖流、普通账户与精英账户多空结构。
-- Smart Money 交易员绩效、持仓、历史订单、聚合信号与分歧。
-- 资金费率、基差、强平样本、保险基金、价格限制和 ADL 状态。
-
-每个视图披露数据时间、抓取时间、覆盖率和新鲜度。缺失、过期与上游异常会被明确标记，不使用旧快照冒充当前状态。
-
 ## 安全与执行原则
 
-Desic Terminal 将“不确定结果”视为独立状态，而不是简单的成功或失败。一次外部写入超时后，系统会使用稳定执行键、客户端订单 ID、账户身份和 OKX 查询进行对账；在结果明确前，不会用新的执行键自动重试风险增加操作。
+Desic Terminal 将"不确定结果"视为独立状态，而不是简单的成功或失败。一次外部写入超时后，系统会使用稳定执行键、客户端订单 ID、账户身份和 OKX 查询进行对账；在结果明确前，不会用新的执行键自动重试风险增加操作。
 
 ```mermaid
 flowchart LR
@@ -210,7 +129,7 @@ flowchart LR
     UI[React + TypeScript\nTerminal / Chart / Intelligence / AI]
     HOT[Bounded Hot Store]
     IPC[Tauri Commands & Events]
-    CORE[Rust Runtime\nMarket / Trade / Automation]
+    CORE[Rust Runtime\nMarket / Trade / Automation / Systematic]
     DB[(SQLite\nHistory / Audit / Review)]
     SIDECAR[AI Sidecar\nPinned Node Runtime]
   end
@@ -235,7 +154,7 @@ src/                         React UI、图表适配、状态与桌面调用封�
 src-tauri/src/               Tauri command、事件、外部 IO 与运行时编排
 src-tauri/crates/            交易领域、图表 DSL、情报与自动化领域模块
 scripts/                     AI Sidecar、Provider 适配、策略测试与 smoke tests
-docs/                        开发规范与 README 资源
+docs/                        使用文档与开发规范
 ```
 
 ## 开发
@@ -302,9 +221,13 @@ QQ群：`781180447`
 
 通过 **[OKX 专属注册链接](https://www.okx.com/zh-hans/join/xiazhi?shortCode=6CngT5)** 注册并满足活动规则，可享 15% 返佣。具体资格、比例和有效期以 OKX 页面展示的规则为准。
 
+## 免责声明（Disclaimer）
+
+This software is for educational purposes only. USE THE SOFTWARE AT YOUR OWN RISK. THE AUTHORS AND ALL AFFILIATES ASSUME NO RESPONSIBILITY FOR YOUR TRADING RESULTS. Do not risk money that you are afraid to lose. There might be bugs in the code - this software DOES NOT come with ANY warranty.
+
 ## License
 
-Desic Terminal 源代码基于 [MIT License](LICENSE) 开源。第三方依赖和素材仍遵循各自的许可证；MIT License 不授予 Desic Terminal 名称、Logo 或品牌标识的商标使用权。
+Desic Terminal 源代码基于 [MIT License](LICENSE) 开源。第三方依赖和素材仍遵循各自的许可证，概览见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，完整许可清单随安装包分发并可在应用内"关于 → 开源许可"查看；MIT License 不授予 Desic Terminal 名称、Logo 或品牌标识的商标使用权。
 
 ---
 
