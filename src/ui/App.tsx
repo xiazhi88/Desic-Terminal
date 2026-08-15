@@ -527,24 +527,7 @@ function normalizeAutomationTab(tab: string | null | undefined): AiAutomationTab
 }
 
 function normalizeAiSkillDefinitions(definitions: AiSkillDefinition[]): AiSkillDefinition[] {
-  return definitions.map((skill) => {
-    if (skill.id !== "desic-core-operations") return skill;
-    return {
-      ...skill,
-      content: skill.content
-        .split("\n")
-        .map((line) => {
-          if (line.startsWith("5. ")) {
-            return "5. advisor 模式不能创建交易机会或修改杠杆；copilot 与 limited_auto 的后台 Profile 主 Agent 可以在预检确认不一致后调用 trade.setLeverage，把当前合约杠杆同步到用户配置的 Profile 目标值。除此之外，copilot 只能创建、修改和复用机会，limited_auto 必须通过 tradeOpportunity.create 创建交易机会并由后端按 Profile 权限自动批准执行；两种模式都不得直接下单、撤单、改单或平仓，子 Agent 不得修改杠杆。";
-          }
-          if (line.startsWith("10. ")) {
-            return "10. 子 Agent 只能读取行情、账户、历史和交易机会并返回分析结果；不得创建、修改或关闭交易机会，不得下单、撤单、改单、平仓、通知、提醒或运行脚本。";
-          }
-          return line;
-        })
-        .join("\n")
-    };
-  });
+  return definitions;
 }
 
 export function App() {
@@ -6831,10 +6814,12 @@ function DataDashboardPage({
 
   return (
     <div className="data-dashboard">
-      <DataDashboardViewTabs value={dashboardView} onChange={setDashboardView} />
-      <header className="data-dashboard-header">
-        <div className="data-title-row">
-          <h1>{t("common:accountPerformance")}</h1>
+      {/* One toolbar carries view, scope, range, and actions. Previously these
+          were four stacked bands that pushed the first number below the fold. */}
+      <header className="data-toolbar">
+        <DataDashboardViewTabs value={dashboardView} onChange={setDashboardView} />
+        <span className="data-toolbar__divider" aria-hidden="true" />
+        <div className="data-toolbar__scope">
           <TerminalSelect
             ariaLabel={t("common:selectAccount")}
             value={selectedAccountId}
@@ -6852,19 +6837,22 @@ function DataDashboardPage({
             onChange={setSelectedSymbol}
           />
         </div>
-        <div className="data-dashboard-actions">
-          <button onClick={() => void refresh()} disabled={loading}>{loading ? t("common:refreshing") : t("common:refresh")}</button>
-          <button onClick={onSyncHistory}>{t("common:syncHistory")}</button>
+        <div className="data-range-tabs" role="tablist" aria-label={t("common:performanceTimeRange")}>
+          {performanceRangeOptions.map((item) => (
+            <button className={range === item ? "active" : ""} onClick={() => setRange(item)} key={item} role="tab" aria-selected={range === item}>
+              {t(`common:range_${item}`)}
+            </button>
+          ))}
+        </div>
+        <div className="data-toolbar__actions">
+          <button onClick={() => void refresh()} disabled={loading} title={t("common:refresh")} aria-label={t("common:refresh")}>
+            <RefreshCw size={14} className={loading ? "spin" : undefined} />
+          </button>
+          <button onClick={onSyncHistory} title={t("common:syncHistory")} aria-label={t("common:syncHistory")}>
+            <History size={14} />
+          </button>
         </div>
       </header>
-
-      <div className="data-range-tabs" role="tablist" aria-label={t("common:performanceTimeRange")}>
-        {performanceRangeOptions.map((item) => (
-          <button className={range === item ? "active" : ""} onClick={() => setRange(item)} key={item}>
-            {t(`common:range_${item}`)}
-          </button>
-        ))}
-      </div>
 
       {(error || warnings.length > 0) && (
         <div className={clsx("data-warning", error && "negative")}>
@@ -6873,13 +6861,20 @@ function DataDashboardPage({
         </div>
       )}
 
-      <section className="data-metric-grid">
-        <DataMetric label={t("common:currentAccountEquity")} value={formatPerformanceUsdt(totals?.currentEquity)} />
-        <DataMetric label={t("common:cumulativeReturn")} value={formatSignedPercent(totals?.returnPct)} tone={toneByNumber(totals?.returnPct)} />
-        <DataMetric label={t("common:maximumDrawdown")} value={formatPercent(totals?.maxDrawdownPct)} tone={totals?.maxDrawdownPct ? "warning" : "neutral"} />
-        <DataMetric label={t("trading:netPnl")} value={formatSignedUsdt(totals?.netPnl)} tone={toneByNumber(totals?.netPnl)} />
-        <DataMetric label={t("trading:fees")} value={formatPerformanceUsdt(totals?.fees)} tone="muted" />
-        <DataMetric label={t("common:winRate")} value={formatPercent(totals?.winRatePct)} />
+      {/* Cumulative return is the answer this page exists to give, so it leads at
+          display size while the remaining five read as supporting facts. */}
+      <section className="data-headline">
+        <div className={clsx("data-headline__lead", `is-${toneByNumber(totals?.returnPct)}`)}>
+          <span>{t("common:cumulativeReturn")}</span>
+          <strong>{formatSignedPercent(totals?.returnPct)}</strong>
+          <small>{t("common:netPnl", { defaultValue: t("trading:netPnl") })} {formatSignedUsdt(totals?.netPnl)}</small>
+        </div>
+        <div className="data-headline__support">
+          <DataMetric label={t("common:currentAccountEquity")} value={formatPerformanceUsdt(totals?.currentEquity)} />
+          <DataMetric label={t("common:maximumDrawdown")} value={formatPercent(totals?.maxDrawdownPct)} tone={totals?.maxDrawdownPct ? "drawdown" : "neutral"} />
+          <DataMetric label={t("common:winRate")} value={formatPercent(totals?.winRatePct)} />
+          <DataMetric label={t("trading:fees")} value={formatPerformanceUsdt(totals?.fees)} tone="muted" />
+        </div>
       </section>
 
       <section className="data-main-grid">
@@ -6901,10 +6896,11 @@ function DataDashboardPage({
         <SourcePerformanceTable summary={summary} attribution={attribution} />
       </section>
 
+      {/* Two detail slots instead of three: the daily rhythm, and one panel that
+          switches between per-market ranking and position extremes. */}
       <section className="data-secondary-grid">
-        <SymbolRankingTable items={summary?.symbolBreakdown ?? []} marketAssets={marketAssets} />
         <MonthlyPnlCalendar items={summary?.dailyPnl ?? []} />
-        <PositionHighlightsList summary={summary} marketAssets={marketAssets} />
+        <DetailBreakdownPanel items={summary?.symbolBreakdown ?? []} summary={summary} marketAssets={marketAssets} />
       </section>
 
       <footer className="data-dashboard-footer">
@@ -6977,14 +6973,16 @@ function AiTokenUsageDashboardPage({
 
   return (
     <div className="data-dashboard ai-usage-dashboard">
-      <DataDashboardViewTabs value="ai_usage" onChange={onViewChange} />
-      <header className="data-dashboard-header ai-usage-header">
-        <div className="data-title-row">
-          <h1>{t("aiUsage")}</h1>
-          <span>{t("aiUsageDescription")}</span>
-        </div>
-        <div className="data-dashboard-actions">
-          <button type="button" onClick={() => void refresh()} disabled={loading}>{loading ? t("refreshing") : t("refresh")}</button>
+      {/* Same single-line toolbar as the performance view, so switching views
+          does not restructure the page under the pointer. */}
+      <header className="data-toolbar">
+        <DataDashboardViewTabs value="ai_usage" onChange={onViewChange} />
+        <span className="data-toolbar__divider" aria-hidden="true" />
+        <span className="data-toolbar__note">{t("aiUsageDescription")}</span>
+        <div className="data-toolbar__actions">
+          <button type="button" onClick={() => void refresh()} disabled={loading} title={t("refresh")} aria-label={t("refresh")}>
+            <RefreshCw size={14} className={loading ? "spin" : undefined} />
+          </button>
         </div>
       </header>
 
@@ -7239,35 +7237,35 @@ function SourcePerformanceTable({
           {summary?.coverage.attributionComplete ? t("common:attributionCoverageComplete") : t("common:attributionCoveragePartial")}
         </span>
       </div>
-      <table className="data-table">
+      <table className="data-table data-table--ranked">
         <thead>
           <tr>
             <th>{t("common:source")}</th>
             <th>{t("trading:netPnl")}</th>
-            <th>{t("common:netReturnRate")}</th>
-            <th>{t("common:winRate")}</th>
-            <th>{t("common:tradeCount")}</th>
-            <th>{t("trading:fees")}</th>
+            <th className="is-secondary">{t("common:winRate")}</th>
+            <th className="is-secondary">{t("common:tradeCount")}</th>
           </tr>
         </thead>
         <tbody>
           {sourceRows.map(({ label, item }) => (
             <tr key={label}>
-              <td>{label}</td>
-              <td className={clsx("cell-tone", toneByNumber(item?.netPnl))}>{formatSignedUsdt(item?.netPnl)}</td>
-              <td className={clsx("cell-tone", toneByNumber(item?.returnPct))}>{formatSignedPercent(item?.returnPct)}</td>
-              <td>{formatPercent(item?.winRatePct)}</td>
-              <td>{(item?.tradeCount ?? 0).toLocaleString("en-US")}</td>
-              <td>{formatPerformanceUsdt(item?.fees)}</td>
+              <td>
+                <span className="data-source-name">{label}</span>
+                <small className={clsx("cell-tone", toneByNumber(item?.returnPct))}>{formatSignedPercent(item?.returnPct)}</small>
+              </td>
+              <td className={clsx("is-primary cell-tone", toneByNumber(item?.netPnl))}>{formatSignedUsdt(item?.netPnl)}</td>
+              <td className="is-secondary">{formatPercent(item?.winRatePct)}</td>
+              <td className="is-secondary">{(item?.tradeCount ?? 0).toLocaleString("en-US")}</td>
             </tr>
           ))}
           <tr className="total">
-            <td>{t("common:total")}</td>
-            <td className={clsx("cell-tone", toneByNumber(totalRow?.netPnl))}>{formatSignedUsdt(totalRow?.netPnl)}</td>
-            <td className={clsx("cell-tone", toneByNumber(totalRow?.returnPct))}>{formatSignedPercent(totalRow?.returnPct)}</td>
-            <td>{formatPercent(totalRow?.winRatePct)}</td>
-            <td>{(totalRow?.tradeCount ?? 0).toLocaleString("en-US")}</td>
-            <td>{formatPerformanceUsdt(totalRow?.fees)}</td>
+            <td>
+              <span className="data-source-name">{t("common:total")}</span>
+              <small className={clsx("cell-tone", toneByNumber(totalRow?.returnPct))}>{formatSignedPercent(totalRow?.returnPct)}</small>
+            </td>
+            <td className={clsx("is-primary cell-tone", toneByNumber(totalRow?.netPnl))}>{formatSignedUsdt(totalRow?.netPnl)}</td>
+            <td className="is-secondary">{formatPercent(totalRow?.winRatePct)}</td>
+            <td className="is-secondary">{(totalRow?.tradeCount ?? 0).toLocaleString("en-US")}</td>
           </tr>
         </tbody>
       </table>
@@ -7275,35 +7273,66 @@ function SourcePerformanceTable({
   );
 }
 
-function SymbolRankingTable({ items, marketAssets }: { items: AccountPerformanceSummary["symbolBreakdown"]; marketAssets: MarketAssetsSummary | null }) {
+/** Market ranking and position highlights are both drill-down detail, so they
+ *  share one panel and one screen slot instead of competing for two. */
+function DetailBreakdownPanel({
+  items,
+  summary,
+  marketAssets
+}: {
+  items: AccountPerformanceSummary["symbolBreakdown"];
+  summary: AccountPerformanceSummary | null;
+  marketAssets: MarketAssetsSummary | null;
+}) {
+  const { t } = useTranslation(["common", "trading"]);
+  const [view, setView] = useState<"markets" | "highlights">("markets");
+  return (
+    <div className="data-panel data-breakdown-panel">
+      <div className="data-panel-head">
+        <div className="data-breakdown-switch" role="tablist" aria-label={t("common:marketRanking")}>
+          <button type="button" role="tab" aria-selected={view === "markets"} className={view === "markets" ? "active" : ""} onClick={() => setView("markets")}>
+            {t("common:marketRanking")}
+          </button>
+          <button type="button" role="tab" aria-selected={view === "highlights"} className={view === "highlights" ? "active" : ""} onClick={() => setView("highlights")}>
+            {t("common:positionHighlights")}
+          </button>
+        </div>
+        <span>
+          {view === "markets"
+            ? t("common:sortedByNetPnl")
+            : t("common:episodeCount", { count: summary?.coverage.episodesCount ?? 0 })}
+        </span>
+      </div>
+      {view === "markets"
+        ? <SymbolRankingBody items={items} marketAssets={marketAssets} />
+        : <PositionHighlightsBody summary={summary} marketAssets={marketAssets} />}
+    </div>
+  );
+}
+
+function SymbolRankingBody({ items, marketAssets }: { items: AccountPerformanceSummary["symbolBreakdown"]; marketAssets: MarketAssetsSummary | null }) {
   const { t } = useTranslation(["common", "trading"]);
   return (
-    <div className="data-panel data-ranking-panel">
-      <div className="data-panel-head">
-        <strong>{t("common:marketRanking")}</strong>
-        <span>{t("common:sortedByNetPnl")}</span>
-      </div>
+    <>
       {items.length > 0 ? (
-        <table className="data-table">
+        <table className="data-table data-table--ranked">
           <thead>
             <tr>
               <th>{t("trading:tradingPair")}</th>
               <th>{t("trading:netPnl")}</th>
-              <th>{t("common:returnRate")}</th>
-              <th>{t("common:winRate")}</th>
-              <th>{t("common:tradeCount")}</th>
-              <th>{t("trading:fees")}</th>
+              <th className="is-secondary">{t("common:winRate")}</th>
+              <th className="is-secondary">{t("common:tradeCount")}</th>
+              <th className="is-secondary">{t("trading:fees")}</th>
             </tr>
           </thead>
           <tbody>
             {items.slice(0, 6).map((item) => (
               <tr key={item.instId}>
                 <td><SymbolLabel symbol={item.instId} marketAssets={marketAssets} /></td>
-                <td className={clsx("cell-tone", toneByNumber(item.netPnl))}>{formatSignedUsdt(item.netPnl)}</td>
-                <td>--</td>
-                <td>{formatPercent(item.winRatePct)}</td>
-                <td>{item.tradeCount.toLocaleString("en-US")}</td>
-                <td>{formatPerformanceUsdt(item.fees)}</td>
+                <td className={clsx("is-primary cell-tone", toneByNumber(item.netPnl))}>{formatSignedUsdt(item.netPnl)}</td>
+                <td className="is-secondary">{formatPercent(item.winRatePct)}</td>
+                <td className="is-secondary">{item.tradeCount.toLocaleString("en-US")}</td>
+                <td className="is-secondary">{formatPerformanceUsdt(item.fees)}</td>
               </tr>
             ))}
           </tbody>
@@ -7311,15 +7340,24 @@ function SymbolRankingTable({ items, marketAssets }: { items: AccountPerformance
       ) : (
         <div className="data-empty-inline">{t("common:marketRankingEmpty")}</div>
       )}
-    </div>
+    </>
   );
 }
 
+/** Daily PnL month grid. Weeks with no trading activity at all are dropped so
+ *  the panel does not spend most of its height on empty cells, which was the
+ *  original complaint; every day that carries data is still shown in place. */
 function MonthlyPnlCalendar({ items }: { items: AccountPerformanceSummary["dailyPnl"] }) {
   const { t } = useTranslation("common");
   const calendar = buildPerformanceCalendar(items);
   const max = Math.max(1, ...items.map((item) => Math.abs(item.netPnl)));
   const weekdayLabels = Array.from({ length: 7 }, (_, index) => formatLocalizedDate(new Date(2024, 0, index + 1), { weekday: "short" }));
+  // Group into weeks, then keep only weeks that contain at least one traded day.
+  const weeks: Array<typeof calendar.days> = [];
+  for (let i = 0; i < calendar.days.length; i += 7) weeks.push(calendar.days.slice(i, i + 7));
+  const activeWeeks = weeks.filter((week) => week.some((day) => day.pnl != null));
+  const visibleWeeks = activeWeeks.length > 0 ? activeWeeks : weeks;
+
   return (
     <div className="data-panel data-calendar-panel">
       <div className="data-panel-head">
@@ -7332,7 +7370,7 @@ function MonthlyPnlCalendar({ items }: { items: AccountPerformanceSummary["daily
             {weekdayLabels.map((item) => <span key={item}>{item}</span>)}
           </div>
           <div className="data-calendar-grid">
-            {calendar.days.map((day) => {
+            {visibleWeeks.flat().map((day) => {
               const intensity = day.pnl == null ? 0 : Math.min(1, Math.abs(day.pnl) / max);
               return (
                 <div
@@ -7360,7 +7398,7 @@ function MonthlyPnlCalendar({ items }: { items: AccountPerformanceSummary["daily
   );
 }
 
-function PositionHighlightsList({ summary, marketAssets }: { summary: AccountPerformanceSummary | null; marketAssets: MarketAssetsSummary | null }) {
+function PositionHighlightsBody({ summary, marketAssets }: { summary: AccountPerformanceSummary | null; marketAssets: MarketAssetsSummary | null }) {
   const { t } = useTranslation(["common", "trading"]);
   const items = [
     { label: t("common:largestProfit"), item: summary?.highlights.bestEpisode ?? null, value: summary?.highlights.bestEpisode ? formatSignedUsdt(summary.highlights.bestEpisode.netPnl) : "--" },
@@ -7369,12 +7407,7 @@ function PositionHighlightsList({ summary, marketAssets }: { summary: AccountPer
     { label: t("common:shortestHolding"), item: summary?.highlights.shortestEpisode ?? null, value: summary?.highlights.shortestEpisode ? formatDuration(summary.highlights.shortestEpisode.openTime, summary.highlights.shortestEpisode.closeTime ?? summary.highlights.shortestEpisode.openTime) : "--" }
   ];
   return (
-    <div className="data-panel data-highlights-panel">
-      <div className="data-panel-head">
-        <strong>{t("common:positionHighlights")}</strong>
-        <span>{t("common:episodeCount", { count: summary?.coverage.episodesCount ?? 0 })}</span>
-      </div>
-      <div className="data-highlight-list">
+    <div className="data-highlight-list">
         {items.map(({ label, item, value }) => (
           <div className="data-highlight-row" key={label}>
             <div>
@@ -7384,9 +7417,33 @@ function PositionHighlightsList({ summary, marketAssets }: { summary: AccountPer
             {item ? <SymbolLabel symbol={item.instId} marketAssets={marketAssets} secondary={`${item.side === "short" ? t("trading:short") : t("trading:long")} · ${formatDateTime(item.openTime)}`} /> : <small>{t("common:noClosedPositions")}</small>}
           </div>
         ))}
-      </div>
     </div>
   );
+}
+
+function localDateKey(time: number) {
+  const date = new Date(time);
+  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatAxisNumber(value?: number | null) {
+  if (!Number.isFinite(value)) return "--";
+  const numeric = Number(value);
+  if (Math.abs(numeric) >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
+  if (Math.abs(numeric) >= 10_000) return numeric.toLocaleString("en-US", { maximumFractionDigits: 0 });
+  return numeric.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function formatShortMonthDay(time?: number | null) {
+  if (!Number.isFinite(time)) return "";
+  const date = new Date(Number(time));
+  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
+}
+
+function formatClock(time?: number | null) {
+  if (!Number.isFinite(time)) return "--";
+  const date = new Date(Number(time));
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function buildPerformanceCalendar(items: AccountPerformanceSummary["dailyPnl"]) {
@@ -7417,31 +7474,6 @@ function buildPerformanceCalendar(items: AccountPerformanceSummary["dailyPnl"]) 
     days.push({ date: key, day: date.getDate(), inMonth: false, pnl: item?.netPnl ?? null, tradeCount: item?.tradeCount ?? 0 });
   }
   return { title: formatLocalizedDate(new Date(year, month - 1, 1), { year: "numeric", month: "long" }), days };
-}
-
-function localDateKey(time: number) {
-  const date = new Date(time);
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatAxisNumber(value?: number | null) {
-  if (!Number.isFinite(value)) return "--";
-  const numeric = Number(value);
-  if (Math.abs(numeric) >= 1_000_000) return `${(numeric / 1_000_000).toFixed(1)}M`;
-  if (Math.abs(numeric) >= 10_000) return numeric.toLocaleString("en-US", { maximumFractionDigits: 0 });
-  return numeric.toLocaleString("en-US", { maximumFractionDigits: 2 });
-}
-
-function formatShortMonthDay(time?: number | null) {
-  if (!Number.isFinite(time)) return "";
-  const date = new Date(Number(time));
-  return `${String(date.getMonth() + 1).padStart(2, "0")}/${String(date.getDate()).padStart(2, "0")}`;
-}
-
-function formatClock(time?: number | null) {
-  if (!Number.isFinite(time)) return "--";
-  const date = new Date(Number(time));
-  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}.${String(date.getMilliseconds()).padStart(3, "0")}`;
 }
 
 function formatCalendarPnl(value?: number | null) {
@@ -10242,7 +10274,8 @@ function positionCoinAmount(position: OkxPosition, instrument?: OkxInstrumentSum
   return contracts * ctVal;
 }
 
-type CellTone = "positive" | "negative" | "active" | "warning" | "neutral" | "muted";
+/** "drawdown" renders as the extreme of a loss so the palette stays red/green. */
+type CellTone = "positive" | "negative" | "drawdown" | "active" | "warning" | "neutral" | "muted";
 
 function toneByNumber(value?: string | number | null, neutralZero = true): CellTone {
   const numeric = Number(value);

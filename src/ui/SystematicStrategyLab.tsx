@@ -1512,7 +1512,7 @@ function StrategyView({
                     <small className="systematic-lab-strategy-row__meta">{text.python} · v{strategy.version}</small>
                     <small className="systematic-lab-strategy-row__updated" title={formatFullDateTime(strategy.updatedAt)}>{formatFullDateTime(strategy.updatedAt)}</small>
                   </span>
-                  {bestRun?.metrics ? <em className={clsx("systematic-lab-strategy-row__best", bestRun.metrics.netReturnPct >= 0 ? "positive" : "negative")}>{text.bestBacktest} {formatPercent(bestRun.metrics.netReturnPct)} · {text.backtestDays.replace("{days}", formatBacktestDays(bestRun.barCount))}</em> : null}
+                  {bestRun?.metrics ? <em className={clsx("systematic-lab-strategy-row__best", bestRun.metrics.netReturnPct >= 0 ? "is-gain" : "is-loss")}>{text.bestBacktest} {formatPercent(bestRun.metrics.netReturnPct)} · {text.backtestDays.replace("{days}", formatBacktestDays(bestRun.barCount))}</em> : null}
                 </span>
               </button>
               <button className="systematic-lab__row-delete" type="button" title={text.deleteStrategy} aria-label={text.deleteStrategy} onClick={() => onDelete(strategy)} disabled={deletingId === strategy.id}>
@@ -1695,10 +1695,12 @@ function StrategyView({
           <div className="systematic-lab__pane-head"><span>{text.strategyParameters}</span></div>
           <div className="systematic-lab-strategy-inspector__params">
             <VisualParameterEditor text={text} value={draft.parameters} onChange={(parameters) => onDraftChange({ ...draft, parameters })} />
-            <button className="systematic-lab__command-button systematic-lab-strategy-inspector__tuning-link" type="button" onClick={onOpenTuning}>
-              <SlidersHorizontal size={13} />{text.configureOptimization}
-            </button>
-            {bestRunsByStrategy.get(selectedPython.id) ? <button className="systematic-lab__command-button systematic-lab-strategy-inspector__backtest-link" type="button" onClick={() => onOpenBacktest(bestRunsByStrategy.get(selectedPython.id)!)}><BarChart3 size={13} />{text.openBestBacktest}</button> : null}
+            <div className="systematic-lab-strategy-inspector__actions">
+              <button className="systematic-lab__command-button systematic-lab-strategy-inspector__tuning-link" type="button" onClick={onOpenTuning}>
+                <SlidersHorizontal size={13} />{text.configureOptimization}
+              </button>
+              {bestRunsByStrategy.get(selectedPython.id) ? <button className="systematic-lab__command-button systematic-lab-strategy-inspector__backtest-link" type="button" onClick={() => onOpenBacktest(bestRunsByStrategy.get(selectedPython.id)!)}><BarChart3 size={13} />{text.openBestBacktest}</button> : null}
+            </div>
           </div>
         </aside>
       ) : null}
@@ -1948,6 +1950,10 @@ function VisualParameterEditor({ text, value, onChange }: Readonly<{ text: Copy;
   );
 }
 
+/** Financial tone for a readout. Red is a gain, green is a loss, and a drawdown
+ *  renders as the extreme of a loss rather than introducing a third colour. */
+type LabTone = "gain" | "loss" | "drawdown";
+
 type OptimizationBudget = 30 | 100 | 300;
 
 function TuningView({
@@ -2041,7 +2047,6 @@ function TuningView({
       <main className="systematic-lab-tuning-main">
         <div className="systematic-lab-view-heading">
           <div>
-            <span className="systematic-lab__eyebrow">{text.optimization}</span>
             <h2>{text.tuningWorkbench}</h2>
             <p>{text.tuningWorkbenchHint}</p>
           </div>
@@ -3210,7 +3215,6 @@ function BacktestView({
       <section className="systematic-lab-backtest-config">
         <div className="systematic-lab-view-heading systematic-lab-backtest-config__heading">
           <div>
-            <span className="systematic-lab__eyebrow">{text.virtualAccount}</span>
             <h2>{text.backtest}</h2>
           </div>
           <div className="systematic-lab-backtest-config__context" aria-label={text.backtest}>
@@ -3255,7 +3259,7 @@ function BacktestView({
             <strong>{text.virtualAccount}</strong>
             <span>{text.positionSizing}</span>
           </div>
-          <div className="systematic-lab-form-grid">
+          <div className="systematic-lab-form-grid systematic-lab-form-grid--lead">
             <NumericField label={text.initialEquity} value={initialEquity} onChange={onInitialEquity} suffix="USDT" />
             <NumericField label={text.leverage} value={leverage} onChange={onLeverage} suffix="x" />
             <NumericField label={text.marginSafetyMultiplier} value={marginSafetyMultiplier} onChange={onMarginSafetyMultiplier} suffix="x" />
@@ -3357,8 +3361,9 @@ function OptimizationPanel({ text, optimizations, onApply, onCancel, cancellingO
   if (!optimizations.length) return null;
   return (
     <section className="systematic-lab-optimization-panel" aria-label={text.optimizationResults}>
-      <div className="systematic-lab-view-heading">
-        <div><span className="systematic-lab__eyebrow">{text.optimization}</span><h2>{text.optimizationResults}</h2></div>
+      <div className="systematic-lab-optimization-panel__head">
+        <strong>{text.optimizationResults}</strong>
+        <span>{optimizations.length}</span>
       </div>
       <div className="systematic-lab-optimization-list">
         {optimizations.map((optimization) => {
@@ -3384,7 +3389,7 @@ function OptimizationPanel({ text, optimizations, onApply, onCancel, cancellingO
               </div>
               <div className="systematic-lab-optimization-card__calmar">
                 <span>{text.validationCalmar}</span>
-                <strong className={(optimization.bestValidationCalmar ?? 0) >= 0 ? "positive" : "negative"}>{formatRatio(optimization.bestValidationCalmar)}</strong>
+                <strong className={(optimization.bestValidationCalmar ?? 0) >= 0 ? "is-gain" : "is-loss"}>{formatRatio(optimization.bestValidationCalmar)}</strong>
                 {optimization.baselineValidationCalmar !== null && optimization.baselineValidationCalmar !== undefined ? <small>{text.baselineCalmar} {formatRatio(optimization.baselineValidationCalmar)}</small> : null}
               </div>
             </header>
@@ -3640,8 +3645,8 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                 </span>
                 <em className={clsx(
                   "systematic-lab-run-row__return",
-                  completed && typeof returnPct === "number" && returnPct > 0 && "is-positive",
-                  completed && typeof returnPct === "number" && returnPct < 0 && "is-negative",
+                  completed && typeof returnPct === "number" && returnPct > 0 && "is-gain",
+                  completed && typeof returnPct === "number" && returnPct < 0 && "is-loss",
                 )}>{completed ? formatPercent(returnPct) : `${Math.round(run.progressPct)}%`}</em>
               </button>
               <div className="systematic-lab-run-row__actions">
@@ -3695,7 +3700,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
           <section className="systematic-lab-run-comparison" aria-label={text.compareRuns}>
             <header><strong>{text.compareRuns}</strong><button type="button" onClick={() => setCompareRunIds([])} title={text.clearComparison} aria-label={text.clearComparison}><X size={12} /></button></header>
             <div className="systematic-lab-run-comparison__table">
-              <div><span>{text.netPnl}</span>{comparisonRuns.map((run) => <strong key={run.id} className={(run.metrics?.netReturnPct ?? 0) >= 0 ? "positive" : "negative"}>{formatPercent(run.metrics?.netReturnPct)}</strong>)}</div>
+              <div><span>{text.netPnl}</span>{comparisonRuns.map((run) => <strong key={run.id} className={(run.metrics?.netReturnPct ?? 0) >= 0 ? "is-gain" : "is-loss"}>{formatPercent(run.metrics?.netReturnPct)}</strong>)}</div>
               <div><span>{text.maxDrawdown}</span>{comparisonRuns.map((run) => <strong key={run.id}>{formatPercent(run.metrics?.maxDrawdownPct, false)}</strong>)}</div>
               <div><span>{text.closedTrades}</span>{comparisonRuns.map((run) => <strong key={run.id}>{formatLocalizedNumber(run.metrics?.closedTradeCount ?? 0)}</strong>)}</div>
             </div>
@@ -3718,18 +3723,18 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
                   <section className="systematic-lab-result-deck__group is-final" aria-label={text.fullBacktest}>
                     <header><span>{text.fullBacktest}</span><small>{selectedRun.dataSnapshotId}</small></header>
                     <div className="systematic-lab-result-deck__metrics">
-                      <Metric label={text.netPnl} value={formatPnlUsdt(metrics?.netPnlUsdt)} tone={(metrics?.netPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.netPnl} value={formatPnlUsdt(metrics?.netPnlUsdt)} tone={(metrics?.netPnlUsdt ?? 0) >= 0 ? "gain" : "loss"} />
                       <Metric label={text.finalEquity} value={formatUsdt(metrics?.finalEquityUsdt)} />
-                      <Metric label={text.maxDrawdown} value={`${formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))} · ${formatPercent(metrics?.maxDrawdownPct, false)}`} tone="negative" />
+                      <Metric label={text.maxDrawdown} value={`${formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))} · ${formatPercent(metrics?.maxDrawdownPct, false)}`} tone="drawdown" />
                       <Metric label={text.closedTrades} value={formatLocalizedNumber(metrics?.closedTradeCount ?? 0)} />
                     </div>
                   </section>
                   <section className="systematic-lab-result-deck__group is-cursor" aria-label={text.replayAccount}>
                     <header><span>{text.replayAccount}</span><small>{visibleBar ? formatRunTime(visibleBar.time * 1_000) : "--"}</small></header>
                     <div className="systematic-lab-result-deck__metrics">
-                      <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "gain" : "loss"} />
                       <Metric label={text.accountEquity} value={formatUsdt(replaySnapshot?.equityUsdt)} />
-                      <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+                      <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "gain" : "loss"} />
                       <Metric label={text.usedMargin} value={formatUsdt(replaySnapshot?.usedMarginUsdt)} />
                     </div>
                   </section>
@@ -3832,8 +3837,10 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   );
 }
 
-const REPLAY_FILL_LEDGER_ROW_HEIGHT = 196;
-const REPLAY_POSITION_HISTORY_ROW_HEIGHT = 220;
+// Flattening the nested fact frame shrank the natural row box; these constants
+// must stay in sync with .is-virtual-fill / .is-virtual-trade in the stylesheet.
+const REPLAY_FILL_LEDGER_ROW_HEIGHT = 132;
+const REPLAY_POSITION_HISTORY_ROW_HEIGHT = 150;
 const REPLAY_LEDGER_OVERSCAN = 3;
 
 function ReplayFillLedgerPanel({ text, fills, visibleCount }: Readonly<{
@@ -3865,7 +3872,7 @@ function ReplayFillLedgerRow({ text, fill }: Readonly<{
   return (
     <div className="systematic-lab-ledger-row is-virtual-fill">
       <div className="systematic-lab-ledger-row__head">
-        <span className={fill.side === "buy" ? "positive" : "negative"}>{fill.side === "buy" ? text.buy : text.sell}</span>
+        <span className={fill.side === "buy" ? "is-long" : "is-short"}>{fill.side === "buy" ? text.buy : text.sell}</span>
         <strong>{formatLocalizedNumber(fill.quantity)} {text.contracts}</strong>
       </div>
       <div className="systematic-lab-ledger-row__details">
@@ -3922,7 +3929,7 @@ function ReplayPositionHistoryRow({ text, trade, onJumpToTrade }: Readonly<{
       }}
     >
       <div className="systematic-lab-ledger-row__head">
-        <span className={trade.side === "long" ? "positive" : "negative"}>{trade.side === "long" ? text.long : text.short}</span>
+        <span className={trade.side === "long" ? "is-long" : "is-short"}>{trade.side === "long" ? text.long : text.short}</span>
         <strong className={trade.netPnlUsdt >= 0 ? "systematic-lab-pnl--gain" : "systematic-lab-pnl--loss"}>{formatPnlUsdt(trade.netPnlUsdt)}</strong>
       </div>
       <div className="systematic-lab-ledger-row__details">
@@ -3994,7 +4001,7 @@ function ReplayPositionPanel({ text, position, atTimeMs }: Readonly<{
   }
   return (
     <div className="systematic-lab-trade-ledger__scroll systematic-lab-position-panel" role="tabpanel">
-      <div className={clsx("systematic-lab-position-panel__side", position.side === "long" ? "positive" : "negative")}>
+      <div className={clsx("systematic-lab-position-panel__side", position.side === "long" ? "is-long" : "is-short")}>
         <Activity size={14} />
         <strong>{position.side === "long" ? text.long : text.short}</strong>
         <span>{formatLocalizedNumber(position.quantity)} {text.contracts}</span>
@@ -4035,14 +4042,14 @@ function BacktestStatisticsPanel({ text, report }: Readonly<{
     <section className="systematic-lab-statistics-stage" aria-label={text.statistics}>
       <div className="systematic-lab-statistics-stage__head"><span>{text.statistics}</span><strong>{text.fullBacktest}</strong></div>
       <div className="systematic-lab-statistics-grid">
-        <Statistic label={text.totalReturn} value={formatPercent(totalReturn)} tone={(totalReturn ?? 0) >= 0 ? "positive" : "negative"} />
-        <Statistic label={text.maxDrawdown} value={formatPercent(metrics.maxDrawdownPct, false)} tone="negative" />
+        <Statistic label={text.totalReturn} value={formatPercent(totalReturn)} tone={(totalReturn ?? 0) >= 0 ? "gain" : "loss"} />
+        <Statistic label={text.maxDrawdown} value={formatPercent(metrics.maxDrawdownPct, false)} tone="drawdown" />
         <Statistic label={text.winRate} value={formatPercent(metrics.winRate === undefined || metrics.winRate === null ? null : metrics.winRate * 100, false)} />
         <Statistic label={text.sharpe} value={formatRatio(statistics?.annualizedSharpe)} />
         <Statistic label={text.sortino} value={formatRatio(statistics?.annualizedSortino)} />
         <Statistic label={text.volatility} value={formatPercent(statistics?.annualizedVolatilityPct, false)} />
         <Statistic label={text.profitFactor} value={formatRatio(statistics?.profitFactor)} />
-        <Statistic label={text.expectancy} value={formatPnlUsdt(statistics?.expectancyUsdt)} tone={(statistics?.expectancyUsdt ?? 0) >= 0 ? "positive" : "negative"} />
+        <Statistic label={text.expectancy} value={formatPnlUsdt(statistics?.expectancyUsdt)} tone={(statistics?.expectancyUsdt ?? 0) >= 0 ? "gain" : "loss"} />
         <Statistic label={text.averageHolding} value={formatDuration(statistics?.averageHoldingMs)} />
         <Statistic label={text.exposure} value={formatPercent(report.statistics?.exposurePct, false)} />
         <Statistic label={text.largestWinLoss} value={`${formatPnlUsdt(statistics?.largestWinUsdt)} / ${formatPnlUsdt(statistics?.largestLossUsdt)}`} />
@@ -4126,7 +4133,7 @@ function deriveLegacyBacktestStatistics(report: NonNullable<SystematicBacktestDe
   };
 }
 
-function Statistic({ label, value, tone }: Readonly<{ label: string; value: string; tone?: "positive" | "negative" }>) {
+function Statistic({ label, value, tone }: Readonly<{ label: string; value: string; tone?: LabTone }>) {
   return <div className={clsx("systematic-lab-statistic", tone && `is-${tone}`)}><span>{label}</span><strong>{value}</strong></div>;
 }
 
@@ -4451,7 +4458,9 @@ function ProfilesView({ text, profiles, strategies, watchlist, instruments, acco
             </div>
           </header>
           <span className="systematic-lab__status is-guarded"><ShieldCheck size={12} />{text.profileGuard}</span>
-          <div className="systematic-lab-profile-editor__form">
+          <div className="systematic-lab-profile-editor__group">
+            <div className="systematic-lab-profile-editor__group-head"><strong>{text.profileGroupBinding}</strong><small>{text.profileGroupBindingHint}</small></div>
+            <div className="systematic-lab-profile-editor__form">
             <label className="systematic-lab-field wide"><span>{text.name}</span><input value={draft.name} disabled={!profileEditable} onChange={(event) => updateDraft({ name: event.target.value })} /></label>
             <label className="systematic-lab-field"><span>{text.strategy}</span><TerminalSelect ariaLabel={text.strategy} value={draft.strategyId} options={strategies.map((strategy) => ({ value: strategy.id, label: `${strategy.name} · v${strategy.version}` }))} disabled={!profileEditable} onChange={(strategyId) => {
               const selected = strategies.find((strategy) => strategy.id === strategyId);
@@ -4460,17 +4469,28 @@ function ProfilesView({ text, profiles, strategies, watchlist, instruments, acco
             <label className="systematic-lab-field"><span>{text.strategyVersion}</span><TerminalSelect ariaLabel={text.strategyVersion} value={draft.strategyVersion} options={(strategyVersions?.items ?? []).map((version) => ({ value: String(version.version), label: `v${version.version}${version.version === strategies.find((strategy) => strategy.id === draft.strategyId)?.version ? ` · ${text.latestVersion}` : ""}` }))} disabled={!profileEditable || !strategyVersions} onChange={(strategyVersion) => updateDraft({ strategyVersion, takeProfitOrderType: "market", stopLossOrderType: "market" })} /></label>
             <label className="systematic-lab-field"><span>{text.contract}</span><ProfileInstrumentSelect value={draft.instId} options={watchlist} disabled={!profileEditable} text={text} onChange={(instId) => updateDraft({ instId })} /></label>
             <label className="systematic-lab-field"><span>{text.account}</span><TerminalSelect ariaLabel={text.account} value={draft.accountId} options={accounts.map((account) => ({ value: account.id, label: `${account.name} · ${account.environment}` }))} disabled={!profileEditable} onChange={(accountId) => updateDraft({ accountId })} /></label>
+            </div>
+          </div>
+          <div className="systematic-lab-profile-editor__group">
+            <div className="systematic-lab-profile-editor__group-head"><strong>{text.profileGroupSizing}</strong><small>{text.profileGroupSizingHint}</small></div>
+            <div className="systematic-lab-profile-editor__form">
             <NumericField label={text.leverage} value={draft.leverage} onChange={(leverage) => updateDraft({ leverage })} suffix="x" disabled={!profileEditable} />
             <label className="systematic-lab-field"><span>{text.marginMode}</span><TerminalSelect ariaLabel={text.marginMode} value={draft.marginMode} options={[{ value: "cross", label: text.crossMargin }, { value: "isolated", label: text.isolatedMargin }]} disabled={!profileEditable} onChange={(marginMode) => updateDraft({ marginMode: marginMode === "isolated" ? "isolated" : "cross" })} /></label>
             <label className="systematic-lab-field"><span>{text.positionSizing}</span><TerminalSelect ariaLabel={text.positionSizing} value={draft.positionSizingMode} options={[{ value: "equityPercent", label: text.equityPercent }, { value: "fixedUsdt", label: text.fixedUsdt }]} disabled={!profileEditable} onChange={(value) => updateDraft({ positionSizingMode: value === "fixedUsdt" ? "fixedUsdt" : "equityPercent" })} /></label>
             <NumericField label={text.perEntryBudget} value={draft.perEntryBudget} onChange={(perEntryBudget) => updateDraft({ perEntryBudget })} suffix={draft.positionSizingMode === "equityPercent" ? "%" : "USDT"} disabled={!profileEditable} hint={<ProfilePositionEstimateHint estimate={positionEstimate} text={text} />} />
             <NumericField label={text.sameSideTotalBudget} value={draft.sameSideTotalBudget} onChange={(sameSideTotalBudget) => updateDraft({ sameSideTotalBudget })} suffix={draft.positionSizingMode === "equityPercent" ? "%" : "USDT"} disabled={!profileEditable} />
+            </div>
+          </div>
+          <div className="systematic-lab-profile-editor__group">
+            <div className="systematic-lab-profile-editor__group-head"><strong>{text.profileGroupRisk}</strong><small>{text.profileGroupRiskHint}</small></div>
+            <div className="systematic-lab-profile-editor__form">
             {showTakeProfitExecution ? <label className="systematic-lab-field"><span>{text.takeProfitExecution}</span><TerminalSelect ariaLabel={text.takeProfitExecution} value={draft.takeProfitOrderType} options={[{ value: "market", label: text.marketProtection }, { value: "limit", label: text.limitProtection }, { value: "postFillLimit", label: text.postFillLimitProtection }]} disabled={!profileEditable} onChange={(value) => updateDraft({ takeProfitOrderType: value === "postFillLimit" ? "postFillLimit" : value === "limit" ? "limit" : "market" })} /></label> : null}
             {showStopLossExecution ? <label className="systematic-lab-field"><span>{text.stopLossExecution}</span><TerminalSelect ariaLabel={text.stopLossExecution} value={draft.stopLossOrderType} options={[{ value: "market", label: text.marketProtection }, { value: "limit", label: text.limitProtection }]} disabled={!profileEditable} onChange={(value) => updateDraft({ stopLossOrderType: value === "limit" ? "limit" : "market" })} /></label> : null}
             <NumericField label={text.dailyLossLimit} value={draft.dailyLoss} onChange={(dailyLoss) => updateDraft({ dailyLoss })} suffix="USDT" disabled={!profileEditable} />
             <NumericField label={text.cooldown} value={draft.cooldown} onChange={(cooldown) => updateDraft({ cooldown })} suffix="s" disabled={!profileEditable} />
             <fieldset className="systematic-lab-profile-editor__directions"><legend>{text.directions}</legend><label><input type="checkbox" checked={draft.allowLong} disabled={!profileEditable} onChange={(event) => updateDraft({ allowLong: event.target.checked })} />{text.allowLong}</label><label><input type="checkbox" checked={draft.allowShort} disabled={!profileEditable} onChange={(event) => updateDraft({ allowShort: event.target.checked })} />{text.allowShort}</label></fieldset>
             <label className="systematic-lab-profile-editor__notification"><input type="checkbox" checked={draft.notifyOnSignal} disabled={!profileEditable} onChange={(event) => updateDraft({ notifyOnSignal: event.target.checked })} /><span><strong>{text.profileSignalNotify}</strong><small>{text.profileSignalNotifyDetail}</small></span></label>
+            </div>
           </div>
           {protectionCapabilities?.dynamic ? <small className="systematic-lab__status is-guarded"><AlertTriangle size={12} />{text.dynamicProtectionHint}</small> : null}
           {loadingProtectionCapabilities ? <small className="systematic-lab__status is-muted"><LoaderCircle size={12} className="is-spinning" />{text.protectionInspectionPending}</small> : null}
@@ -4552,8 +4572,8 @@ function ProfileSignalsView({ text, profiles, desktop, refresh, chinese, onOpenP
   return <section className="systematic-lab-profile-signals-view">
     <header className="systematic-lab-profile-signals-view__head">
       <div>
-        <span className="systematic-lab__eyebrow">PROFILES</span>
         <h2>{text.profileSignals}</h2>
+        <small>{text.profileSignalHistoryHint}</small>
       </div>
       <label className="systematic-lab-field systematic-lab-profile-signals-view__filter">
         <span>{text.profileFilter}</span>
@@ -4949,11 +4969,11 @@ function RunEquityPreview({ points, negative }: Readonly<{ points: readonly numb
   const max = Math.max(...points);
   const span = Math.max(Number.EPSILON, max - min);
   const path = points.map((value, index) => `${(index / (points.length - 1)) * 100},${22 - ((value - min) / span) * 18}`).join(" ");
-  return <svg className={clsx("systematic-lab-run-row__equity", negative && "is-negative")} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points={path} fill="none" vectorEffect="non-scaling-stroke" /></svg>;
+  return <svg className={clsx("systematic-lab-run-row__equity", negative && "is-loss")} viewBox="0 0 100 24" preserveAspectRatio="none" aria-hidden="true"><polyline points={path} fill="none" vectorEffect="non-scaling-stroke" /></svg>;
 }
 
 
-function Metric({ label, value, tone }: Readonly<{ label: string; value: string; tone?: "positive" | "negative" }>) {
+function Metric({ label, value, tone }: Readonly<{ label: string; value: string; tone?: LabTone }>) {
   return <div className={clsx("systematic-lab-metric", tone && `is-${tone}`)}><span>{label}</span><strong>{value}</strong></div>;
 }
 
@@ -5492,7 +5512,7 @@ function copy(chinese: boolean) {
       replayAccount: "回放账户", tradeLedger: "成交账本", position: "仓位", positionHistory: "历史仓位", noTrades: "没有已平仓交易", noTradesDetail: "动作、成交和权益仍会保留在回测报告中。", noReplayTrades: "当前时点没有已平仓交易", noReplayTradesDetail: "继续回放以查看后续记账结果。", noReplayFills: "当前时点没有成交", noReplayFillsDetail: "继续回放以查看下一根开盘成交和保护性退出。", noPosition: "当前时点没有持仓", noPositionDetail: "仓位将在下一根开盘成交后显示。", contracts: "张", contractValue: "每张面值", notional: "名义价值", entryPrice: "开仓均价", exitPrice: "平仓均价", markPrice: "标记价格", funding: "资金费用", stopLoss: "止损", takeProfit: "止盈", holdingTime: "持有时长", fillPrice: "成交价", marginChange: "保证金变动", entryNotional: "开仓名义价值", exitNotional: "平仓名义价值", fee: "手续费", buy: "买入", sell: "卖出", long: "多", short: "空",
       statistics: "策略统计", fullBacktest: "完整回测", totalReturn: "总收益", winRate: "胜率", sharpe: "夏普 (1m 年化)", sortino: "索提诺 (1m 年化)", volatility: "波动率 (1m 年化)", profitFactor: "盈亏因子", expectancy: "单笔期望", averageHolding: "平均持有", exposure: "持仓暴露", largestWinLoss: "最大盈 / 亏", maxStreak: "最长连胜 / 连亏",
       completed: "已完成", running: "运行中", queued: "排队中", cancelled: "已取消", failed: "失败",
-      forwardSimulation: "前向模拟", paused: "已暂停", monitoring: "监控中", input: "输入", noExchangeOrders: "策略源码不能直接访问交易所；已启用的 Profile 由桌面执行层提交已验证的动作。", liveProfiles: "策略 Profiles", profileGuard: "启用后仅在已确认的 1m K 线收线运行固定策略版本。策略只表达开仓、平仓和原因；桌面按 Profile 预算、合约规则、权益和杠杆换算实际张数。", profileDescription: "Profile 固定策略版本、账户、合约、保证金模式和风险预算。启用后复用当前行情流与私有账户快照，在策略产生动作时走终端现有的审计订单链路。", newProfile: "新建 Profile", saveProfile: "保存 Profile", profileSaved: "Profile 已保存", profileSaveFailed: "无法保存 Profile", profileStateFailed: "无法更新 Profile", profileExactBacktestRequired: "该 Profile 必须先完成所选策略版本与合约的回测。请在“回测”中选择相同策略版本和合约并完成一次回测后，再保存 Profile。", invalidProfile: "Profile 参数无效", invalidProfileDetail: "请选择策略、合约和账户，并填写有效的仓位预算与风险限制。", noProfiles: "还没有 Profile", noProfilesDetail: "先为已经完成该版本与合约回测的 Python 策略保存一个 Profile，再显式启用它。", armed: "已启用", stopped: "未启用", profileEnabled: "启用 Profile", profileDraftUnsaved: "存在未保存的 Profile 修改", profileDraftSaveFirst: "请先保存当前 Profile 修改，再启用或停用。", account: "账户", strategyVersion: "策略版本", marginMode: "保证金模式", crossMargin: "全仓", isolatedMargin: "逐仓", positionSizing: "仓位预算", equityPercent: "权益百分比", fixedUsdt: "固定 USDT 保证金", perEntryBudget: "单次开仓预算", sameSideTotalBudget: "同方向总预算", takeProfitExecution: "止盈执行", stopLossExecution: "止损执行", marketProtection: "触发后市价", limitProtection: "触发后限价", protectionInspectionPending: "正在检查策略版本中的止盈止损声明。", noProtectionDeclared: "该策略版本没有声明止盈或止损，Profile 不会自动提交保护单。", dynamicProtectionHint: "该版本使用动态保护表达式，无法静态确认具体保护侧；两侧选项会保留，运行时仍以策略返回为准。", oneContractEstimate: "1 张约等于", positionSizingEstimate: "按当前价估算单次最多", positionSizingPercentEstimate: "实际张数在执行时按账户权益、合约最小张数和步长向下换算。", positionSizingEstimateUnavailable: "等待当前合约规格和最新价后估算。", positionSizingBudgetTooSmall: "单次开仓预算低于该合约最小下单保证金，至少需要 {margin} USDT 初始保证金。", positionSizingBudgetExhausted: "同方向仓位预算已用尽，本次开仓被拦截。", dailyLossLimit: "每日已实现亏损上限", cooldown: "开仓冷却", directions: "方向权限", allowLong: "允许做多", allowShort: "允许做空", profileSignalNotify: "交易信号通知", profileSignalNotifyDetail: "策略有交易动作或被风控拦截时，按已配置的飞书通知规则发送。", profileSignals: "信号记录", profileSignalHistoryHint: "审计历史：历史异常会保留；请结合 Profile 当前状态判断是否已恢复。", noProfileSignals: "还没有交易信号或运行异常记录。", signalPage: "第 {page} / {total} 页", previousPage: "上一页", nextPage: "下一页", submitted: "已提交", blocked: "已拦截", profileExecutionError: "运行异常", profileMarketDataUnavailable: "本地已确认的 1 分钟 K 线尚未准备完整，本轮策略未执行；Profile 会在后续收线自动重试。", openLong: "开多", openShort: "开空", closeLong: "平多", closeShort: "平空", setProtection: "修改保护", cancelProtection: "撤销保护", cancelOrder: "撤销委托", deleteProfile: "删除 Profile", deleteProfileConfirm: "删除 Profile “{name}”？", profileDeleteFailed: "无法删除 Profile", forceAiConflict: "同账户和环境有启用中的 AI 自动化。仍要强制启用策略 Profile 吗？", aiProfileConflict: "同一账户与环境存在启用中的 AI 自动化 Profile。", liveProfileConfirmTitle: "启用实盘策略 Profile", liveProfileConfirmDetail: "“{name}” 将在每根已确认 1 分钟 K 线收线后执行固定策略版本。策略返回开仓或平仓动作时，Desic Terminal 会以此 Profile 的账户、合约、保证金模式、杠杆和仓位预算提交真实订单。请确认你理解这不是回测或模拟。", enableLiveProfile: "确认启用实盘",
+      forwardSimulation: "前向模拟", paused: "已暂停", monitoring: "监控中", input: "输入", noExchangeOrders: "策略源码不能直接访问交易所；已启用的 Profile 由桌面执行层提交已验证的动作。", liveProfiles: "策略 Profiles", profileGuard: "启用后仅在已确认的 1m K 线收线运行固定策略版本。策略只表达开仓、平仓和原因；桌面按 Profile 预算、合约规则、权益和杠杆换算实际张数。", profileDescription: "Profile 固定策略版本、账户、合约、保证金模式和风险预算。启用后复用当前行情流与私有账户快照，在策略产生动作时走终端现有的审计订单链路。", newProfile: "新建 Profile", profileGroupBinding: "绑定", profileGroupBindingHint: "策略版本、合约与账户在启用后固定", profileGroupSizing: "仓位与杠杆", profileGroupSizingHint: "决定每次开仓换算出的实际张数", profileGroupRisk: "风险与执行", profileGroupRiskHint: "保护单、亏损上限、冷却与方向权限", saveProfile: "保存 Profile", profileSaved: "Profile 已保存", profileSaveFailed: "无法保存 Profile", profileStateFailed: "无法更新 Profile", profileExactBacktestRequired: "该 Profile 必须先完成所选策略版本与合约的回测。请在“回测”中选择相同策略版本和合约并完成一次回测后，再保存 Profile。", invalidProfile: "Profile 参数无效", invalidProfileDetail: "请选择策略、合约和账户，并填写有效的仓位预算与风险限制。", noProfiles: "还没有 Profile", noProfilesDetail: "先为已经完成该版本与合约回测的 Python 策略保存一个 Profile，再显式启用它。", armed: "已启用", stopped: "未启用", profileEnabled: "启用 Profile", profileDraftUnsaved: "存在未保存的 Profile 修改", profileDraftSaveFirst: "请先保存当前 Profile 修改，再启用或停用。", account: "账户", strategyVersion: "策略版本", marginMode: "保证金模式", crossMargin: "全仓", isolatedMargin: "逐仓", positionSizing: "仓位预算", equityPercent: "权益百分比", fixedUsdt: "固定 USDT 保证金", perEntryBudget: "单次开仓预算", sameSideTotalBudget: "同方向总预算", takeProfitExecution: "止盈执行", stopLossExecution: "止损执行", marketProtection: "触发后市价", limitProtection: "触发后限价", protectionInspectionPending: "正在检查策略版本中的止盈止损声明。", noProtectionDeclared: "该策略版本没有声明止盈或止损，Profile 不会自动提交保护单。", dynamicProtectionHint: "该版本使用动态保护表达式，无法静态确认具体保护侧；两侧选项会保留，运行时仍以策略返回为准。", oneContractEstimate: "1 张约等于", positionSizingEstimate: "按当前价估算单次最多", positionSizingPercentEstimate: "实际张数在执行时按账户权益、合约最小张数和步长向下换算。", positionSizingEstimateUnavailable: "等待当前合约规格和最新价后估算。", positionSizingBudgetTooSmall: "单次开仓预算低于该合约最小下单保证金，至少需要 {margin} USDT 初始保证金。", positionSizingBudgetExhausted: "同方向仓位预算已用尽，本次开仓被拦截。", dailyLossLimit: "每日已实现亏损上限", cooldown: "开仓冷却", directions: "方向权限", allowLong: "允许做多", allowShort: "允许做空", profileSignalNotify: "交易信号通知", profileSignalNotifyDetail: "策略有交易动作或被风控拦截时，按已配置的飞书通知规则发送。", profileSignals: "信号记录", profileSignalHistoryHint: "审计历史：历史异常会保留；请结合 Profile 当前状态判断是否已恢复。", noProfileSignals: "还没有交易信号或运行异常记录。", signalPage: "第 {page} / {total} 页", previousPage: "上一页", nextPage: "下一页", submitted: "已提交", blocked: "已拦截", profileExecutionError: "运行异常", profileMarketDataUnavailable: "本地已确认的 1 分钟 K 线尚未准备完整，本轮策略未执行；Profile 会在后续收线自动重试。", openLong: "开多", openShort: "开空", closeLong: "平多", closeShort: "平空", setProtection: "修改保护", cancelProtection: "撤销保护", cancelOrder: "撤销委托", deleteProfile: "删除 Profile", deleteProfileConfirm: "删除 Profile “{name}”？", profileDeleteFailed: "无法删除 Profile", forceAiConflict: "同账户和环境有启用中的 AI 自动化。仍要强制启用策略 Profile 吗？", aiProfileConflict: "同一账户与环境存在启用中的 AI 自动化 Profile。", liveProfileConfirmTitle: "启用实盘策略 Profile", liveProfileConfirmDetail: "“{name}” 将在每根已确认 1 分钟 K 线收线后执行固定策略版本。策略返回开仓或平仓动作时，Desic Terminal 会以此 Profile 的账户、合约、保证金模式、杠杆和仓位预算提交真实订单。请确认你理解这不是回测或模拟。", enableLiveProfile: "确认启用实盘",
       postFillLimitProtection: "成交后挂限价",
       futureAutomation: "未来自动化边界", profileBoundary: "自动化 Profile 设计", profileScope: "唯一归属", profileScopeValue: "一个账户、环境和合约只能由一个自动 Profile 接管",
       handoff: "接管", handoffValue: "明确记录现有仓位与挂单，再让策略接管", shutdown: "应用退出", shutdownValue: "停止新动作；未来实现保留保护性订单处理", audit: "审计", auditValue: "版本、输入截点、动作、风控决定和成交始终关联",
@@ -5548,7 +5568,7 @@ function copy(chinese: boolean) {
     liveProfiles: "Strategy Profiles",
     profileGuard: "When enabled, the pinned strategy version runs only after a confirmed 1m close. The strategy expresses an opening, close, and reason; the host converts the configured budget into legal contracts.",
     profileDescription: "A Profile pins a strategy version, account, contract, margin mode, and position budget. When enabled it reuses the existing market stream and private account snapshot, then sends actions through the terminal audited order flow.",
-    newProfile: "New Profile",
+    newProfile: "New Profile", profileGroupBinding: "Binding", profileGroupBindingHint: "Strategy version, contract, and account are pinned once enabled", profileGroupSizing: "Sizing & leverage", profileGroupSizingHint: "Determines the contracts each entry converts into", profileGroupRisk: "Risk & execution", profileGroupRiskHint: "Protection, loss limit, cooldown, and direction permissions",
     saveProfile: "Save Profile",
     profileSaved: "Profile saved",
     profileSaveFailed: "Could not save Profile",

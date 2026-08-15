@@ -4131,7 +4131,10 @@ function AiAutomationPanelComponent({
 
   const handleTabClick = useCallback((id: AiAutomationTab) => {
     setActiveTab(id);
-    if (id !== "profiles") void loadSection(id);
+    // Opening a tab revalidates it. A cached section still renders immediately so
+    // the layout stays stable, while a forced reload replaces it with current
+    // data; only the uncached first load shows the loading state.
+    if (id !== "profiles") void loadSection(id, Boolean(automationSectionCache.get(id)), true);
   }, [loadSection]);
 
   const saveUserWakeCondition = useCallback(async (draft: UserWakeConditionDraft) => {
