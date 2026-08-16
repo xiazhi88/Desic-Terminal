@@ -330,6 +330,9 @@ const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as cons
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
 const WATCHLIST_STORAGE_KEY = "desictrade.watchlist.v1";
 const WATCHLIST_COLLAPSED_STORAGE_KEY = "desictrade.watchlist.collapsed.v1";
+/// Sentinel for the bottom-panel instrument filter. Not a valid instId, so it can
+/// never collide with a real contract.
+const ALL_INSTRUMENTS_FILTER = "__all__";
 const LIVE_ACK_STORAGE_KEY = "desictrade.liveRiskAcknowledged.v2";
 const CHART_WORKSPACE_LAYOUT_KEY = "desictrade.chartWorkspaceLayout.v1";
 
@@ -3120,7 +3123,7 @@ function TradingTerminal({
     const refresh = async () => {
       try {
         setEpisodesStatus("同步中");
-        const episodes = await fetchPositionEpisodes({ accountId: account.id, instId: symbol, limit: 60 });
+        const episodes = await fetchPositionEpisodes({ accountId: account.id, limit: 200 });
         if (cancelled) return;
         if (episodes) {
           setPositionEpisodes(episodes);
@@ -3132,7 +3135,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load position episodes", error, { accountId: account.id, symbol });
+        logger.error("failed to load position episodes", error, { accountId: account.id });
         setEpisodesStatus(message);
       } finally {
         if (!cancelled) timer = window.setTimeout(refresh, 60_000);
@@ -3143,7 +3146,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, privateHistoryVersion]);
+  }, [account, privateHistoryVersion]);
 
   useEffect(() => {
     if (!account) {
@@ -3161,7 +3164,7 @@ function TradingTerminal({
     const refresh = async () => {
       try {
         setHistoricalOrdersStatus("同步中");
-        const orders = await fetchHistoricalOrders({ accountId: account.id, instId: symbol, limit: 120 });
+        const orders = await fetchHistoricalOrders({ accountId: account.id, limit: 300 });
         if (cancelled) return;
         if (orders) {
           setHistoricalOrders(orders);
@@ -3173,7 +3176,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load historical orders", error, { accountId: account.id, symbol });
+        logger.error("failed to load historical orders", error, { accountId: account.id });
         setHistoricalOrders([]);
         setHistoricalOrdersStatus(message);
       } finally {
@@ -3185,7 +3188,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, privateHistoryVersion]);
+  }, [account, privateHistoryVersion]);
 
   useEffect(() => {
     if (!account) {
@@ -3203,7 +3206,7 @@ function TradingTerminal({
     const refresh = async () => {
       try {
         setHistoricalFillsStatus("同步中");
-        const fills = await fetchHistoricalFills({ accountId: account.id, instId: symbol, limit: 160 });
+        const fills = await fetchHistoricalFills({ accountId: account.id, limit: 300 });
         fetchChartTradeSources()
           .then((sources) => { if (!cancelled && sources) setChartTradeSources(sources); })
           .catch(() => undefined);
@@ -3218,7 +3221,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load historical fills", error, { accountId: account.id, symbol });
+        logger.error("failed to load historical fills", error, { accountId: account.id });
         setHistoricalFills([]);
         setHistoricalFillsStatus(message);
       } finally {
@@ -3230,7 +3233,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, privateHistoryVersion]);
+  }, [account, privateHistoryVersion]);
 
   useEffect(() => {
     if (!account) {
@@ -3251,7 +3254,6 @@ function TradingTerminal({
         const response = await fetchOkxAlgoOrders({
           accountId: account.id,
           environment: effectiveTradeEnvironment,
-          instId: symbol,
           includeHistory: true
         });
         if (cancelled) return;
@@ -3265,7 +3267,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load algo orders", error, { accountId: account.id, symbol });
+        logger.error("failed to load algo orders", error, { accountId: account.id });
         setAlgoOrders([]);
         setAlgoOrdersStatus(message);
       } finally {
@@ -3277,7 +3279,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, effectiveTradeEnvironment, algoOrdersVersion, privateHistoryVersion]);
+  }, [account, effectiveTradeEnvironment, algoOrdersVersion, privateHistoryVersion]);
 
   useEffect(() => {
     if (!account) {
@@ -3295,7 +3297,7 @@ function TradingTerminal({
     const refresh = async () => {
       try {
         setAccountBillsStatus("同步中");
-        const bills = await fetchAccountBills({ accountId: account.id, instId: symbol, limit: 160 });
+        const bills = await fetchAccountBills({ accountId: account.id, limit: 300 });
         if (cancelled) return;
         if (bills) {
           setAccountBills(bills);
@@ -3307,7 +3309,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load account bills", error, { accountId: account.id, symbol });
+        logger.error("failed to load account bills", error, { accountId: account.id });
         setAccountBills([]);
         setAccountBillsStatus(message);
       } finally {
@@ -3319,7 +3321,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, privateHistoryVersion]);
+  }, [account, privateHistoryVersion]);
 
   useEffect(() => {
     if (!account) {
@@ -3332,7 +3334,7 @@ function TradingTerminal({
     const refresh = async () => {
       try {
         setTradeAuditStatus("同步中");
-        const events = await fetchTradeAuditEvents({ accountId: account.id, instId: symbol, limit: 160 });
+        const events = await fetchTradeAuditEvents({ accountId: account.id, limit: 300 });
         if (cancelled) return;
         if (events) {
           setTradeAuditEvents(events);
@@ -3344,7 +3346,7 @@ function TradingTerminal({
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load trade audit events", error, { accountId: account.id, symbol });
+        logger.error("failed to load trade audit events", error, { accountId: account.id });
         setTradeAuditEvents([]);
         setTradeAuditStatus(message);
       } finally {
@@ -3356,7 +3358,7 @@ function TradingTerminal({
       cancelled = true;
       if (timer) window.clearTimeout(timer);
     };
-  }, [account, symbol, privateHistoryVersion]);
+  }, [account, privateHistoryVersion]);
 
   const refreshTradeOpportunities = useCallback(async () => {
     try {
@@ -13200,9 +13202,65 @@ function BottomPanel({
   const [amendingAlgo, setAmendingAlgo] = useState<OkxAlgoOrder | null>(null);
   const [confirmCancelAlgo, setConfirmCancelAlgo] = useState<OkxAlgoOrder | null>(null);
   const [ordersView, setOrdersView] = useState<"normal" | "algo">("normal");
+  // These tabs read the whole account, matching positions and open orders. The
+  // filter narrows what is already loaded, so switching it never refetches.
+  const [instrumentFilter, setInstrumentFilter] = useState(ALL_INSTRUMENTS_FILTER);
   const activePositions = snapshot?.positions.filter((position) => Math.abs(Number(position.pos)) > 0) ?? [];
+  const filterInstruments = useCallback(
+    <T extends { instId?: string | null }>(items: T[]) =>
+      instrumentFilter === ALL_INSTRUMENTS_FILTER
+        ? items
+        : items.filter((item) => item.instId === instrumentFilter),
+    [instrumentFilter]
+  );
+  const filteredAlgoOrders = useMemo(() => filterInstruments(algoOrders), [algoOrders, filterInstruments]);
+  const filteredHistoricalOrders = useMemo(() => filterInstruments(historicalOrders), [filterInstruments, historicalOrders]);
+  const filteredHistoricalFills = useMemo(() => filterInstruments(historicalFills), [filterInstruments, historicalFills]);
+  const filteredEpisodes = useMemo(() => filterInstruments(episodes), [episodes, filterInstruments]);
+  const filteredAccountBills = useMemo(() => filterInstruments(accountBills), [accountBills, filterInstruments]);
+  const filteredTradeAuditEvents = useMemo(() => filterInstruments(tradeAuditEvents), [filterInstruments, tradeAuditEvents]);
+  // Every instrument present in the loaded data, so the filter can only offer
+  // choices that actually match something.
+  const filterOptions = useMemo(() => {
+    const seen = new Set<string>();
+    for (const list of [
+      algoOrders as { instId?: string | null }[],
+      snapshot?.orders ?? [],
+      historicalOrders,
+      historicalFills,
+      episodes,
+      accountBills,
+      tradeAuditEvents
+    ]) {
+      for (const item of list) {
+        const instId = item.instId?.trim();
+        if (instId) seen.add(instId);
+      }
+    }
+    return [
+      { value: ALL_INSTRUMENTS_FILTER, label: t("trading:allContracts") },
+      ...Array.from(seen)
+        .sort((left, right) => left.localeCompare(right))
+        .map((instId) => ({ value: instId, label: instId }))
+    ];
+  }, [accountBills, algoOrders, episodes, historicalFills, historicalOrders, snapshot?.orders, t, tradeAuditEvents]);
+  // A filter pinned to an instrument that has dropped out of the data would show
+  // an empty table with no way back, so fall back to showing everything.
+  useEffect(() => {
+    if (
+      instrumentFilter !== ALL_INSTRUMENTS_FILTER
+      && !filterOptions.some((option) => option.value === instrumentFilter)
+    ) {
+      setInstrumentFilter(ALL_INSTRUMENTS_FILTER);
+    }
+  }, [filterOptions, instrumentFilter]);
+  const instrumentFilterTabs = new Set(["orders", "history", "fills", "episodes", "bills", "audit"]);
   const pendingAlgoOrders = algoOrders.filter(isActiveAlgoOrder);
   const normalOrders = snapshot?.orders.filter((order) => !["conditional", "oco"].includes(order.ordType)) ?? [];
+  // Tab badges keep counting the whole account so the filter cannot hide the fact
+  // that orders exist elsewhere; only the tables narrow.
+  const filteredPendingAlgoOrders = filterInstruments(pendingAlgoOrders);
+  const filteredNormalOrders = filterInstruments(normalOrders);
   const tabs = [
     ["positions", `${t("trading:positions")}(${activePositions.length})`],
     ["orders", `${t("trading:openOrders")}(${normalOrders.length + pendingAlgoOrders.length})`],
@@ -13221,6 +13279,18 @@ function BottomPanel({
           {tabs.map(([id, label]) => <button className={id === activeTab ? "active" : ""} onClick={() => setActiveTab(id)} key={id}>{label}</button>)}
         </div>
         <div className="bottom-tab-actions">
+          {instrumentFilterTabs.has(activeTab) && filterOptions.length > 1 && (
+            <label className="bottom-instrument-filter">
+              <span>{t("trading:contract")}</span>
+              <TerminalSelect
+                ariaLabel={t("trading:filterByContract")}
+                value={instrumentFilter}
+                options={filterOptions}
+                onChange={setInstrumentFilter}
+                preserveOptionLabels
+              />
+            </label>
+          )}
           <div className="bottom-action-slot" ref={flattenPositionsTargetRef} hidden={activeTab !== "positions"} />
           <div className="bottom-action-slot" ref={cancelOrdersTargetRef} hidden={activeTab !== "orders"} />
         </div>
@@ -13269,7 +13339,7 @@ function BottomPanel({
             {ordersView === "normal" && (
               <>
                 <div className="table-head orders"><span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("trading:typeAndId")}</span><span>{t("trading:triggerAndOrderPrice")}</span><span>{t("common:quantity")}</span><span>{t("trading:filledQuantity")}</span><span>{t("trading:statusAndTime")}</span></div>
-                {normalOrders.map((order) => {
+                {filteredNormalOrders.map((order) => {
                   const triggerPx = order.isAlgo ? (order.triggerPx || order.px) : "";
                   const orderPx = order.isAlgo ? (order.ordPx || "") : (order.ordPx || order.px);
                   const triggerDisplay = triggerPx ? fmtPrice(triggerPx) : "--";
@@ -13354,7 +13424,7 @@ function BottomPanel({
                   );
                 })}
                 {isEmpty && <div className="empty-row">{account ? t("trading:accountDataStatus", { status: formatPrivateWsStatus(privateStatus, t) }) : t("trading:noAccountOpenOrders")}</div>}
-                {snapshot && normalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdinaryOrPlannedOrders")}</div>}
+                {snapshot && filteredNormalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdinaryOrPlannedOrders")}</div>}
               </>
             )}
             {ordersView === "algo" && (
@@ -13362,7 +13432,7 @@ function BottomPanel({
                 <div className="table-head algo-orders">
                   <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:quantity")}</span><span>{t("trading:takeProfit")}</span><span>{t("trading:stopLoss")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span><span>{t("common:actions")}</span>
                 </div>
-                {pendingAlgoOrders.map((order) => (
+                {filteredPendingAlgoOrders.map((order) => (
                   <div className="table-row algo-orders" key={order.algoId || order.algoClOrdId || `${order.instId}-${order.cTime}`}>
                     <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode || "--"} />
                     <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
@@ -13409,7 +13479,7 @@ function BottomPanel({
                   </div>
                 ))}
                 {!account && <div className="empty-row">{t("trading:noAccountAlgoOrders")}</div>}
-                {account && pendingAlgoOrders.length === 0 && <div className="empty-row">{t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
+                {account && filteredPendingAlgoOrders.length === 0 && <div className="empty-row">{t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
               </>
             )}
           </>
@@ -13437,7 +13507,7 @@ function BottomPanel({
             <div className="table-head historical-orders">
               <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:price")}</span><span>{t("common:quantity")}</span><span>{t("common:status")}</span><span>{t("trading:pnlAndFee")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span>
             </div>
-            {historicalOrders.map((order) => (
+            {filteredHistoricalOrders.map((order) => (
               <div className="table-row historical-orders" key={order.ordId || order.clOrdId || `${order.instId}-${order.syncedAt}`}>
                 <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
                 <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side ?? "", order.posSide ?? "", t)}</span>
@@ -13454,7 +13524,7 @@ function BottomPanel({
               </div>
             ))}
             {!account && <div className="empty-row">{t("trading:noAccountOrderHistory")}</div>}
-            {account && historicalOrders.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalOrders"), status: formatPrivateDataStatus(historicalOrdersStatus, t) })}</div>}
+            {account && filteredHistoricalOrders.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalOrders"), status: formatPrivateDataStatus(historicalOrdersStatus, t) })}</div>}
           </>
         )}
         {activeTab === "fills" && (
@@ -13462,7 +13532,7 @@ function BottomPanel({
             <div className="table-head historical-fills">
               <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("trading:fillPrice")}</span><span>{t("trading:fillQuantity")}</span><span>{t("trading:fillPnl")}</span><span>{t("trading:fee")}</span><span>{t("trading:operator")}</span><span>{t("trading:orderAndFill")}</span><span>{t("common:time")}</span>
             </div>
-            {historicalFills.map((fill) => (
+            {filteredHistoricalFills.map((fill) => (
               <div className="table-row historical-fills" key={fill.billId || `${fill.instId}-${fill.tradeId}-${fill.syncedAt}`}>
                 <SymbolLabel symbol={fill.instId} marketAssets={marketAssets} secondary={fill.sourceEndpoint} />
                 <span className={clsx("cell-tone", toneBySide(fill.side, fill.posSide))}>
@@ -13479,7 +13549,7 @@ function BottomPanel({
               </div>
             ))}
             {!account && <div className="empty-row">{t("trading:noAccountFillHistory")}</div>}
-            {account && historicalFills.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalFills"), status: formatPrivateDataStatus(historicalFillsStatus, t) })}</div>}
+            {account && filteredHistoricalFills.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalFills"), status: formatPrivateDataStatus(historicalFillsStatus, t) })}</div>}
           </>
         )}
         {activeTab === "bills" && (
@@ -13504,7 +13574,7 @@ function BottomPanel({
             <div className="table-head account-bills">
               <span>{t("trading:contract")}</span><span>{t("common:type")}</span><span>{t("trading:currency")}</span><span>{t("trading:balanceChange")}</span><span>{t("trading:balance")}</span><span>{t("trading:pnlAndFee")}</span><span>{t("trading:quantityAndPrice")}</span><span>{t("trading:orderAndFill")}</span><span>{t("common:time")}</span>
             </div>
-            {accountBills.map((bill) => (
+            {filteredAccountBills.map((bill) => (
               <div className="table-row account-bills" key={bill.billId}>
                 <span>{bill.instId || "--"}<small>{bill.sourceEndpoint}</small></span>
                 <span>{formatBillType(bill.billType ?? "", t)}<small>{formatBillSubType(bill.subType ?? "", t)}</small></span>
@@ -13518,7 +13588,7 @@ function BottomPanel({
               </div>
             ))}
             {!account && <div className="empty-row">{t("trading:noAccountBills")}</div>}
-            {account && accountBills.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:bills"), status: formatPrivateDataStatus(accountBillsStatus, t) })}</div>}
+            {account && filteredAccountBills.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:bills"), status: formatPrivateDataStatus(accountBillsStatus, t) })}</div>}
           </>
         )}
         {activeTab === "audit" && (
@@ -13526,7 +13596,7 @@ function BottomPanel({
             <div className="table-head trade-audit">
               <span>{t("common:time")}</span><span>{t("trading:events")}</span><span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("trading:quantityAndPrice")}</span><span>{t("trading:order")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("trading:okxAndError")}</span>
             </div>
-            {tradeAuditEvents.map((event) => (
+            {filteredTradeAuditEvents.map((event) => (
               <div className="table-row trade-audit" key={event.id} title={event.error || event.okxMessage || event.id}>
                 <span>{formatDateTime(event.createdAt)}<small>{event.liveConfirmed ? t("trading:liveConfirmed") : t(event.environment === "live" ? "common:live" : "common:demo")}</small></span>
                 <span>{formatTradeAuditOperation(event.operation, t)}<small>{formatTradeAuditEvent(event.eventType, t)}</small></span>
@@ -13540,7 +13610,7 @@ function BottomPanel({
               </div>
             ))}
             {!account && <div className="empty-row">{t("trading:noAccountAudit")}</div>}
-            {account && tradeAuditEvents.length === 0 && <div className="empty-row">{t("trading:auditStatus", { status: formatPrivateDataStatus(tradeAuditStatus, t) })}</div>}
+            {account && filteredTradeAuditEvents.length === 0 && <div className="empty-row">{t("trading:auditStatus", { status: formatPrivateDataStatus(tradeAuditStatus, t) })}</div>}
           </>
         )}
         {activeTab === "episodes" && (
@@ -13548,7 +13618,7 @@ function BottomPanel({
             <div className="table-head episodes">
               <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:status")}</span><span>{t("trading:openTime")}</span><span>{t("trading:closeTime")}</span><span>{t("trading:averagePrice")}</span><span>{t("common:quantity")}</span><span>{t("trading:netPnl")}</span><span>{t("common:source")}</span>
             </div>
-            {episodes.map((episode) => (
+            {filteredEpisodes.map((episode) => (
               <div className="episode-row" key={episode.id}>
                 <div className="table-row episodes">
                   <SymbolLabel symbol={episode.instId} marketAssets={marketAssets} secondary={episode.id} />
@@ -13591,7 +13661,7 @@ function BottomPanel({
               </div>
             ))}
             {!account && <div className="empty-row">{t("trading:noAccountPositionHistory")}</div>}
-            {account && episodes.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalPositions"), status: formatPrivateDataStatus(episodesStatus, t) })}</div>}
+            {account && filteredEpisodes.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalPositions"), status: formatPrivateDataStatus(episodesStatus, t) })}</div>}
           </>
         )}
       </div>

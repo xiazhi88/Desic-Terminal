@@ -12333,7 +12333,35 @@ button {
   padding: 0 12px 0 10px;
   display: flex;
   align-items: center;
+  gap: 10px;
   background: #07090c;
+}
+
+.bottom-instrument-filter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.bottom-instrument-filter > span {
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  color: var(--text-muted, #7d8794);
+  white-space: nowrap;
+}
+
+.bottom-instrument-filter .terminal-select {
+  min-width: 132px;
+}
+
+/* The trigger inherits its font, which in this toolbar renders far larger than
+   the tab labels beside it. Match the 13px tab typography and the compact row. */
+.bottom-instrument-filter .terminal-select-trigger {
+  height: 26px;
+  font-size: 12px;
+  border-radius: 6px;
+  padding: 0 8px;
 }
 
 .bottom-action-slot[hidden] {
