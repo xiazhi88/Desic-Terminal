@@ -559,9 +559,9 @@ mod tests {
         let definitions = default_ai_skill_definitions();
         let expected = [
             ("desic-core-operations", 0x6747_4642_2d8f_9554_u64),
-            ("trading-philosophy", 0x6d8a_3054_9b52_6d47_u64),
-            ("okx-news-intelligence", 0x0cda_8f96_d93c_2722_u64),
-            ("okx-smart-money-analysis", 0x6a14_843c_f028_1a8b_u64),
+            ("trading-philosophy", 0xaf42_b47e_755b_3c08_u64),
+            ("okx-news-intelligence", 0x790c_faa6_cc57_d766_u64),
+            ("okx-smart-money-analysis", 0x18d3_b51e_1a97_ffe3_u64),
         ];
 
         for (id, fingerprint) in expected {
@@ -601,6 +601,64 @@ mod tests {
         assert!(!skill
             .content
             .contains("price up plus OI up proves new longs"));
+    }
+
+    /// Under on-demand loading a Skill's description *is* its routing signal, so
+    /// it must describe the work, not who requested it. Phrasing a trigger as
+    /// "when the user asks" makes background Runs skip the Skill correctly but
+    /// uselessly, because no one is asking in a scheduled scan.
+    #[test]
+    fn loadable_skill_descriptions_describe_work_not_a_requester() {
+        for skill in default_ai_skill_definitions() {
+            if skill.id == "desic-core-operations" {
+                // Always injected as fixed policy; never routed by description.
+                continue;
+            }
+            assert!(
+                !skill.description.contains("user asks"),
+                "{} routes on a requester instead of the work: {}",
+                skill.id,
+                skill.description
+            );
+            assert!(
+                !skill.description.trim().is_empty(),
+                "{} needs a description to be loadable at all",
+                skill.id
+            );
+        }
+    }
+
+    /// The default philosophy must price both sides of a decision. Every clause
+    /// here counters a specific one-directional bias: without them the document
+    /// only ever supplies reasons to stand aside, so the model can always
+    /// justify waiting and never justify acting.
+    #[test]
+    fn trading_philosophy_prices_the_cost_of_not_acting() {
+        let skill = default_ai_skill_definitions()
+            .into_iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("trading philosophy");
+        let text = format!("{}\n{}", skill.rules, skill.content);
+
+        for expected in [
+            // Unknowable must not collapse into refusing to judge.
+            "unknowable is not unjudgeable",
+            "directional lean",
+            // Abstention is not a free default.
+            "Waiting also has a cost",
+            // Waiting must be a falsifiable plan, not an open deferral.
+            "time or event limit",
+            // Deficient evidence and irreducible uncertainty are different.
+            "irreducible uncertainty as a reason to defer",
+            // Absence has to be reviewable, or the bias returns through review.
+            "carries the same weight as a loss",
+            "systematic absence",
+        ] {
+            assert!(
+                text.contains(expected),
+                "philosophy lost its counterweight to one-sided caution: {expected}"
+            );
+        }
     }
 
     /// Every factual constraint that stays correct regardless of the user's

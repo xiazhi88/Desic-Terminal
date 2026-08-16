@@ -13077,32 +13077,28 @@ async fn run_ai_stream(
         config.enabled_skills = context.enabled_skills.clone();
         active_skill_ids = context.enabled_skills.clone();
         config.skill_definitions = context.skill_definitions.clone();
-        let locked_skills = context
-            .skill_definitions
-            .iter()
-            .filter(|skill| skill.id != "desic-core-operations")
-            .map(|skill| {
-                let version = context.skill_versions.get(&skill.id).copied().unwrap_or(1);
-                format!(
-                    "### Skill: {} (锁定版本 {})\n{}\n{}",
-                    skill.name,
-                    version,
-                    skill.rules.trim(),
-                    skill.content.trim()
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n");
-        if !locked_skills.trim().is_empty() {
-            config.custom_rules = format!(
-                "{}\n\n本次 Agent Run 使用以下不可变 Skill 快照：\n{}",
-                config.custom_rules.trim(),
-                locked_skills
-            )
-            .trim()
-            .to_string();
+        // Background Runs load their Skills the same way every other session
+        // does: version-locked snapshots are written to this Run's private
+        // workspace and read on demand through the `skills` tool. Only the fixed
+        // policy is injected as prompt text. `active_skill_ids` intentionally
+        // keeps the plain Skill ids because tool gating matches on them.
+        // Review Runs carry no run_id, so they key their workspace off the review
+        // id instead of losing their Skills entirely.
+        let workspace_key = context
+            .run_id
+            .as_deref()
+            .or(context.review_id.as_deref())
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if let Some(key) = workspace_key {
+            config.enabled_skills = crate::storage_config::sync_run_scoped_skill_files(
+                key,
+                &context.skill_definitions,
+                &context.skill_versions,
+            )?;
+        } else {
+            config.enabled_skills.clear();
         }
-        config.enabled_skills.clear();
     }
     if let Some(options) = options.as_ref() {
         if let Some(model_id) = options
@@ -13169,10 +13165,12 @@ async fn run_ai_stream(
         .trim()
         .to_string();
     }
+    // Background Runs now read their locked snapshots through this tool, so it
+    // stays available unless a caller explicitly disables it.
     let disable_skills_tool = options
         .as_ref()
         .and_then(|value| value.disable_skills_tool)
-        .unwrap_or(run_context.is_some());
+        .unwrap_or(false);
     let enable_spawn_agent = if run_context.is_some() {
         false
     } else {
@@ -13328,11 +13326,24 @@ async fn run_ai_stream(
             "openAgent".to_string(),
             serde_json::Value::Bool(config.open_agent && run_context.is_none()),
         );
-        let workspace_root = config
-            .workspace_roots
-            .first()
-            .cloned()
-            .unwrap_or_else(|| crate::storage_config::runtime_work_dir().to_string_lossy().into_owned());
+        // The sidecar resolves Skill discovery from workspaceRoot while rules and
+        // workflows follow cwd, so a per-Run root isolates concurrent Runs'
+        // version-locked snapshots without changing anything else. Background
+        // Runs never enable the file tools (openAgent is false above).
+        let run_scoped_root = run_context
+            .as_ref()
+            .and_then(|context| context.run_id.as_deref().or(context.review_id.as_deref()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|key| crate::storage_config::run_scoped_workspace_root(key).ok())
+            .map(|path| path.to_string_lossy().into_owned());
+        let workspace_root = run_scoped_root.unwrap_or_else(|| {
+            config
+                .workspace_roots
+                .first()
+                .cloned()
+                .unwrap_or_else(|| crate::storage_config::runtime_work_dir().to_string_lossy().into_owned())
+        });
         config_payload.insert("workspaceRoot".to_string(), serde_json::Value::String(workspace_root));
     }
     let payload = payload;
@@ -15749,6 +15760,56 @@ async fn execute_ai_tool(
     let canonical_name = canonical_ai_tool_name(tool_name);
     authorize_ai_tool(canonical_name, context)?;
     let session_id = context.session_id.as_str();
+    // A resource read for any Skill other than the strategy-authoring bundle is
+    // an ordinary read against this turn's active Skills, so it must not be
+    // routed through the strategy-editor session path.
+    if canonical_name == "skill.readResource"
+        && input
+            .get("skillId")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .is_some_and(|id| id != "systematic-strategy-authoring")
+    {
+        ensure_ai_run_is_active(&app, context).await?;
+        let skill_id = input
+            .get("skillId")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        let path = input
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        // A background Run's snapshots live in its private workspace, so resolve
+        // the read against the same root the model loaded the Skill from.
+        let run_scoped_dir = context
+            .run_context
+            .as_ref()
+            .and_then(|run| run.run_id.as_deref().or(run.review_id.as_deref()))
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .and_then(|key| crate::storage_config::run_scoped_workspace_root(key).ok())
+            .map(|root| root.join(".cline").join("skills"));
+        let active = context
+            .active_skill_ids
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>();
+        let contents = crate::storage_config::read_cline_skill_resource(
+            &skill_id,
+            &path,
+            &active,
+            run_scoped_dir.as_deref(),
+        )?;
+        return Ok(json!({
+            "skillId": skill_id,
+            "path": path.trim(),
+            "content": contents,
+            "readOnly": true,
+        }));
+    }
     if canonical_name.starts_with("strategy.") || canonical_name == "skill.readResource" {
         ensure_ai_run_is_active(&app, context).await?;
         if context.strategy_session_kind == "trading-research"

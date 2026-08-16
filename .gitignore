@@ -79,3 +79,6 @@ Thumbs.db
 __pycache__/
 *.py[cod]
 rust_out
+
+# Local promo video workspace (large rendered artifacts)
+promo-videos/

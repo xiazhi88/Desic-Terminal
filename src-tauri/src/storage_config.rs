@@ -472,17 +472,93 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
         }
         let dir = root.join(sanitize_skill_dir_name(id));
         fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-        let content = format!(
-            "---\nname: {}\ndescription: {}\ndisabled: false\n---\n\n# {}\n\n## 规则\n{}\n\n## 内容\n{}\n",
-            yaml_scalar(id),
-            yaml_scalar(&skill.description),
-            id,
-            skill.rules.trim(),
-            skill.content.trim(),
-        );
-        write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
+        write_file_atomically(
+            &dir.join("SKILL.md"),
+            render_skill_markdown(id, skill, None).as_bytes(),
+        )?;
     }
     Ok(())
+}
+
+/// Renders one `SKILL.md` body. Shared so a per-run snapshot is byte-identical
+/// to the interactive file except for the version banner.
+fn render_skill_markdown(
+    id: &str,
+    skill: &desic_storage_config::AiSkillDefinition,
+    locked_version: Option<u32>,
+) -> String {
+    let banner = match locked_version {
+        Some(version) => format!("\n> 本次 Agent Run 锁定版本 v{version}。\n"),
+        None => String::new(),
+    };
+    format!(
+        "---\nname: {}\ndescription: {}\ndisabled: false\n---\n\n# {}\n{}\n## 规则\n{}\n\n## 内容\n{}\n",
+        yaml_scalar(id),
+        yaml_scalar(&skill.description),
+        id,
+        banner,
+        skill.rules.trim(),
+        skill.content.trim(),
+    )
+}
+
+/// The per-run workspace root handed to the sidecar for one background Run.
+///
+/// Background Runs must read their Skills through the `skills` tool like every
+/// other session, but each Run may pin a *different* published version of the
+/// same Skill and up to three Runs execute concurrently. A single shared
+/// `.cline/skills` directory would let one Run's snapshot overwrite another's,
+/// silently feeding a model the wrong version while the Run record still claims
+/// the pinned one. Giving each Run its own root keeps the snapshots isolated.
+pub(crate) fn run_scoped_workspace_root(run_id: &str) -> Result<PathBuf, String> {
+    let safe = sanitize_skill_dir_name(run_id);
+    if safe.is_empty() || safe == "item" {
+        return Err("Run 标识不可用于工作目录".to_string());
+    }
+    Ok(runtime_paths().work_dir.join("runs").join(safe))
+}
+
+/// Writes the version-locked Skill snapshots for one background Run and returns
+/// the names to enable, so the caller can hand them to the `skills` tool.
+pub(crate) fn sync_run_scoped_skill_files(
+    run_id: &str,
+    definitions: &[desic_storage_config::AiSkillDefinition],
+    locked_versions: &std::collections::HashMap<String, u32>,
+) -> Result<Vec<String>, String> {
+    let root = run_scoped_workspace_root(run_id)?
+        .join(".cline")
+        .join("skills");
+    // A crashed Run can leave a stale snapshot behind; never let it leak into
+    // this Run's context.
+    if root.exists() {
+        fs::remove_dir_all(&root)
+            .map_err(|err| format!("清理 Run Skill 目录 {} 失败：{}", root.display(), err))?;
+    }
+    fs::create_dir_all(&root).map_err(|err| err.to_string())?;
+    let mut names = Vec::new();
+    for skill in definitions {
+        let id = skill.id.trim();
+        if id.is_empty() || id == "desic-core-operations" {
+            continue;
+        }
+        let dir = root.join(sanitize_skill_dir_name(id));
+        fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
+        let content =
+            render_skill_markdown(id, skill, locked_versions.get(id).copied().or(Some(1)));
+        write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
+        names.push(id.to_string());
+    }
+    Ok(names)
+}
+
+/// Removes one background Run's private workspace. Best-effort: a failure here
+/// must never fail the Run itself.
+pub(crate) fn cleanup_run_scoped_workspace(run_id: &str) {
+    if let Ok(root) = run_scoped_workspace_root(run_id) {
+        if root.exists() {
+            let _ = fs::remove_dir_all(&root);
+        }
+    }
 }
 
 fn imported_skill_id(value: &str) -> String {
@@ -867,14 +943,27 @@ pub(crate) fn validated_skill_resource_path(value: &str) -> Result<PathBuf, Stri
 pub(crate) fn read_cline_skill_resource(
     skill_id: &str,
     resource_path: &str,
+    active_skill_ids: &[String],
+    workspace_skills_dir: Option<&Path>,
 ) -> Result<String, String> {
     let id = skill_id.trim();
-    if id.is_empty() || !is_runtime_scoped_skill_id(id) {
-        return Err("未知的运行时 Skill 标识".to_string());
+    if id.is_empty() {
+        return Err("Skill 标识不能为空".to_string());
+    }
+    // Any Skill loaded for this turn may expose its own reference documents; the
+    // active set is the authorization boundary, not a hard-coded id. The path
+    // checks below remain the actual containment guarantee.
+    let authorized = is_runtime_scoped_skill_id(id)
+        || active_skill_ids
+            .iter()
+            .any(|active| active.trim() == id);
+    if !authorized {
+        return Err(format!("本次会话未加载 Skill：{id}"));
     }
     let relative = validated_skill_resource_path(resource_path)?;
-    let dir = runtime_paths()
-        .cline_skills_dir
+    let dir = workspace_skills_dir
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| runtime_paths().cline_skills_dir)
         .join(sanitize_skill_dir_name(id));
     let root = dir
         .canonicalize()
@@ -2429,15 +2518,25 @@ fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
     const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 4] = [
+    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 7] = [
         ("trading-philosophy", 0x28b8_35c6_2b63_9623),
         ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
         ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
+        // Untouched baselines whose descriptions still said "when the user asks".
+        // Under on-demand loading the description is the routing signal, so that
+        // wording made background Runs skip these Skills entirely: nobody is
+        // asking in a scheduled scan. Upgrading an unedited default is safe.
+        ("okx-news-intelligence", 0xb640_7d75_2958_c507),
+        ("okx-smart-money-analysis", 0x4fb7_3ba6_e18f_2e12),
         // Untouched English baseline that still carried the factual constraints
         // (OI identity, contract-size invention, leverage/margin) before they
         // moved into the fixed skill. Upgrading it is safe precisely because an
         // unedited philosophy carries no user intent.
         ("trading-philosophy", 0x77f1_451b_c3b4_4a7c),
+        // Untouched baseline shipped after that move but before the philosophy
+        // was de-biased (waiting cost, directional lean, absence review). Same
+        // reasoning: no user edit, so the newer default is strictly better.
+        ("trading-philosophy", 0x701f_74f8_3aa4_b270),
     ];
     let protected_skill_ids = [
         "desic-core-operations",
@@ -3015,6 +3114,104 @@ mod tests {
         assert!(validated_skill_resource_path(&long).is_err());
     }
 
+    /// Two background Runs pinning different published versions of the same
+    /// Skill must never see each other's snapshot. Before per-Run workspaces
+    /// this collided on one shared path, so a Run could be fed a version its
+    /// own record did not claim.
+    #[test]
+    fn concurrent_runs_keep_independent_locked_skill_snapshots() {
+        let definition = |content: &str| desic_storage_config::AiSkillDefinition {
+            id: "trading-philosophy".to_string(),
+            name: "trading-philosophy".to_string(),
+            description: "Use when analyzing perpetual markets.".to_string(),
+            rules: "rules".to_string(),
+            content: content.to_string(),
+            builtin: true,
+        };
+        let run_a = format!("run-a-{}", now_ms());
+        let run_b = format!("run-b-{}", now_ms());
+
+        let names_a = sync_run_scoped_skill_files(
+            &run_a,
+            &[definition("BODY FROM V3")],
+            &std::collections::HashMap::from([("trading-philosophy".to_string(), 3_u32)]),
+        )
+        .expect("run A snapshot");
+        let names_b = sync_run_scoped_skill_files(
+            &run_b,
+            &[definition("BODY FROM V7")],
+            &std::collections::HashMap::from([("trading-philosophy".to_string(), 7_u32)]),
+        )
+        .expect("run B snapshot");
+
+        // The enabled names stay plain ids, because tool gating matches on them.
+        assert_eq!(names_a, vec!["trading-philosophy".to_string()]);
+        assert_eq!(names_b, names_a);
+
+        let read = |run_id: &str| {
+            fs::read_to_string(
+                run_scoped_workspace_root(run_id)
+                    .expect("root")
+                    .join(".cline")
+                    .join("skills")
+                    .join("trading-philosophy")
+                    .join("SKILL.md"),
+            )
+            .expect("snapshot readable")
+        };
+        let body_a = read(&run_a);
+        let body_b = read(&run_b);
+        assert!(body_a.contains("BODY FROM V3") && body_a.contains("v3"));
+        assert!(body_b.contains("BODY FROM V7") && body_b.contains("v7"));
+        assert!(!body_a.contains("BODY FROM V7"));
+        assert!(!body_b.contains("BODY FROM V3"));
+        // The catalog-facing frontmatter keeps the plain name and the real
+        // description, which is what lets the model decide to load it.
+        assert!(body_a.contains("name: \"trading-philosophy\""));
+        assert!(body_a.contains("Use when analyzing perpetual markets."));
+
+        cleanup_run_scoped_workspace(&run_a);
+        cleanup_run_scoped_workspace(&run_b);
+        assert!(!run_scoped_workspace_root(&run_a).expect("root").exists());
+        assert!(!run_scoped_workspace_root(&run_b).expect("root").exists());
+    }
+
+    /// Saving AI config prunes disabled Skills from the interactive directory.
+    /// That sweep must not reach into a running Run's private workspace.
+    #[test]
+    fn interactive_skill_pruning_cannot_touch_a_run_workspace() {
+        let run_id = format!("run-prune-{}", now_ms());
+        sync_run_scoped_skill_files(
+            &run_id,
+            &[desic_storage_config::AiSkillDefinition {
+                id: "trading-philosophy".to_string(),
+                name: "trading-philosophy".to_string(),
+                description: "d".to_string(),
+                rules: "r".to_string(),
+                content: "c".to_string(),
+                builtin: true,
+            }],
+            &std::collections::HashMap::new(),
+        )
+        .expect("run snapshot");
+
+        // No Skills enabled at all: the harshest possible prune.
+        let config = config_with_skills(
+            desic_storage_config::default_ai_skill_definitions(),
+            Vec::new(),
+        );
+        sync_cline_skill_files_from_config(&config).expect("interactive sync");
+
+        let snapshot = run_scoped_workspace_root(&run_id)
+            .expect("root")
+            .join(".cline")
+            .join("skills")
+            .join("trading-philosophy")
+            .join("SKILL.md");
+        assert!(snapshot.exists(), "run snapshot must survive interactive prune");
+        cleanup_run_scoped_workspace(&run_id);
+    }
+
     #[test]
     fn syncing_the_strategy_skill_bundle_writes_a_readable_layout() {
         // Exercises the real sync + read path end to end so the paths advertised
@@ -3052,23 +3249,46 @@ mod tests {
         assert!(!written.contains("## 规则"));
 
         let resource =
-            read_cline_skill_resource("systematic-strategy-authoring", "docs/actions.md")
+            read_cline_skill_resource("systematic-strategy-authoring", "docs/actions.md", &[], None)
                 .expect("bundled resource is readable");
         assert_eq!(resource, "# Action reference\n");
         // A path the bundle never declared must not be readable.
-        assert!(read_cline_skill_resource("systematic-strategy-authoring", "docs/missing.md").is_err());
+        assert!(read_cline_skill_resource(
+            "systematic-strategy-authoring",
+            "docs/missing.md",
+            &[],
+            None
+        )
+        .is_err());
     }
 
+    /// The active Skill set is the authorization boundary: a loaded Skill may
+    /// expose its own documents, an unloaded one may not, and path containment
+    /// still holds in both cases.
     #[test]
-    fn skill_resources_are_only_readable_for_application_owned_skills() {
-        assert!(read_cline_skill_resource("", "docs/actions.md").is_err());
-        assert!(read_cline_skill_resource("trading-philosophy", "docs/actions.md").is_err());
-        assert!(read_cline_skill_resource("../../etc", "passwd").is_err());
-        // A known application-owned id must still reject a traversal payload
-        // before it ever touches the filesystem.
+    fn skill_resources_are_readable_only_for_skills_loaded_this_turn() {
+        let loaded = ["trading-philosophy".to_string()];
+        assert!(read_cline_skill_resource("", "docs/actions.md", &loaded, None).is_err());
+        // Not loaded this turn.
         assert!(
-            read_cline_skill_resource("systematic-strategy-authoring", "../../SKILL.md").is_err()
+            read_cline_skill_resource("okx-news-intelligence", "docs/x.md", &loaded, None).is_err()
         );
+        assert!(read_cline_skill_resource("../../etc", "passwd", &loaded, None).is_err());
+        // Loaded, but the payload is a traversal: rejected before any filesystem
+        // access.
+        assert!(
+            read_cline_skill_resource("trading-philosophy", "../../SKILL.md", &loaded, None)
+                .is_err()
+        );
+        // The strategy bundle stays readable inside its scoped session even when
+        // it is not part of the interactive active set.
+        assert!(read_cline_skill_resource(
+            "systematic-strategy-authoring",
+            "../../SKILL.md",
+            &[],
+            None
+        )
+        .is_err());
     }
 
     #[test]
@@ -3564,6 +3784,79 @@ VI. Review and evolve
 17. Evaluate decision quality, execution quality, and random outcome separately. A profit may result from a bad decision, and a loss may be the normal cost of a sound process. Review planned versus actual behavior, evidence changes, risk compliance, fills and slippage, available MAE/MFE, net return, and missed alternative paths.
 18. Do not overfit rules to one trade. Look for patterns repeated across multiple trades in comparable environments and distinguish strategy failure, regime change, execution deviation, and normal variance. Improvements should be small, observable, and testable; retain sound principles while allowing methods to evolve with evidence."#;
 
+    const PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_DESC: &str = r#"Use when the user asks about crypto news, event timelines, regulation, market reactions, anomalies, market sentiment, the economic calendar, or a daily market briefing. It uses Desic Terminal's native read-only intelligence tools for event clusters, News, Sentiment, Calendar, and local market reactions."#;
+    const PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_RULES: &str = r#"Use only controlled intelligence.news.* tools. Read local events and history first, then refresh when data is stale. Every conclusion must identify source, publication time, fetch time, local event/article IDs, market-reaction window, and coverage, while separating facts, inferences, and risks. Interpret multi-asset reactions per instrument; btc_market_proxy may only be described as a BTC market proxy. News, sentiment, and anomalies are trading evidence and must not directly trigger an order."#;
+    const PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_CONTENT: &str = r#"I. Select tools
+1. Use intelligence.news.list for the latest, important, or asset-specific news; use intelligence.news.search for keyword or sentiment filters.
+2. Use intelligence.news.readDetail when the original article is needed and intelligence.news.listSources for the source list.
+3. Use intelligence.news.readCoinSentiment for a single-asset sentiment snapshot, intelligence.news.readCoinSentimentTrend for a time series, and intelligence.news.readSentimentRanking for cross-asset rankings.
+4. Use intelligence.news.readEconomicCalendar for CPI, payrolls, GDP, PMI, FOMC, rate decisions, and similar events. Pass normal startTime/endTime values rather than OKX's reversed before/after semantics.
+5. By default, call intelligence.news.listEvents for clustered events, then readEvent for multi-source articles and readMarketReaction when impact needs assessment. Analyze multi-asset events separately by instId. For events without an instrument, BTC-USDT-SWAP may only be used as an explicitly labeled BTC market proxy. Use listAnomalies for anomalies and readDailyBriefing for the daily briefing.
+
+II. Analysis workflow
+6. For a daily briefing, read important events, the macro calendar, and sentiment rankings before derivatives positioning, Smart Money, anomalies, and market data for key assets.
+7. For macro impact analysis, read the economic calendar, event articles, target-asset sentiment, and local market reactions together. Never predict direction from an event name alone.
+8. Output must include sources, publication times, local event and article IDs, reaction windows, related assets, importance, factual summary, possible impact, validation conditions, and risks.
+9. When data returns stale=true, truncated=true, insufficient coverage, or non-empty limitations, disclose it explicitly. Do not interpret missing results as proof that an event does not exist.
+10. News, sentiment, anomalies, and macro data are not trade instructions. After forming a trade plan, still read instrument specifications and account information and follow the tradeOpportunity and trade.precheck workflow."#;
+
+    const PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_DESC: &str = r#"Use when the user asks about Smart Money, traders, consensus, OI, net taker flow, crowding, funding, basis, liquidation samples, or systemic stress. It uses Desic Terminal's native read-only tools to analyze OKX Smart Money and public trading data."#;
+    const PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_RULES: &str = r#"Use only controlled intelligence.smartMoney.* tools. A single-trader analysis must read performance, current positions, and orders in parallel. Derivatives analysis must combine price/OI, net taker flow, crowding, funding, and basis. Aggregated signals cover only USDT/USDS linear contracts, and notional value uses average entry price. Smart Money and derivatives inferences are evidence and must not directly place orders."#;
+    const PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_CONTENT: &str = r#"I. Select tools
+1. Use intelligence.smartMoney.listTradersByFilter for ranked filtering and intelligence.smartMoney.searchTrader to resolve a display name.
+2. When authorId is known, build a complete profile by calling readPerformanceByTrader, readTraderPositions, and readTraderOrderHistory in parallel. Use readTraderPositionHistory for historical realized profit and loss.
+3. Use readSignalOverviewByFilter for current multi-asset consensus in a performance pool and readSignalOverviewByTrader for a specified trader set.
+4. Use readSignalTrendByFilter or readSignalTrendByTrader for a single asset's historical trend.
+5. Use readMarketPositioning/readPositionChanges for positioning state, readTakerFlow for aggressive flow, and readCrowdingComparison/readConsensusDivergence for divergence between general and elite accounts.
+6. Use readFundingBasis for funding and basis. Use only readLiquidationSamples for liquidations and explicitly call them platform event samples. Use readSystemStress for insurance funds, price limits, and ADL.
+
+II. Analysis workflow
+7. Do not base a conclusion on one ranking, one trader, or one point in time. At minimum, examine sample size, horizon, win rate, drawdown, current positions, and historical execution.
+8. Aggregated signals cover only USDT/USDS linear contracts. Read the trader's current positions when complete position details are needed.
+9. longNotional, shortNotional, and weighted ratios are calculated from trader average entry prices. Read market ticker/candles in parallel when comparing current profit/loss or price displacement.
+10. Describe OI-price combinations only as positioning-state inferences. Net taker flow is not tick-by-tick CVD. Platform liquidation event samples must not be described as total market liquidations.
+11. Output must state the filter pool, window, coverage, data version, directional consensus, counterexamples, limitations, and risks. Disclose stale, truncated, and limitations explicitly.
+12. Smart Money and derivatives evidence is not a copy-trading or trading instruction. After forming a plan, continue through tradeOpportunity and trade.precheck."#;
+
+    /// Verbatim philosophy shipped in the release before de-biasing: the
+    /// factual constraints had already moved out, but it still supplied only
+    /// reasons to stand aside. Frozen so the upgrade fingerprint is verifiable.
+    const PRE_DEBIAS_PHILOSOPHY_CONTENT: &str = r#"Your responsibility is to form decisions that evidence can test, risk can constrain, and changing markets can revise. Trading edge comes from behavior and asymmetric payoff that recur in a specific environment, not from confidence, a complete story, or a large number of indicators. Preserve the AI's judgment, but every important conclusion must answer: what supports it, what would prove it wrong, how much could be lost if it is wrong, and how the plan changes when evidence changes.
+
+I. Understand the market
+1. Accept that the future is unknowable. The goal is not to predict the next candle precisely, but to identify the current environment, build conditional hypotheses, and prepare for multiple paths. Price behavior is the outcome; narratives, indicators, and models are explanatory tools. When market evidence conflicts with the original view, revise the view instead of arguing with the market.
+2. Identify the market regime before selecting a method. Trends, ranges, breakouts, exhaustion, event shocks, deteriorating liquidity, and mixed regimes require different logic. The regime classification itself is a falsifiable hypothesis. Select observation timeframes and analysis tools from the user's objective, holding period, volatility, liquidity, and data coverage rather than applying a fixed template.
+3. Separate a view, a setup, a trigger, and a trade. Bullish or bearish is only a view. It becomes a possible plan only after location, trigger, invalidation, exit, and risk budget are defined. No trade is also a valid decision; waiting preserves capital, attention, and future optionality.
+
+II. Build an edge
+4. Edge must depend on environment and evidence. Seek combinations of price structure, location, volatility, transactions, liquidity, derivatives state, event drivers, and account constraints that have causal meaning. Multiple indicators derived from the same price series are not independent evidence. State supporting evidence, opposing evidence, unverified assumptions, and the most plausible alternative explanation.
+5. A key location matters because participants may be forced to decide there and because price can reveal a real response on arrival, not because many lines were drawn. Observe how price approaches, crosses, accepts, or rejects an area, and define both the confirmation you want and the behavior you do not want. Entry location should expose an error early; do not chase a price that has moved far from the invalidation point merely to participate.
+6. Direction and opportunity need not be symmetric. The AI may choose trend-following, reversal, range, breakout, event-driven, or no participation from the evidence, but must explain why the chosen logic fits the current regime and when that logic normally fails.
+
+III. Use evidence correctly
+7. Order books and recent trades are short-lived evidence. One snapshot describes only currently visible liquidity. Persistent replenishment, cancellation, aggressive flow, and price response are required before confidence increases in absorption, initiative, or spoofing interpretations. Visible orders are not direct proof of intent.
+8. Funding, basis, and open interest describe leverage, pricing, and crowding; they do not directly give direction. Combine them with price, aggressive flow, basis, funding, liquidation samples, and timing, then present only constrained interpretations.
+9. News, sentiment, and Smart Money are evidence, not commands. Check source, freshness, coverage, whether the market has already priced the information, and whether price response supports the narrative. When evidence conflicts, do not trade by vote; reduce conviction, reduce risk, or wait for information that can distinguish the hypotheses.
+
+IV. Move from judgment to execution
+10. A trading plan is a conditional branch, not a prophecy. State the current judgment, trigger, acceptable entry area, logical invalidation, execution stop, targets or exit principles, evidence still requiring observation, and whether to execute now, wait, or abstain. Adapt the presentation to the user's question without hiding information that changes the decision.
+11. Determine invalidation from market logic first, then derive position size from invalidation distance, contract value, trading costs, and account risk budget. Do not place a stop arbitrarily close to improve the apparent reward-to-risk ratio or widen it in an adverse direction to avoid realizing a loss.
+12. Do not judge an opportunity by headline reward-to-risk alone. Consider target probability, fees, slippage, funding, liquidity, path dependency, tail risk, and capital usage. There is no universal minimum reward-to-risk ratio or per-trade risk percentage. Use Profile or user constraints and explain how the choice fits drawdown tolerance.
+13. Judge account tolerance from the structured risk picture as a whole, including effective exposure, fee-inclusive stop risk, one-ATR risk, remaining margin, liquidation distance, total portfolio risk, and consecutive losses, rather than from a single number. Add to a position only from new valid evidence and a recalculated total-risk assessment, never to average down or rescue an invalidated view.
+14. Profits remain subordinate to evidence. Leave room for favorable movement while edge and risk structure remain intact. Reduce or exit when the hypothesis fails, the regime changes, remaining reward is consumed, or a materially better opportunity appears. Do not apply 'let profits run' mechanically.
+
+V. Remain revisable
+15. Confidence comes from evidence quality, independence, and consistency, not tone. Explicitly reduce confidence when data is stale, coverage is incomplete, samples are small, markets are abnormal, or critical evidence is missing. Do not trade when risk cannot be exited reasonably.
+16. After entry, keep comparing market behavior with the original hypothesis. New evidence may justify holding, reducing, exiting, or replanning within the risk budget. Do not change standards because of sunk cost, recent profit or loss, fear of missing out, or a need to be proven right. Consecutive losses may be normal variance or evidence that the regime or edge has changed; diagnose before adjusting.
+
+VI. Review and evolve
+17. Evaluate decision quality, execution quality, and random outcome separately. A profit may result from a bad decision, and a loss may be the normal cost of a sound process. Review planned versus actual behavior, evidence changes, risk compliance, fills and slippage, available MAE/MFE, net return, and missed alternative paths.
+18. Do not overfit rules to one trade. Look for patterns repeated across multiple trades in comparable environments and distinguish strategy failure, regime change, execution deviation, and normal variance. Improvements should be small, observable, and testable; retain sound principles while allowing methods to evolve with evidence."#;
+
+    const PRE_DEBIAS_PHILOSOPHY_DESCRIPTION: &str = r#"Use when analyzing OKX USDT perpetual markets, direction, trade opportunities, entries and exits, position risk, or trade reviews. It provides an adaptive trading philosophy: the AI selects analysis methods from the target horizon, market regime, evidence quality, and account constraints while respecting uncertainty, evidence, asymmetric payoff, and risk-first principles."#;
+
+    const PRE_DEBIAS_PHILOSOPHY_RULES: &str = r#"Treat trading as decision-making under uncertainty, not a prediction contest. The AI may select timeframes, indicators, structure, order flow, and intelligence evidence, but must not treat any school, indicator, parameter, reward-to-risk ratio, or risk percentage as universally correct. Explain why each method was selected, separate facts, inferences, assumptions, and conditions, actively seek disconfirming evidence, and update conclusions when evidence changes. Wait or abstain when there is no explainable edge, risk cannot be defined, execution conditions are invalid, or critical data is missing. Never promise profits."#;
+
     /// An untouched philosophy still holding the relocated factual constraints
     /// must be upgraded, otherwise existing installs would keep asserting them
     /// from a document the user is now free to delete.
@@ -3589,6 +3882,123 @@ VI. Review and evolve
             .contains("cannot identify new longs, new shorts, covering, or stops"));
         assert!(!trading.content.contains("do not invent a contract size"));
         assert!(trading.builtin);
+    }
+
+    /// Installs running the previous release hold a philosophy that is already
+    /// free of the factual constraints but still one-directional. They must also
+    /// receive the de-biased default, otherwise the fix would only ever reach
+    /// fresh installs.
+    #[test]
+    fn untouched_philosophy_baseline_upgrades_after_debiasing() {
+        let stale = desic_storage_config::AiSkillDefinition {
+            id: "trading-philosophy".to_string(),
+            name: "trading-philosophy".to_string(),
+            description: PRE_DEBIAS_PHILOSOPHY_DESCRIPTION.to_string(),
+            rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
+            content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
+            builtin: true,
+        };
+        assert_eq!(skill_text_fingerprint(&stale), 0x701f_74f8_3aa4_b270);
+
+        let merged = merge_ai_skill_definitions(vec![stale]);
+        let trading = merged
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("merged trading philosophy");
+        assert!(trading.content.contains("Waiting also has a cost"));
+        assert!(trading.content.contains("unknowable is not unjudgeable"));
+        assert!(trading.builtin);
+    }
+
+    /// A user-edited philosophy must never be replaced by any upgrade path,
+    /// including the de-biasing one.
+    #[test]
+    fn debiasing_upgrade_never_overwrites_a_user_edited_philosophy() {
+        let mut edited = desic_storage_config::AiSkillDefinition {
+            id: "trading-philosophy".to_string(),
+            name: "trading-philosophy".to_string(),
+            description: PRE_DEBIAS_PHILOSOPHY_DESCRIPTION.to_string(),
+            rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
+            content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
+            builtin: true,
+        };
+        edited.content.push_str("\n19. 只做亚洲时段的突破。");
+
+        let merged = merge_ai_skill_definitions(vec![edited]);
+        let trading = merged
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("merged trading philosophy");
+        assert!(trading.content.contains("只做亚洲时段的突破。"));
+        assert!(!trading.content.contains("Waiting also has a cost"));
+    }
+
+    /// Existing installs hold intelligence Skills whose descriptions still route
+    /// on "when the user asks", which silently excluded them from background
+    /// Runs once loading became on-demand. They must receive the corrected
+    /// descriptions, or the fix would only ever reach fresh installs.
+    #[test]
+    fn untouched_intelligence_baselines_upgrade_to_requester_neutral_descriptions() {
+        let stale = |id: &str, description: &str, rules: &str, content: &str| {
+            desic_storage_config::AiSkillDefinition {
+                id: id.to_string(),
+                name: id.to_string(),
+                description: description.to_string(),
+                rules: rules.to_string(),
+                content: content.to_string(),
+                builtin: true,
+            }
+        };
+        let news = stale(
+            "okx-news-intelligence",
+            PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_DESC,
+            PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_RULES,
+            PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_CONTENT,
+        );
+        let smart = stale(
+            "okx-smart-money-analysis",
+            PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_DESC,
+            PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_RULES,
+            PRE_ROUTING_FIX_OKX_SMART_MONEY_ANALYSIS_CONTENT,
+        );
+        assert_eq!(skill_text_fingerprint(&news), 0xb640_7d75_2958_c507);
+        assert_eq!(skill_text_fingerprint(&smart), 0x4fb7_3ba6_e18f_2e12);
+
+        let merged = merge_ai_skill_definitions(vec![news, smart]);
+        for id in ["okx-news-intelligence", "okx-smart-money-analysis"] {
+            let skill = merged
+                .iter()
+                .find(|skill| skill.id == id)
+                .unwrap_or_else(|| panic!("merged {id}"));
+            assert!(
+                !skill.description.contains("user asks"),
+                "{id} kept the requester-gated description"
+            );
+            assert!(skill.builtin);
+        }
+    }
+
+    /// A user who rewrote an intelligence Skill keeps their text, exactly as with
+    /// the philosophy.
+    #[test]
+    fn description_fix_never_overwrites_an_edited_intelligence_skill() {
+        let mut edited = desic_storage_config::AiSkillDefinition {
+            id: "okx-news-intelligence".to_string(),
+            name: "okx-news-intelligence".to_string(),
+            description: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_DESC.to_string(),
+            rules: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_RULES.to_string(),
+            content: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_CONTENT.to_string(),
+            builtin: true,
+        };
+        edited.content.push_str("\n11. 只看中文财经源。");
+
+        let merged = merge_ai_skill_definitions(vec![edited]);
+        let news = merged
+            .iter()
+            .find(|skill| skill.id == "okx-news-intelligence")
+            .expect("merged news skill");
+        assert!(news.content.contains("只看中文财经源。"));
+        assert!(news.description.contains("user asks"));
     }
 
     #[test]

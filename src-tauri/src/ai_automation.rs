@@ -6322,6 +6322,9 @@ async fn automation_tick(
                         );
                     }
                 }
+                // Drop this Run's private Skill-snapshot workspace on both the
+                // success and failure paths.
+                crate::storage_config::cleanup_run_scoped_workspace(&failed_run_id);
                 run_runtime.notify.notify_one();
             });
             continue;
@@ -6339,6 +6342,8 @@ async fn automation_tick(
                         json!({ "type": "reviewFailed", "message": message, "action": { "tab": "reviews", "id": failed_review_id } }),
                     );
                 }
+                // Review Runs key their Skill workspace off the review id.
+                crate::storage_config::cleanup_run_scoped_workspace(&failed_review_id);
                 review_runtime.notify.notify_one();
             });
             continue;

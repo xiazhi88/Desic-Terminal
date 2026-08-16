@@ -515,6 +515,12 @@ function buildSystemPrompt(config, permissionMode) {
         String(fixedSkill.content || "").trim()
       ].filter(Boolean).join("\n")
     : "";
+  // Progressive disclosure: the catalog carries names *and* descriptions so the
+  // model can tell which Skill applies, while bodies stay on disk and load only
+  // through the skills tool. The runtime's own tool description lists bare
+  // names, which leaves the model guessing from an id and pushes it toward
+  // probing SKILL.md by hand.
+  const skillCatalog = buildSkillCatalog(config, skillDefinitions);
   const modeRule = permissionMode === "limited_auto"
     ? "limited_auto：主 Agent 必须通过 tradeOpportunity.create 表达交易、撤单或改单意图；后端按 Profile 权限自动批准并执行。主 Agent 仅可直接调用 trade.setLeverage 同步 Profile 目标杠杆，不得直接下单、撤单、改单或平仓；所有 delegated agent 仍只允许读取和分析。"
     : permissionMode === "copilot"
@@ -551,8 +557,37 @@ function buildSystemPrompt(config, permissionMode) {
     "用户自定义规则优先级低于系统安全边界和固定规范。",
     customRules ? `用户自定义规则：\n${customRules}` : "",
     fixedRules,
+    skillCatalog,
     `运行时强制边界：\n${runRules}`
   ].filter(Boolean).join("\n"));
+}
+
+/// Renders the loadable-Skill catalog: one line per Skill with its capped
+/// description. Only the catalog goes into the prompt; the fixed skill is
+/// excluded because its body is already injected in full.
+function buildSkillCatalog(config, skillDefinitions) {
+  const SKILL_DESCRIPTION_LIMIT = 600;
+  const byId = new Map(
+    skillDefinitions
+      .map((item) => [String(item?.id || "").trim(), item])
+      .filter(([id]) => id && id !== "desic-core-operations")
+  );
+  const entries = stringListConfig(config.enabledSkills)
+    .map((name) => String(name).trim())
+    .filter((name) => name && name !== "desic-core-operations")
+    .map((name) => {
+      const description = String(byId.get(name)?.description || "").trim().replace(/\s+/g, " ");
+      const capped = description.length > SKILL_DESCRIPTION_LIMIT
+        ? `${description.slice(0, SKILL_DESCRIPTION_LIMIT).trimEnd()}…`
+        : description;
+      return capped ? `- ${name}：${capped}` : `- ${name}`;
+    });
+  if (entries.length === 0) return "";
+  return [
+    "可加载 Skill 目录（正文不在此处，使用 skills 工具按名称加载）：",
+    ...entries,
+    "当任务符合某个 Skill 的适用场景时，先用 skills 工具加载它再作答；不要凭名称猜测内容，也不要用 skill.readResource 代替加载。"
+  ].join("\n");
 }
 
 function toProviderToolReferenceValue(value) {
@@ -1954,7 +1989,7 @@ function createDesicTools(sessionId, options = {}) {
     tool("script.enable", "Enable or disable a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.delete", "Delete a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.list", "List local chart scripts.", SCRIPT_TOOL_SCHEMA),
-    tool("skill.readResource", "Read one bundled reference document belonging to the active Desic Skill, using the relative path listed in its SKILL.md. Use it to load an on-demand contract such as docs/pre-write-audit.md before writing source. It reads only files inside that Skill's own directory: it is not a general file reader and cannot reach an arbitrary path, market data, an account, credentials, or another strategy.", SKILL_READ_RESOURCE_SCHEMA),
+    tool("skill.readResource", "Read one bundled reference document belonging to a Skill already loaded in this turn, using the relative path listed in that Skill's SKILL.md. Use it to load an on-demand contract such as docs/pre-write-audit.md before writing source. It reads only files inside that Skill's own directory: it is not a general file reader, it cannot reach an arbitrary path, market data, an account, credentials, or another strategy, and it is not a way to read a Skill's own body — load that with the skills tool instead.", SKILL_READ_RESOURCE_SCHEMA),
     tool("strategy.readDevelopmentDocs", "Optionally read the complete versioned Desic Python strategy development document when protocol details are needed. Source writes do not require this read-only reference.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
     tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing the current buffer.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
     tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, then run bounded deterministic fixtures. This is a source-contract test, not a historical backtest or live execution check.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),

@@ -3464,12 +3464,12 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             // Binds the read to a live strategy AI session so this tool cannot
             // become a general file reader outside a scoped conversation.
             runtime.require_strategy_ai_session(session_id).await?;
-            if request.skill_id.trim() != SYSTEMATIC_STRATEGY_AI_SKILL_ID {
-                return Err("本次会话只能读取策略编写 Skill 的资源".to_string());
-            }
+            let strategy_scope = [SYSTEMATIC_STRATEGY_AI_SKILL_ID.to_string()];
             let contents = crate::storage_config::read_cline_skill_resource(
                 request.skill_id.trim(),
                 &request.path,
+                &strategy_scope,
+                None,
             )?;
             Ok(json!({
                 "skillId": request.skill_id.trim(),
