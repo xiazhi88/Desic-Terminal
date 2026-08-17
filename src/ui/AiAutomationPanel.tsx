@@ -73,6 +73,7 @@ import type {
   AiPermissionMode,
   AiReasoningDepth,
   AiSkillDefinition,
+  AiProfilePerformance,
   AiSkillVersion,
   AiWakeCondition,
   ChartFillMarker,
@@ -123,6 +124,9 @@ type SystematicProfileConflictConfirmation = {
 type AiAutomationPanelProps = {
   accounts: AccountSummary[];
   marketAssets?: MarketAssetsSummary | null;
+  /** Symbols with a live subscription. A Profile may only watch these, because
+   *  anything else has no realtime candles for its tools to read. */
+  watchlist?: string[];
   initialTab?: AiAutomationTab;
   focusId?: string | null;
   onNotify: (notification: NotificationInput) => void;
@@ -498,7 +502,10 @@ function normalizeSummary(value: AiAutomationSummary): AiAutomationSummary {
     dailyMarketReviews: Array.isArray(value?.dailyMarketReviews) ? value.dailyMarketReviews : [],
     optimizationSuggestions: Array.isArray(value?.optimizationSuggestions) ? value.optimizationSuggestions : [],
     notificationDeliveries: Array.isArray(value?.notificationDeliveries) ? value.notificationDeliveries : [],
-    skillVersions: Array.isArray(value?.skillVersions) ? value.skillVersions : []
+    skillVersions: Array.isArray(value?.skillVersions) ? value.skillVersions : [],
+    // Rebuilt field by field, so anything omitted here is silently dropped: the
+    // Profile cards showed "--" because this list never survived normalization.
+    profilePerformance: Array.isArray(value?.profilePerformance) ? value.profilePerformance : []
   };
 }
 
@@ -703,10 +710,253 @@ function Metric({ label, value, icon, tone }: { label: string; value: number; ic
   );
 }
 
+/** Trailing window for the Profile cards. Kept in step with
+ *  PROFILE_PERFORMANCE_WINDOW_DAYS in ai_automation.rs. */
+const PROFILE_CARD_WINDOW_DAYS = 30;
+
+/** Returns a Profile name that is not already taken, appending the smallest free
+ *  numeric suffix. Comparison ignores case and surrounding spaces so "Profile"
+ *  and "profile " are treated as the same name. `excludeId` lets a Profile keep
+ *  its own name while being renamed. */
+function uniqueProfileName(
+  desired: string,
+  existing: ReadonlyArray<{ id: string; name: string }>,
+  excludeId?: string
+): string {
+  const base = desired.trim() || "Profile";
+  const taken = new Set(
+    existing
+      .filter((item) => item.id !== excludeId)
+      .map((item) => item.name.trim().toLowerCase())
+  );
+  if (!taken.has(base.toLowerCase())) return base;
+  for (let suffix = 1; suffix < 1000; suffix += 1) {
+    const candidate = `${base} ${suffix}`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  // Practically unreachable; keeps the function total instead of looping forever.
+  return `${base} ${Date.now()}`;
+}
+
+/** Signed USDT amount for a card readout. Keeps two decimals so a small
+ *  automation result stays legible instead of rounding to zero. */
+function formatSignedUsdtAmount(value: number): string {
+  if (!Number.isFinite(value)) return "--";
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}${Math.abs(value).toFixed(2)} USDT`;
+}
+
+/** In-app confirmation. `window.confirm` is unavailable in the Tauri webview
+ *  ("dialog.confirm not allowed"), so destructive actions use this instead of a
+ *  native prompt that silently rejects. */
+function AutomationConfirmDialog({
+  title,
+  message,
+  confirmText,
+  danger,
+  onCancel,
+  onConfirm
+}: Readonly<{
+  title: string;
+  message: string;
+  confirmText: string;
+  danger?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+}>) {
+  const { t } = useTranslation(["automation", "common"]);
+  const cancelRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    cancelRef.current?.focus();
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onCancel();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onCancel]);
+
+  return createPortal(
+    <div className="modal-backdrop compact automation-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
+      <section className="modal-shell compact automation-confirm-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <header className="modal-head"><div><strong>{title}</strong></div></header>
+        <p className="automation-confirm-modal__message">{message}</p>
+        <div className="modal-actions">
+          <button type="button" ref={cancelRef} onClick={onCancel}>{t("common:cancel")}</button>
+          <button type="button" className={danger ? "danger-action" : ""} onClick={onConfirm}>{confirmText}</button>
+        </div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
+/** A Profile at rest. Everything the list view used to truncate is shown here in
+ *  full, and the actions that do not need the editor act straight from the card. */
+function ProfileCard({
+  profile,
+  marketAssets,
+  running,
+  focused,
+  recentRuns,
+  performance,
+  busy,
+  onEdit,
+  onDelete,
+  onToggleEnabled
+}: Readonly<{
+  profile: AiAgentProfile;
+  marketAssets: MarketAssetsSummary | null | undefined;
+  running: boolean;
+  focused: boolean;
+  recentRuns: { runs: number; failed: number; trades: number; lastAt: number | null } | null;
+  performance: AiProfilePerformance | null;
+  busy: boolean;
+  onEdit: () => void;
+  onDelete: () => void;
+  onToggleEnabled: () => void;
+}>) {
+  const { t } = useTranslation(["automation", "common", "trading"]);
+  const state = running ? "running" : profile.enabled ? "listening" : "stopped";
+  const stateLabel = running
+    ? t("automation:running")
+    : profile.enabled
+      ? t("automation:profileListening")
+      : t("automation:stopped");
+  const collaboration = profile.multiAgentMode === "off"
+    ? t("automation:profileCardSingleAgent")
+    : profile.multiAgentMode === "auto"
+      ? t("automation:profileCollaborationAuto", { count: profile.multiAgentMaxAgents || 4 })
+      : t("automation:profileCollaborationCustom", { count: profile.multiAgents.filter((agent) => agent.enabled).length });
+
+  return (
+    <article className={clsx("automation-profile-card", `is-${state}`, focused && "is-focused")} data-profile-id={profile.id}>
+      <header className="automation-profile-card__head">
+        <div className="automation-profile-card__identity">
+          <strong title={profile.name}>{profile.name}</strong>
+          <div className="automation-profile-card__tags">
+            <em>{t(permissionModeI18nKey(profile.mode))}</em>
+            <em className={profile.environment === "live" ? "is-live" : "is-demo"}>
+              {profile.environment === "live" ? t("common:live") : t("common:demo")}
+            </em>
+            <em className="is-quiet">{collaboration}</em>
+          </div>
+        </div>
+        {/* Enabling is the one setting changed often enough to belong on the card. */}
+        <label className="automation-profile-card__switch" title={t("automation:profileCardEnable")}>
+          <input type="checkbox" checked={profile.enabled} disabled={busy} onChange={onToggleEnabled} />
+          <span />
+        </label>
+      </header>
+
+      <div className="automation-profile-card__symbols">
+        {profile.symbols.length === 0 ? (
+          <span className="automation-profile-card__symbol is-empty">--</span>
+        ) : profile.symbols.slice(0, 3).map((symbol) => {
+          const asset = marketAssets?.instruments.find((item) => item.instId === symbol);
+          return (
+            <span className="automation-profile-card__symbol" key={symbol}>
+              <SymbolIcon base={asset?.baseCcy || symbolBase(symbol)} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
+              {symbol}
+            </span>
+          );
+        })}
+        {profile.symbols.length > 3 ? <span className="automation-profile-card__symbol is-more">+{profile.symbols.length - 3}</span> : null}
+      </div>
+
+      <dl className="automation-profile-card__facts">
+        <div><dt>{t("automation:profileCardLeverage")}</dt><dd>{profile.targetLeverage}X</dd></div>
+        <div><dt>{t("automation:profileCardMargin")}</dt><dd>{profile.maxSingleTradeMarginPct}%</dd></div>
+        <div><dt>{t("automation:profileCardInterval")}</dt><dd>{t("automation:profileCardScan", { minutes: profile.scanIntervalMinutes })}</dd></div>
+      </dl>
+
+      <div className="automation-profile-card__recent">
+        <span>{t("automation:profileCardRecent")}</span>
+        <span className="automation-profile-card__recent-values">
+          {/* Net result leads; red is a gain and green a loss, as everywhere else. */}
+          {performance && performance.fillCount > 0 ? (
+            <strong className={clsx("automation-profile-card__pnl", performance.netPnlUsdt >= 0 ? "is-gain" : "is-loss")}>
+              {formatSignedUsdtAmount(performance.netPnlUsdt)}
+            </strong>
+          ) : (
+            <strong className="automation-profile-card__pnl is-muted">--</strong>
+          )}
+          {recentRuns && recentRuns.runs > 0 ? (
+            <em>
+              {t("automation:profileCardRuns", { count: recentRuns.runs })}
+              {recentRuns.failed > 0 ? <b className="is-failed">{t("automation:profileCardFailed", { count: recentRuns.failed })}</b> : null}
+            </em>
+          ) : (
+            <em className="is-muted">{t("automation:profileCardNoRuns")}</em>
+          )}
+        </span>
+      </div>
+
+      <footer className="automation-profile-card__actions">
+        <span className={clsx("automation-profile-card__state", `is-${state}`)}><i />{stateLabel}</span>
+        <div className="automation-profile-card__buttons">
+          <button type="button" onClick={onEdit} title={t("automation:profileCardOpenEditor", { name: profile.name })}>
+            <Pencil size={13} />{t("automation:profileCardEdit")}
+          </button>
+          <button type="button" className="is-danger" onClick={onDelete} disabled={busy} title={t("automation:profileDelete")}>
+            <Trash2 size={13} />
+          </button>
+        </div>
+      </footer>
+    </article>
+  );
+}
+
+/** Hosts the existing editor in a draggable dialog. The editor component itself
+ *  is unchanged; only its container moved out of the page body. */
+function ProfileEditorDialog({
+  title,
+  dirty,
+  onClose,
+  children
+}: Readonly<{ title: string; dirty: boolean; onClose: () => void; children: ReactNode }>) {
+  const { t } = useTranslation(["automation", "common"]);
+  const dialogDrag = useDraggableSurface<HTMLElement>();
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [onClose]);
+
+  return createPortal(
+    <div
+      className="modal-backdrop automation-profile-editor-backdrop"
+      onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
+    >
+      <section ref={dialogDrag.surfaceRef} className="modal-shell automation-profile-editor-modal" role="dialog" aria-modal="true" aria-label={title}>
+        <header className="modal-head automation-profile-editor-modal__head" {...dialogDrag.handleProps}>
+          <div>
+            <strong>{title}</strong>
+            {dirty ? <span className="automation-profile-editor-modal__dirty">{t("automation:profileUnsavedTitle")}</span> : null}
+          </div>
+          <button className="window-button" type="button" onClick={onClose} title={t("common:close")}><X size={16} /></button>
+        </header>
+        <div className="automation-profile-editor-modal__body">{children}</div>
+      </section>
+    </div>,
+    document.body
+  );
+}
+
 function ProfileEditor({
   draft,
   accounts,
   marketAssets,
+  watchlist,
   skills,
   skillVersions,
   models,
@@ -724,6 +974,7 @@ function ProfileEditor({
   draft: AiAgentProfile;
   accounts: AccountSummary[];
   marketAssets?: MarketAssetsSummary | null;
+  watchlist?: string[];
   skills: AiSkillDefinition[];
   skillVersions: AiSkillVersion[];
   models: AiConfigSummary["models"];
@@ -744,17 +995,28 @@ function ProfileEditor({
   const skillIds = useMemo(() => new Set(draft.skillIds), [draft.skillIds]);
   const boundAccount = accounts.find((account) => account.id === draft.accountId) ?? null;
   const boundEnvironment = boundAccount?.environment ?? draft.environment;
+  // Only watchlist symbols are offered. The market stream subscribes the
+  // watchlist plus the chart's symbol, so a Profile watching anything else has
+  // no realtime candles and its tools report missing data instead of trading on
+  // stale numbers.
+  const watchlistSymbols = useMemo(
+    () => new Set((watchlist ?? []).map((item) => item.trim().toUpperCase()).filter(Boolean)),
+    [watchlist]
+  );
   const symbolOptions = useMemo(() => {
     const query = symbolQuery.trim().toUpperCase();
     const selected = new Set(draft.symbols);
     return (marketAssets?.instruments ?? [])
+      .filter((item) => watchlistSymbols.size === 0 || watchlistSymbols.has(item.instId))
       .filter((item) => !selected.has(item.instId))
       .filter((item) => !query || item.instId.includes(query) || item.baseCcy.includes(query))
       .slice(0, 8);
-  }, [draft.symbols, marketAssets?.instruments, symbolQuery]);
+  }, [draft.symbols, marketAssets?.instruments, symbolQuery, watchlistSymbols]);
   const addProfileSymbol = (symbol: string) => {
     const normalized = symbol.trim().toUpperCase();
     if (!normalized) return;
+    // Typing a symbol by hand must not bypass the restriction.
+    if (watchlistSymbols.size > 0 && !watchlistSymbols.has(normalized)) return;
     onChange({ symbols: Array.from(new Set([...draft.symbols, normalized])) });
     setSymbolQuery("");
     setSymbolPickerOpen(false);
@@ -899,12 +1161,23 @@ function ProfileEditor({
           />
         </label>
         <div className="automation-symbol-field wide">
-          <span>{t("automation:profileWatchSymbols")}</span>
+          <span>
+            {t("automation:profileWatchSymbols")}
+            <small>{t("automation:profileWatchSymbolsWatchlistOnly")}</small>
+          </span>
           <div className="automation-symbol-chips">
             {draft.symbols.map((symbol) => {
               const asset = marketAssets?.instruments.find((item) => item.instId === symbol);
+              // A Profile saved before this restriction can still hold a symbol
+              // that is no longer subscribed. Flag it, because the run would
+              // silently read stale candles instead of failing loudly.
+              const unsubscribed = watchlistSymbols.size > 0 && !watchlistSymbols.has(symbol);
               return (
-                <span className="automation-symbol-chip" key={symbol}>
+                <span
+                  className={clsx("automation-symbol-chip", unsubscribed && "is-unsubscribed")}
+                  key={symbol}
+                  title={unsubscribed ? t("automation:profileSymbolNotInWatchlist", { symbol }) : undefined}
+                >
                   <SymbolIcon base={asset?.baseCcy || symbolBase(symbol)} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
                   <b>{symbol}</b>
                   <button type="button" title={t("automation:profileRemoveSymbol", { symbol })} aria-label={t("automation:profileRemoveSymbol", { symbol })} onClick={() => onChange({ symbols: draft.symbols.filter((item) => item !== symbol) })}><X size={11} /></button>
@@ -3634,6 +3907,7 @@ function NotificationsView({
 function AiAutomationPanelComponent({
   accounts,
   marketAssets,
+  watchlist,
   initialTab = "profiles",
   focusId,
   onNotify,
@@ -3649,6 +3923,17 @@ function AiAutomationPanelComponent({
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [scopeProfileId, setScopeProfileId] = useState("");
   const [profileDraft, setProfileDraft] = useState<AiAgentProfile | null>(null);
+  // The editor is a dialog now: the grid is the resting state of this tab.
+  const [profileEditorOpen, setProfileEditorOpen] = useState(false);
+  // Destructive and lossy actions route through an in-app dialog because the
+  // Tauri webview rejects window.confirm.
+  const [pendingConfirm, setPendingConfirm] = useState<{
+    title: string;
+    message: string;
+    confirmText: string;
+    danger?: boolean;
+    onConfirm: () => void;
+  } | null>(null);
   const [profileQuery, setProfileQuery] = useState("");
   const [loading, setLoading] = useState(true);
   const [sectionLoading, setSectionLoading] = useState<AiAutomationTab | null>(null);
@@ -3808,7 +4093,11 @@ function AiAutomationPanelComponent({
       const selected = next.profiles.find((item) => item.id === targetId) ?? next.profiles[0] ?? null;
       setSelectedProfileId(selected?.id ?? null);
       setProfileDraft(selected ? normalizeProfile({ ...selected, model: resolveProfileModelId(selected.model, config) }) : null);
-      if (activeTab !== "profiles") await loadSection(activeTab, true, true);
+      // The Profiles grid reports each Profile's recent activity, which lives in
+      // the runs section. Load it quietly alongside the overview so a card shows
+      // its run count immediately instead of only after visiting the runs tab.
+      if (activeTab === "profiles") await loadSection("runs", true, true);
+      else await loadSection(activeTab, true, true);
       logger.info("ai automation overview loaded", { durationMs: Math.round(performance.now() - startedAt), tab: activeTab });
     } catch (nextError) {
       const message = nextError instanceof Error ? nextError.message : String(nextError);
@@ -4022,6 +4311,15 @@ function AiAutomationPanelComponent({
       onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationModelRequired") });
       return;
     }
+    // Renaming onto an existing name is rejected rather than silently renumbered:
+    // the user typed this name deliberately, so they decide how to resolve it.
+    const duplicate = (summary?.profiles ?? []).find(
+      (item) => item.id !== profileDraft.id && item.name.trim().toLowerCase() === name.toLowerCase()
+    );
+    if (duplicate) {
+      onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationNameDuplicate", { name }) });
+      return;
+    }
     const multiAgents = profileDraft.multiAgents.slice(0, CUSTOM_AGENT_LIMIT).map((agent) => ({
       ...agent,
       id: agent.id.trim(),
@@ -4106,16 +4404,40 @@ function AiAutomationPanelComponent({
       });
   }, [onNotify, persistProfile, profileDraft, t]);
 
+  // Enabling from a card persists just that flag; everything else is kept as
+  // stored so a card toggle can never publish an unrelated half-finished edit.
+  const toggleProfileEnabled = useCallback((profile: AiAgentProfile) => {
+    persistProfile({ ...profile, enabled: !profile.enabled, updatedAt: Date.now() }, false);
+  }, [persistProfile]);
+
+  // Card actions operate on a given Profile rather than the open draft, so the
+  // grid can act without first loading a Profile into the editor.
+  const deleteProfileById = useCallback((profile: Pick<AiAgentProfile, "id" | "name">) => {
+    const name = profile.name || t("automation:profileThisProfile");
+    setPendingConfirm({
+      title: t("automation:profileDelete"),
+      message: t("automation:profileConfirmDelete", { name }),
+      confirmText: t("common:delete"),
+      danger: true,
+      onConfirm: () => {
+        void runCommand(`profile-delete:${profile.id}`, "ai_agent_profile_delete", { id: profile.id }, t("automation:profileDeleted"), profile.name || profile.id, null);
+      }
+    });
+  }, [runCommand, t]);
+
+  const runProfileById = useCallback((profile: Pick<AiAgentProfile, "id" | "name">) => {
+    void runCommand(`profile-run:${profile.id}`, "ai_agent_profile_run_now", { id: profile.id }, t("automation:profileRunSubmitted"), t("automation:profileRunSubmittedMessage", { name: profile.name }), profile.id);
+  }, [runCommand, t]);
+
   const deleteProfile = useCallback(() => {
     if (!profileDraft) return;
-    if (!window.confirm(t("automation:profileConfirmDelete", { name: profileDraft.name || t("automation:profileThisProfile") }))) return;
-    void runCommand(`profile-delete:${profileDraft.id}`, "ai_agent_profile_delete", { id: profileDraft.id }, t("automation:profileDeleted"), profileDraft.name || profileDraft.id, null);
-  }, [profileDraft, runCommand, t]);
+    deleteProfileById(profileDraft);
+  }, [deleteProfileById, profileDraft]);
 
   const runProfileNow = useCallback(() => {
     if (!profileDraft) return;
-    void runCommand(`profile-run:${profileDraft.id}`, "ai_agent_profile_run_now", { id: profileDraft.id }, t("automation:profileRunSubmitted"), t("automation:profileRunSubmittedMessage", { name: profileDraft.name }), profileDraft.id);
-  }, [profileDraft, runCommand, t]);
+    runProfileById(profileDraft);
+  }, [profileDraft, runProfileById]);
 
   const runDailyReview = useCallback(() => {
     if (!profileDraft) return;
@@ -4202,39 +4524,115 @@ function AiAutomationPanelComponent({
   }, [runCommand]);
 
   const publishSkillVersion = useCallback((item: AiSkillVersion) => {
-    if (!window.confirm(automationText("confirmPublishSkill", "Publish {{skillId}} v{{version}}?", "确认发布 {{skillId}} v{{version}}？", { skillId: item.skillId, version: item.version }))) return;
-    void runCommand(
-      `skill-publish:${item.id}`,
-      "ai_skill_version_publish",
-      { id: item.id },
-      automationText("skillVersionPublished", "Skill version published", "Skill 版本已发布"),
-      `${item.skillId} · v${item.version}`
-    );
+    setPendingConfirm({
+      title: automationText("skillVersionPublish", "Publish skill version", "发布 Skill 版本"),
+      message: automationText("confirmPublishSkill", "Publish {{skillId}} v{{version}}?", "确认发布 {{skillId}} v{{version}}？", { skillId: item.skillId, version: item.version }),
+      confirmText: automationText("skillVersionPublishAction", "Publish", "发布"),
+      onConfirm: () => {
+        void runCommand(
+          `skill-publish:${item.id}`,
+          "ai_skill_version_publish",
+          { id: item.id },
+          automationText("skillVersionPublished", "Skill version published", "Skill 版本已发布"),
+          `${item.skillId} · v${item.version}`
+        );
+      }
+    });
   }, [runCommand]);
 
   const discardSkillVersion = useCallback((item: AiSkillVersion) => {
-    if (!window.confirm(automationText("confirmDiscardSkill", "Discard the {{skillId}} v{{version}} draft?", "确认丢弃 {{skillId}} v{{version}} 草稿？", { skillId: item.skillId, version: item.version }))) return;
-    void runCommand(
-      `skill-discard:${item.id}`,
-      "ai_skill_version_discard",
-      { id: item.id },
-      automationText("skillDraftDiscarded", "Skill draft discarded", "Skill 草稿已丢弃"),
-      `${item.skillId} · v${item.version}`
-    );
+    setPendingConfirm({
+      title: automationText("skillVersionDiscard", "Discard skill draft", "丢弃 Skill 草稿"),
+      message: automationText("confirmDiscardSkill", "Discard the {{skillId}} v{{version}} draft?", "确认丢弃 {{skillId}} v{{version}} 草稿？", { skillId: item.skillId, version: item.version }),
+      confirmText: automationText("skillVersionDiscardAction", "Discard", "丢弃"),
+      danger: true,
+      onConfirm: () => {
+        void runCommand(
+          `skill-discard:${item.id}`,
+          "ai_skill_version_discard",
+          { id: item.id },
+          automationText("skillDraftDiscarded", "Skill draft discarded", "Skill 草稿已丢弃"),
+          `${item.skillId} · v${item.version}`
+        );
+      }
+    });
   }, [runCommand]);
 
   const selectProfile = useCallback((profile: AiAgentProfile) => {
     setSelectedProfileId(profile.id);
     setScopeProfileId(profile.id);
     setProfileDraft(normalizeProfile({ ...profile, model: resolveProfileModelId(profile.model, aiConfig) }));
+    setProfileEditorOpen(true);
   }, [aiConfig?.activeModelId, aiConfig?.models]);
+
+  // Unsaved edits are detected by comparing the draft with the stored Profile it
+  // came from, normalized the same way, so no separate dirty flag can drift.
+  const profileDraftDirty = useMemo(() => {
+    if (!profileDraft) return false;
+    const saved = (summary?.profiles ?? []).find((item) => item.id === profileDraft.id);
+    // A Profile that was never saved is dirty by definition.
+    if (!saved) return true;
+    const baseline = normalizeProfile({ ...saved, model: resolveProfileModelId(saved.model, aiConfig) });
+    return JSON.stringify(baseline) !== JSON.stringify(profileDraft);
+  }, [aiConfig, profileDraft, summary?.profiles]);
+
+  const closeProfileEditor = useCallback(() => {
+    if (!profileDraftDirty) {
+      setProfileEditorOpen(false);
+      return;
+    }
+    setPendingConfirm({
+      title: t("automation:profileUnsavedTitle"),
+      message: t("automation:profileUnsavedDetail"),
+      confirmText: t("automation:profileUnsavedDiscard"),
+      danger: true,
+      onConfirm: () => setProfileEditorOpen(false)
+    });
+  }, [profileDraftDirty, t]);
 
   const createNewProfile = useCallback(() => {
     const profile = createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || "");
-    profile.name = onboardingActive ? t("automation:profileOnboardingName") : t("automation:profileDefaultName");
+    const desired = onboardingActive ? t("automation:profileOnboardingName") : t("automation:profileDefaultName");
+    // Two Profiles sharing a name are indistinguishable in the grid, in run
+    // records and in notifications, so the default gets the first free suffix.
+    profile.name = uniqueProfileName(desired, summary?.profiles ?? []);
     setSelectedProfileId(profile.id);
     setProfileDraft(profile);
-  }, [accounts, aiConfig?.activeModelId, aiConfig?.models, onboardingActive, t]);
+    setProfileEditorOpen(true);
+  }, [accounts, aiConfig?.activeModelId, aiConfig?.models, onboardingActive, summary?.profiles, t]);
+
+  // Trailing activity per Profile for the cards. The window must match the one the
+  // backend uses for realised profit, otherwise the card mixes two periods in a
+  // single row. The runs section loads lazily,
+  // so an unloaded section yields an empty map and the card shows no claim at all
+  // rather than a misleading "never run".
+  const profileRecentRuns = useMemo(() => {
+    const stats = new Map<string, { runs: number; failed: number; trades: number; lastAt: number | null }>();
+    if (!loadedSections.has("runs")) return stats;
+    const since = Date.now() - PROFILE_CARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+    for (const run of summary?.runs ?? []) {
+      const startedAt = Number(run.startedAt) || 0;
+      if (startedAt < since) continue;
+      const entry = stats.get(run.profileId) ?? { runs: 0, failed: 0, trades: 0, lastAt: null };
+      entry.runs += 1;
+      if (run.status === "failed") entry.failed += 1;
+      // Runs record how many trade actions they took, not their P&L: realised
+      // profit is attributed to fills, not to an automation run. Reporting trade
+      // count keeps the card truthful instead of implying a return it cannot know.
+      entry.trades += Number(run.actionCounts?.trade) || 0;
+      entry.lastAt = Math.max(entry.lastAt ?? 0, startedAt) || null;
+      stats.set(run.profileId, entry);
+    }
+    return stats;
+  }, [loadedSections, summary?.runs]);
+
+  // Realised 7-day result per Profile, supplied with the overview so the grid has
+  // it on first paint. Absent means "not reported", which renders as no claim.
+  const profilePerformance = useMemo(() => {
+    const map = new Map<string, AiProfilePerformance>();
+    for (const row of summary?.profilePerformance ?? []) map.set(row.profileId, row);
+    return map;
+  }, [summary?.profilePerformance]);
 
   const profiles = summary?.profiles ?? [];
   useEffect(() => {
@@ -4292,7 +4690,7 @@ function AiAutomationPanelComponent({
       clearProps: "transform,opacity,visibility"
     });
     if (!reduceMotion) {
-      const rows = content.querySelectorAll(".automation-profile-item, .automation-list-row");
+      const rows = content.querySelectorAll(".automation-profile-card, .automation-profile-item, .automation-list-row");
       if (rows.length > 0) {
         gsap.fromTo(rows, { autoAlpha: 0.82, y: 4 }, {
           autoAlpha: 1,
@@ -4378,47 +4776,50 @@ function AiAutomationPanelComponent({
         ) : !summary ? (
           <SectionState icon={<Bot size={22} />} title={t("automation:workbenchUnavailable")} detail={error || t("automation:workbenchNoSummary")} />
         ) : activeTab === "profiles" ? (
-          <div className="automation-profiles-layout">
-            <aside className="automation-profile-list">
-              <div className="automation-subhead">
-                <div><strong>{t("automation:profiles")}</strong><span>{t("common:itemCount", { count: profiles.length })}</span></div>
-                <button className="automation-create-profile" onClick={createNewProfile} title={t("automation:profileNew")}><Plus size={14} />{t("automation:profileCreate")}</button>
-              </div>
+          <div className="automation-profiles-board">
+            <div className="automation-subhead automation-profiles-board__head">
+              <div><strong>{t("automation:profiles")}</strong><span>{t("common:itemCount", { count: profiles.length })}</span></div>
               <label className="automation-profile-search">
                 <Search size={14} />
                 <input value={profileQuery} onChange={(event) => setProfileQuery(event.target.value)} placeholder={t("automation:profileSearchPlaceholder")} />
                 {profileQuery ? <button type="button" onClick={() => setProfileQuery("")} title={t("automation:profileClearSearch")}><X size={12} /></button> : null}
               </label>
-              {profiles.length === 0 ? (
-                <SectionState icon={<Bot size={20} />} title={t("automation:noProfiles")} detail={t("automation:profileEmptyDetail")} action={<button className="automation-empty-action" onClick={createNewProfile}><Plus size={14} />{t("automation:profileNew")}</button>} />
-              ) : filteredProfiles.length === 0 ? (
-                <SectionState icon={<Search size={20} />} title={t("automation:profileNoMatches")} detail={t("automation:profileNoMatchesDetail")} />
-              ) : (
-                <div className="automation-profile-items">
-                  {filteredProfiles.map((profile) => (
-                    <button className={clsx("automation-profile-item", selectedProfileId === profile.id && "active", focusId === profile.id && "focused")} onClick={() => selectProfile(profile)} key={profile.id}>
-                      <span className={clsx("automation-profile-dot", profile.enabled && "enabled")} />
-                      <span className="automation-profile-copy">
-                        <span>
-                          <strong>{profile.name}</strong>
-                          <em>{t(permissionModeI18nKey(profile.mode))}</em>
-                          {profile.multiAgentMode !== "off" ? <em className="collaboration">{profile.multiAgentMode === "auto" ? t("automation:profileCollaborationAuto", { count: profile.multiAgentMaxAgents || 4 }) : t("automation:profileCollaborationCustom", { count: profile.multiAgents.filter((agent) => agent.enabled).length })}</em> : null}
-                        </span>
-                        <small>{t("automation:profileListSummary", { environment: profile.environment === "live" ? t("common:live") : t("common:demo"), leverage: profile.targetLeverage, margin: profile.maxSingleTradeMarginPct, count: profile.symbols.length, minutes: profile.scanIntervalMinutes })}</small>
-                        <b className={clsx(runningProfileIds.has(profile.id) ? "running" : profile.enabled ? "listening" : "stopped")}>{runningProfileIds.has(profile.id) ? t("automation:running") : profile.enabled ? t("automation:profileListening") : t("automation:stopped")}</b>
-                      </span>
-                      <ChevronRight size={14} />
-                    </button>
-                  ))}
-                </div>
-              )}
-            </aside>
-            <main className="automation-profile-main">
-              {profileDraft ? (
+              <button className="automation-create-profile" onClick={createNewProfile} title={t("automation:profileNew")}><Plus size={14} />{t("automation:profileCreate")}</button>
+            </div>
+            {profiles.length === 0 ? (
+              <SectionState icon={<Bot size={20} />} title={t("automation:noProfiles")} detail={t("automation:profileEmptyDetail")} action={<button className="automation-empty-action" onClick={createNewProfile}><Plus size={14} />{t("automation:profileNew")}</button>} />
+            ) : filteredProfiles.length === 0 ? (
+              <SectionState icon={<Search size={20} />} title={t("automation:profileNoMatches")} detail={t("automation:profileNoMatchesDetail")} />
+            ) : (
+              <div className="automation-profile-grid">
+                {filteredProfiles.map((profile) => (
+                  <ProfileCard
+                    key={profile.id}
+                    profile={profile}
+                    marketAssets={marketAssets}
+                    running={runningProfileIds.has(profile.id)}
+                    focused={focusId === profile.id}
+                    recentRuns={profileRecentRuns.get(profile.id) ?? null}
+                    performance={profilePerformance.get(profile.id) ?? null}
+                    busy={Boolean(busyAction)}
+                    onEdit={() => selectProfile(profile)}
+                    onDelete={() => deleteProfileById(profile)}
+                    onToggleEnabled={() => toggleProfileEnabled(profile)}
+                  />
+                ))}
+              </div>
+            )}
+            {profileEditorOpen && profileDraft ? (
+              <ProfileEditorDialog
+                title={profileDraft.name || t("automation:profileUnnamed", { defaultValue: profileDraft.id })}
+                dirty={profileDraftDirty}
+                onClose={closeProfileEditor}
+              >
                 <ProfileEditor
                   draft={profileDraft}
                   accounts={accounts}
                   marketAssets={marketAssets}
+                  watchlist={watchlist}
                   skills={skills}
                   skillVersions={summary.skillVersions}
                   models={aiConfig?.models ?? []}
@@ -4433,10 +4834,8 @@ function AiAutomationPanelComponent({
                   onDailyReview={runDailyReview}
                   onDelete={deleteProfile}
                 />
-              ) : (
-                <SectionState icon={<Bot size={22} />} title={t("automation:profileSelect")} detail={t("automation:profileSelectDetail")} />
-              )}
-            </main>
+              </ProfileEditorDialog>
+            ) : null}
           </div>
         ) : activeTab === "runs" ? (
           <RunsView items={scopeRuns} profiles={profileMap} deliveries={scopeNotificationDeliveries} focusId={focusId} />
@@ -4471,6 +4870,20 @@ function AiAutomationPanelComponent({
             const pending = systematicProfileConflict;
             setSystematicProfileConflict(null);
             persistProfile(pending.profile, true);
+          }}
+        />
+      ) : null}
+      {pendingConfirm ? (
+        <AutomationConfirmDialog
+          title={pendingConfirm.title}
+          message={pendingConfirm.message}
+          confirmText={pendingConfirm.confirmText}
+          danger={pendingConfirm.danger}
+          onCancel={() => setPendingConfirm(null)}
+          onConfirm={() => {
+            const pending = pendingConfirm;
+            setPendingConfirm(null);
+            pending.onConfirm();
           }}
         />
       ) : null}

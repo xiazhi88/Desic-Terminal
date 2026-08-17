@@ -1502,7 +1502,6 @@ button {
   scrollbar-color: rgba(139, 92, 246, 0.22) transparent;
 }
 
-.watch-list-body::-webkit-scrollbar,
 .recent-trades::-webkit-scrollbar,
 .ticket-form::-webkit-scrollbar,
 .positions-table::-webkit-scrollbar,
@@ -1517,7 +1516,6 @@ button {
   height: 5px;
 }
 
-.watch-list-body::-webkit-scrollbar-track,
 .recent-trades::-webkit-scrollbar-track,
 .ticket-form::-webkit-scrollbar-track,
 .positions-table::-webkit-scrollbar-track,
@@ -1531,7 +1529,6 @@ button {
   background: transparent;
 }
 
-.watch-list-body::-webkit-scrollbar-thumb,
 .recent-trades::-webkit-scrollbar-thumb,
 .ticket-form::-webkit-scrollbar-thumb,
 .positions-table::-webkit-scrollbar-thumb,
@@ -1546,7 +1543,6 @@ button {
   background: rgba(139, 92, 246, 0.2);
 }
 
-.watch-list-body::-webkit-scrollbar-thumb:hover,
 .recent-trades::-webkit-scrollbar-thumb:hover,
 .ticket-form::-webkit-scrollbar-thumb:hover,
 .positions-table::-webkit-scrollbar-thumb:hover,
@@ -1558,76 +1554,6 @@ button {
 .ai-session-list::-webkit-scrollbar-thumb:hover,
 .storage-table-list::-webkit-scrollbar-thumb:hover {
   background: rgba(139, 92, 246, 0.34);
-}
-
-.symbol-row-wrap {
-  position: relative;
-  min-width: 0;
-  width: 100%;
-  height: 56px;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr);
-  align-items: center;
-  border-left: 3px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  padding: 0;
-  transform-style: preserve-3d;
-  transition: transform 180ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 180ms ease, background 180ms ease;
-}
-
-.symbol-row-wrap.dragging {
-  border-color: rgba(183, 146, 255, 0.42);
-  background: rgba(139, 92, 246, 0.11);
-  opacity: 0.82;
-}
-
-.drag-symbol {
-  position: absolute;
-  left: 5px;
-  top: 50%;
-  transform: translateY(-50%);
-  z-index: 2;
-  width: 18px;
-  height: 32px;
-  display: inline-grid;
-  place-items: center;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  color: var(--weak);
-  cursor: grab;
-}
-
-.drag-symbol:active {
-  cursor: grabbing;
-}
-
-.symbol-row {
-  display: grid;
-  grid-template-columns: 22px minmax(34px, 1fr) minmax(74px, 78px);
-  column-gap: 9px;
-  align-items: center;
-  height: 56px;
-  width: 100%;
-  min-width: 0;
-  border: 0;
-  background: transparent;
-  color: var(--text);
-  text-align: left;
-  cursor: pointer;
-  padding: 0 9px 0 25px;
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.symbol-main {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  gap: 1px;
-  overflow: hidden;
 }
 
 .symbol-icon {
@@ -1684,127 +1610,7 @@ button {
   font-weight: 550;
 }
 
-.symbol-row-wrap.active {
-  border-left-color: #d2b6ff;
-  background: linear-gradient(110deg, rgba(113, 56, 232, 0.54), rgba(49, 29, 93, 0.88) 56%, rgba(12, 15, 24, 0.94));
-  box-shadow: inset 0 0 0 1px rgba(210, 185, 255, 0.42), inset 0 1px rgba(255, 255, 255, 0.16), 0 12px 25px rgba(0, 0, 0, 0.24), 0 0 30px rgba(113, 56, 232, 0.28);
-}
-
-.symbol-row-wrap.active::before {
-  content: "";
-  position: absolute;
-  inset: 1px 1px 50% 4px;
-  border-radius: 4px 4px 0 0;
-  background: linear-gradient(90deg, rgba(255, 255, 255, 0.14), transparent 48%);
-  pointer-events: none;
-}
-
-.symbol-row-wrap.active .symbol-row {
-  position: relative;
-  z-index: 1;
-}
-
-.symbol-row-wrap.active .symbol-icon {
-  width: 26px;
-  height: 26px;
-  min-width: 26px;
-  border-color: rgba(255, 255, 255, 0.5);
-  box-shadow: 0 0 18px rgba(149, 92, 255, 0.36);
-}
-
-.symbol-row-wrap.active .symbol-name {
-  color: #fff;
-  font-size: 12px;
-}
-
 @media (hover: hover) and (pointer: fine) {
-  .symbol-row-wrap.active:hover {
-    transform: perspective(720px) translate3d(2px, -1px, 7px) rotateX(1.2deg) rotateY(-1.4deg);
-    box-shadow: inset 0 0 0 1px rgba(198, 179, 255, 0.44), inset 0 1px rgba(255, 255, 255, 0.1), 0 13px 25px rgba(0, 0, 0, 0.3), 0 0 28px rgba(113, 56, 232, 0.18);
-  }
-}
-
-.sort-symbol-actions {
-  position: absolute;
-  right: 31px;
-  top: 5px;
-  z-index: 4;
-  width: 20px;
-  display: grid;
-  gap: 2px;
-  opacity: 0;
-  transition: opacity 160ms ease;
-}
-
-.sort-symbol-actions button {
-  width: 18px;
-  height: 18px;
-  display: grid;
-  place-items: center;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--weak);
-  font-size: 11px;
-  line-height: 1;
-  cursor: pointer;
-}
-
-.sort-symbol-actions button:hover:not(:disabled) {
-  color: #efe8ff;
-  border-color: rgba(139, 92, 246, 0.38);
-}
-
-.sort-symbol-actions button:disabled {
-  cursor: not-allowed;
-  opacity: 0.3;
-}
-
-.remove-symbol {
-  position: absolute;
-  right: 6px;
-  top: 14px;
-  z-index: 4;
-  width: 20px;
-  height: 20px;
-  display: inline-grid;
-  place-items: center;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--weak);
-  cursor: pointer;
-  opacity: 0;
-  transition: opacity 160ms ease, color 160ms ease, border-color 160ms ease;
-}
-
-.symbol-row-wrap:hover .remove-symbol,
-.symbol-row-wrap:hover .sort-symbol-actions,
-.remove-symbol:focus-visible,
-.sort-symbol-actions:focus-within {
-  opacity: 1;
-}
-
-.remove-symbol:hover:not(:disabled) {
-  color: var(--down);
-  border-color: rgba(246, 70, 93, 0.36);
-}
-
-.remove-symbol:disabled {
-  cursor: not-allowed;
-  opacity: 0;
-}
-
-.symbol-row small {
-  display: block;
-  color: var(--weak);
-  font-size: 8px;
-  font-weight: 500;
-  line-height: 10px;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .symbol-quote {
@@ -1818,51 +1624,6 @@ button {
   align-self: center;
   padding-right: 0;
   overflow: hidden;
-}
-
-.symbol-row strong,
-.symbol-row em {
-  font-size: 9px;
-  font-style: normal;
-  min-width: 0;
-  width: 100%;
-  max-width: 78px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  text-align: right;
-}
-
-.symbol-row strong {
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 13px;
-}
-
-.symbol-row em {
-  font-size: 9px;
-  font-weight: 700;
-  line-height: 12px;
-}
-
-.symbol-name {
-  min-width: 0;
-  font-size: 11px;
-  font-weight: 750;
-  line-height: 13px;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  overflow: hidden;
-}
-
-.symbol-row-wrap:hover .symbol-row {
-  padding-right: 9px;
-}
-
-.symbol-row-wrap:hover .symbol-quote,
-.symbol-row-wrap:focus-within .symbol-quote {
-  opacity: 0.18;
-  transition: opacity 120ms ease;
 }
 
 .center-panel {
@@ -15636,7 +15397,6 @@ button {
     animation: none;
   }
 
-  .symbol-row-wrap.active:hover,
   .ai-float:hover {
     transform: none;
   }
@@ -16303,24 +16063,293 @@ button {
   margin-bottom: 0;
 }
 
-.automation-profiles-layout {
+/* Profiles at rest: a full-width grid. The old 272px rail truncated names and
+   kept the editor on screen even when nobody was editing. */
+.automation-profiles-board {
   min-width: 0;
   min-height: 100%;
   display: grid;
-  grid-template-columns: 272px minmax(0, 1fr);
-  border: 1px solid #27272d;
-  border-radius: 8px;
-  background: #0b0b0d;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 14px;
+  align-content: start;
+}
+
+.automation-profiles-board__head {
+  display: grid;
+  grid-template-columns: auto minmax(180px, 320px) auto;
+  align-items: center;
+  gap: 12px;
+}
+
+.automation-profiles-board__head .automation-profile-search { margin: 0; }
+
+.automation-profile-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+  gap: 12px;
+  align-content: start;
+}
+
+.automation-profile-card {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.018);
+  transition: border-color 160ms ease, background 160ms ease;
+}
+
+.automation-profile-card:hover { border-color: rgba(149, 92, 255, 0.4); }
+
+/* A listening or running Profile is acting on the account right now, so it is
+   marked with a coloured edge rather than only a word in the footer. */
+.automation-profile-card.is-listening { box-shadow: inset 3px 0 0 var(--status-ready); }
+.automation-profile-card.is-running { box-shadow: inset 3px 0 0 var(--status-running); }
+.automation-profile-card.is-focused { border-color: var(--purple); }
+
+.automation-profile-card__head {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 10px;
+}
+
+.automation-profile-card__identity { min-width: 0; display: grid; gap: 7px; }
+
+.automation-profile-card__identity > strong {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-profile-card__tags { display: flex; flex-wrap: wrap; gap: 5px; }
+
+.automation-profile-card__tags em {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--muted);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+}
+
+/* Live money is the one tag that must never be mistaken for demo. */
+.automation-profile-card__tags em.is-live {
+  color: #ffd7dc;
+  background: color-mix(in srgb, var(--up) 24%, transparent);
+}
+
+.automation-profile-card__tags em.is-quiet { color: var(--weak); background: transparent; padding-left: 0; }
+
+.automation-profile-card__switch { flex: 0 0 auto; display: inline-flex; cursor: pointer; }
+.automation-profile-card__switch input { position: absolute; width: 1px; height: 1px; opacity: 0; }
+
+.automation-profile-card__switch > span {
+  width: 32px;
+  height: 18px;
+  display: block;
+  position: relative;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  transition: background 160ms ease;
+}
+
+.automation-profile-card__switch > span::after {
+  content: "";
+  position: absolute;
+  top: 3px;
+  left: 3px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #8d97a8;
+  transition: transform 160ms ease, background 160ms ease;
+}
+
+.automation-profile-card__switch input:checked + span { background: color-mix(in srgb, var(--purple) 42%, transparent); }
+.automation-profile-card__switch input:checked + span::after { transform: translateX(14px); background: #f2ecff; }
+.automation-profile-card__switch input:focus-visible + span { outline: 1px solid var(--focus); outline-offset: 2px; }
+
+.automation-profile-card__symbols { min-width: 0; display: flex; flex-wrap: wrap; gap: 5px; }
+
+.automation-profile-card__symbol {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px 3px 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.automation-profile-card__symbol .symbol-icon { width: 18px; min-width: 18px; height: 18px; flex: 0 0 auto; }
+.automation-profile-card__symbol.is-more,
+.automation-profile-card__symbol.is-empty { padding-left: 8px; color: var(--weak); }
+
+.automation-profile-card__facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+  padding: 10px 0;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.automation-profile-card__facts > div { min-width: 0; display: grid; gap: 3px; }
+
+.automation-profile-card__facts dt {
+  overflow: hidden;
+  color: var(--weak);
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.automation-profile-card__facts dd {
+  margin: 0;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.automation-profile-card__recent {
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automation-profile-card__recent > span { color: var(--weak); font-size: 10px; }
+
+.automation-profile-card__recent-values {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+/* The realised result is the headline of this row; run counts support it. */
+.automation-profile-card__pnl {
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+
+.automation-profile-card__pnl.is-gain { color: var(--up); }
+.automation-profile-card__pnl.is-loss { color: var(--down); }
+.automation-profile-card__pnl.is-muted { color: var(--weak); font-weight: 600; }
+
+.automation-profile-card__recent-values em {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 5px;
+  color: var(--weak);
+  font-size: 10px;
+  font-style: normal;
+}
+.automation-profile-card__recent b.is-failed { color: var(--danger); font-size: 10px; font-weight: 650; }
+.automation-profile-card__recent b.is-trades { color: var(--muted); font-size: 10px; font-weight: 650; }
+
+/* In-app confirmation, used because the Tauri webview rejects window.confirm. */
+.automation-confirm-modal,
+.confirm-prompt { width: min(420px, 92vw); display: grid; gap: 12px; }
+.automation-confirm-modal__message,
+.confirm-prompt__message { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+
+.automation-profile-card__actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.automation-profile-card__state {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.automation-profile-card__state i { width: 6px; height: 6px; border-radius: 50%; background: var(--weak); }
+.automation-profile-card__state.is-listening i { background: var(--status-ready); }
+.automation-profile-card__state.is-running i { background: var(--status-running); }
+
+.automation-profile-card__buttons { display: flex; align-items: center; gap: 5px; }
+
+.automation-profile-card__buttons button {
+  min-height: 26px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.automation-profile-card__buttons button:hover:not(:disabled) {
+  border-color: rgba(149, 92, 255, 0.55);
+  color: var(--text);
+}
+
+.automation-profile-card__buttons button.is-danger:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--danger) 55%, transparent);
+  color: #ffb4b8;
+}
+
+.automation-profile-card__buttons button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+/* Editor dialog: tall content, so it is draggable and scrolls internally. */
+.automation-profile-editor-modal {
+  width: min(1080px, 94vw);
+  max-height: 92vh;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  padding: 0;
   overflow: hidden;
 }
 
-.automation-profile-list {
-  min-width: 0;
-  min-height: 0;
-  display: grid;
-  grid-template-rows: auto auto minmax(0, 1fr);
-  border-right: 1px solid #27272d;
-  background: #09090b;
+.automation-profile-editor-modal__head { cursor: grab; }
+.automation-profile-editor-modal__head > div { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
+
+.automation-profile-editor-modal__dirty {
+  flex: 0 0 auto;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--warn) 20%, transparent);
+  color: #ffdfa6;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+.automation-profile-editor-modal__body { min-height: 0; overflow: auto; }
+.automation-profile-editor-modal__body .automation-profile-editor { border: 0; border-radius: 0; }
+
+@media (max-width: 720px) {
+  .automation-profiles-board__head { grid-template-columns: minmax(0, 1fr); }
+  .automation-profile-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 .automation-subhead {
@@ -16398,92 +16427,9 @@ button {
   outline-offset: -2px;
 }
 
-.automation-profile-items {
-  min-height: 0;
-  overflow-y: auto;
-  padding: 7px;
-}
-
-.automation-profile-item {
-  width: 100%;
-  min-width: 0;
-  min-height: 72px;
-  display: grid;
-  grid-template-columns: 8px minmax(0, 1fr) 16px;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid transparent;
-  border-radius: 6px;
-  background: transparent;
-  color: var(--muted);
-  padding: 8px 9px;
-  text-align: left;
-  cursor: pointer;
-  transition: border-color 160ms ease, background-color 160ms ease, color 160ms ease, transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
-}
-
-.automation-profile-item:hover,
-.automation-profile-item.active {
-  background: #111115;
-  color: var(--text);
-}
-
-.automation-profile-item.active {
-  border-color: #3c354c;
-  background: #121017;
-}
-
-.automation-profile-item:hover:not(.active) {
-  border-color: #29292f;
-  transform: translateX(2px);
-}
-
-.automation-profile-item > svg {
-  color: #55555f;
-  transition: color 160ms ease, transform 160ms ease;
-}
-
-.automation-profile-item.active > svg {
-  color: #aa95da;
-  transform: translateX(1px);
-}
-
-.automation-profile-item.focused,
 .automation-list-row.focused {
   outline: 1px solid rgba(139, 92, 246, 0.58);
   outline-offset: -1px;
-}
-
-.automation-profile-item strong,
-.automation-profile-item small,
-.automation-profile-copy {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.automation-profile-copy > span {
-  min-width: 0;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.automation-profile-copy > b {
-  display: block;
-  margin-top: 4px;
-  font-size: 9px;
-  font-weight: 700;
-}
-
-.automation-profile-copy > b.running,
-.automation-profile-copy > b.listening {
-  color: #66d58d;
-}
-
-.automation-profile-copy > b.stopped {
-  color: #6d6d77;
 }
 
 .automation-create-profile,
@@ -16549,40 +16495,6 @@ button {
   background: transparent;
   color: #777782;
   cursor: pointer;
-}
-
-.automation-profile-copy em {
-  flex: 0 0 auto;
-  padding: 2px 5px;
-  border: 1px solid #34313d;
-  border-radius: 4px;
-  color: #a89abc;
-  font-size: 8px;
-  font-style: normal;
-  font-weight: 700;
-}
-
-.automation-profile-item strong {
-  font-size: 12px;
-}
-
-.automation-profile-item small {
-  margin-top: 3px;
-  color: var(--weak);
-  font-size: 10px;
-}
-
-.automation-profile-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--weak);
-}
-
-.automation-profile-dot.enabled {
-  background: var(--down);
-  box-shadow: 0 0 0 3px rgba(14, 203, 129, 0.08);
-  animation: automation-listening-pulse 2.6s ease-in-out infinite;
 }
 
 .automation-profile-main {
@@ -16820,6 +16732,20 @@ button {
 }
 
 .automation-symbol-field.wide { grid-column: 1 / -1; }
+
+/* The restriction is stated beside the label, because the picker silently
+   offering fewer markets would otherwise look like missing data. */
+.automation-symbol-field > span { display: flex; align-items: baseline; flex-wrap: wrap; gap: 8px; }
+.automation-symbol-field > span > small { color: #6c7787; font-size: 9px; font-weight: 500; }
+
+/* A saved symbol with no live subscription is marked in the warning colour: the
+   Profile would otherwise look correctly configured while reading stale data. */
+.automation-symbol-chip.is-unsubscribed {
+  border-color: color-mix(in srgb, var(--warn) 55%, transparent);
+  background: color-mix(in srgb, var(--warn) 12%, transparent);
+}
+
+.automation-symbol-chip.is-unsubscribed b { color: #ffd9a3; }
 
 .automation-symbol-chips {
   min-height: 42px;
@@ -17717,11 +17643,6 @@ button {
 .automation-team-footer button:disabled {
   opacity: 0.38;
   cursor: not-allowed;
-}
-
-.automation-profile-copy em.collaboration {
-  border-color: #3d364b;
-  color: #c6b6e5;
 }
 
 @container (max-width: 760px) {
@@ -22787,7 +22708,6 @@ button {
 .ai-automation-panel .automation-master-toggle small,
 .ai-automation-panel .automation-metric span,
 .ai-automation-panel .automation-subhead span,
-.ai-automation-panel .automation-profile-item small,
 .ai-automation-panel .automation-editor-head span,
 .ai-automation-panel .automation-field-note,
 .ai-automation-panel .automation-inline-empty,
@@ -22814,7 +22734,6 @@ button {
 }
 
 .ai-automation-panel .automation-tabs button small,
-.ai-automation-panel .automation-profile-copy em,
 .ai-automation-panel .automation-wake-rule-tags span,
 .ai-automation-panel .automation-wake-rule-cell > span,
 .ai-automation-panel .automation-wake-rule-cell > small,
@@ -22824,14 +22743,12 @@ button {
 }
 
 .ai-automation-panel .automation-subhead strong,
-.ai-automation-panel .automation-profile-item strong,
 .ai-automation-panel .automation-row-main strong,
 .ai-automation-panel .automation-wake-editor-head strong,
 .ai-automation-panel .automation-wake-list-head strong {
   font-size: 14px;
 }
 
-.ai-automation-panel .automation-profile-copy > b,
 .ai-automation-panel .automation-skill-version-row small,
 .ai-automation-panel .automation-skill-version-row label,
 .ai-automation-panel .automation-source-badge,
@@ -22888,10 +22805,6 @@ button {
 .ai-automation-panel .terminal-select-trigger,
 .ai-automation-panel .automation-wake-toolbar-fields input {
   height: 38px;
-}
-
-.ai-automation-panel .automation-profile-item {
-  min-height: 78px;
 }
 
 .automation-run-modal-head strong {
