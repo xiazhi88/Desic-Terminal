@@ -1589,7 +1589,6 @@ function TradingTerminal({
     promise: Promise<Candle[]>;
     queued: boolean;
   } | null>(null);
-  const watchSearchRef = useRef<HTMLDivElement | null>(null);
   terminalRenderCountRef.current += 1;
   const requestMarketCandles = useCallback((nextBar: string) => {
     const key = `${symbol}\u0000${nextBar}`;
@@ -4077,6 +4076,7 @@ function TradingTerminal({
               <AiAutomationPanel
                 accounts={accounts}
                 marketAssets={marketAssets}
+                watchlist={watchlist}
                 initialTab={automationInitialTab}
                 focusId={automationFocusId}
                 onNotify={pushNotification}
@@ -5832,7 +5832,7 @@ function AiSettingsPane({
 
       {!firstSetup && <div className="ai-current-model-row">
         <label>
-          <span>{t("settings:currentAiAssistantModel")}</span>
+          <span>{t("settings:currentAiAssistantModel")}<small>{t("settings:currentModelScope")}</small></span>
           <TerminalSelect
             ariaLabel={t("settings:currentAiAssistantModel")}
             value={activeModelId}
@@ -5846,13 +5846,37 @@ function AiSettingsPane({
 
       <div className={clsx("ai-model-config-layout", firstSetup && "first-setup")}>
         <aside className="ai-model-config-list" aria-label={t("settings:modelConfigurationList")}>
-          {models.length === 0 ? <button type="button" onClick={() => setSetupOpen(true)}><Plus size={14} />{t("settings:addFirstModel")}</button> : models.map((item) => (
-            <button type="button" className={clsx(item.id === selectedModelId && "active")} onClick={() => setSelectedModelId(item.id)} key={item.id}>
-              <strong>{item.name || t("settings:unnamedModel")}</strong>
-              <span>{item.provider} · {item.model || t("settings:pendingConfiguration")}</span>
-              <em>{item.id === activeModelId ? t("settings:currentlyUsed") : summary?.models.find((saved) => saved.id === item.id)?.configured ? t("settings:configured") : aiProviderUsesLocalCli(item.provider) ? t("settings:pendingSave") : t("settings:keyNotConfigured")}</em>
-            </button>
-          ))}
+          {models.length === 0 ? <button type="button" onClick={() => setSetupOpen(true)}><Plus size={14} />{t("settings:addFirstModel")}</button> : models.map((item) => {
+            const isActive = item.id === activeModelId;
+            const saved = summary?.models.find((entry) => entry.id === item.id);
+            return (
+              // The row carries two distinct actions: opening the model for
+              // editing, and making it the model the assistants actually use.
+              // They were previously one control, so "currently used" read as a
+              // status label rather than something switchable.
+              <div className={clsx("ai-model-config-row", item.id === selectedModelId && "is-selected", isActive && "is-active")} key={item.id}>
+                <button type="button" className="ai-model-config-row__select" onClick={() => setSelectedModelId(item.id)} aria-pressed={item.id === selectedModelId}>
+                  <strong>{item.name || t("settings:unnamedModel")}</strong>
+                  <span>{item.provider} · {item.model || t("settings:pendingConfiguration")}</span>
+                  <em>{saved?.configured ? t("settings:configured") : aiProviderUsesLocalCli(item.provider) ? t("settings:pendingSave") : t("settings:keyNotConfigured")}</em>
+                </button>
+                {isActive ? (
+                  <span className="ai-model-config-row__badge" title={t("settings:currentModelScope")}>
+                    <CircleCheck size={11} />{t("settings:currentlyUsed")}
+                  </span>
+                ) : (
+                  <button
+                    type="button"
+                    className="ai-model-config-row__use"
+                    onClick={() => setActiveModelId(item.id)}
+                    title={t("settings:setAsCurrentModelHint")}
+                  >
+                    {t("settings:setAsCurrentModel")}
+                  </button>
+                )}
+              </div>
+            );
+          })}
         </aside>
 
         {selectedModel ? (

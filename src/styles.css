@@ -8928,6 +8928,11 @@ button {
   border-bottom: 1px solid var(--line-soft);
 }
 
+/* The label states which surfaces this choice drives, so the setting is not
+   mistaken for a display preference. */
+.ai-current-model-row label > span { display: grid; gap: 2px; }
+.ai-current-model-row label > span > small { color: var(--weak); font-size: 10px; line-height: 1.4; }
+
 .ai-current-model-row label {
   min-width: 0;
   display: grid;
@@ -9004,34 +9009,123 @@ button {
   cursor: pointer;
 }
 
-.ai-model-config-list > button:hover,
-.ai-model-config-list > button.active {
+.ai-model-config-list > button:hover {
   border-color: rgba(139, 92, 246, 0.48);
   background: rgba(139, 92, 246, 0.08);
 }
 
+/* Model row: identity on the left opens it for editing, the trailing control
+   makes it the model the assistants use. */
+.ai-model-config-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 10px 4px 4px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.ai-model-config-row.is-selected {
+  border-color: rgba(139, 92, 246, 0.48);
+  background: rgba(139, 92, 246, 0.08);
+}
+
+/* The active model keeps a persistent left marker so it stays identifiable
+   even while a different row is open for editing. */
+.ai-model-config-row.is-active {
+  box-shadow: inset 2px 0 0 var(--purple);
+}
+
+.ai-model-config-row__select {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 7px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--muted);
+  text-align: left;
+  cursor: pointer;
+}
+
+.ai-model-config-row__select:hover { background: rgba(255, 255, 255, 0.03); }
+.ai-model-config-row__select:focus-visible { outline: 1px solid var(--focus); outline-offset: -1px; }
+
+.ai-model-config-row__use {
+  flex: 0 0 auto;
+  height: 24px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  font-weight: 700;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+/* Revealed on hover or keyboard focus, so the list stays calm while remaining
+   discoverable; it is always present for assistive technology. */
+.ai-model-config-row:hover .ai-model-config-row__use,
+.ai-model-config-row:focus-within .ai-model-config-row__use,
+.ai-model-config-row__use:focus-visible { opacity: 1; }
+
+.ai-model-config-row__use:hover {
+  border-color: rgba(149, 92, 255, 0.6);
+  color: var(--text);
+}
+
+.ai-model-config-row__badge {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 9px;
+  border-radius: 999px;
+  color: #e7dcff;
+  background: color-mix(in srgb, var(--purple) 22%, transparent);
+  font-size: 10px;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
 .ai-model-config-list strong,
 .ai-model-config-list span,
-.ai-model-config-list em {
+.ai-model-config-list em,
+.ai-model-config-row__select strong,
+.ai-model-config-row__select span,
+.ai-model-config-row__select em {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.ai-model-config-list strong {
+.ai-model-config-list strong,
+.ai-model-config-row__select strong {
   color: var(--text);
   font-size: 12px;
 }
 
 .ai-model-config-list span,
-.ai-model-config-list em {
+.ai-model-config-list em,
+.ai-model-config-row__select span,
+.ai-model-config-row__select em {
   font-size: 10px;
   font-style: normal;
 }
 
-.ai-model-config-list em {
-  color: #a995dd;
+.ai-model-config-list em,
+.ai-model-config-row__select em {
+  color: var(--weak);
 }
 
 .ai-model-config-editor {
