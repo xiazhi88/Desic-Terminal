@@ -18985,6 +18985,42 @@ fn database_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(data_dir.join("desic_trade_ai.sqlite3"))
 }
 
+/// Writers wait this long for a peer to release the lock before failing. Long
+/// batches legitimately exceed a few seconds, so the wait has to outlast them.
+const WRITE_BUSY_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// `PRAGMA auto_vacuum` values. 0 never reclaims, 1 reclaims on every commit
+/// (too costly for candle writes), 2 records free pages for later reclamation.
+const AUTO_VACUUM_NONE: i64 = 0;
+const AUTO_VACUUM_INCREMENTAL: i64 = 2;
+
+/// Puts the database into incremental auto-vacuum so freed pages can later be
+/// returned to the filesystem. A database created without it keeps mode 0 until
+/// a full `VACUUM` rebuilds it, which is why this reports rather than fails.
+fn enable_incremental_auto_vacuum(conn: &Connection) -> Result<bool, String> {
+    let current: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    if current == AUTO_VACUUM_INCREMENTAL {
+        return Ok(true);
+    }
+    conn.pragma_update(None, "auto_vacuum", AUTO_VACUUM_INCREMENTAL)
+        .map_err(|err| err.to_string())?;
+    let applied: i64 = conn
+        .query_row("PRAGMA auto_vacuum", [], |row| row.get(0))
+        .map_err(|err| err.to_string())?;
+    Ok(applied == AUTO_VACUUM_INCREMENTAL)
+}
+
+/// Returns free pages to the filesystem. Only effective under incremental
+/// auto-vacuum; on a mode-0 database the pragma is a no-op, so callers treat
+/// this as best-effort maintenance rather than a guarantee.
+pub(crate) fn reclaim_free_database_pages(conn: &Connection) {
+    if let Err(error) = conn.execute_batch("PRAGMA incremental_vacuum;") {
+        eprintln!("incremental_vacuum skipped: {error}");
+    }
+}
+
 fn open_database_connection(
     app: &tauri::AppHandle,
     initialize_journal_mode: bool,
@@ -18993,7 +19029,11 @@ fn open_database_connection(
         app.state::<DatabaseRuntime>().wait_until_ready()?;
     }
     let conn = Connection::open(database_path(app)?).map_err(|err| err.to_string())?;
-    conn.busy_timeout(Duration::from_secs(5))
+    // Writers share one lock, so a long batch (a backtest report, a candle
+    // backfill) can hold it well past a few seconds. Five seconds surfaced as
+    // "database is locked" on unattended work such as the automation
+    // scheduler; thirty matches the updater and lets the waiter ride it out.
+    conn.busy_timeout(WRITE_BUSY_TIMEOUT)
         .map_err(|err| err.to_string())?;
     if initialize_journal_mode {
         let journal_mode = conn
@@ -19002,6 +19042,14 @@ fn open_database_connection(
         if !journal_mode.eq_ignore_ascii_case("wal") {
             conn.pragma_update(None, "journal_mode", "WAL")
                 .map_err(|err| err.to_string())?;
+        }
+        // Deleted pages are only reused, never returned, so a database that
+        // once held large reports keeps that size forever. Incremental mode
+        // records free pages without stalling ordinary writes; maintenance
+        // reclaims them. SQLite only accepts the switch on a fresh file or via
+        // VACUUM, so an existing database keeps mode 0 until it is rebuilt.
+        if let Err(error) = enable_incremental_auto_vacuum(&conn) {
+            eprintln!("database auto_vacuum setup skipped: {error}");
         }
     }
     conn.pragma_update(None, "synchronous", "NORMAL")
@@ -23139,6 +23187,61 @@ mod tests {
             };
             let _ = fs::remove_file(candidate);
         }
+    }
+
+    #[test]
+    fn incremental_auto_vacuum_returns_free_pages_to_the_file() {
+        // A fresh database can adopt incremental mode directly, which is the
+        // path new installs take.
+        let dir = std::env::temp_dir().join(format!("desic-vacuum-{}", now_ms()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("vacuum.sqlite3");
+        let conn = Connection::open(&path).expect("open");
+        assert!(
+            enable_incremental_auto_vacuum(&conn).expect("pragma"),
+            "a new database must accept incremental auto_vacuum"
+        );
+
+        conn.execute_batch(
+            "CREATE TABLE bulk(id INTEGER PRIMARY KEY, blob TEXT NOT NULL);",
+        )
+        .expect("schema");
+        let payload = "x".repeat(4_000);
+        for id in 0..500 {
+            conn.execute("INSERT INTO bulk(id, blob) VALUES(?1, ?2)", params![id, payload])
+                .expect("insert");
+        }
+        conn.execute_batch("DELETE FROM bulk;").expect("delete");
+
+        let free_before: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .expect("freelist");
+        assert!(free_before > 0, "deleting rows must leave reclaimable pages");
+
+        reclaim_free_database_pages(&conn);
+
+        let free_after: i64 = conn
+            .query_row("PRAGMA freelist_count", [], |row| row.get(0))
+            .expect("freelist");
+        assert!(
+            free_after < free_before,
+            "incremental_vacuum must return pages: {free_before} -> {free_after}"
+        );
+
+        drop(conn);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_connections_wait_long_enough_for_a_large_batch() {
+        // Five seconds surfaced as "database is locked" while a backtest report
+        // was being written; the wait must outlast such a batch.
+        assert!(
+            WRITE_BUSY_TIMEOUT >= Duration::from_secs(30),
+            "write busy timeout regressed to {WRITE_BUSY_TIMEOUT:?}"
+        );
+        assert_eq!(AUTO_VACUUM_INCREMENTAL, 2);
+        assert_eq!(AUTO_VACUUM_NONE, 0);
     }
 
     #[test]

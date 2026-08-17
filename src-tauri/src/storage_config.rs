@@ -1832,6 +1832,11 @@ fn storage_maintenance_blocking(app: tauri::AppHandle) -> Result<StorageMaintena
         PRAGMA optimize;
         ",
     );
+    // Reclaim the pages this pass freed. Under incremental auto-vacuum the file
+    // actually shrinks. A database created before that setting reports its free
+    // pages but cannot return them until a full VACUUM rebuilds it, so this is
+    // best-effort and never fails maintenance.
+    crate::reclaim_free_database_pages(&conn);
     let rows = storage_table_counts(&conn)?;
     let kline_ranges = storage_kline_ranges(&app, &conn)?;
     let database_bytes = fs::metadata(&path)
