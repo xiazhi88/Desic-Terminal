@@ -4823,6 +4823,12 @@ pub(crate) fn archive_backtest_series(conn: &Connection) -> Result<usize, String
 /// `strategyActions` / `equityCurve`.
 const LEGACY_REPORT_COMPACT_THRESHOLD_BYTES: i64 = 8 * 1024 * 1024;
 
+/// Largest report the recency reprieve will protect. Slim runs measured on real
+/// data stay under a megabyte even at 132k bars, while pre-slimming rows reach
+/// 257 MB, so this cleanly separates "recent run worth keeping replayable" from
+/// "legacy bulk that must be reclaimed".
+const RECENCY_REPRIEVE_MAX_REPORT_BYTES: i64 = 8 * 1024 * 1024;
+
 /// Per-bar arrays the current engine no longer persists. Dropping them from a
 /// legacy row leaves exactly what a slim run stores today.
 const LEGACY_REPORT_PER_BAR_KEYS: [&str; 4] = [
@@ -4857,6 +4863,15 @@ pub(crate) fn compact_legacy_backtest_reports(conn: &Connection) -> Result<usize
                  SELECT id FROM (
                    SELECT id FROM systematic_backtests
                    WHERE report_json IS NOT NULL
+                     -- The recency reprieve exists so the runs a user is still
+                     -- reviewing keep their replay. It was written when every
+                     -- report was small, so it also shielded pre-slimming rows
+                     -- of 100-270 MB: those dominate the file and slow every
+                     -- history read, which is the opposite of the intent. A
+                     -- current slim run stays under a megabyte even at 130k
+                     -- bars, so anything past this ceiling is legacy bulk and
+                     -- is compacted regardless of age.
+                     AND LENGTH(report_json) <= ?3
                    ORDER BY COALESCE(finished_at, updated_at, created_at) DESC
                    LIMIT ?2
                  )
@@ -4867,7 +4882,8 @@ pub(crate) fn compact_legacy_backtest_reports(conn: &Connection) -> Result<usize
         .query_map(
             params![
                 LEGACY_REPORT_COMPACT_THRESHOLD_BYTES,
-                RETAINED_BACKTEST_SERIES_RUNS as i64
+                RETAINED_BACKTEST_SERIES_RUNS as i64,
+                RECENCY_REPRIEVE_MAX_REPORT_BYTES
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
         )
@@ -15946,9 +15962,38 @@ def on_bar(ctx):
             params![big],
         )
         .expect("insert live run");
+        // The newest run, sized like a current slim run. Recency must still
+        // protect this one so a user can replay what they just executed.
+        let slim = legacy_report(64);
+        assert!((slim.len() as i64) <= RECENCY_REPRIEVE_MAX_REPORT_BYTES);
+        conn.execute(
+            "INSERT INTO systematic_backtests(
+               id,strategy_id,strategy_version,inst_id,status,progress_pct,data_snapshot_id,
+               bar_count,request_json,report_json,created_at,updated_at,finished_at
+             ) VALUES('run-slim','s','1','BTC-USDT-SWAP','completed',100.0,'snap',1,'{}',?1,?2,?2,?2)",
+            params![slim, total_runs as i64 + 10],
+        )
+        .expect("insert slim run");
 
         let compacted = compact_legacy_backtest_reports(&conn).expect("compact");
-        assert_eq!(compacted, 3, "only runs older than the retention window compact");
+        // Every completed legacy-scale row compacts regardless of age: at
+        // 100-270 MB each they are what bloats the file and slows history reads.
+        // Recency only shields rows small enough to be a current slim run.
+        assert_eq!(
+            compacted, total_runs,
+            "legacy-scale reports must compact even inside the recency window"
+        );
+        let slim_after: String = conn
+            .query_row(
+                "SELECT report_json FROM systematic_backtests WHERE id='run-slim'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("slim row");
+        assert_eq!(
+            slim_after, slim,
+            "a recent slim run must keep its replay arrays untouched"
+        );
 
         let report_of = |id: &str| -> Value {
             let raw: String = conn
@@ -15988,8 +16033,9 @@ def on_bar(ctx):
             Some(LEGACY_BARS as u64)
         );
 
-        // The newest runs and the in-flight run keep their full reports.
-        assert!(report_of(&format!("run-{:03}", total_runs - 1))["equityCurve"]
+        // A recent run keeps its full report only when it is slim; the in-flight
+        // run keeps its report at any size because it is still being written.
+        assert!(report_of("run-slim")["equityCurve"]
             .as_array()
             .is_some_and(|rows| !rows.is_empty()));
         assert!(report_of("run-live")["replaySnapshots"]
