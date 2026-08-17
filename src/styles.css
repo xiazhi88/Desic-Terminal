@@ -886,9 +886,10 @@ button {
 }
 
 .market-title {
+  position: relative;
   min-width: 268px;
   min-height: 46px;
-  padding: 0 15px 0 11px;
+  padding: 0;
   border: 1px solid rgba(188, 157, 255, 0.3);
   border-left: 3px solid #b58dff;
   border-radius: 7px;
@@ -897,9 +898,173 @@ button {
   gap: 9px;
 }
 
+/* The whole plate is the button, so the hit area matches what users aim at. */
+.market-title__trigger {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 0 12px 0 11px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  -webkit-app-region: no-drag;
+}
+
+.market-title__chevron {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: var(--muted);
+  transition: transform 160ms ease, color 160ms ease;
+}
+
+.market-title__trigger:hover .market-title__chevron { color: var(--text); }
+.market-title__trigger.is-open .market-title__chevron { transform: rotate(180deg); color: var(--text); }
+.market-title__trigger:focus-visible { outline: 1px solid var(--focus); outline-offset: -2px; }
+
 .market-title .symbol-icon {
   width: 24px;
+  min-width: 24px;
   height: 24px;
+  flex: 0 0 auto;
+}
+
+.market-picker {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 320;
+  width: min(400px, 92vw);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel-2);
+  box-shadow: 0 22px 48px rgba(0, 0, 0, 0.5);
+  -webkit-app-region: no-drag;
+}
+
+.market-picker__search {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding: 0 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--weak);
+}
+
+.market-picker__search input {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+}
+
+.market-picker__search > button {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--weak);
+  background: rgba(255, 255, 255, 0.07);
+  cursor: pointer;
+}
+
+.market-picker__list {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: 2px;
+  max-height: min(52vh, 420px);
+  overflow: auto;
+}
+
+.market-picker__row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 4px;
+  border-radius: 8px;
+}
+
+.market-picker__row:hover { background: rgba(255, 255, 255, 0.035); }
+.market-picker__row.is-active { background: color-mix(in srgb, var(--purple) 16%, transparent); }
+
+.market-picker__pick {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 6px 8px 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.market-picker__ident { min-width: 0; display: grid; gap: 1px; }
+.market-picker__ident strong { color: var(--text); font-size: 13px; font-weight: 700; }
+
+.market-picker__ident small {
+  overflow: hidden;
+  color: var(--weak);
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Starring is a secondary action, so it stays quiet until the row is hovered
+   while remaining reachable by keyboard at all times. */
+.market-picker__star {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  margin-right: 4px;
+  padding: 0;
+  border: 0;
+  border-radius: 50%;
+  color: var(--weak);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 140ms ease, color 140ms ease;
+}
+
+.market-picker__row:hover .market-picker__star,
+.market-picker__star.is-on,
+.market-picker__star:focus-visible { opacity: 1; }
+.market-picker__star.is-on { color: #f5c15a; }
+.market-picker__star.is-on svg { fill: currentColor; }
+.market-picker__star:hover:not(:disabled) { color: #ffd98a; }
+.market-picker__star:disabled { cursor: not-allowed; opacity: 0.4; }
+
+.market-picker__empty {
+  padding: 18px 10px;
+  color: var(--weak);
+  font-size: 11px;
+  text-align: center;
 }
 
 .market-title strong {
@@ -1177,16 +1342,15 @@ button {
 .content-grid {
   --chart-depth-default: 220px;
   --chart-depth-min: 188px;
-  --watchlist-min: 206px;
-  --watchlist-max: 236px;
   height: 100%;
   min-height: 0;
   min-width: 0;
   overflow: hidden;
   position: relative;
   display: grid;
+  /* The watchlist rail is gone: markets are switched from the title bar, so the
+     chart owns the width the rail used to take. */
   grid-template-columns:
-    minmax(var(--watchlist-min), var(--watchlist-max))
     minmax(0, 1fr)
     minmax(var(--chart-depth-min), var(--chart-depth-size, var(--chart-depth-default)))
     minmax(232px, 272px);
@@ -1196,10 +1360,7 @@ button {
   .content-grid {
     --chart-depth-default: 196px;
     --chart-depth-min: 168px;
-    --watchlist-min: 196px;
-    --watchlist-max: 216px;
     grid-template-columns:
-      minmax(var(--watchlist-min), var(--watchlist-max))
       minmax(0, 1fr)
       minmax(var(--chart-depth-min), var(--chart-depth-size, var(--chart-depth-default)))
       minmax(210px, 238px);
@@ -1227,10 +1388,7 @@ button {
   .content-grid {
     --chart-depth-default: 176px;
     --chart-depth-min: 152px;
-    --watchlist-min: 188px;
-    --watchlist-max: 204px;
     grid-template-columns:
-      minmax(var(--watchlist-min), var(--watchlist-max))
       minmax(0, 1fr)
       minmax(var(--chart-depth-min), var(--chart-depth-size, var(--chart-depth-default)))
       minmax(198px, 216px);
@@ -1245,122 +1403,23 @@ button {
   .content-grid.compact-layout {
     --chart-depth-default: 152px;
     --chart-depth-min: 152px;
-    --watchlist-min: 0px;
-    --watchlist-max: 0px;
     grid-template-columns:
-      minmax(0, 0px)
       minmax(0, 1fr)
       minmax(152px, 152px)
       minmax(198px, 198px);
   }
 
-  .content-grid.compact-layout .watchlist:not(.collapsed) {
-    position: absolute;
-    inset: 0 auto 0 0;
-    z-index: 26;
-    width: min(280px, calc(100% - 374px));
-    min-width: 232px;
-    box-shadow: 16px 0 30px rgba(0, 0, 0, 0.5);
-  }
-
-  .content-grid.compact-layout .watchlist.collapsed {
-    width: auto;
-    min-width: 0;
-  }
-
-  .content-grid.compact-layout .center-panel { grid-column: 2; }
-  .content-grid.compact-layout .market-depth { grid-column: 3; }
-  .content-grid.compact-layout .ticket { grid-column: 4; }
+  .content-grid.compact-layout .center-panel { grid-column: 1; }
+  .content-grid.compact-layout .market-depth { grid-column: 2; }
+  .content-grid.compact-layout .ticket { grid-column: 3; }
 }
 
-.content-grid.watchlist-collapsed {
-  --watchlist-min: 0px;
-  --watchlist-max: 0px;
-}
-
-.watchlist,
 .center-panel,
 .market-depth,
 .ticket {
   min-height: 0;
   border-right: 1px solid var(--line);
   background: #05070a;
-}
-
-
-.watchlist {
-  padding: 12px;
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  background:
-    linear-gradient(180deg, rgba(149, 92, 255, 0.055), transparent 150px),
-    #05070a;
-}
-
-.watch-title {
-  height: 30px;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  color: #b98cff;
-  font-weight: 800;
-  font-size: 15px;
-}
-
-.watchlist.collapsed {
-  position: relative;
-  z-index: 24;
-  overflow: visible;
-  padding: 0;
-  border-right: 0;
-  background: transparent;
-}
-
-.watchlist.collapsed .watch-title {
-  position: absolute;
-  top: 50%;
-  left: 6px;
-  width: 34px;
-  height: 40px;
-  transform: translateY(-50%);
-}
-
-.watchlist-toggle {
-  width: 26px;
-  height: 26px;
-  flex: 0 0 auto;
-  display: grid;
-  place-items: center;
-  padding: 0;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: transparent;
-  color: #8e94a4;
-  cursor: pointer;
-}
-
-.watchlist.collapsed .watchlist-toggle {
-  width: 34px;
-  height: 40px;
-  padding: 0;
-  border-color: rgba(167, 139, 250, 0.34);
-  border-radius: 0 7px 7px 0;
-  background: rgba(12, 10, 20, 0.94);
-  color: #cdb5ff;
-  box-shadow: 5px 0 18px rgba(0, 0, 0, 0.46), 0 0 16px rgba(124, 58, 237, 0.12);
-}
-
-.content-grid.watchlist-collapsed .center-panel .chart-drawing-toolbar {
-  left: 50px;
-}
-
-.watchlist-toggle:hover,
-.watchlist-toggle:focus-visible {
-  border-color: rgba(183, 146, 255, 0.28);
-  outline: 0;
-  background: rgba(183, 146, 255, 0.08);
-  color: #d7c3ff;
 }
 
 .tabs,
@@ -1413,12 +1472,6 @@ button {
   transition: border-color 140ms ease, background 140ms ease, box-shadow 140ms ease;
 }
 
-.watch-search {
-  position: relative;
-  z-index: 18;
-  flex: 0 0 auto;
-}
-
 .search-box.active {
   border-color: rgba(167, 139, 250, 0.58);
   background: rgba(139, 92, 246, 0.045);
@@ -1435,130 +1488,6 @@ button {
   font-size: 13px;
 }
 
-.watch-search-chevron {
-  flex: 0 0 auto;
-  color: var(--weak);
-  transition: transform 140ms ease, color 140ms ease;
-}
-
-.watch-search-chevron.open {
-  color: #cbb9ff;
-  transform: rotate(180deg);
-}
-
-.watch-search-menu {
-  position: absolute;
-  top: 48px;
-  left: 0;
-  right: 0;
-  z-index: 40;
-  max-height: min(340px, calc(100vh - 180px));
-  overflow: auto;
-  padding: 5px;
-  border: 1px solid rgba(148, 163, 184, 0.2);
-  border-radius: 8px;
-  background: rgba(8, 8, 11, 0.985);
-  box-shadow: 0 16px 38px rgba(0, 0, 0, 0.52);
-  scrollbar-width: thin;
-  scrollbar-color: rgba(139, 92, 246, 0.26) transparent;
-}
-
-.watch-search-option {
-  min-width: 0;
-  height: 42px;
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) 28px;
-  align-items: center;
-  gap: 8px;
-  padding: 0 5px 0 7px;
-  border-radius: 6px;
-}
-
-.watch-search-option:hover {
-  background: rgba(255, 255, 255, 0.045);
-}
-
-.watch-search-option > span {
-  min-width: 0;
-  display: grid;
-  gap: 1px;
-}
-
-.watch-search-option strong,
-.watch-search-option small {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.watch-search-option strong {
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 700;
-}
-
-.watch-search-option small {
-  color: var(--weak);
-  font-size: 9px;
-}
-
-.watch-search-option button {
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: 1px solid rgba(139, 92, 246, 0.32);
-  border-radius: 6px;
-  background: rgba(139, 92, 246, 0.09);
-  color: #cbb9ff;
-  cursor: pointer;
-}
-
-.watch-search-option button:hover:not(:disabled) {
-  border-color: rgba(167, 139, 250, 0.68);
-  background: rgba(139, 92, 246, 0.18);
-  color: #f4efff;
-}
-
-.watch-search-option button:disabled {
-  border-color: transparent;
-  background: transparent;
-  color: rgba(14, 203, 129, 0.72);
-  cursor: default;
-}
-
-.watch-search-empty {
-  min-height: 56px;
-  display: grid;
-  place-items: center;
-  color: var(--weak);
-  font-size: 10px;
-}
-
-.watch-head {
-  flex: 0 0 auto;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 62px;
-  gap: 8px;
-  color: var(--weak);
-  font-size: 10px;
-  padding: 0 8px 8px 45px;
-}
-
-.watch-head span:nth-child(2) {
-  text-align: right;
-}
-
-.watch-list-body {
-  min-height: 0;
-  overflow: auto;
-  padding-right: 2px;
-  display: grid;
-  align-content: start;
-  gap: 4px;
-}
-
-.watch-list-body,
 .recent-trades,
 .ticket-form,
 .positions-table,
@@ -26895,7 +26824,6 @@ button {
 }
 
 :where(
-  .watch-search-menu,
   .app-update-popover,
   .chart-context-menu,
   .chart-drawing-menu,
@@ -27012,7 +26940,6 @@ button {
 
 @media (prefers-reduced-motion: reduce) {
   :where(
-    .watch-search-menu,
     .app-update-popover,
     .chart-context-menu,
     .chart-drawing-menu,

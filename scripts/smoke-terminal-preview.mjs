@@ -424,19 +424,23 @@ async function openTerminalPreviewPage(browser, scenario) {
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
   await page.waitForSelector(".terminal .workspace", { timeout: 30_000 });
 
-  const watchSearch = page.getByRole("textbox", { name: "搜索可添加的交易对" });
-  await watchSearch.click();
-  await page.waitForSelector(".watch-search-menu .watch-search-option", { timeout: 10_000 });
-  if (!(await page.locator(".watch-search-option button:not(:disabled)").count())) {
-    throw new Error("watchlist picker should expose add buttons for available symbols");
-  }
+  // Search lives inside the title-bar market picker and spans every perpetual, so
+  // a market can be starred without leaving the menu.
+  await page.locator(".market-title__trigger").click();
+  await page.waitForSelector(".market-picker", { timeout: 10_000 });
+  const watchSearch = page.getByRole("textbox", { name: "搜索交易对" });
   await watchSearch.fill("ETH");
-  await page.waitForTimeout(80);
-  const filteredOptions = await page.locator(".watch-search-option").allTextContents();
+  await page.waitForTimeout(120);
+  const filteredOptions = await page.locator(".market-picker__row").allTextContents();
   if (!filteredOptions.length || filteredOptions.some((text) => !/ETH/i.test(text))) {
-    throw new Error(`watchlist picker did not filter symbols: ${JSON.stringify(filteredOptions)}`);
+    throw new Error(`market picker did not filter symbols: ${JSON.stringify(filteredOptions)}`);
   }
+  if (!(await page.locator(".market-picker__star").count())) {
+    throw new Error("market picker should expose star controls for search results");
+  }
+  await watchSearch.fill("");
   await page.keyboard.press("Escape");
+  await page.waitForTimeout(150);
   if (await page.locator(".add-symbol").count()) throw new Error("legacy bottom add-watchlist button should be removed");
   const chartToolbarText = await page.locator(".chart-toolbar").textContent();
   if (/自研图表|低延迟/.test(chartToolbarText || "")) throw new Error(`legacy chart labels should be removed: ${chartToolbarText}`);
@@ -663,7 +667,6 @@ async function verifyResponsiveShell(page, label) {
       contentGrid: rect(".content-grid"),
       windowControls: rect(".window-controls"),
       windowButtons: rects(".window-controls .window-button"),
-      watchlist: rect(".watchlist"),
       center: rect(".center-panel"),
       marketDepth: rect(".market-depth"),
       orderbook: rect(".orderbook"),
@@ -682,7 +685,9 @@ async function verifyResponsiveShell(page, label) {
     };
   });
 
-  const required = ["terminal", "workspace", "topbar", "contentGrid", "windowControls", "watchlist", "center", "marketDepth", "orderbook", "pressure", "recentTrades", "ticket"];
+  // The watchlist rail was replaced by the title-bar market picker, so it is no
+  // longer part of the persistent layout.
+  const required = ["terminal", "workspace", "topbar", "contentGrid", "windowControls", "center", "marketDepth", "orderbook", "pressure", "recentTrades", "ticket"];
   for (const key of required) {
     const box = state[key];
     if (!box || box.width <= 0 || box.height <= 0) {
@@ -972,7 +977,9 @@ async function verifySettingsConfigurationPage(page) {
       actions: rect(".ai-settings-pane > .modal-actions"),
       aiFloat: rect(".ai-float"),
       copy: firstSetup?.textContent?.trim() || "",
-      modelDraftRows: document.querySelectorAll(".ai-model-config-list > button strong").length,
+      // Counts both the legacy button rows and the current row markup, so the
+      // "no implicit draft" guarantee survives changes to the row structure.
+      modelDraftRows: document.querySelectorAll(".ai-model-config-list > button strong, .ai-model-config-row").length,
       bodyOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth
     };
   });
@@ -1053,12 +1060,18 @@ async function verifySettingsConfigurationPage(page) {
   await page.getByRole("button", { name: "添加到配置列表" }).click();
   await page.waitForSelector(".ai-current-model-row");
   const multiModelState = await page.evaluate(() => ({
-    modelRows: document.querySelectorAll(".ai-model-config-list > button").length,
+    modelRows: document.querySelectorAll(".ai-model-config-row").length,
+    // The only configured model must be marked as the one the assistants use.
+    activeRows: document.querySelectorAll(".ai-model-config-row.is-active").length,
+    activeBadges: document.querySelectorAll(".ai-model-config-row__badge").length,
     selectedName: document.querySelector(".ai-model-config-editor input")?.value || "",
     firstSetupVisible: Boolean(document.querySelector(".ai-first-setup"))
   }));
   if (multiModelState.modelRows !== 1 || multiModelState.selectedName !== "DeepSeek" || multiModelState.firstSetupVisible) {
     throw new Error(`AI first setup did not enter multi-model editing: ${JSON.stringify(multiModelState)}`);
+  }
+  if (multiModelState.activeRows !== 1 || multiModelState.activeBadges !== 1) {
+    throw new Error(`the configured model must be marked as currently used: ${JSON.stringify(multiModelState)}`);
   }
   if (!await page.locator(".ai-model-config-editor > .ai-provider-guide").count()) {
     throw new Error("selected AI model editor should retain its provider access guide");
@@ -1265,17 +1278,32 @@ function assertTradeButtons(state, expectedLabels, forbiddenLabels) {
   }
 }
 
+async function openMarketPicker(page) {
+  if (await page.locator(".market-picker").count()) return;
+  await page.locator(".market-title__trigger").click();
+  await page.waitForSelector(".market-picker", { timeout: 10_000 });
+}
+
+async function closeMarketPicker(page) {
+  if (!(await page.locator(".market-picker").count())) return;
+  await page.keyboard.press("Escape");
+  await page.waitForTimeout(200);
+}
+
 async function verifyWatchlistRows(page, label) {
-  const rows = await page.locator(".symbol-row").count();
+  // The watchlist moved out of a fixed rail and into the market picker that hangs
+  // off the title bar, so it has to be opened before its rows can be inspected.
+  await openMarketPicker(page);
+  const rows = await page.locator(".market-picker__pick").count();
   if (rows < 1) throw new Error(`watchlist rows are missing on ${label}`);
 
-  const rowChecks = await page.locator(".symbol-row").evaluateAll((nodes) =>
+  const rowChecks = await page.locator(".market-picker__pick").evaluateAll((nodes) =>
     nodes.slice(0, 8).map((node) => {
       const row = node;
       const icon = row.querySelector(".symbol-icon");
-      const main = row.querySelector(".symbol-main");
-      const name = row.querySelector(".symbol-name");
-      const state = row.querySelector(".symbol-main small");
+      const main = row.querySelector(".market-picker__ident");
+      const name = row.querySelector(".market-picker__ident strong");
+      const state = row.querySelector(".market-picker__ident small");
       const quote = row.querySelector(".symbol-quote");
       const price = row.querySelector(".symbol-quote strong");
       const change = row.querySelector(".symbol-quote em");
@@ -1348,44 +1376,68 @@ async function verifyWatchlistRows(page, label) {
 }
 
 async function verifyWatchlistCollapse(page) {
-  const expandedWidth = (await page.locator(".watchlist").boundingBox())?.width || 0;
-  const centerWidth = (await page.locator(".center-panel").boundingBox())?.width || 0;
-  await page.getByRole("button", { name: "收起自选面板" }).click();
-  const collapsed = await page.evaluate(() => ({
-    gridCollapsed: document.querySelector(".content-grid")?.classList.contains("watchlist-collapsed") || false,
-    watchlistCollapsed: document.querySelector(".watchlist")?.classList.contains("collapsed") || false,
-    rows: document.querySelectorAll(".watchlist .symbol-row").length,
-    stored: window.localStorage.getItem("desictrade.watchlist.collapsed.v1")
-  }));
-  const collapsedWidth = (await page.locator(".watchlist").boundingBox())?.width || 0;
-  const expandButtonBox = await page.getByRole("button", { name: "展开自选面板" }).boundingBox();
-  const drawingToolbarBox = await page.locator(".chart-drawing-toolbar").boundingBox();
-  const contentBox = await page.locator(".content-grid").boundingBox();
-  const expandedCenterWidth = (await page.locator(".center-panel").boundingBox())?.width || 0;
-  if (!collapsed.gridCollapsed || !collapsed.watchlistCollapsed || collapsed.rows !== 0 || collapsed.stored !== "true"
-    || collapsedWidth > 2 || !expandButtonBox || !contentBox
-    || expandButtonBox.width < 30 || expandButtonBox.width > 38
-    || Math.abs((expandButtonBox.y + expandButtonBox.height / 2) - (contentBox.y + contentBox.height / 2)) > 8
-    || (drawingToolbarBox && rectsOverlap(expandButtonBox, drawingToolbarBox))
-    || expandedCenterWidth <= centerWidth) {
-    throw new Error(`watchlist did not collapse into a centered floating control: ${JSON.stringify({ collapsed, expandedWidth, collapsedWidth, centerWidth, expandedCenterWidth, expandButtonBox, drawingToolbarBox, contentBox })}`);
+  // There is no collapsible rail any more. The guarantee is that the chart owns
+  // the full width and the watchlist is reachable from the title bar: opening the
+  // market picker must not resize the layout underneath it.
+  const layout = await page.evaluate(() => {
+    const grid = document.querySelector(".content-grid");
+    const center = document.querySelector(".center-panel");
+    return {
+      railPresent: Boolean(document.querySelector(".watchlist")),
+      handlePresent: Boolean(document.querySelector(".watchlist-toggle")),
+      columns: grid ? getComputedStyle(grid).gridTemplateColumns.split(" ").length : 0,
+      centerLeft: center ? Math.round(center.getBoundingClientRect().x) : -1,
+      gridLeft: grid ? Math.round(grid.getBoundingClientRect().x) : -1
+    };
+  });
+  if (layout.railPresent || layout.handlePresent || layout.columns !== 3 || layout.centerLeft !== layout.gridLeft) {
+    throw new Error(`watchlist rail should be gone and the chart flush left: ${JSON.stringify(layout)}`);
   }
-  await page.getByRole("button", { name: "展开自选面板" }).click();
-  if (await page.locator(".watchlist .symbol-row").count() < 1
-    || await page.evaluate(() => window.localStorage.getItem("desictrade.watchlist.collapsed.v1")) !== "false") {
-    throw new Error("watchlist did not expand or persist its restored state");
+
+  const centerWidth = (await page.locator(".center-panel").boundingBox())?.width || 0;
+  await openMarketPicker(page);
+  const open = await page.evaluate(() => {
+    const menu = document.querySelector(".market-picker");
+    const trigger = document.querySelector(".market-title__trigger");
+    const menuBox = menu?.getBoundingClientRect();
+    const triggerBox = trigger?.getBoundingClientRect();
+    return {
+      rows: document.querySelectorAll(".market-picker__pick").length,
+      starred: document.querySelectorAll(".market-picker__star.is-on").length,
+      searchFocused: Boolean(document.activeElement?.closest(".market-picker__search")),
+      // The menu hangs directly off the market name it belongs to.
+      anchored: Boolean(menuBox && triggerBox && Math.abs(menuBox.x - triggerBox.x) < 12 && menuBox.y > triggerBox.y),
+      expanded: trigger?.getAttribute("aria-expanded")
+    };
+  });
+  const centerWidthWithMenu = (await page.locator(".center-panel").boundingBox())?.width || 0;
+  if (open.rows < 1 || open.starred < 1 || !open.searchFocused || !open.anchored || open.expanded !== "true"
+    || Math.abs(centerWidthWithMenu - centerWidth) > 1) {
+    throw new Error(`market picker did not open as an anchored overlay: ${JSON.stringify({ open, centerWidth, centerWidthWithMenu })}`);
+  }
+
+  await closeMarketPicker(page);
+  if (await page.locator(".market-picker").count()) {
+    throw new Error("market picker did not close on Escape");
   }
 }
 
 async function verifyChartSymbolSwitch(page) {
-  const symbolRow = (base) => page.locator(".symbol-row").filter({ has: page.locator(".symbol-name", { hasText: base }) }).first();
+  // Switching markets now goes through the title-bar picker, which closes itself
+  // on selection, so it is reopened for each switch.
+  const symbolRow = async (base) => {
+    await openMarketPicker(page);
+    return page.locator(".market-picker__pick")
+      .filter({ has: page.locator(".market-picker__ident strong", { hasText: base }) })
+      .first();
+  };
   const latestPrice = async () => {
     const text = await page.locator(".ohlc-summary").textContent();
     const match = text?.match(/最新\s*([\d,.]+)/);
     return Number(match?.[1]?.replaceAll(",", ""));
   };
 
-  await symbolRow("ETH").click();
+  await (await symbolRow("ETH")).click();
   await page.waitForFunction(() => {
     const text = document.querySelector(".ohlc-summary")?.textContent || "";
     const value = Number(text.match(/最新\s*([\d,.]+)/)?.[1]?.replaceAll(",", ""));
@@ -1393,7 +1445,7 @@ async function verifyChartSymbolSwitch(page) {
   });
   const ethPrice = await latestPrice();
 
-  await symbolRow("BTC").click();
+  await (await symbolRow("BTC")).click();
   await page.waitForFunction(() => {
     const text = document.querySelector(".ohlc-summary")?.textContent || "";
     const value = Number(text.match(/最新\s*([\d,.]+)/)?.[1]?.replaceAll(",", ""));

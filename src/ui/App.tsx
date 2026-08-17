@@ -28,6 +28,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Star,
   Send,
   Settings,
   ShieldCheck,
@@ -330,7 +331,6 @@ const PRIMARY_CHART_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m"] as const;
 const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as const;
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
 const WATCHLIST_STORAGE_KEY = "desictrade.watchlist.v1";
-const WATCHLIST_COLLAPSED_STORAGE_KEY = "desictrade.watchlist.collapsed.v1";
 /// Sentinel for the bottom-panel instrument filter. Not a valid instId, so it can
 /// never collide with a real contract.
 const ALL_INSTRUMENTS_FILTER = "__all__";
@@ -1396,13 +1396,11 @@ function TradingTerminal({
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [ticketPriceFill, setTicketPriceFill] = useState<{ symbol: string; price: string; nonce: number } | null>(null);
   const [watchlist, setWatchlist] = useState<string[]>(() => loadWatchlist());
-  const [watchlistCollapsed, setWatchlistCollapsed] = useState(() => loadWatchlistCollapsed());
+  const [marketPickerOpen, setMarketPickerOpen] = useState(false);
+  const marketPickerRef = useRef<HTMLDivElement | null>(null);
   const [compactTerminalLayout, setCompactTerminalLayout] = useState(() => window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY).matches);
-  const [compactWatchlistOpen, setCompactWatchlistOpen] = useState(false);
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(initialMarketAssets);
-  const [draggedSymbol, setDraggedSymbol] = useState<string | null>(null);
   const [symbolSearch, setSymbolSearch] = useState("");
-  const [symbolPickerOpen, setSymbolPickerOpen] = useState(false);
   const [bar, setBar] = useState("30m");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [marketCandleLoadError, setMarketCandleLoadError] = useState<{ symbol: string; bar: string; message: string } | null>(null);
@@ -1482,11 +1480,6 @@ function TradingTerminal({
     return () => media.removeEventListener("change", updateCompactTerminalLayout);
   }, []);
 
-  useEffect(() => {
-    if (!compactTerminalLayout) setCompactWatchlistOpen(false);
-  }, [compactTerminalLayout]);
-
-  const effectiveWatchlistCollapsed = compactTerminalLayout ? !compactWatchlistOpen : watchlistCollapsed;
 
   useEffect(() => {
     const idleWindow = window as Window & {
@@ -1699,12 +1692,20 @@ function TradingTerminal({
   }, [optimisticPendingOrders, privateSnapshot?.orders]);
 
   useEffect(() => {
-    const closePicker = (event: PointerEvent) => {
-      if (!watchSearchRef.current?.contains(event.target as Node)) setSymbolPickerOpen(false);
+    if (!marketPickerOpen) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      if (!marketPickerRef.current?.contains(event.target as Node)) setMarketPickerOpen(false);
     };
-    document.addEventListener("pointerdown", closePicker);
-    return () => document.removeEventListener("pointerdown", closePicker);
-  }, []);
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setMarketPickerOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutside);
+    window.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside);
+      window.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [marketPickerOpen]);
   const visiblePrivateSnapshot = useMemo(
     () => privateSnapshot ? { ...privateSnapshot, orders: visiblePendingOrders } : privateSnapshot,
     [privateSnapshot, visiblePendingOrders]
@@ -3689,26 +3690,6 @@ function TradingTerminal({
       return next;
     });
   }, []);
-  const moveWatchSymbol = useCallback((target: string, direction: -1 | 1) => {
-    setWatchlist((items) => {
-      const index = items.indexOf(target);
-      const nextIndex = index + direction;
-      if (index < 0 || nextIndex < 0 || nextIndex >= items.length) return items;
-      const nextItems = [...items];
-      [nextItems[index], nextItems[nextIndex]] = [nextItems[nextIndex], nextItems[index]];
-      const next = persistWatchlist(nextItems);
-      void saveWatchlistConfig({ symbols: next }).catch((error) => logger.error("failed to save moved watchlist config", error));
-      return next;
-    });
-  }, []);
-  const toggleWatchlist = useCallback(() => {
-    setSymbolPickerOpen(false);
-    if (compactTerminalLayout) {
-      setCompactWatchlistOpen((open) => !open);
-      return;
-    }
-    setWatchlistCollapsed((current) => persistWatchlistCollapsed(!current));
-  }, [compactTerminalLayout]);
   const handleWindowAction = useCallback(async (action: "minimize" | "maximize" | "close") => {
     const handled = await invokeOptional<boolean>("window_action", { action });
     if (handled !== null) {
@@ -3974,10 +3955,38 @@ function TradingTerminal({
 
       <section className="workspace">
         <header className="topbar" data-tauri-drag-region>
-          <div className="market-title">
-            <SymbolIcon base={currentInstrument?.baseCcy || symbol.split("-")[0]} iconPath={currentInstrument?.iconPath} cached={currentInstrument?.iconCached} cacheDir={marketAssetCacheDir} />
-            <strong>{symbol}</strong>
-            <span>{t("common:perpetual")}</span>
+          {/* The market name is the entry point to the watchlist. Users reach for
+              "what am I looking at" when they want to switch, so the list hangs
+              off it instead of a separate control floating over the chart. */}
+          <div className="market-title" ref={marketPickerRef}>
+            <button
+              type="button"
+              className={clsx("market-title__trigger", marketPickerOpen && "is-open")}
+              onClick={() => setMarketPickerOpen((open) => !open)}
+              aria-expanded={marketPickerOpen}
+              aria-haspopup="listbox"
+              title={t("trading:openWatchlist")}
+            >
+              <SymbolIcon base={currentInstrument?.baseCcy || symbol.split("-")[0]} iconPath={currentInstrument?.iconPath} cached={currentInstrument?.iconCached} cacheDir={marketAssetCacheDir} />
+              <strong>{symbol}</strong>
+              <span>{t("common:perpetual")}</span>
+              <ChevronDown size={15} className="market-title__chevron" />
+            </button>
+            {marketPickerOpen ? (
+              <MarketPickerMenu
+                symbol={symbol}
+                watchlist={watchlist}
+                options={filteredWatchOptions}
+                query={symbolSearch}
+                marketAssets={marketAssets}
+                cacheDir={marketAssetCacheDir}
+                onQueryChange={setSymbolSearch}
+                onSelect={(next) => { setSymbol(next); setMarketPickerOpen(false); }}
+                onAdd={addWatchSymbol}
+                onRemove={removeWatchSymbol}
+                onClose={() => setMarketPickerOpen(false)}
+              />
+            ) : null}
           </div>
           <HotPriceStrip timeState={timeState} />
           <div className="top-actions">
@@ -4150,154 +4159,7 @@ function TradingTerminal({
             onAiValidated={() => firstLaunchOnboarding.completeStep("ai")}
           />
         ) : (
-        <div className={clsx("content-grid", effectiveWatchlistCollapsed && "watchlist-collapsed", compactTerminalLayout && "compact-layout")} ref={contentGridRef}>
-          <aside className={clsx("watchlist", effectiveWatchlistCollapsed && "collapsed")}>
-            <div className="watch-title">
-              {!effectiveWatchlistCollapsed && <span>{t("trading:watchlist")}</span>}
-              <button
-                type="button"
-                className="watchlist-toggle"
-                onClick={toggleWatchlist}
-                title={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-label={effectiveWatchlistCollapsed ? uiText("展开自选面板", "Expand watchlist") : uiText("收起自选面板", "Collapse watchlist")}
-                aria-expanded={!effectiveWatchlistCollapsed}
-              >
-                {effectiveWatchlistCollapsed ? <PanelLeftOpen size={16} /> : <PanelLeftClose size={15} />}
-              </button>
-            </div>
-            {!effectiveWatchlistCollapsed && <>
-            <div className="watch-search" ref={watchSearchRef}>
-              <div className={clsx("search-box", symbolPickerOpen && "active")}>
-                <Search size={16} />
-                <input
-                  value={symbolSearch}
-                  placeholder={uiText("搜索交易对", "Search markets")}
-                  aria-label={uiText("搜索可添加的交易对", "Search markets to add")}
-                  aria-expanded={symbolPickerOpen}
-                  aria-controls="watch-symbol-options"
-                  onFocus={() => setSymbolPickerOpen(true)}
-                  onClick={() => setSymbolPickerOpen(true)}
-                  onChange={(event) => {
-                    setSymbolSearch(event.target.value);
-                    setSymbolPickerOpen(true);
-                  }}
-                  onKeyDown={(event) => {
-                    if (event.key === "Escape") {
-                      setSymbolPickerOpen(false);
-                      event.currentTarget.blur();
-                    }
-                    if (event.key === "Enter") {
-                      const firstAvailable = filteredWatchOptions.find((item) => !watchlist.includes(item.instId));
-                      if (firstAvailable) addWatchSymbol(firstAvailable.instId);
-                    }
-                  }}
-                />
-                <ChevronDown size={14} className={clsx("watch-search-chevron", symbolPickerOpen && "open")} />
-              </div>
-              {symbolPickerOpen && (
-                <div className="watch-search-menu" id="watch-symbol-options" role="listbox" aria-label={uiText("可添加的交易对", "Markets available to add")}>
-                  {filteredWatchOptions.length > 0 ? filteredWatchOptions.map((item) => {
-                    const added = watchlist.includes(item.instId);
-                    return (
-                      <div className="watch-search-option" role="option" aria-selected={added} key={item.instId}>
-                        <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={marketAssetCacheDir} />
-                        <span>
-                          <strong>{item.baseCcy}</strong>
-                          <small>{item.instId}</small>
-                        </span>
-                        <button
-                          type="button"
-                          disabled={added || watchlist.length >= 10}
-                          onClick={() => addWatchSymbol(item.instId)}
-                          title={added ? uiText("已在自选中", "Already in watchlist") : watchlist.length >= 10 ? uiText("自选最多 10 个", "Watchlist limit: 10") : uiText(`添加 ${item.instId}`, `Add ${item.instId}`)}
-                          aria-label={added ? uiText(`${item.instId} 已添加`, `${item.instId} added`) : uiText(`添加 ${item.instId}`, `Add ${item.instId}`)}
-                        >
-                          {added ? <CheckCircle2 size={15} /> : <Plus size={15} />}
-                        </button>
-                      </div>
-                    );
-                  }) : (
-                    <div className="watch-search-empty">没有匹配的永续合约</div>
-                  )}
-                </div>
-              )}
-            </div>
-            <div className="watch-head"><span>{t("trading:contract")}</span><span>{t("trading:marketData")}</span></div>
-            <div className="watch-list-body">
-              {watchlist.map((item, index) => {
-                const asset = assetMap.get(item);
-                const base = marketBaseFromSymbol(item, asset?.baseCcy);
-                const marketState = symbolSyncStatus[item] === "同步失败" ? uiText("同步异常", "Sync error") : t("common:perpetual");
-                return (
-                  <div
-                    className={clsx("symbol-row-wrap", item === symbol && "active", draggedSymbol === item && "dragging")}
-                    key={item}
-                    title={item}
-                    draggable
-                    onDragStart={(event) => {
-                      setDraggedSymbol(item);
-                      event.dataTransfer.effectAllowed = "move";
-                      event.dataTransfer.setData("text/plain", item);
-                    }}
-                    onDragOver={(event) => {
-                      event.preventDefault();
-                      const source = draggedSymbol || event.dataTransfer.getData("text/plain");
-                      if (source) reorderWatchSymbol(source, item);
-                    }}
-                    onDragEnd={() => setDraggedSymbol(null)}
-                    onDrop={(event) => {
-                      event.preventDefault();
-                      const source = draggedSymbol || event.dataTransfer.getData("text/plain");
-                      if (source) reorderWatchSymbol(source, item);
-                      setDraggedSymbol(null);
-                    }}
-                  >
-                    <button className="drag-symbol" title={uiText("拖拽排序", "Drag to reorder")} aria-label={uiText(`拖拽排序 ${item}`, `Drag to reorder ${item}`)}>
-                      <GripVertical size={14} />
-                    </button>
-                    <button className="symbol-row" onClick={() => {
-                      setSymbol(item);
-                      if (compactTerminalLayout) setCompactWatchlistOpen(false);
-                    }}>
-                      <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssetCacheDir} />
-                      <span className="symbol-main">
-                        <span className="symbol-name">{base}</span>
-                        <small>{marketState}</small>
-                      </span>
-                      <HotWatchQuote symbol={item} />
-                    </button>
-                    <div className="sort-symbol-actions" aria-label={t("trading:marketReorderActions", { symbol: item })}>
-                      <button
-                        type="button"
-                        disabled={index === 0}
-                        onClick={() => moveWatchSymbol(item, -1)}
-                        title={uiText("上移", "Move up")}
-                      >
-                        ↑
-                      </button>
-                      <button
-                        type="button"
-                        disabled={index === watchlist.length - 1}
-                        onClick={() => moveWatchSymbol(item, 1)}
-                        title={uiText("下移", "Move down")}
-                      >
-                        ↓
-                      </button>
-                    </div>
-                    <button
-                      className="remove-symbol"
-                      disabled={item === DEFAULT_SYMBOL}
-                      onClick={() => removeWatchSymbol(item)}
-                      title={item === DEFAULT_SYMBOL ? uiText("默认交易对不可移除", "The default market cannot be removed") : uiText(`移除 ${item}`, `Remove ${item}`)}
-                    >
-                      <X size={13} />
-                    </button>
-                  </div>
-                );
-              })}
-            </div>
-            </>}
-          </aside>
+        <div className={clsx("content-grid", compactTerminalLayout && "compact-layout")} ref={contentGridRef}>
 
           <section className="center-panel" ref={centerPanelRef}>
             <div className="chart-toolbar">
@@ -5277,25 +5139,6 @@ function persistWatchlist(items: string[]) {
     logger.warn("failed to persist watchlist", { error: String(error) });
   }
   return next;
-}
-
-function loadWatchlistCollapsed() {
-  if (typeof window === "undefined") return false;
-  try {
-    return window.localStorage.getItem(WATCHLIST_COLLAPSED_STORAGE_KEY) === "true";
-  } catch (error) {
-    logger.warn("failed to load watchlist layout", { error: String(error) });
-    return false;
-  }
-}
-
-function persistWatchlistCollapsed(value: boolean) {
-  try {
-    window.localStorage.setItem(WATCHLIST_COLLAPSED_STORAGE_KEY, String(value));
-  } catch (error) {
-    logger.warn("failed to persist watchlist layout", { error: String(error) });
-  }
-  return value;
 }
 
 function loadChartWorkspaceLayout(): ChartWorkspaceLayout {
@@ -8264,6 +8107,128 @@ function AccountSettingsPane({
             </div>
           </form>
         </div>
+  );
+}
+
+/** Watchlist hung off the market name in the title bar.
+ *
+ *  Replaces a 272px rail plus an edge handle that floated over the chart. The
+ *  chart now owns its full width, and the way to switch markets is the thing the
+ *  user is already looking at. Search spans every perpetual so a market can be
+ *  added without leaving the menu.
+ */
+function MarketPickerMenu({
+  symbol,
+  watchlist,
+  options,
+  query,
+  marketAssets,
+  cacheDir,
+  onQueryChange,
+  onSelect,
+  onAdd,
+  onRemove,
+  onClose
+}: Readonly<{
+  symbol: string;
+  watchlist: string[];
+  options: OkxInstrumentSummary[];
+  query: string;
+  marketAssets: MarketAssetsSummary | null;
+  cacheDir?: string;
+  onQueryChange: (value: string) => void;
+  onSelect: (symbol: string) => void;
+  onAdd: (symbol: string) => void;
+  onRemove: (symbol: string) => void;
+  onClose: () => void;
+}>) {
+  const { t } = useTranslation(["trading", "common"]);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const searching = query.trim().length > 0;
+
+  useEffect(() => { searchRef.current?.focus(); }, []);
+
+  return (
+    <div className="market-picker" role="dialog" aria-label={t("trading:watchlist")}>
+      <div className="market-picker__search">
+        <Search size={14} />
+        <input
+          ref={searchRef}
+          value={query}
+          placeholder={t("trading:searchMarkets")}
+          aria-label={t("trading:searchMarkets")}
+          onChange={(event) => onQueryChange(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Escape") { event.preventDefault(); onClose(); }
+          }}
+        />
+        {query ? (
+          <button type="button" onClick={() => onQueryChange("")} title={t("common:clear")} aria-label={t("common:clear")}>
+            <X size={12} />
+          </button>
+        ) : null}
+      </div>
+
+      <div className="market-picker__list" role="listbox" aria-label={t("trading:watchlist")}>
+        {/* Without a query the menu is the watchlist; typing searches every
+            perpetual so an unlisted market can be starred straight from here. */}
+        {searching ? (
+          options.length > 0 ? options.map((item) => {
+            const starred = watchlist.includes(item.instId);
+            return (
+              <div className={clsx("market-picker__row", item.instId === symbol && "is-active")} key={item.instId}>
+                <button type="button" className="market-picker__pick" onClick={() => onSelect(item.instId)} role="option" aria-selected={item.instId === symbol}>
+                  <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={cacheDir} />
+                  <span className="market-picker__ident">
+                    <strong>{item.baseCcy}</strong>
+                    <small>{item.instId}</small>
+                  </span>
+                  <HotWatchQuote symbol={item.instId} />
+                </button>
+                <button
+                  type="button"
+                  className={clsx("market-picker__star", starred && "is-on")}
+                  disabled={starred ? item.instId === DEFAULT_SYMBOL : watchlist.length >= 10}
+                  onClick={() => (starred ? onRemove(item.instId) : onAdd(item.instId))}
+                  title={starred
+                    ? (item.instId === DEFAULT_SYMBOL ? t("trading:defaultMarketLocked") : t("trading:removeFromWatchlist"))
+                    : (watchlist.length >= 10 ? t("trading:watchlistFull") : t("trading:addToWatchlist"))}
+                  aria-label={starred ? t("trading:removeFromWatchlist") : t("trading:addToWatchlist")}
+                >
+                  <Star size={13} />
+                </button>
+              </div>
+            );
+          }) : <div className="market-picker__empty">{t("trading:noMatchingMarkets")}</div>
+        ) : (
+          watchlist.map((item) => {
+            const asset = marketAssets?.instruments.find((entry) => entry.instId === item);
+            return (
+              <div className={clsx("market-picker__row", item === symbol && "is-active")} key={item}>
+                <button type="button" className="market-picker__pick" onClick={() => onSelect(item)} role="option" aria-selected={item === symbol}>
+                  <SymbolIcon base={asset?.baseCcy || item.split("-")[0]} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={cacheDir} />
+                  <span className="market-picker__ident">
+                    <strong>{asset?.baseCcy || item.split("-")[0]}</strong>
+                    <small>{item}</small>
+                  </span>
+                  <HotWatchQuote symbol={item} />
+                </button>
+                <button
+                  type="button"
+                  className="market-picker__star is-on"
+                  disabled={item === DEFAULT_SYMBOL}
+                  onClick={() => onRemove(item)}
+                  title={item === DEFAULT_SYMBOL ? t("trading:defaultMarketLocked") : t("trading:removeFromWatchlist")}
+                  aria-label={t("trading:removeFromWatchlist")}
+                >
+                  <Star size={13} />
+                </button>
+              </div>
+            );
+          })
+        )}
+      </div>
+    </div>
   );
 }
 
