@@ -1132,19 +1132,23 @@
 .systematic-lab-profile-editor__notification strong { color: var(--lab-muted); font-size: var(--lab-text-label); font-weight: 700; }
 .systematic-lab-profile-editor__notification small { color: var(--lab-weak); font-size: var(--lab-text-micro); line-height: 1.35; }
 .systematic-lab-profile-instrument { position: relative; min-width: 0; }
-.systematic-lab-profile-instrument__trigger { width: 100%; min-height: 30px; display: grid; grid-template-columns: 18px minmax(0,1fr) 13px; gap: var(--lab-space-xs); align-items: center; padding: 4px 7px; border: 1px solid var(--lab-line); border-radius: var(--lab-radius-control); color: var(--lab-text); background: #090c11; text-align: left; }
+/* The restriction is stated beside the label so a short list does not look like
+   missing market data. */
+.systematic-lab-field > span > small { display: block; margin-top: 2px; color: var(--lab-weak); font-size: var(--lab-text-micro); font-weight: 500; }
+
+.systematic-lab-profile-instrument__trigger { width: 100%; min-height: 30px; display: grid; grid-template-columns: 18px minmax(0,1fr) 13px; gap: var(--lab-space-sm); align-items: center; padding: 4px 7px; border: 1px solid var(--lab-line); border-radius: var(--lab-radius-control); color: var(--lab-text); background: #090c11; text-align: left; }
 .systematic-lab-profile-instrument__trigger:enabled:hover { border-color: color-mix(in srgb, var(--lab-accent) 58%, transparent); }
 .systematic-lab-profile-instrument__trigger:disabled { color: var(--lab-muted); cursor: not-allowed; }
-.systematic-lab-profile-instrument__trigger .symbol-icon { width: 17px; height: 17px; }
+.systematic-lab-profile-instrument__trigger .symbol-icon { width: 18px; min-width: 18px; height: 18px; flex: 0 0 auto; }
 .systematic-lab-profile-instrument__trigger span:not(.symbol-icon) { overflow: hidden; font-size: var(--lab-text-label); font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
 .systematic-lab-profile-instrument__trigger svg { color: var(--lab-weak); }
 .systematic-lab-profile-instrument__menu { position: fixed; z-index: 900; display: flex; flex-direction: column; gap: 5px; min-height: 76px; padding: 6px; overflow: hidden; border: 1px solid color-mix(in srgb, var(--lab-accent) 48%, transparent); border-radius: var(--lab-radius-control); background: #10131a; box-shadow: 0 12px 28px rgba(0,0,0,0.42); box-sizing: border-box; }
 .systematic-lab-profile-instrument__menu input { min-width: 0; height: 28px; padding: 0 7px; border: 1px solid var(--lab-line); border-radius: var(--lab-radius-control); color: var(--lab-text); background: #080b10; font-size: var(--lab-text-label); outline: none; }
 .systematic-lab-profile-instrument__menu input:focus { border-color: var(--lab-accent); }
 .systematic-lab-profile-instrument__menu > div { min-height: 0; display: grid; flex: 1 1 auto; gap: 2px; max-height: 174px; overflow: auto; }
-.systematic-lab-profile-instrument__menu button { min-width: 0; display: grid; grid-template-columns: 18px minmax(0,1fr); gap: var(--lab-space-xs); align-items: center; padding: 5px; border: 0; border-radius: var(--lab-radius-control); color: var(--lab-muted); background: transparent; text-align: left; }
+.systematic-lab-profile-instrument__menu button { min-width: 0; display: grid; grid-template-columns: 18px minmax(0,1fr); gap: var(--lab-space-sm); align-items: center; padding: 5px; border: 0; border-radius: var(--lab-radius-control); color: var(--lab-muted); background: transparent; text-align: left; }
 .systematic-lab-profile-instrument__menu button:hover, .systematic-lab-profile-instrument__menu button.is-selected { color: var(--lab-text); background: color-mix(in srgb, var(--lab-accent) 12%, transparent); }
-.systematic-lab-profile-instrument__menu .symbol-icon { width: 17px; height: 17px; }
+.systematic-lab-profile-instrument__menu .symbol-icon { width: 18px; min-width: 18px; height: 18px; flex: 0 0 auto; }
 .systematic-lab-profile-instrument__menu button span { overflow: hidden; font-size: var(--lab-text-label); text-overflow: ellipsis; white-space: nowrap; }
 .systematic-lab-profile-instrument__menu small { padding: 8px 5px; color: var(--lab-weak); font-size: var(--lab-text-micro); }
 .systematic-lab-profile-signals-view { height: 100%; min-width: 0; min-height: 0; display: grid; grid-template-rows: auto minmax(0,1fr); overflow: hidden; background: var(--lab-panel); }
