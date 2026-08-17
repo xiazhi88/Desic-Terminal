@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { useConfirmPrompt } from "./ConfirmPrompt";
 import {
   Bot,
   Check,
@@ -144,7 +145,8 @@ export function ProfileCollaborationEditor({
   onSaveScheme,
   onDeleteScheme
 }: ProfileCollaborationEditorProps) {
-  const { t } = useTranslation("automation");
+  const { t } = useTranslation(["automation", "common"]);
+  const confirmPrompt = useConfirmPrompt();
   const [expandedAgentId, setExpandedAgentId] = useState<string | null>(null);
   const [savingScheme, setSavingScheme] = useState(false);
   const [schemeName, setSchemeName] = useState("");
@@ -210,7 +212,20 @@ export function ProfileCollaborationEditor({
   const applyScheme = (id: string) => {
     const scheme = schemes.find((item) => item.id === id);
     if (!scheme || scheme.id === selectedSchemeId) return;
-    if (agents.length > 0 && !window.confirm(t("collaborationConfirmApplyScheme", { name: schemeDisplayName(scheme) }))) return;
+    // Applying a scheme replaces the agents already configured, so confirm first.
+    if (agents.length > 0) {
+      confirmPrompt.confirm({
+        title: t("collaborationApplyScheme", { defaultValue: t("collaborationSchemes") }),
+        message: t("collaborationConfirmApplyScheme", { name: schemeDisplayName(scheme) }),
+        confirmText: t("common:confirm"),
+        onConfirm: () => applySchemeNow(scheme)
+      });
+      return;
+    }
+    applySchemeNow(scheme);
+  };
+
+  const applySchemeNow = (scheme: AiAgentScheme) => {
     const next = cloneAgents(scheme.agents)
       .slice(0, CUSTOM_AGENT_LIMIT)
       .map((agent) => scheme.id === PERPETUAL_DECISION_SCHEME_ID ? localizeBuiltinAgent(agent) : agent);
@@ -240,10 +255,21 @@ export function ProfileCollaborationEditor({
     setSchemeDescription("");
   };
 
-  const deleteCurrentScheme = async () => {
+  const deleteCurrentScheme = () => {
     if (!selectedScheme || selectedScheme.builtin || !onDeleteScheme) return;
-    if (!window.confirm(t("collaborationConfirmDeleteScheme", { name: selectedScheme.name }))) return;
-    if (await onDeleteScheme(selectedScheme.id)) onChange({ multiAgentSchemeId: null });
+    const scheme = selectedScheme;
+    const remove = onDeleteScheme;
+    confirmPrompt.confirm({
+      title: t("collaborationDeleteScheme", { defaultValue: t("common:delete") }),
+      message: t("collaborationConfirmDeleteScheme", { name: scheme.name }),
+      confirmText: t("common:delete"),
+      danger: true,
+      onConfirm: () => {
+        void remove(scheme.id).then((removed) => {
+          if (removed) onChange({ multiAgentSchemeId: null });
+        });
+      }
+    });
   };
 
   const updateMaxAgents = (value: number) => {
@@ -437,6 +463,7 @@ export function ProfileCollaborationEditor({
           </div>
         ) : null}
       </div>
+      {confirmPrompt.element}
     </div>
   );
 }

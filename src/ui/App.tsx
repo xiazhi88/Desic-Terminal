@@ -46,6 +46,7 @@ import clsx from "clsx";
 import type { TFunction } from "i18next";
 import defaultAiConfig from "../../shared/default-ai-config.json";
 import { SymbolIcon, SymbolLabel } from "./SymbolIcon";
+import { useConfirmPrompt } from "./ConfirmPrompt";
 import { AppUpdateBadge } from "./AppUpdateBadge";
 import { useDraggableSurface } from "./useDraggableSurface";
 import type {
@@ -5785,6 +5786,7 @@ function AiSettingsPane({
   onValidated?: () => void;
 }) {
   const { t } = useTranslation(["settings", "common"]);
+  const confirmPrompt = useConfirmPrompt();
   const [summary, setSummary] = useState<AiConfigSummary | null>(null);
   const [models, setModels] = useState<AiModelDraft[]>([]);
   const [activeModelId, setActiveModelId] = useState("");
@@ -5865,12 +5867,20 @@ function AiSettingsPane({
 
   const removeModel = useCallback(() => {
     if (!selectedModel || models.length <= 1) return;
-    if (!window.confirm(t("settings:confirmDeleteModel", { name: selectedModel.name }))) return;
-    const next = models.filter((item) => item.id !== selectedModel.id);
-    setModels(next);
-    setSelectedModelId(next[0]?.id ?? "");
-    if (activeModelId === selectedModel.id) setActiveModelId(next[0]?.id ?? "");
-  }, [activeModelId, models, selectedModel, t]);
+    const target = selectedModel;
+    confirmPrompt.confirm({
+      title: t("settings:deleteModelConfiguration"),
+      message: t("settings:confirmDeleteModel", { name: target.name }),
+      confirmText: t("common:delete"),
+      danger: true,
+      onConfirm: () => {
+        const next = models.filter((item) => item.id !== target.id);
+        setModels(next);
+        setSelectedModelId(next[0]?.id ?? "");
+        if (activeModelId === target.id) setActiveModelId(next[0]?.id ?? "");
+      }
+    });
+  }, [activeModelId, confirmPrompt, models, selectedModel, t]);
 
   const save = useCallback(async () => {
     const active = models.find((item) => item.id === activeModelId);
@@ -6043,6 +6053,7 @@ function AiSettingsPane({
           />
         </ModalShell>
       ) : null}
+      {confirmPrompt.element}
     </>
   );
 }
@@ -6199,6 +6210,7 @@ function PromptSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
 function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void }) {
   const { t } = useTranslation(["settings", "common"]);
   const { draft, setDraft, status, busy, save, applySummary } = useAiConfigDraft(onNotify);
+  const confirmPrompt = useConfirmPrompt();
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
   const [skillDialogMode, setSkillDialogMode] = useState<"custom" | "local" | "git">("custom");
   const [customSkill, setCustomSkill] = useState({ id: "", description: "", rules: "", content: "" });
@@ -6421,8 +6433,7 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
     }
   }, [onNotify, refreshSkillVersions]);
 
-  const discardVersion = useCallback(async (version: AiSkillVersion) => {
-    if (!window.confirm(t("settings:confirmDiscardSkillDraft", { skill: version.skillId, version: version.version }))) return;
+  const discardVersionNow = useCallback(async (version: AiSkillVersion) => {
     setVersionBusy(`discard:${version.id}`);
     try {
       await invokeDesktop("ai_skill_version_discard", { id: version.id });
@@ -6437,6 +6448,17 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
       setVersionBusy(null);
     }
   }, [onNotify, refreshSkillVersions, viewedVersionId]);
+
+  // Discarding a draft is irreversible, so it is confirmed before running.
+  const discardVersion = useCallback((version: AiSkillVersion) => {
+    confirmPrompt.confirm({
+      title: t("settings:discardSkillDraft", { defaultValue: t("common:delete") }),
+      message: t("settings:confirmDiscardSkillDraft", { skill: version.skillId, version: version.version }),
+      confirmText: t("common:delete"),
+      danger: true,
+      onConfirm: () => { void discardVersionNow(version); }
+    });
+  }, [confirmPrompt, discardVersionNow, t]);
 
   const latestPublished = editingVersions.find((version) => version.status === "published");
   const usingProfiles = editingSkill ? profilesBySkill.get(editingSkill.id) ?? [] : [];
@@ -6557,6 +6579,7 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
           </div>
         </ModalShell>
       ) : null}
+      {confirmPrompt.element}
     </div>
   );
 }
