@@ -12397,6 +12397,48 @@ button {
   background: rgba(139, 92, 246, 0.28);
 }
 
+.order-type-tabs {
+  display: flex;
+  width: 100%;
+  gap: 8px;
+  min-height: 34px;
+  margin-bottom: 12px;
+  padding: 0 0 2px;
+  overflow-x: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  scrollbar-width: thin;
+}
+
+.order-type-tabs button {
+  flex: 0 0 auto;
+  height: 32px;
+  padding: 0 13px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--weak);
+  background: rgba(255, 255, 255, 0.012);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.order-type-tabs button:hover {
+  color: var(--text);
+  border-color: rgba(139, 92, 246, 0.42);
+}
+
+.order-type-tabs button.active {
+  color: var(--text);
+  border-color: rgba(139, 92, 246, 0.44);
+  background: rgba(139, 92, 246, 0.2);
+}
+
+.order-type-tabs button:focus-visible {
+  outline: 2px solid rgba(167, 139, 250, 0.72);
+  outline-offset: 2px;
+}
+
 .positions-table {
   padding: 12px;
   min-height: 0;

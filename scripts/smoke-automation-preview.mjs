@@ -168,6 +168,10 @@ async function verifyRun(page, scenario) {
 
   const state = await readPageState(page);
   assertNoGlobalOverflow(state, `${scenario.label}/run`);
+  const tokenBreakdown = await page.locator(".automation-run-token-breakdown").innerText();
+  if (!tokenBreakdown.includes("缓存命中率 35.9%") || !tokenBreakdown.includes("读取 65.5K")) {
+    throw new Error(`${scenario.label}/run: cache hit rate is missing from run details: ${tokenBreakdown}`);
+  }
   const lanes = page.locator(".automation-agent-trace-lane");
   if (await lanes.count() !== 4) throw new Error(`${scenario.label}/run: expected four Agent lanes`);
   if (!(await page.locator(".automation-agent-trace-lane.status-done").count())) throw new Error(`${scenario.label}/run: completed Agent state missing`);

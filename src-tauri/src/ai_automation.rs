@@ -31,6 +31,8 @@ const DAILY_MARKET_REVIEW_EVIDENCE_RULES: &str = "历史 Smart Money 日内证�
 const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES: &str = "永续合约的张数、币数量、名义敞口、保证金、止损和 ATR 风险只使用 account.readRisk 的 instrumentEvaluations、trade.evaluatePlan 或 trade.precheck 返回的结构化字段，不得自行手算。effectiveExposureMultiple=名义敞口÷USDT权益，notionalPctOfEquity=effectiveExposureMultiple×100%；例如 notionalPctOfEquity=47.58% 等于 effectiveExposureMultiple=0.4758X，表示标的反向波动1%时，忽略费用、资金费和滑点，权益约损失0.4758%，不是占用47.58%保证金。notionalPctOfEquity不超过100%表示有效敞口不超过1X；不得仅凭账户余额绝对值、minSz或名义敞口比例称为高风险、高杠杆、账户太小、容错空间有限或不适合开仓。账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。trade.precheck返回blocked=false时必须称为账户可行；没有明确用户风险预算时只报告结构化数值，不自行发明风险阈值。";
 const DAILY_MARKET_REVIEW_EVIDENCE_RULES_EN: &str = "For historical intraday Smart Money evidence, prefer intelligence.smartMoney.readSignalTrendByFilter. Use the complete perpetual instId, granularity=1h, a 13-digit millisecond ts equal to windowEnd-1, and a limit matching the window hours. The backend converts ts to the OKX UTC+8 hourly dataVersion and never forwards ts upstream. readSignalOverviewByFilter is a current-hour snapshot and must not receive ts/dataVersion; it may only be cited as a clearly labelled post-review supplement and must not be attributed to the target date or used to fabricate a historical evidence conflict. Daily Briefing is an optional pre-generated artifact; disabled or empty briefing results are not an original market-data gap and cannot independently invalidate a conclusion. Report the actual System Stress time buckets and coverage. ADL unknown only means that no warning state was confirmed. accountId is an opaque stable identifier; demo/live text inside it does not define the environment. Use only the separate environment field and backend account binding validation.";
 const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN: &str = "For perpetual contracts, use only structured fields returned by account.readRisk instrumentEvaluations, trade.evaluatePlan, or trade.precheck for contract quantity, base quantity, notional exposure, margin, stop risk, and ATR risk. Never recompute them manually. effectiveExposureMultiple equals notional exposure divided by USDT equity, and notionalPctOfEquity equals effectiveExposureMultiple multiplied by 100%. For example, notionalPctOfEquity=47.58% means effectiveExposureMultiple=0.4758X: ignoring fees, funding, and slippage, an adverse 1% move in the instrument implies about a 0.4758% equity loss; it does not mean 47.58% margin usage. notionalPctOfEquity at or below 100% means effective exposure at or below 1X. Do not label an account high-risk, highly leveraged, too small, low-tolerance, or unsuitable solely from absolute balance, minSz, or notional exposure percentage. Judge account tolerance only with stopRiskPctOfEquity, oneAtrRiskPctOfEquity, marginPctOfEquity, remaining margin, liquidation distance, existing positions, and portfolio risk. If trade.precheck returns blocked=false, describe the account as feasible. Without an explicit user risk budget, report structured values and do not invent thresholds.";
+const EXISTING_POSITION_MANAGEMENT_RULES: &str = "每轮必须把关注品种的现有持仓与当前普通委托、策略委托逐一核对，并明确识别没有 reduce-only 平仓单、止盈、止损或保护性 trigger 的裸持仓。每个裸持仓都必须在本轮形成明确选择：附带失效条件和下一退出条件继续持有、通过正常最终复核和 tradeOpportunity.create 创建 intent=close 的保护性 trigger/limit 机会、或在证据支持时减仓/平仓；不得因发现新开仓机会而静默忽略。已有仓位的立即退出使用 market，保护止损使用 trigger，目标退出使用 limit，数量不得超过可平张数；新开仓专用的 takeProfit/stopLoss 字段不能用于声称已有仓位已受保护。在 long/short 模式下同时持有反向仓位可以是对冲，但新开反向仓前必须明确说明对冲目标、规模关系、期限、解除/失效条件、双方退出机制和组合总风险；缺少这些组合层理由时优先管理已有敞口。";
+const EXISTING_POSITION_MANAGEMENT_RULES_EN: &str = "On every run, reconcile each watched instrument's existing positions against current ordinary and algo orders and explicitly identify positions with no reduce-only close, take-profit, stop-loss, or protective trigger. Every unprotected position requires an explicit decision in this run: hold with a stated invalidation and next exit condition, create an intent=close protective trigger/limit opportunity through the normal final review and tradeOpportunity.create workflow, or reduce/close when evidence supports it. Never silently ignore it because a new opening opportunity was found. Use market for an immediate exit, trigger for a protective stop, and limit for a target exit, never exceeding the closable contract size. takeProfit/stopLoss fields belong to new open orders and cannot be used to claim an existing position is protected. Opposite positions in long/short mode may be a hedge, but before opening the opposite side state its objective, size relationship, duration, unwind/invalidation condition, exits for both sides, and combined portfolio risk. Without that portfolio-level rationale, manage the existing exposure first.";
 
 fn automation_response_instruction(locale: &str) -> &'static str {
     match locale {
@@ -608,7 +610,7 @@ fn default_environment() -> String {
     "demo".to_string()
 }
 fn default_scan_interval() -> u32 {
-    15
+    30
 }
 fn default_history_days() -> u32 {
     30
@@ -7451,7 +7453,7 @@ async fn execute_profile_run(
         }
     } else if chinese_prompt {
         format!(
-            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
+            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
             response_instruction,
             current_time,
             current_timestamp_ms,
@@ -7466,11 +7468,12 @@ async fn execute_profile_run(
             trigger,
             multi_agent_instruction,
             PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES,
+            EXISTING_POSITION_MANAGEMENT_RULES,
             decision_workflow_instruction,
         )
     } else {
         format!(
-            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
+            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
             response_instruction,
             current_time,
             current_timestamp_ms,
@@ -7485,6 +7488,7 @@ async fn execute_profile_run(
             trigger,
             multi_agent_instruction,
             PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN,
+            EXISTING_POSITION_MANAGEMENT_RULES_EN,
             decision_workflow_instruction,
         )
     };
@@ -8474,6 +8478,31 @@ fn load_review_evidence(app: &tauri::AppHandle, episode_id: &str) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_profile_defaults_to_thirty_minute_maximum_silence() {
+        let profile = serde_json::from_value::<AiAgentProfileInput>(json!({ "name": "Test" }))
+            .expect("minimal profile input");
+        assert_eq!(profile.scan_interval_minutes, 30);
+    }
+
+    #[test]
+    fn background_prompt_requires_existing_position_management() {
+        for expected in [
+            "每个裸持仓都必须在本轮形成明确选择",
+            "intent=close",
+            "对冲目标、规模关系、期限",
+        ] {
+            assert!(EXISTING_POSITION_MANAGEMENT_RULES.contains(expected));
+        }
+        for expected in [
+            "Every unprotected position requires an explicit decision",
+            "intent=close",
+            "combined portfolio risk",
+        ] {
+            assert!(EXISTING_POSITION_MANAGEMENT_RULES_EN.contains(expected));
+        }
+    }
 
     #[test]
     fn profile_performance_attributes_only_this_profile_s_fills() {

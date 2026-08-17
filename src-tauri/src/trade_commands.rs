@@ -6217,6 +6217,12 @@ pub struct AlgoOrderSummary {
     #[serde(default)]
     ord_px: String,
     #[serde(default)]
+    active_px: String,
+    #[serde(default)]
+    callback_ratio: String,
+    #[serde(default)]
+    callback_spread: String,
+    #[serde(default)]
     tp_trigger_px: String,
     #[serde(default)]
     tp_trigger_px_type: String,
@@ -7862,6 +7868,14 @@ pub async fn okx_cancel_algo_order(
     })
 }
 
+const ALGO_ORDER_TYPE_GROUPS: [&str; 4] = [
+    "conditional,oco",
+    "trigger",
+    "move_order_stop",
+    "iceberg,twap",
+];
+const OPTIONAL_ALGO_ORDER_TYPE_GROUPS: [&str; 2] = ["move_order_stop", "iceberg,twap"];
+
 #[tauri::command]
 pub async fn okx_list_algo_orders(
     app: tauri::AppHandle,
@@ -7869,11 +7883,20 @@ pub async fn okx_list_algo_orders(
 ) -> Result<AlgoOrdersResponse, String> {
     let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     ensure_trade_account(&account, &request.environment).await?;
-    const ALGO_ORDER_TYPE_GROUPS: [&str; 2] = ["conditional,oco", "trigger"];
     let mut orders = Vec::new();
     for order_types in ALGO_ORDER_TYPE_GROUPS {
         let path = format!("/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={order_types}");
-        let pending = okx_private_get::<AlgoOrderSummary>(&account, &path).await?;
+        let pending = match okx_private_get::<AlgoOrderSummary>(&account, &path).await {
+            Ok(pending) => pending,
+            Err(error) if OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&order_types) => {
+                eprintln!(
+                    "okx_optional_algo_order_group_read_failed account={} ord_types={} error={error}",
+                    account.id, order_types
+                );
+                continue;
+            }
+            Err(error) => return Err(error),
+        };
         orders.extend(
             pending
                 .data
@@ -11223,10 +11246,34 @@ fn upsert_algo_order_summaries(
 #[cfg(test)]
 mod idempotency_tests {
     use super::*;
+    use std::collections::HashSet;
     use std::sync::Barrier;
 
     #[test]
-    fn algo_order_summary_preserves_trigger_order_prices() {
+    fn algo_order_queries_cover_every_supported_tab_category() {
+        let order_types = ALGO_ORDER_TYPE_GROUPS
+            .iter()
+            .flat_map(|group| group.split(','))
+            .collect::<HashSet<_>>();
+        assert_eq!(
+            order_types,
+            HashSet::from([
+                "conditional",
+                "oco",
+                "trigger",
+                "move_order_stop",
+                "iceberg",
+                "twap",
+            ])
+        );
+        assert!(!OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&"conditional,oco"));
+        assert!(!OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&"trigger"));
+        assert!(OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&"move_order_stop"));
+        assert!(OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&"iceberg,twap"));
+    }
+
+    #[test]
+    fn algo_order_summary_preserves_trigger_and_trailing_prices() {
         let order = serde_json::from_value::<AlgoOrderSummary>(json!({
             "algoId": "algo-trigger-1",
             "instId": "BTC-USDT-SWAP",
@@ -11239,6 +11286,19 @@ mod idempotency_tests {
         assert_eq!(order.trigger_px, "65000");
         assert_eq!(order.trigger_px_type, "last");
         assert_eq!(order.ord_px, "-1");
+
+        let trailing = serde_json::from_value::<AlgoOrderSummary>(json!({
+            "algoId": "algo-trailing-1",
+            "instId": "BTC-USDT-SWAP",
+            "ordType": "move_order_stop",
+            "activePx": "64000",
+            "callbackRatio": "1.5",
+            "callbackSpread": ""
+        }))
+        .expect("parse trailing algo order");
+        assert_eq!(trailing.active_px, "64000");
+        assert_eq!(trailing.callback_ratio, "1.5");
+        assert!(trailing.callback_spread.is_empty());
     }
 
     fn place_request(order_type: &str) -> PlaceOrderRequest {

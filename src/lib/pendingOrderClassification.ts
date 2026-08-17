@@ -1,4 +1,4 @@
-import type { OkxAlgoOrder, OkxPendingOrder } from "../types";
+import type { OkxAlgoOrder, OkxPendingOrder, OkxPosition } from "../types";
 
 const ALGO_ORDER_TYPES = new Set([
   "conditional",
@@ -59,6 +59,49 @@ function pendingOrderToAlgoOrder(
 
 function algoOrderIdentity(order: Pick<OkxAlgoOrder, "algoId" | "algoClOrdId" | "ordId" | "clOrdId">): string {
   return order.algoId || order.algoClOrdId || order.ordId || order.clOrdId;
+}
+
+export type OrdinaryPendingOrderGroup = "limitMarket" | "advancedLimit";
+export type AlgoPendingOrderGroup = "takeProfitStopLoss" | "trailing" | "planned" | "other";
+
+export function classifyOrdinaryPendingOrderGroup(ordType: string | null | undefined): OrdinaryPendingOrderGroup {
+  const normalized = String(ordType ?? "").trim().toLowerCase();
+  return normalized === "limit" || normalized === "market" ? "limitMarket" : "advancedLimit";
+}
+
+export function classifyAlgoPendingOrderGroup(ordType: string | null | undefined): AlgoPendingOrderGroup {
+  const normalized = String(ordType ?? "").trim().toLowerCase();
+  if (normalized === "conditional" || normalized === "oco") return "takeProfitStopLoss";
+  if (normalized === "move_order_stop") return "trailing";
+  if (normalized === "trigger") return "planned";
+  return "other";
+}
+
+export type AlgoTriggerPurpose = "entry" | "takeProfit" | "stopLoss" | "close";
+
+export function classifyAlgoTriggerPurpose(
+  order: Pick<OkxAlgoOrder, "instId" | "ordType" | "side" | "posSide" | "reduceOnly" | "triggerPx">,
+  positions: Array<Pick<OkxPosition, "instId" | "posSide" | "pos" | "markPx">>
+): AlgoTriggerPurpose | null {
+  if (String(order.ordType).trim().toLowerCase() !== "trigger") return null;
+
+  let closingSide: "long" | "short" | null = null;
+  if (order.posSide === "long" && order.side === "sell") closingSide = "long";
+  if (order.posSide === "short" && order.side === "buy") closingSide = "short";
+  if (order.posSide === "net" && String(order.reduceOnly).toLowerCase() === "true") {
+    const netPosition = positions.find((position) => position.instId === order.instId && position.posSide === "net");
+    const netSize = Number(netPosition?.pos);
+    if (Number.isFinite(netSize) && netSize > 0 && order.side === "sell") closingSide = "long";
+    if (Number.isFinite(netSize) && netSize < 0 && order.side === "buy") closingSide = "short";
+  }
+  if (!closingSide) return "entry";
+
+  const position = positions.find((item) => item.instId === order.instId && (item.posSide === closingSide || item.posSide === "net"));
+  const referencePrice = Number(position?.markPx);
+  const triggerPrice = Number(order.triggerPx);
+  if (!Number.isFinite(referencePrice) || referencePrice <= 0 || !Number.isFinite(triggerPrice) || triggerPrice <= 0 || triggerPrice === referencePrice) return "close";
+  if (closingSide === "long") return triggerPrice < referencePrice ? "stopLoss" : "takeProfit";
+  return triggerPrice > referencePrice ? "stopLoss" : "takeProfit";
 }
 
 export function mergePendingAlgoOrders(

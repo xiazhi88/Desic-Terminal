@@ -546,6 +546,8 @@ mod tests {
             "netRewardRiskRatio",
             "it does not change notional, absolute fees",
             "Never present gross target profit as the expected net payoff",
+            "prefer a resting non-marketable ordinary limit order",
+            "a marketable limit can still pay taker fees",
         ] {
             assert!(
                 fixed.content.contains(expected),
@@ -556,10 +558,48 @@ mod tests {
             "directionally plausible setup can still be economically unattractive",
             "target is close to the fee-adjusted break-even price",
             "higher leverage does not improve net profit",
+            "maker-fee savings improve net expectancy",
+            "fee treatment must never be promised",
         ] {
             assert!(
                 philosophy.content.contains(expected),
                 "missing editable cost judgment: {expected}"
+            );
+        }
+    }
+
+    #[test]
+    fn position_management_rules_cover_unprotected_positions_and_hedges() {
+        let definitions = default_ai_skill_definitions();
+        let fixed = definitions
+            .iter()
+            .find(|skill| skill.id == "desic-core-operations")
+            .expect("fixed skill");
+        let philosophy = definitions
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("trading philosophy");
+
+        for expected in [
+            "never silently ignore an unprotected position",
+            "intent=close",
+            "takeProfit/stopLoss fields attach only to a new open order",
+            "opening the opposite direction while a position already exists is a hedge",
+            "unwind or invalidation condition",
+        ] {
+            assert!(
+                fixed.content.contains(expected),
+                "missing fixed position-management rule: {expected}"
+            );
+        }
+        for expected in [
+            "Existing exposure is a live decision",
+            "An unprotected position requires an explicit hold-and-exit plan",
+            "Do not create an accidental hedge",
+        ] {
+            assert!(
+                philosophy.content.contains(expected),
+                "missing editable position-management judgment: {expected}"
             );
         }
     }
@@ -594,8 +634,8 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0x7133_6f9f_0a42_3ee4_u64),
-            ("trading-philosophy", 0x49ea_5f9d_7db7_ec0c_u64),
+            ("desic-core-operations", 0xf9a7_b003_17c7_a4e9_u64),
+            ("trading-philosophy", 0x6d82_4f43_18eb_a276_u64),
             ("okx-news-intelligence", 0x790c_faa6_cc57_d766_u64),
             ("okx-smart-money-analysis", 0x18d3_b51e_1a97_ffe3_u64),
         ];

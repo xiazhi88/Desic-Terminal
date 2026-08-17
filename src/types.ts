@@ -1223,6 +1223,9 @@ export type OkxAlgoOrder = {
   triggerPx: string;
   triggerPxType: string;
   ordPx: string;
+  activePx?: string;
+  callbackRatio?: string;
+  callbackSpread?: string;
   tpTriggerPx: string;
   tpTriggerPxType: string;
   tpOrdPx: string;

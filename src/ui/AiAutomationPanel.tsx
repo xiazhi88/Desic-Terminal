@@ -571,6 +571,7 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     skillVersions: profile.skillVersions ?? {},
     skillVersionModes: profile.skillVersionModes ?? {},
     reasoningDepth: profile.reasoningDepth ?? "medium",
+    scanIntervalMinutes: Math.max(1, Math.min(1_440, Math.round(Number(profile.scanIntervalMinutes) || 30))),
     targetLeverage: Math.max(1, Math.min(125, Math.round(Number(profile.targetLeverage) || 20))),
     maxSingleTradeMarginPct: Math.max(1, Math.min(100, Math.round(Number(profile.maxSingleTradeMarginPct) || 30))),
     dailyReviewEnabled: Boolean(profile.dailyReviewEnabled),
@@ -597,7 +598,7 @@ function createProfile(accounts: AccountSummary[], defaultModelId: string): AiAg
     accountId: account?.id ?? null,
     environment: account?.environment ?? "demo",
     symbols: ["BTC-USDT-SWAP"],
-    scanIntervalMinutes: 15,
+    scanIntervalMinutes: 30,
     skillIds: withRequiredProfileSkills([]),
     skillVersions: {},
     skillVersionModes: {},
@@ -1542,6 +1543,14 @@ function formatRunTokenCount(value: number | undefined) {
   return formatLocalizedNumber(Math.round(tokens));
 }
 
+export function formatRunCacheHitRate(summary: AiAutomationRun["tokenUsage"]) {
+  if (!summary?.reported || !summary.coverage.inputOutput || !summary.coverage.cacheRead) return null;
+  const inputTokens = Number(summary.usage.inputTokens);
+  const cacheReadTokens = Number(summary.usage.cacheReadTokens);
+  if (!Number.isFinite(inputTokens) || inputTokens <= 0 || !Number.isFinite(cacheReadTokens) || cacheReadTokens < 0 || cacheReadTokens > inputTokens) return null;
+  return `${((cacheReadTokens / inputTokens) * 100).toFixed(1)}%`;
+}
+
 function runTokenSummary(run: AiAutomationRun) {
   const summary = run.tokenUsage;
   if (!summary) return null;
@@ -1837,6 +1846,7 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
   const tradeCount = steps.filter((step) => runActionKind(step) === "trade").length;
   const notificationCount = steps.filter((step) => runActionKind(step) === "notification").length;
   const skills = isRecord(detail.skillVersions) ? Object.entries(detail.skillVersions) : [];
+  const cacheHitRate = formatRunCacheHitRate(detail.run.tokenUsage);
   const decisionTrace = useMemo(() => latestDecisionContextTrace(detail.toolEvents), [detail.toolEvents]);
   const finalDecision = isRecord(detail.finalDecision) ? detail.finalDecision : null;
   const reviewedDecisionTrace = decisionTrace && validDecisionContextResult(decisionTrace.result) ? decisionTrace : null;
@@ -1876,7 +1886,7 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
               <>
                 <b>{i18n.t("common:input")} {formatRunTokenCount(detail.run.tokenUsage.usage.inputTokens)}</b>
                 <b>{i18n.t("common:output")} {formatRunTokenCount(detail.run.tokenUsage.usage.outputTokens)}</b>
-                {detail.run.tokenUsage.coverage.cacheRead ? <em>{automationText("runCacheRead", "Cache read {{tokens}} (included in input)", "缓存读取 {{tokens}}（已含在输入）", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
+                {detail.run.tokenUsage.coverage.cacheRead ? <em>{cacheHitRate ? automationText("runCacheHitRate", "Cache hit {{rate}} · read {{tokens}} (included in input)", "缓存命中率 {{rate}} · 读取 {{tokens}}（已含在输入）", { rate: cacheHitRate, tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) }) : automationText("runCacheRead", "Cache read {{tokens}} (included in input)", "缓存读取 {{tokens}}（已含在输入）", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
                 {detail.run.tokenUsage.agentCount > 0 ? <em>{automationText("runSubAgents", "{{count}} sub-Agents", "{{count}} 个子 Agent", { count: detail.run.tokenUsage.agentCount })}</em> : null}
                 {detail.run.tokenUsage.quality === "partial" ? <em>{automationText("runTokenPartial", "Known usage only; reporting is incomplete", "仅显示已知用量；统计不完整")}</em> : null}
               </>

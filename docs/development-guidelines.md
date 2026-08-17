@@ -313,6 +313,8 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 图表提醒的条件验证、收盘判定、状态更新和外部投递必须集中在 Rust；前端只负责从指标中心已选实例生成结构化定义与预览。内置和自定义 DSL 指标必须保存实例参数及输出线标识，多输出指标不得退化为含糊的指标级条件。指标提醒不得在未确认 K 线上触发，也不得用旧的最后有效值冒充当前值；HTTP 渠道只允许经过后端校验的 GET/POST URL，日志不得输出完整请求体、Webhook 地址或潜在凭据。
 - 应用业务 UI 禁止直接渲染原生 `<select>`；单选下拉统一复用 `TerminalSelect`。新增场景必须提供可读 `ariaLabel`，保留关联字段的 `id`、禁用态、校验态和描述引用，并验证方向键、Enter/Space、Home/End、Esc、前缀键入、点击外部关闭与焦点恢复。Portal 列表必须限制在视口内，且不能触发父弹窗或浮层的 outside-click / Esc 关闭逻辑。
 - 独立策略单的可靠来源仍是 `orders-algo-pending`；`orders-pending` 中的 TP/SL 字段只能作为普通委托附带 TP/SL 的展示补充，不应替代策略单修改、撤销和 OCO 状态来源。
+- 通用 `trigger` 计划委托本身不等于止盈或止损。开仓 trigger 必须按“触发价 + 触发后委托价”展示；平仓 trigger 只有结合 `side/posSide`、对应持仓和当前参考价后才能归入止盈或止损，触发后市价/限价是该退出条件的执行方式，不得占成另一个止盈止损字段。证据不足时显示“平仓触发”，禁止猜测收益语义。
+- 当前委托和历史委托按交易所订单语义分 Tab 时，分类必须穷尽：普通 `limit/market`、普通高级限价、`conditional/oco`、`move_order_stop`、`trigger` 分别独立，冰山、TWAP 和未知策略类型只在实际存在时进入“其他策略”。新增 `ordType` 不得因缺少 UI 分支而从列表中消失；Tab 数量统计全账号，合约筛选只收窄表格内容。历史页面必须合并普通 `orders-history` 与独立 `orders-algo-history` 的展示层，但不能把 Algo 记录伪造成带手续费或盈亏字段的普通历史委托。
 
 ## 11. 代码组织
 

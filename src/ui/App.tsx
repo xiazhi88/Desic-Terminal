@@ -239,7 +239,7 @@ import {
   useMarketHotStore
 } from "../lib/marketHotStore";
 import { loadNotificationSettings, saveFeishuConfig, testFeishuNotification } from "../lib/notifications";
-import { isOrdinaryPendingOrder, mergePendingAlgoOrders } from "../lib/pendingOrderClassification";
+import { classifyAlgoPendingOrderGroup, classifyAlgoTriggerPurpose, classifyOrdinaryPendingOrderGroup, isOrdinaryPendingOrder, mergePendingAlgoOrders } from "../lib/pendingOrderClassification";
 import { getActiveTauriListenerCounts, invokeDesktop, invokeOptional, isTauriRuntime, listenOptional } from "../lib/tauri";
 import { useTranslation } from "react-i18next";
 
@@ -456,7 +456,11 @@ function buildTerminalPreviewPrivateSnapshot(account?: AccountSummary, includePe
       { ccy: "USDT", eq: "13.21213", availEq: "10.638698", availBal: "10.638698", cashBal: "13.10349", frozenBal: "2.573432", uTime: String(syncedAt) },
       { ccy: "BTC", eq: "0.00042", availEq: "0.00042", availBal: "0.00042", cashBal: "0.00042", frozenBal: "0", uTime: String(syncedAt) }
     ],
-    positions: [],
+    positions: includePendingOrder ? [{
+      instId: "BTC-USDT-SWAP", instType: "SWAP", mgnMode: "cross", posSide: "long", pos: "0.04",
+      avgPx: "63550", markPx: "63625", upl: "0.003", uplRatio: "0.01", lever: "20", liqPx: "61000",
+      posId: "preview-btc-long", cTime: String(syncedAt - 60_000), uTime: String(syncedAt)
+    }] : [],
     orders: includePendingOrder
       ? [{
           instId: "BTC-USDT-SWAP",
@@ -479,20 +483,20 @@ function buildTerminalPreviewPrivateSnapshot(account?: AccountSummary, includePe
         }, {
           instId: "BTC-USDT-SWAP",
           instType: "SWAP",
-          ordId: "preview-trigger-order-65000",
-          clOrdId: "preview-trigger-client-65000",
-          algoId: "preview-trigger-order-65000",
-          algoClOrdId: "preview-trigger-client-65000",
+          ordId: "preview-trigger-close-long-63100",
+          clOrdId: "preview-trigger-close-long-client-63100",
+          algoId: "preview-trigger-close-long-63100",
+          algoClOrdId: "preview-trigger-close-long-client-63100",
           isAlgo: true,
-          side: "buy",
+          side: "sell",
           posSide: "long",
           tdMode: "cross",
           ordType: "trigger",
           px: "",
-          triggerPx: "65000",
+          triggerPx: "63100",
           triggerPxType: "last",
           ordPx: "-1",
-          sz: "0.03",
+          sz: "0.04",
           accFillSz: "0",
           avgPx: "",
           state: "live",
@@ -500,6 +504,30 @@ function buildTerminalPreviewPrivateSnapshot(account?: AccountSummary, includePe
           reduceOnly: "false",
           cTime: String(syncedAt),
           uTime: String(syncedAt)
+        }, {
+          instId: "ETH-USDT-SWAP",
+          instType: "SWAP",
+          ordId: "preview-trigger-entry-long-1912",
+          clOrdId: "preview-trigger-entry-long-client-1912",
+          algoId: "preview-trigger-entry-long-1912",
+          algoClOrdId: "preview-trigger-entry-long-client-1912",
+          isAlgo: true,
+          side: "buy",
+          posSide: "long",
+          tdMode: "cross",
+          ordType: "trigger",
+          px: "",
+          triggerPx: "1912.5",
+          triggerPxType: "last",
+          ordPx: "-1",
+          sz: "0.1",
+          accFillSz: "0",
+          avgPx: "",
+          state: "live",
+          lever: "20",
+          reduceOnly: "false",
+          cTime: String(syncedAt + 1),
+          uTime: String(syncedAt + 1)
         }]
       : [],
     syncedAt
@@ -13230,6 +13258,8 @@ function formatOpportunityDirection(item: Pick<TradeOpportunity, "direction" | "
   return item.direction === "short" ? "做空" : "做多";
 }
 
+type PendingOrdersView = "limitMarket" | "advancedLimit" | "takeProfitStopLoss" | "trailing" | "planned" | "other";
+
 function BottomPanel({
   activeTab,
   setActiveTab,
@@ -13307,7 +13337,8 @@ function BottomPanel({
   const [marketClosePosition, setMarketClosePosition] = useState<OkxPosition | null>(null);
   const [amendingAlgo, setAmendingAlgo] = useState<OkxAlgoOrder | null>(null);
   const [confirmCancelAlgo, setConfirmCancelAlgo] = useState<OkxAlgoOrder | null>(null);
-  const [ordersView, setOrdersView] = useState<"normal" | "algo">("normal");
+  const [ordersView, setOrdersView] = useState<PendingOrdersView>("limitMarket");
+  const [historicalOrdersView, setHistoricalOrdersView] = useState<PendingOrdersView>("limitMarket");
   // These tabs read the whole account, matching positions and open orders. The
   // filter narrows what is already loaded, so switching it never refetches.
   const [instrumentFilter, setInstrumentFilter] = useState(ALL_INSTRUMENTS_FILTER);
@@ -13323,7 +13354,6 @@ function BottomPanel({
     () => mergePendingAlgoOrders(algoOrders, snapshot?.orders ?? [], account?.id ?? "", tradeEnvironment),
     [account?.id, algoOrders, snapshot?.orders, tradeEnvironment]
   );
-  const filteredHistoricalOrders = useMemo(() => filterInstruments(historicalOrders), [filterInstruments, historicalOrders]);
   const filteredHistoricalFills = useMemo(() => filterInstruments(historicalFills), [filterInstruments, historicalFills]);
   const filteredEpisodes = useMemo(() => filterInstruments(episodes), [episodes, filterInstruments]);
   const filteredAccountBills = useMemo(() => filterInstruments(accountBills), [accountBills, filterInstruments]);
@@ -13366,10 +13396,60 @@ function BottomPanel({
   const instrumentFilterTabs = new Set(["orders", "history", "fills", "episodes", "bills", "audit"]);
   const pendingAlgoOrders = mergedAlgoOrders.filter(isActiveAlgoOrder);
   const normalOrders = snapshot?.orders.filter(isOrdinaryPendingOrder) ?? [];
-  // Tab badges keep counting the whole account so the filter cannot hide the fact
-  // that orders exist elsewhere; only the tables narrow.
-  const filteredPendingAlgoOrders = filterInstruments(pendingAlgoOrders);
-  const filteredNormalOrders = filterInstruments(normalOrders);
+  const limitMarketOrders = normalOrders.filter((order) => classifyOrdinaryPendingOrderGroup(order.ordType) === "limitMarket");
+  const advancedLimitOrders = normalOrders.filter((order) => classifyOrdinaryPendingOrderGroup(order.ordType) === "advancedLimit");
+  const takeProfitStopLossOrders = pendingAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "takeProfitStopLoss");
+  const trailingOrders = pendingAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "trailing");
+  const plannedOrders = pendingAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "planned");
+  const otherStrategyOrders = pendingAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "other");
+  const pendingOrderTabs: Array<{ id: PendingOrdersView; label: string; count: number }> = [
+    { id: "limitMarket", label: t("trading:limitMarketOrders"), count: limitMarketOrders.length },
+    { id: "advancedLimit", label: t("trading:advancedLimitOrders"), count: advancedLimitOrders.length },
+    { id: "takeProfitStopLoss", label: t("trading:takeProfitStopLossOrders"), count: takeProfitStopLossOrders.length },
+    { id: "trailing", label: t("trading:trailingStopOrders"), count: trailingOrders.length },
+    { id: "planned", label: t("trading:plannedOrders"), count: plannedOrders.length },
+    ...(otherStrategyOrders.length > 0 ? [{ id: "other" as const, label: t("trading:otherStrategyOrders"), count: otherStrategyOrders.length }] : [])
+  ];
+  const selectedNormalOrders = ordersView === "limitMarket" ? limitMarketOrders : ordersView === "advancedLimit" ? advancedLimitOrders : [];
+  const selectedAlgoOrders = ordersView === "takeProfitStopLoss"
+    ? takeProfitStopLossOrders
+    : ordersView === "trailing"
+      ? trailingOrders
+      : ordersView === "planned"
+        ? plannedOrders
+        : ordersView === "other" ? otherStrategyOrders : [];
+  // Tab badges keep counting the whole account so the instrument filter cannot
+  // hide orders that exist on another contract.
+  const filteredSelectedNormalOrders = filterInstruments(selectedNormalOrders);
+  const filteredSelectedAlgoOrders = filterInstruments(selectedAlgoOrders);
+
+  const historicalAlgoOrders = algoOrders.filter((order) => order.sourceEndpoint === "orders-algo-history");
+  const historicalLimitMarketOrders = historicalOrders.filter((order) => classifyOrdinaryPendingOrderGroup(order.ordType) === "limitMarket");
+  const historicalAdvancedLimitOrders = historicalOrders.filter((order) => classifyOrdinaryPendingOrderGroup(order.ordType) === "advancedLimit");
+  const historicalTakeProfitStopLossOrders = historicalAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "takeProfitStopLoss");
+  const historicalTrailingOrders = historicalAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "trailing");
+  const historicalPlannedOrders = historicalAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "planned");
+  const historicalOtherStrategyOrders = historicalAlgoOrders.filter((order) => classifyAlgoPendingOrderGroup(order.ordType) === "other");
+  const historicalOrderTabs: Array<{ id: PendingOrdersView; label: string; count: number }> = [
+    { id: "limitMarket", label: t("trading:limitMarketOrders"), count: historicalLimitMarketOrders.length },
+    { id: "advancedLimit", label: t("trading:advancedLimitOrders"), count: historicalAdvancedLimitOrders.length },
+    { id: "takeProfitStopLoss", label: t("trading:takeProfitStopLossOrders"), count: historicalTakeProfitStopLossOrders.length },
+    { id: "trailing", label: t("trading:trailingStopOrders"), count: historicalTrailingOrders.length },
+    { id: "planned", label: t("trading:plannedOrders"), count: historicalPlannedOrders.length },
+    ...(historicalOtherStrategyOrders.length > 0 ? [{ id: "other" as const, label: t("trading:otherStrategyOrders"), count: historicalOtherStrategyOrders.length }] : [])
+  ];
+  const selectedHistoricalOrders = historicalOrdersView === "limitMarket"
+    ? historicalLimitMarketOrders
+    : historicalOrdersView === "advancedLimit" ? historicalAdvancedLimitOrders : [];
+  const selectedHistoricalAlgoOrders = historicalOrdersView === "takeProfitStopLoss"
+    ? historicalTakeProfitStopLossOrders
+    : historicalOrdersView === "trailing"
+      ? historicalTrailingOrders
+      : historicalOrdersView === "planned"
+        ? historicalPlannedOrders
+        : historicalOrdersView === "other" ? historicalOtherStrategyOrders : [];
+  const filteredSelectedHistoricalOrders = filterInstruments(selectedHistoricalOrders);
+  const filteredSelectedHistoricalAlgoOrders = filterInstruments(selectedHistoricalAlgoOrders);
   const tabs = [
     ["positions", `${t("trading:positions")}(${activePositions.length})`],
     ["orders", `${t("trading:openOrders")}(${normalOrders.length + pendingAlgoOrders.length})`],
@@ -13441,14 +13521,24 @@ function BottomPanel({
         )}
         {activeTab === "orders" && (
           <>
-            <div className="sub-tabs">
-              <button type="button" className={ordersView === "normal" ? "active" : ""} onClick={() => setOrdersView("normal")}>{t("trading:ordinaryOrders")}({normalOrders.length})</button>
-              <button type="button" className={ordersView === "algo" ? "active" : ""} onClick={() => setOrdersView("algo")}>{t("trading:algoOrders")}({pendingAlgoOrders.length})</button>
+            <div className="sub-tabs order-type-tabs" role="tablist" aria-label={t("trading:openOrderTypes")}>
+              {pendingOrderTabs.map((tab) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={ordersView === tab.id}
+                  className={ordersView === tab.id ? "active" : ""}
+                  onClick={() => setOrdersView(tab.id)}
+                  key={tab.id}
+                >
+                  {tab.label}{tab.count > 0 ? `(${tab.count})` : ""}
+                </button>
+              ))}
             </div>
-            {ordersView === "normal" && (
+            {(ordersView === "limitMarket" || ordersView === "advancedLimit") && (
               <>
                 <div className="table-head orders"><span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("trading:typeAndId")}</span><span>{t("trading:triggerAndOrderPrice")}</span><span>{t("common:quantity")}</span><span>{t("trading:filledQuantity")}</span><span>{t("trading:statusAndTime")}</span></div>
-                {filteredNormalOrders.map((order) => {
+                {filteredSelectedNormalOrders.map((order) => {
                   const triggerPx = order.isAlgo ? (order.triggerPx || order.px) : "";
                   const orderPx = order.isAlgo ? (order.ordPx || "") : (order.ordPx || order.px);
                   const triggerDisplay = triggerPx ? fmtPrice(triggerPx) : "--";
@@ -13533,31 +13623,74 @@ function BottomPanel({
                   );
                 })}
                 {isEmpty && <div className="empty-row">{account ? t("trading:accountDataStatus", { status: formatPrivateWsStatus(privateStatus, t) }) : t("trading:noAccountOpenOrders")}</div>}
-                {snapshot && filteredNormalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdinaryOrders")}</div>}
+                {snapshot && filteredSelectedNormalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdersInCategory", { type: pendingOrderTabs.find((tab) => tab.id === ordersView)?.label ?? t("trading:openOrders") })}</div>}
               </>
             )}
-            {ordersView === "algo" && (
+            {(ordersView === "takeProfitStopLoss" || ordersView === "trailing" || ordersView === "planned" || ordersView === "other") && (
               <>
                 <div className="table-head algo-orders">
-                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:quantity")}</span><span>{t("trading:takeProfit")} / {t("trading:triggerPrice")}</span><span>{t("trading:stopLoss")} / {t("trading:orderPriceAfterTrigger")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span><span>{t("common:actions")}</span>
+                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:quantity")}</span><span>{ordersView === "takeProfitStopLoss" ? t("trading:takeProfit") : ordersView === "trailing" ? t("trading:activationPrice") : ordersView === "planned" ? `${t("trading:triggerPrice")} / ${t("trading:takeProfit")}` : t("trading:triggerPrice")}</span><span>{ordersView === "takeProfitStopLoss" ? t("trading:stopLoss") : ordersView === "trailing" ? t("trading:callbackRange") : ordersView === "planned" ? `${t("trading:orderPriceAfterTrigger")} / ${t("trading:stopLoss")}` : t("trading:orderPriceAfterTrigger")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span><span>{t("common:actions")}</span>
                 </div>
-                {filteredPendingAlgoOrders.map((order) => {
-                  const isTriggerOrder = order.ordType === "trigger";
-                  const primaryTrigger = isTriggerOrder ? order.triggerPx : order.tpTriggerPx;
-                  const secondaryTrigger = isTriggerOrder ? order.ordPx : order.slTriggerPx;
+                {filteredSelectedAlgoOrders.map((order) => {
+                  const algoGroup = classifyAlgoPendingOrderGroup(order.ordType);
+                  const isTakeProfitStopLoss = algoGroup === "takeProfitStopLoss";
+                  const isTrailingOrder = algoGroup === "trailing";
+                  const isPlannedOrder = algoGroup === "planned";
+                  const triggerPurpose = isPlannedOrder ? classifyAlgoTriggerPurpose(order, snapshot?.positions ?? []) : null;
+                  const triggerExecution = formatAlgoExecPrice(order.ordPx, t);
+                  const trailingCallback = order.callbackRatio
+                    ? `${order.callbackRatio}%`
+                    : order.callbackSpread ? fmtPrice(order.callbackSpread) : "--";
+                  const trailingCallbackLabel = order.callbackRatio ? t("trading:callbackRatio") : order.callbackSpread ? t("trading:callbackSpread") : "--";
+                  const primaryPrice = isTakeProfitStopLoss
+                    ? order.tpTriggerPx
+                    : isPlannedOrder
+                      ? triggerPurpose === "stopLoss" ? "" : order.triggerPx
+                      : isTrailingOrder ? order.activePx || order.triggerPx : order.triggerPx || order.tpTriggerPx;
+                  const secondaryPrice = isTakeProfitStopLoss
+                    ? order.slTriggerPx
+                    : isPlannedOrder
+                      ? triggerPurpose === "entry" ? order.ordPx : triggerPurpose === "stopLoss" ? order.triggerPx : ""
+                      : isTrailingOrder ? "" : order.ordPx || order.slTriggerPx;
+                  const primaryDetail = isTakeProfitStopLoss
+                    ? `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.tpOrdPx, t)}`
+                    : !isPlannedOrder
+                      ? isTrailingOrder ? t("trading:activationPrice") : formatTriggerPriceType(order.triggerPxType, t)
+                      : triggerPurpose === "entry"
+                        ? formatTriggerPriceType(order.triggerPxType, t)
+                        : triggerPurpose === "takeProfit"
+                          ? `${t("trading:takeProfit")} · ${t("trading:orderAbbreviation")} ${triggerExecution}`
+                          : triggerPurpose === "close"
+                            ? `${t("trading:closePosition")} · ${t("trading:orderAbbreviation")} ${triggerExecution}`
+                            : "--";
+                  const secondaryDetail = isTakeProfitStopLoss
+                    ? `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.slOrdPx, t)}`
+                    : !isPlannedOrder
+                      ? isTrailingOrder ? trailingCallbackLabel : t("trading:orderPriceAfterTrigger")
+                      : triggerPurpose === "entry"
+                        ? t("trading:orderPriceAfterTrigger")
+                        : triggerPurpose === "stopLoss"
+                          ? `${t("trading:stopLoss")} · ${t("trading:orderAbbreviation")} ${triggerExecution}`
+                          : "--";
+                  const primaryTone = isTakeProfitStopLoss || triggerPurpose === "takeProfit"
+                    ? (primaryPrice ? "positive" : "muted")
+                    : triggerPurpose === "entry" || !isPlannedOrder ? toneBySide(order.side, order.posSide) : "muted";
+                  const secondaryTone = isTakeProfitStopLoss || triggerPurpose === "stopLoss"
+                    ? (secondaryPrice ? "negative" : "muted")
+                    : "muted";
                   return (
-                  <div className="table-row algo-orders" key={order.algoId || order.algoClOrdId || `${order.instId}-${order.cTime}`}>
+                  <div className="table-row algo-orders" data-order-group={algoGroup} data-trigger-purpose={triggerPurpose ?? undefined} key={order.algoId || order.algoClOrdId || `${order.instId}-${order.cTime}`}>
                     <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode || "--"} />
                     <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
                     <span>{formatAlgoOrderType(order.ordType, t)}<small>{t("trading:notTriggered")}</small></span>
                     <span>{formatAmount(order.sz)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.actualSz)}</small></span>
-                    <span className={clsx("cell-tone", primaryTrigger ? "positive" : "muted")}>{fmtPrice(primaryTrigger)}<small>{isTriggerOrder ? formatTriggerPriceType(order.triggerPxType, t) : `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.tpOrdPx, t)}`}</small></span>
-                    <span className={clsx("cell-tone", secondaryTrigger ? "negative" : "muted")}>{isTriggerOrder ? formatAlgoExecPrice(order.ordPx, t) : fmtPrice(secondaryTrigger)}<small>{isTriggerOrder ? t("trading:orderPriceAfterTrigger") : `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.slOrdPx, t)}`}</small></span>
+                    <span className={clsx("cell-tone", primaryTone)}>{primaryPrice ? fmtPrice(primaryPrice) : "--"}<small>{primaryDetail}</small></span>
+                    <span className={clsx("cell-tone", secondaryTone)}>{isTrailingOrder ? trailingCallback : !secondaryPrice ? "--" : isTakeProfitStopLoss || (isPlannedOrder && triggerPurpose === "stopLoss") ? fmtPrice(secondaryPrice) : formatAlgoExecPrice(secondaryPrice, t)}<small>{secondaryDetail}</small></span>
                     <span><b className={clsx("status-pill", toneByState(order.state))}>{formatAlgoState(order.state, t)}</b><small>{order.actualSide || order.failCode || "--"}</small></span>
                     <span>{formatEpisodeOrigin(order.operator || "user", t)}<small>{order.algoId || order.algoClOrdId}</small></span>
                     <span>{formatDateTime(order.uTime || order.cTime)}</span>
                     <span className="position-actions">
-                      <button type="button" onClick={() => setAmendingAlgo(order)}>{t("common:edit")}</button>
+                      {["trigger", "conditional", "oco"].includes(order.ordType.toLowerCase()) && <button type="button" onClick={() => setAmendingAlgo(order)}>{t("common:edit")}</button>}
                       <button
                         type="button"
                         className="danger"
@@ -13592,8 +13725,8 @@ function BottomPanel({
                   </div>
                   );
                 })}
-                {!account && <div className="empty-row">{t("trading:noAccountAlgoOrders")}</div>}
-                {account && filteredPendingAlgoOrders.length === 0 && <div className="empty-row">{t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
+                {!account && <div className="empty-row">{t("trading:noAccountOpenOrders")}</div>}
+                {account && filteredSelectedAlgoOrders.length === 0 && <div className="empty-row">{t("trading:noOrdersInCategory", { type: pendingOrderTabs.find((tab) => tab.id === ordersView)?.label ?? t("trading:algoOrders") })} {t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
               </>
             )}
           </>
@@ -13618,27 +13751,78 @@ function BottomPanel({
         )}
         {activeTab === "history" && (
           <>
-            <div className="table-head historical-orders">
-              <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:price")}</span><span>{t("common:quantity")}</span><span>{t("common:status")}</span><span>{t("trading:pnlAndFee")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span>
+            <div className="sub-tabs order-type-tabs" role="tablist" aria-label={t("trading:historicalOrderTypes")}>
+              {historicalOrderTabs.map((tab) => (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={historicalOrdersView === tab.id}
+                  className={historicalOrdersView === tab.id ? "active" : ""}
+                  onClick={() => setHistoricalOrdersView(tab.id)}
+                  key={tab.id}
+                >
+                  {tab.label}{tab.count > 0 ? `(${tab.count})` : ""}
+                </button>
+              ))}
             </div>
-            {filteredHistoricalOrders.map((order) => (
-              <div className="table-row historical-orders" key={order.ordId || order.clOrdId || `${order.instId}-${order.syncedAt}`}>
-                <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
-                <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side ?? "", order.posSide ?? "", t)}</span>
-                <span>{formatOrderType(order.ordType ?? "", t)}<small>{order.tdMode || "--"}</small></span>
-                <span>{fmtPrice(order.px ?? undefined)}<small>{t("trading:averageAbbreviation")} {fmtPrice(order.avgPx ?? undefined)}</small></span>
-                <span>{formatAmount(order.sz ?? undefined)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.accFillSz ?? undefined)}</small></span>
-                <span><b className={clsx("status-pill", toneByState(order.state))}>{formatOrderState(order.state ?? "", t)}</b></span>
-                <span className={clsx("cell-tone", toneByNumber(order.pnl))}>
-                  {formatAmount(order.pnl ?? undefined)}
-                  <small>{t("trading:feeAbbreviation")} {formatAmount(order.fee ?? undefined)}</small>
-                </span>
-                <span>{formatEpisodeOrigin(order.operator || "unknown", t)}<small>{order.strategyId || order.sessionId || "--"}</small></span>
-                <span>{formatDateTime(order.okxUtime ?? order.okxCtime ?? order.syncedAt)}</span>
-              </div>
-            ))}
-            {!account && <div className="empty-row">{t("trading:noAccountOrderHistory")}</div>}
-            {account && filteredHistoricalOrders.length === 0 && <div className="empty-row">{t("trading:historySyncStatus", { type: t("trading:historicalOrders"), status: formatPrivateDataStatus(historicalOrdersStatus, t) })}</div>}
+            {(historicalOrdersView === "limitMarket" || historicalOrdersView === "advancedLimit") && (
+              <>
+                <div className="table-head historical-orders">
+                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:price")}</span><span>{t("common:quantity")}</span><span>{t("common:status")}</span><span>{t("trading:pnlAndFee")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span>
+                </div>
+                {filteredSelectedHistoricalOrders.map((order) => (
+                  <div className="table-row historical-orders" key={order.ordId || order.clOrdId || `${order.instId}-${order.syncedAt}`}>
+                    <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
+                    <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side ?? "", order.posSide ?? "", t)}</span>
+                    <span>{formatOrderType(order.ordType ?? "", t)}<small>{order.tdMode || "--"}</small></span>
+                    <span>{fmtPrice(order.px ?? undefined)}<small>{t("trading:averageAbbreviation")} {fmtPrice(order.avgPx ?? undefined)}</small></span>
+                    <span>{formatAmount(order.sz ?? undefined)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.accFillSz ?? undefined)}</small></span>
+                    <span><b className={clsx("status-pill", toneByState(order.state))}>{formatOrderState(order.state ?? "", t)}</b></span>
+                    <span className={clsx("cell-tone", toneByNumber(order.pnl))}>
+                      {formatAmount(order.pnl ?? undefined)}
+                      <small>{t("trading:feeAbbreviation")} {formatAmount(order.fee ?? undefined)}</small>
+                    </span>
+                    <span>{formatEpisodeOrigin(order.operator || "unknown", t)}<small>{order.strategyId || order.sessionId || "--"}</small></span>
+                    <span>{formatDateTime(order.okxUtime ?? order.okxCtime ?? order.syncedAt)}</span>
+                  </div>
+                ))}
+                {!account && <div className="empty-row">{t("trading:noAccountOrderHistory")}</div>}
+                {account && filteredSelectedHistoricalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdersInCategory", { type: historicalOrderTabs.find((tab) => tab.id === historicalOrdersView)?.label ?? t("trading:historicalOrders") })} {t("trading:historySyncStatus", { type: t("trading:historicalOrders"), status: formatPrivateDataStatus(historicalOrdersStatus, t) })}</div>}
+              </>
+            )}
+            {(historicalOrdersView === "takeProfitStopLoss" || historicalOrdersView === "trailing" || historicalOrdersView === "planned" || historicalOrdersView === "other") && (
+              <>
+                <div className="table-head historical-orders">
+                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{historicalOrdersView === "takeProfitStopLoss" ? t("trading:takeProfit") : historicalOrdersView === "trailing" ? t("trading:activationPrice") : t("trading:triggerPrice")}</span><span>{historicalOrdersView === "takeProfitStopLoss" ? t("trading:stopLoss") : historicalOrdersView === "trailing" ? t("trading:callbackRange") : t("trading:orderPriceAfterTrigger")}</span><span>{t("common:quantity")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span>
+                </div>
+                {filteredSelectedHistoricalAlgoOrders.map((order) => {
+                  const group = classifyAlgoPendingOrderGroup(order.ordType);
+                  const primaryPrice = group === "takeProfitStopLoss" ? order.tpTriggerPx : group === "trailing" ? order.activePx || order.triggerPx : order.triggerPx || order.tpTriggerPx;
+                  const secondaryPrice = group === "takeProfitStopLoss" ? order.slTriggerPx : order.ordPx || order.slTriggerPx;
+                  const primaryExecution = group === "takeProfitStopLoss" ? order.tpOrdPx : "";
+                  const secondaryExecution = group === "takeProfitStopLoss" ? order.slOrdPx : "";
+                  const trailingCallback = order.callbackRatio
+                    ? `${order.callbackRatio}%`
+                    : order.callbackSpread ? fmtPrice(order.callbackSpread) : "--";
+                  const trailingCallbackLabel = order.callbackRatio ? t("trading:callbackRatio") : order.callbackSpread ? t("trading:callbackSpread") : "--";
+                  return (
+                    <div className="table-row historical-orders" data-order-group={group} key={order.algoId || order.algoClOrdId || `${order.instId}-${order.uTime}`}>
+                      <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
+                      <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
+                      <span>{formatAlgoOrderType(order.ordType, t)}<small>{order.tdMode || "--"}</small></span>
+                      <span>{fmtPrice(primaryPrice)}<small>{primaryExecution ? `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(primaryExecution, t)}` : group === "trailing" ? t("trading:activationPrice") : formatTriggerPriceType(order.triggerPxType, t)}</small></span>
+                      <span>{group === "trailing" ? trailingCallback : group === "takeProfitStopLoss" ? fmtPrice(secondaryPrice) : formatAlgoExecPrice(secondaryPrice, t)}<small>{secondaryExecution ? `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(secondaryExecution, t)}` : group === "trailing" ? trailingCallbackLabel : group === "planned" ? t("trading:orderPriceAfterTrigger") : "--"}</small></span>
+                      <span>{formatAmount(order.sz)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.actualSz)}</small></span>
+                      <span><b className={clsx("status-pill", toneByState(order.state))}>{formatAlgoState(order.state, t)}</b><small>{order.failCode || order.actualSide || "--"}</small></span>
+                      <span>{formatEpisodeOrigin(order.operator || "unknown", t)}<small>{order.algoId || order.algoClOrdId || "--"}</small></span>
+                      <span>{formatDateTime(order.uTime || order.triggerTime || order.cTime)}</span>
+                    </div>
+                  );
+                })}
+                {!account && <div className="empty-row">{t("trading:noAccountOrderHistory")}</div>}
+                {account && filteredSelectedHistoricalAlgoOrders.length === 0 && <div className="empty-row">{t("trading:noOrdersInCategory", { type: historicalOrderTabs.find((tab) => tab.id === historicalOrdersView)?.label ?? t("trading:historicalOrders") })} {t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
+              </>
+            )}
           </>
         )}
         {activeTab === "fills" && (

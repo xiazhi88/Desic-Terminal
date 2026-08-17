@@ -134,6 +134,22 @@ async function main() {
       uTime: "1"
     };
     const mergedAlgoOrders = orderClassification.mergePendingAlgoOrders([], [snapshotTriggerOrder], "account-1", "demo");
+    const stopLossPurpose = orderClassification.classifyAlgoTriggerPurpose(
+      { instId: "BTC-USDT-SWAP", ordType: "trigger", side: "sell", posSide: "long", reduceOnly: "false", triggerPx: "63100" },
+      [{ instId: "BTC-USDT-SWAP", posSide: "long", pos: "0.04", markPx: "63625", avgPx: "63550" }]
+    );
+    const entryPurpose = orderClassification.classifyAlgoTriggerPurpose(
+      { instId: "ETH-USDT-SWAP", ordType: "trigger", side: "buy", posSide: "long", reduceOnly: "false", triggerPx: "1912.5" },
+      []
+    );
+    const orderGroups = {
+      limit: orderClassification.classifyOrdinaryPendingOrderGroup("limit"),
+      advanced: orderClassification.classifyOrdinaryPendingOrderGroup("post_only"),
+      takeProfitStopLoss: orderClassification.classifyAlgoPendingOrderGroup("oco"),
+      trailing: orderClassification.classifyAlgoPendingOrderGroup("move_order_stop"),
+      planned: orderClassification.classifyAlgoPendingOrderGroup("trigger"),
+      other: orderClassification.classifyAlgoPendingOrderGroup("twap")
+    };
     return {
       tickerLast: next.ticker?.last,
       tickerTs: next.ticker?.ts,
@@ -150,7 +166,10 @@ async function main() {
       snapshotTriggerMerged: mergedAlgoOrders.length === 1
         && mergedAlgoOrders[0]?.algoId === "algo-trigger-1"
         && mergedAlgoOrders[0]?.triggerPx === "65000"
-        && mergedAlgoOrders[0]?.ordPx === "-1"
+        && mergedAlgoOrders[0]?.ordPx === "-1",
+      stopLossPurpose,
+      entryPurpose,
+      orderGroups
     };
   });
 
@@ -165,6 +184,12 @@ async function main() {
     `ordinary/algo pending-order classification regressed: ${JSON.stringify(storeResult)}`);
   assert(storeResult.snapshotTriggerMerged,
     `snapshot trigger order was not merged into the strategy-order source: ${JSON.stringify(storeResult)}`);
+  assert(storeResult.stopLossPurpose === "stopLoss" && storeResult.entryPurpose === "entry",
+    `trigger-order purpose classification regressed: ${JSON.stringify(storeResult)}`);
+  assert(JSON.stringify(storeResult.orderGroups) === JSON.stringify({
+    limit: "limitMarket", advanced: "advancedLimit", takeProfitStopLoss: "takeProfitStopLoss",
+    trailing: "trailing", planned: "planned", other: "other"
+  }), `open-order tab classification regressed: ${JSON.stringify(storeResult)}`);
 
   await page.waitForTimeout(500);
 
@@ -179,15 +204,30 @@ async function main() {
   }
 
   await page.getByRole("button", { name: /^当前委托\(/ }).click();
-  const normalTab = page.getByRole("button", { name: "普通委托(1)" });
-  const algoTab = page.getByRole("button", { name: "策略委托(1)" });
-  await normalTab.waitFor({ state: "visible", timeout: 5_000 });
-  await algoTab.click();
+  const orderTypeTabs = page.getByRole("tablist", { name: "当前委托类型" });
+  const limitMarketTab = orderTypeTabs.getByRole("tab", { name: "限价 | 市价(1)", exact: true });
+  const plannedTab = orderTypeTabs.getByRole("tab", { name: "计划委托(2)", exact: true });
+  for (const label of ["高级限价委托", "止盈止损", "移动止盈止损"]) {
+    assert(await orderTypeTabs.getByRole("tab", { name: label, exact: true }).count() === 1, `missing open-order type tab: ${label}`);
+  }
+  assert(await orderTypeTabs.getByRole("tab", { name: "其他策略", exact: true }).count() === 0, "empty fallback strategy tab should stay hidden");
+  await limitMarketTab.waitFor({ state: "visible", timeout: 5_000 });
+  assert(await limitMarketTab.getAttribute("aria-selected") === "true", "limit/market tab should be selected by default");
+  await plannedTab.click();
+  assert(await plannedTab.getAttribute("aria-selected") === "true", "planned orders did not switch to their dedicated tab");
   const strategyRows = page.locator(".table-row.algo-orders");
-  assert(await strategyRows.count() === 1, `snapshot trigger order is not uniquely visible in strategy orders: ${await page.locator(".positions-table").innerText()}`);
-  const strategyText = await strategyRows.first().innerText();
-  assert(strategyText.includes("65,000") && strategyText.includes("市价"), `trigger strategy order prices are missing: ${strategyText}`);
-  const triggerEditButton = strategyRows.first().getByRole("button", { name: "修改" });
+  assert(await strategyRows.count() === 2, `snapshot trigger orders are not uniquely visible in strategy orders: ${await page.locator(".positions-table").innerText()}`);
+  const stopLossRow = strategyRows.filter({ hasText: "BTC-USDT-SWAP" });
+  const entryRow = strategyRows.filter({ hasText: "ETH-USDT-SWAP" });
+  assert(await stopLossRow.getAttribute("data-trigger-purpose") === "stopLoss", `protective close was not classified as stop loss: ${await stopLossRow.innerText()}`);
+  assert(await entryRow.getAttribute("data-trigger-purpose") === "entry", `entry trigger was not classified as entry: ${await entryRow.innerText()}`);
+  const stopLossCells = await stopLossRow.locator(":scope > span").allTextContents();
+  const entryCells = await entryRow.locator(":scope > span").allTextContents();
+  assert(stopLossCells[4]?.trim().startsWith("--") && stopLossCells[5]?.includes("63,100") && stopLossCells[5]?.includes("止损") && stopLossCells[5]?.includes("市价"),
+    `protective close trigger rendered in the wrong strategy-price field: ${JSON.stringify(stopLossCells)}`);
+  assert(entryCells[4]?.includes("1,912.5") && entryCells[5]?.includes("市价") && !entryCells[4]?.includes("止盈") && !entryCells[5]?.includes("止损"),
+    `entry trigger inherited take-profit/stop-loss semantics: ${JSON.stringify(entryCells)}`);
+  const triggerEditButton = entryRow.getByRole("button", { name: "修改" });
   assert(await triggerEditButton.count() === 1, "trigger strategy order is missing its edit action");
   await triggerEditButton.click();
   const triggerEditDialog = page.getByRole("dialog", { name: "修改策略单" });
@@ -195,10 +235,10 @@ async function main() {
   const triggerEditText = await triggerEditDialog.innerText();
   const triggerInputs = await triggerEditDialog.locator("input").evaluateAll((nodes) => nodes.map((node) => node.value));
   assert(triggerEditText.includes("触发") && triggerEditText.includes("执行"), `trigger amend controls are missing: ${triggerEditText}`);
-  assert(triggerInputs.includes("65000"), `trigger amend price was not initialized: ${JSON.stringify(triggerInputs)}`);
+  assert(triggerInputs.includes("1912.5"), `trigger amend price was not initialized: ${JSON.stringify(triggerInputs)}`);
   assert(await triggerEditDialog.getByRole("button", { name: "市价", exact: true }).getAttribute("class").then((value) => value?.includes("active")), "trigger amend market execution mode was not restored");
   await triggerEditDialog.getByRole("button", { name: "关闭" }).click();
-  await normalTab.click();
+  await limitMarketTab.click();
   assert(await page.locator(".table-row.orders").count() === 1, "trigger order leaked back into ordinary orders");
   const amendButton = page.getByRole("button", { name: "修改委托价格" });
   await amendButton.waitFor({ state: "visible", timeout: 5_000 });
@@ -207,6 +247,18 @@ async function main() {
   const editInput = page.locator(".chart-order-edit-modal input").first();
   assert(await editInput.inputValue() === "63400", `amend dialog did not preserve order price: ${await editInput.inputValue()}`);
   assert(await page.getByRole("button", { name: "确认修改" }).isEnabled(), "demo order amendment action should be enabled");
+  await page.keyboard.press("Escape");
+  await page.locator(".chart-order-edit-modal").waitFor({ state: "hidden", timeout: 5_000 });
+
+  await page.locator(".bottom-tabs").getByRole("button", { name: "历史委托", exact: true }).click();
+  const historicalOrderTypeTabs = page.getByRole("tablist", { name: "历史委托类型" });
+  for (const label of ["限价 | 市价", "高级限价委托", "止盈止损", "移动止盈止损", "计划委托"]) {
+    assert(await historicalOrderTypeTabs.getByRole("tab", { name: label, exact: true }).count() === 1, `missing historical order type tab: ${label}`);
+  }
+  const historicalPlannedTab = historicalOrderTypeTabs.getByRole("tab", { name: "计划委托", exact: true });
+  await historicalPlannedTab.click();
+  assert(await historicalPlannedTab.getAttribute("aria-selected") === "true", "historical planned orders did not switch to their dedicated tab");
+  assert((await page.locator(".positions-table").innerText()).includes("当前没有计划委托"), "empty historical planned-order state is missing");
 
   assert(pageErrors.length === 0, `preview raised page errors: ${JSON.stringify(pageErrors)}`);
   await browser.close();

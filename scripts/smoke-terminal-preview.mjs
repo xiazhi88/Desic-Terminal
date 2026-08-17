@@ -62,6 +62,22 @@ async function main() {
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
   await page.waitForSelector(".terminal .workspace", { timeout: 30_000 });
+  const cacheHitRates = await page.evaluate(async () => {
+    const { formatRunCacheHitRate } = await import("/src/ui/AiAutomationPanel.tsx");
+    const summary = {
+      reported: true,
+      coverage: { inputOutput: true, cacheRead: true, cacheWrite: false, reasoning: false },
+      usage: { inputTokens: 299_000, outputTokens: 8_500, cacheReadTokens: 263_000, cacheWriteTokens: 0, reasoningTokens: 0, totalTokens: 307_500 }
+    };
+    return {
+      valid: formatRunCacheHitRate(summary),
+      unavailable: formatRunCacheHitRate({ ...summary, coverage: { ...summary.coverage, cacheRead: false } }),
+      inconsistent: formatRunCacheHitRate({ ...summary, usage: { ...summary.usage, cacheReadTokens: 300_000 } })
+    };
+  });
+  if (cacheHitRates.valid !== "88.0%" || cacheHitRates.unavailable !== null || cacheHitRates.inconsistent !== null) {
+    throw new Error(`cache hit-rate formatting regressed: ${JSON.stringify(cacheHitRates)}`);
+  }
 
   await verifyEpisodeReviewModal(browser);
   if (process.env.DESIC_EPISODE_REVIEW_ONLY === "1") {

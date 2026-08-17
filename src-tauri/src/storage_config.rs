@@ -2597,7 +2597,7 @@ fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
     const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 8] = [
+    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 10] = [
         ("trading-philosophy", 0x28b8_35c6_2b63_9623),
         ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
         ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
@@ -2620,6 +2620,12 @@ fn merge_ai_skill_definitions(
         // became deterministic. User-edited philosophy text has a different
         // fingerprint and remains authoritative.
         ("trading-philosophy", 0x70bc_d86c_6f81_36cf),
+        // Untouched fee-aware baseline shipped before existing-position lifecycle
+        // and deliberate-hedging decisions became mandatory on every run.
+        ("trading-philosophy", 0x2d67_2800_126d_8227),
+        // Untouched position-lifecycle baseline shipped before ordinary resting
+        // limit orders received an explicit, conditional maker-cost preference.
+        ("trading-philosophy", 0xaddb_6bab_fa83_ff77),
     ];
     let protected_skill_ids = [
         "desic-core-operations",
