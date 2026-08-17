@@ -10283,9 +10283,21 @@ function toneByState(value?: string | null): CellTone {
   return "neutral";
 }
 
+/**
+ * Colour for an order direction, matching the label it sits next to.
+ *
+ * The position side decides the tone, because that is the exposure the order acts
+ * on: anything touching the long book is bullish-coloured and anything touching
+ * the short book is bearish-coloured, whether it opens or closes. Testing `side`
+ * first used to paint "close short" (a buy) as bullish, contradicting its own
+ * label. Only net mode, which has no position side, falls back to buy/sell.
+ */
 function toneBySide(side?: string | null, posSide?: string | null): CellTone {
-  if (side === "buy" || posSide === "long") return "positive";
-  if (side === "sell" || posSide === "short") return "negative";
+  const normalizedPosSide = String(posSide || "").toLowerCase();
+  if (normalizedPosSide === "long") return "positive";
+  if (normalizedPosSide === "short") return "negative";
+  if (side === "buy") return "positive";
+  if (side === "sell") return "negative";
   return "neutral";
 }
 
@@ -10831,10 +10843,34 @@ function defaultSlTrigger(position: OkxPosition, latest?: string) {
   return trimFloat(base * (isShort ? 1.05 : 0.95));
 }
 
+/**
+ * Order direction as the intent behind it, not the raw exchange fields.
+ *
+ * "Sell/short" did not tell a trader whether they were entering or exiting: in
+ * OKX hedge mode `side` and `posSide` together decide that. Buying the long book
+ * opens a long and selling it closes one; selling the short book opens a short
+ * and buying it closes one. Net mode carries no position side, so it keeps the
+ * plain buy/sell wording rather than inventing an intent it cannot know.
+ */
 function formatOrderSide(side: string, posSide: string, t?: UiTranslation) {
-  const direction = side === "sell" ? (t ? t("trading:sell") : "卖") : side === "buy" ? (t ? t("trading:buy") : "买") : side || "--";
-  const position = posSide && posSide !== "net" ? `/${formatPositionSide(posSide, t)}` : "";
-  return `${direction}${position}`;
+  const normalizedSide = String(side || "").toLowerCase();
+  const normalizedPosSide = String(posSide || "").toLowerCase();
+  const label = (key: string, fallback: string) => (t ? t(`trading:${key}`) : fallback);
+
+  if (normalizedPosSide === "long" || normalizedPosSide === "short") {
+    if (normalizedPosSide === "long") {
+      return normalizedSide === "buy"
+        ? label("orderOpenLong", "做多")
+        : label("orderCloseLong", "平多");
+    }
+    return normalizedSide === "sell"
+      ? label("orderOpenShort", "做空")
+      : label("orderCloseShort", "平空");
+  }
+
+  if (normalizedSide === "buy") return label("buy", "买");
+  if (normalizedSide === "sell") return label("sell", "卖");
+  return side || "--";
 }
 
 function formatOrderType(value: string, t?: UiTranslation) {
