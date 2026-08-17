@@ -83,6 +83,12 @@ export type ChartContextTradeIntent = Readonly<{
   symbol: string;
 }>;
 
+export type ChartHistoryLoadOutcome =
+  | { status: "loaded"; earliestTime: number }
+  | { status: "exhausted" }
+  | { status: "deferred" }
+  | { status: "failed"; message: string };
+
 type Props = {
   candles: Candle[];
   ticker: Ticker | null;
@@ -98,7 +104,7 @@ type Props = {
   variant?: "full" | "review";
   workspaceId?: string;
   persistWorkspace?: boolean;
-  onNeedMoreHistory?: (payload: { firstTime: number }) => void;
+  onNeedMoreHistory?: (payload: { firstTime: number }) => Promise<ChartHistoryLoadOutcome> | ChartHistoryLoadOutcome;
   onChartCrosshairTime?: (time: number | null) => void;
   onChartCrosshairPosition?: (position: ChartCrosshairPosition | null) => void;
   onChartVisibleRange?: (range: { from: number; to: number } | null) => void;
@@ -293,6 +299,15 @@ type ReplayViewportTarget = {
 
 export type ChartLayerKey = "indicators" | "alerts" | "drawings" | "signals" | "fills" | "tools" | "priceLines";
 export type ChartLayerVisibility = Record<ChartLayerKey, boolean>;
+export const DEFAULT_CHART_LAYER_VISIBILITY: ChartLayerVisibility = {
+  indicators: true,
+  alerts: true,
+  drawings: true,
+  signals: true,
+  fills: true,
+  tools: true,
+  priceLines: true
+};
 
 type FillSourceFilter = {
   ai: boolean;
@@ -505,7 +520,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const onChartContextTradeRef = useRef<Props["onChartContextTrade"]>(onChartContextTrade);
   const onRiskRewardTradeIntentRef = useRef<Props["onRiskRewardTradeIntent"]>(onRiskRewardTradeIntent);
   const aiChartActionHandlerRef = useRef<(action: AiChartAction) => void>(() => undefined);
-  const lastHistoryRequestFirstTimeRef = useRef<number | null>(null);
+  const historySeriesEpochRef = useRef(0);
+  const activeHistoryRequestRef = useRef<{ key: string; epoch: number } | null>(null);
+  const settledHistoryRequestKeyRef = useRef<string | null>(null);
   const renderedFirstTimeRef = useRef<number | null>(null);
   const dataControllerRef = useRef(new ChartDataController());
   const renderedSeriesKeyRef = useRef("");
@@ -515,12 +532,35 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const indicatorConfigSignatureRef = useRef("");
   const workspaceLoadEpochRef = useRef(0);
   const requestMoreHistoryIfNeeded = useCallback((range: { from: number; to: number } | null) => {
-    if (!range || range.from > 30) return;
+    const loadHistory = onNeedMoreHistoryRef.current;
+    if (!loadHistory || !range || range.from > 30) return;
     const first = candleMapRef.current.size ? Math.min(...candleMapRef.current.keys()) : null;
-    if (!first || lastHistoryRequestFirstTimeRef.current === first) return;
-    lastHistoryRequestFirstTimeRef.current = first;
-    onNeedMoreHistoryRef.current?.({ firstTime: first });
-  }, []);
+    if (!first) return;
+    const epoch = historySeriesEpochRef.current;
+    const requestKey = `${symbol}\u0000${timeframe}\u0000${first}`;
+    if (activeHistoryRequestRef.current?.key === requestKey
+      || settledHistoryRequestKeyRef.current === requestKey) return;
+
+    activeHistoryRequestRef.current = { key: requestKey, epoch };
+    // Gate immediately so the range events emitted during a drag cannot fan out
+    // duplicate requests. Deferred and failed outcomes release this key.
+    settledHistoryRequestKeyRef.current = requestKey;
+    void Promise.resolve()
+      .then(() => loadHistory({ firstTime: first }))
+      .then((outcome) => {
+        if (historySeriesEpochRef.current !== epoch) return;
+        if (outcome.status === "deferred" || outcome.status === "failed") {
+          settledHistoryRequestKeyRef.current = null;
+        }
+      })
+      .catch(() => {
+        if (historySeriesEpochRef.current === epoch) settledHistoryRequestKeyRef.current = null;
+      })
+      .finally(() => {
+        const active = activeHistoryRequestRef.current;
+        if (active?.key === requestKey && active.epoch === epoch) activeHistoryRequestRef.current = null;
+      });
+  }, [symbol, timeframe]);
   const [indicatorInstances, setIndicatorInstances] = useState<IndicatorInstance[]>(() => DEFAULT_INDICATOR_INSTANCES.map((item) => ({ ...item, parameters: { ...item.parameters } })));
   const externalIndicatorSignatureRef = useRef<string | null>(null);
   const [unavailableIndicatorIds, setUnavailableIndicatorIds] = useState<Set<string>>(() => new Set());
@@ -563,15 +603,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const [alertWebhookMethod, setAlertWebhookMethod] = useState<"GET" | "POST">("POST");
   const [alertWebhookUrl, setAlertWebhookUrl] = useState("");
   const [alertFormError, setAlertFormError] = useState("");
-  const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>({
-    indicators: true,
-    alerts: true,
-    drawings: true,
-    signals: true,
-    fills: true,
-    tools: true,
-    priceLines: true
-  });
+  const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(DEFAULT_CHART_LAYER_VISIBILITY);
   const [fillSourceFilter, setFillSourceFilter] = useState<FillSourceFilter>({
     ai: true,
     strategy: true,
@@ -1043,7 +1075,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     priceAlertLinesRef.current.clear();
     orderPriceLinesRef.current.clear();
     orderPriceLineSignaturesRef.current.clear();
-    lastHistoryRequestFirstTimeRef.current = null;
+    historySeriesEpochRef.current += 1;
+    activeHistoryRequestRef.current = null;
+    settledHistoryRequestKeyRef.current = null;
     // Review charts are read-only evidence views; never inherit or persist
     // drawings created on the live trading chart.
     setDrawingLines(reviewVariant ? [] : loadDrawingLines(symbol));
@@ -1399,11 +1433,12 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     const seriesKey = `${symbol}\u0000${timeframe}`;
     const controller = dataControllerRef.current;
     if (renderedSeriesKeyRef.current && renderedSeriesKeyRef.current !== seriesKey) {
-      controller.clear(key);
-      renderedSeriesKeyRef.current = seriesKey;
+      // One chart instance renders one active series. Drop the old controller
+      // state, then continue so the new snapshot is installed immediately.
+      controller.clearAll();
       candleMapRef.current = new Map();
       candleIndexRef.current = new Map();
-      chart.replaceSnapshot([], []);
+      chart.clearTemporalData();
       for (const indicatorKey of indicatorSeriesKeysRef.current) chart.removeIndicator(indicatorKey);
       indicatorSeriesKeysRef.current.clear();
       indicatorCalculatorsRef.current.clear();
@@ -1416,7 +1451,6 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       scriptPaneIdsRef.current.clear();
       renderedFirstTimeRef.current = null;
       setCoordinateVersion((version) => version + 1);
-      return;
     }
     const reviewSnapshotChanged = reviewVariant
       && snapshotRevision !== null
@@ -1437,7 +1471,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     renderedSeriesKeyRef.current = seriesKey;
     const canonicalCandles = controller.getCandles(key);
     const visibleRangeBeforeUpdate = chart.getVisibleLogicalRange();
-    const replayPageChanged = reviewVariant && canonicalCandles[0]?.time !== renderedFirstTimeRef.current;
+    const replayPageChanged = reviewVariant
+      && (reviewSnapshotChanged || canonicalCandles[0]?.time !== renderedFirstTimeRef.current);
     let replayTargetRange: ChartVisibleLogicalRange | null = null;
     const prependedCount = patch.type === "prepend" ? patch.candles.length : 0;
     candleMapRef.current = new Map(canonicalCandles.map((candle) => [candle.time, candle]));
@@ -3865,12 +3900,14 @@ function parseWorkspaceIndicators(value: unknown): IndicatorInstance[] {
   });
 }
 
-function parseWorkspaceLayers(value: unknown): Record<ChartLayerKey, boolean> | null {
+export function parseWorkspaceLayers(value: unknown): ChartLayerVisibility | null {
   if (!value || typeof value !== "object") return null;
   const source = value as Partial<Record<ChartLayerKey, unknown>>;
-  const keys: ChartLayerKey[] = ["indicators", "alerts", "drawings", "signals", "fills", "tools"];
-  if (!keys.every((key) => typeof source[key] === "boolean")) return null;
-  return Object.fromEntries(keys.map((key) => [key, Boolean(source[key])])) as Record<ChartLayerKey, boolean>;
+  const keys = Object.keys(DEFAULT_CHART_LAYER_VISIBILITY) as ChartLayerKey[];
+  return Object.fromEntries(keys.map((key) => [
+    key,
+    typeof source[key] === "boolean" ? source[key] : DEFAULT_CHART_LAYER_VISIBILITY[key]
+  ])) as ChartLayerVisibility;
 }
 
 function calculateOrderBookPressure(orderBook: OrderBook | null, recentTrades: Trade[]): ChartScriptOrderBookPressure | null {

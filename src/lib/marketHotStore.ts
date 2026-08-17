@@ -36,6 +36,7 @@ let pendingBusinessLastMessageAt: number | undefined;
 let frameId: number | null = null;
 const MAX_PENDING_TRADES = 128;
 const MAX_RENDERED_TRADES = 32;
+export const MAX_RENDERED_CANDLES = 50_000;
 
 function newerSnapshot<T extends { ts: number }>(current: T | null, incoming: T | null): T | null {
   if (!incoming) return current;
@@ -209,7 +210,9 @@ export function mergeMarketCandles(current: Candle[], incoming: Candle[]) {
     if (existing?.confirm && !candle.confirm) continue;
     merged.set(candle.time, candle);
   }
-  return [...merged.values()].sort((left, right) => left.time - right.time).slice(-2_000);
+  return [...merged.values()]
+    .sort((left, right) => left.time - right.time)
+    .slice(-MAX_RENDERED_CANDLES);
 }
 
 export function applyLivePriceToLatestCandle(candles: Candle[], rawPrice: string | number | null | undefined): Candle[] {

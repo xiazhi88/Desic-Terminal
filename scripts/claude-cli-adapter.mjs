@@ -59,10 +59,14 @@ function tokenCount(value) {
 }
 
 export function normalizeClaudeUsage(usage = {}) {
+  const uncachedInputTokens = tokenCount(usage.input_tokens ?? usage.inputTokens);
+  const cacheReadTokens = tokenCount(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens);
+  const cacheWriteTokens = tokenCount(usage.cache_creation_input_tokens ?? usage.cacheCreationInputTokens);
   return {
-    inputTokens: tokenCount(usage.input_tokens ?? usage.inputTokens),
+    inputTokens: uncachedInputTokens + cacheReadTokens + cacheWriteTokens,
     outputTokens: tokenCount(usage.output_tokens ?? usage.outputTokens),
-    cacheReadTokens: tokenCount(usage.cache_read_input_tokens ?? usage.cacheReadInputTokens),
+    cacheReadTokens,
+    cacheWriteTokens,
     thoughtsTokenCount: tokenCount(usage.thinking_tokens ?? usage.thoughtsTokenCount)
   };
 }

@@ -1,9 +1,13 @@
 use super::*;
 use desic_agent_automation::{
-    evaluate_condition, normalize_multi_agent_mode, normalize_permission_mode,
-    normalize_profile_sub_agents, orderbook_imbalance, validate_profile_sub_agent_capacity,
-    AiProfileSubAgent, DomainEvent, RollingFeatureCache, WakeCondition, WakeMarketState,
-    ADVISOR_MODE, MULTI_AGENT_CUSTOM_MAX_AGENTS,
+    build_ai_usage_summary, evaluate_condition, normalize_multi_agent_mode,
+    normalize_permission_mode, normalize_profile_sub_agents, orderbook_imbalance,
+    validate_profile_sub_agent_capacity, AiProfileSubAgent, DomainEvent, RollingFeatureCache,
+    WakeCondition, WakeMarketState, ADVISOR_MODE, AI_USAGE_SCHEMA_VERSION,
+    MULTI_AGENT_CUSTOM_MAX_AGENTS,
+};
+pub(crate) use desic_agent_automation::{
+    AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
 };
 use rusqlite::{params_from_iter, TransactionBehavior};
 use serde_json::Value;
@@ -223,59 +227,14 @@ pub(crate) struct AiAgentRunActionCounts {
     pub notification: u32,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiTokenUsage {
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub cache_read_tokens: u64,
-    pub cache_write_tokens: u64,
-    pub reasoning_tokens: u64,
-    pub total_tokens: u64,
-}
-
-impl AiTokenUsage {
-    fn add_assign(&mut self, other: &Self) {
-        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
-        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
-        self.cache_read_tokens = self
-            .cache_read_tokens
-            .saturating_add(other.cache_read_tokens);
-        self.cache_write_tokens = self
-            .cache_write_tokens
-            .saturating_add(other.cache_write_tokens);
-        self.reasoning_tokens = self.reasoning_tokens.saturating_add(other.reasoning_tokens);
-        self.total_tokens = self.input_tokens.saturating_add(self.output_tokens);
-    }
-
-    fn is_empty(&self) -> bool {
-        self.input_tokens == 0
-            && self.output_tokens == 0
-            && self.cache_read_tokens == 0
-            && self.cache_write_tokens == 0
-            && self.reasoning_tokens == 0
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct AiUsageSummary {
-    pub provider: String,
-    pub model_id: String,
-    pub model: String,
-    pub model_name: String,
-    pub reported: bool,
-    pub agent_count: u32,
-    pub usage: AiTokenUsage,
-    pub main_usage: AiTokenUsage,
-}
-
 #[derive(Debug, Clone, Default, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiTokenUsagePeriod {
     pub usage: AiTokenUsage,
+    pub coverage: AiUsageCoverage,
     pub turn_count: u32,
     pub session_count: u32,
+    pub partial_turn_count: u32,
     pub unreported_turn_count: u32,
 }
 
@@ -295,7 +254,7 @@ pub(crate) struct AiTokenUsageByModel {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AiTokenUsageDashboard {
     pub generated_at: i64,
-    pub tracked_from: Option<i64>,
+    pub window_start: i64,
     pub today: AiTokenUsagePeriod,
     pub yesterday: AiTokenUsagePeriod,
     pub seven_days: AiTokenUsagePeriod,
@@ -958,6 +917,19 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         [],
     );
     let _ = conn.execute(
+        "ALTER TABLE ai_messages ADD COLUMN token_usage_json TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_messages ADD COLUMN token_usage_version INTEGER NOT NULL DEFAULT 0",
+        [],
+    );
+    let _ = conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_ai_messages_usage_window
+         ON ai_messages(role, created_at) WHERE token_usage_json IS NOT NULL",
+        [],
+    );
+    let _ = conn.execute(
         "ALTER TABLE ai_notification_deliveries ADD COLUMN content TEXT NOT NULL DEFAULT ''",
         [],
     );
@@ -1213,8 +1185,10 @@ struct AiUsageRecord {
 #[derive(Default)]
 struct AiUsageAccumulator {
     usage: AiTokenUsage,
+    coverage: Option<AiUsageCoverage>,
     sessions: HashSet<String>,
     turn_count: u32,
+    partial_turn_count: u32,
     unreported_turn_count: u32,
 }
 
@@ -1224,6 +1198,19 @@ impl AiUsageAccumulator {
         self.sessions.insert(record.session_id.clone());
         if record.summary.reported {
             self.usage.add_assign(&record.summary.usage);
+            self.coverage = Some(match self.coverage.take() {
+                Some(mut coverage) => {
+                    coverage.input_output &= record.summary.coverage.input_output;
+                    coverage.cache_read &= record.summary.coverage.cache_read;
+                    coverage.cache_write &= record.summary.coverage.cache_write;
+                    coverage.reasoning &= record.summary.coverage.reasoning;
+                    coverage
+                }
+                None => record.summary.coverage.clone(),
+            });
+            if record.summary.quality == AiUsageQuality::Partial {
+                self.partial_turn_count = self.partial_turn_count.saturating_add(1);
+            }
         } else {
             self.unreported_turn_count = self.unreported_turn_count.saturating_add(1);
         }
@@ -1232,8 +1219,10 @@ impl AiUsageAccumulator {
     fn finish(self) -> AiTokenUsagePeriod {
         AiTokenUsagePeriod {
             usage: self.usage,
+            coverage: self.coverage.unwrap_or_default(),
             turn_count: self.turn_count,
             session_count: self.sessions.len() as u32,
+            partial_turn_count: self.partial_turn_count,
             unreported_turn_count: self.unreported_turn_count,
         }
     }
@@ -1247,6 +1236,7 @@ fn usage_period(records: &[&AiUsageRecord]) -> AiTokenUsagePeriod {
     accumulator.finish()
 }
 
+#[cfg(test)]
 fn extract_compact_usage_summary(value: &str) -> Option<AiUsageSummary> {
     const MARKER: &str = "{\"__desicUsageSummary\":";
     let start = value.rfind(MARKER)?;
@@ -1256,26 +1246,27 @@ fn extract_compact_usage_summary(value: &str) -> Option<AiUsageSummary> {
 }
 
 fn load_ai_token_usage_dashboard(
-    conn: &Connection,
+    conn: &mut Connection,
     now: i64,
 ) -> Result<AiTokenUsageDashboard, String> {
     const DAY_MS: i64 = 86_400_000;
     const SHANGHAI_OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
-    const SUMMARY_TAIL_BYTES: i64 = 32_768;
     let today_start =
         (now.saturating_add(SHANGHAI_OFFSET_MS)).div_euclid(DAY_MS) * DAY_MS - SHANGHAI_OFFSET_MS;
     let yesterday_start = today_start.saturating_sub(DAY_MS);
     let seven_days_start = today_start.saturating_sub(6 * DAY_MS);
+    ensure_ai_message_usage_since(conn, seven_days_start)?;
     let mut stmt = conn
         .prepare(
-            "SELECT session_id,created_at,substr(tool_json, -?2)
+            "SELECT session_id,created_at,token_usage_json
              FROM ai_messages
-             WHERE role='assistant' AND created_at>=?1 AND tool_json IS NOT NULL
+             WHERE role='assistant' AND created_at>=?1
+               AND token_usage_version>=?2 AND token_usage_json IS NOT NULL
              ORDER BY created_at ASC",
         )
         .map_err(|error| error.to_string())?;
     let rows = stmt
-        .query_map(params![seven_days_start, SUMMARY_TAIL_BYTES], |row| {
+        .query_map(params![seven_days_start, AI_USAGE_SCHEMA_VERSION], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, i64>(1)?,
@@ -1285,8 +1276,8 @@ fn load_ai_token_usage_dashboard(
         .map_err(|error| error.to_string())?;
     let mut records = Vec::new();
     for row in rows {
-        let (session_id, created_at, tail) = row.map_err(|error| error.to_string())?;
-        let Some(summary) = extract_compact_usage_summary(&tail) else {
+        let (session_id, created_at, summary_json) = row.map_err(|error| error.to_string())?;
+        let Ok(summary) = serde_json::from_str::<AiUsageSummary>(&summary_json) else {
             continue;
         };
         records.push(AiUsageRecord {
@@ -1351,7 +1342,7 @@ fn load_ai_token_usage_dashboard(
 
     Ok(AiTokenUsageDashboard {
         generated_at: now,
-        tracked_from: records.first().map(|record| record.created_at),
+        window_start: seven_days_start,
         today: usage_period(&today_records),
         yesterday: usage_period(&yesterday_records),
         seven_days: usage_period(&seven_day_records),
@@ -1364,8 +1355,8 @@ pub(crate) async fn ai_token_usage_summary(
     app: tauri::AppHandle,
 ) -> Result<AiTokenUsageDashboard, String> {
     tokio::task::spawn_blocking(move || {
-        let conn = open_read_database(&app)?;
-        load_ai_token_usage_dashboard(&conn, now_ms())
+        let mut conn = open_automation_database(&app)?;
+        load_ai_token_usage_dashboard(&mut conn, now_ms())
     })
     .await
     .map_err(|error| format!("读取 AI Token 统计任务失败: {error}"))?
@@ -1984,8 +1975,15 @@ pub(crate) fn ai_agent_profile_systematic_conflicts(
     request: AiAgentProfileSystematicConflictRequest,
 ) -> Result<Vec<AiAgentProfileSystematicConflict>, String> {
     let conn = open_automation_database(&app)?;
-    let environment = match request.account_id.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
-        Some(account_id) => normalize_environment(&load_local_account_secret(&app, Some(account_id))?.environment),
+    let environment = match request
+        .account_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(account_id) => {
+            normalize_environment(&load_local_account_secret(&app, Some(account_id))?.environment)
+        }
         None => normalize_environment(&request.environment),
     };
     enabled_systematic_profile_conflicts(
@@ -2926,9 +2924,7 @@ fn enabled_systematic_profile_conflicts(
     .collect()
 }
 
-fn systematic_profile_conflict_message(
-    conflicts: &[AiAgentProfileSystematicConflict],
-) -> String {
+fn systematic_profile_conflict_message(conflicts: &[AiAgentProfileSystematicConflict]) -> String {
     let scopes = conflicts
         .iter()
         .map(|conflict| format!("{} ({})", conflict.name, conflict.inst_id))
@@ -3113,10 +3109,13 @@ fn cached_run_metadata(row: &StoredRunRow) -> Option<RunMetadata> {
     let token_usage = row
         .token_usage_json
         .as_deref()
-        .and_then(|value| serde_json::from_str(value).ok());
+        .and_then(|value| serde_json::from_str::<AiUsageSummary>(value).ok())?;
+    if token_usage.schema_version < AI_USAGE_SCHEMA_VERSION {
+        return None;
+    }
     Some(RunMetadata {
         action_counts,
-        token_usage,
+        token_usage: Some(token_usage),
     })
 }
 
@@ -3230,7 +3229,7 @@ pub(crate) fn persist_ai_automation_run_metadata(
 ) -> Result<(), String> {
     let mut metadata = RunMetadata {
         action_counts: parse_run_action_counts(tool_json),
-        token_usage: token_usage.reported.then(|| token_usage.clone()),
+        token_usage: Some(token_usage.clone()),
     };
     let delivery_count = load_run_delivery_counts(conn, &[run_id.to_string()])
         .ok()
@@ -3335,10 +3334,7 @@ fn load_run(conn: &Connection, id: &str) -> Result<AiAgentRunSummary, String> {
     })
 }
 
-fn load_run_metadata(
-    conn: &Connection,
-    run_id: &str,
-) -> Result<RunMetadata, String> {
+fn load_run_metadata(conn: &Connection, run_id: &str) -> Result<RunMetadata, String> {
     let session_id = format!("background:{run_id}");
     let tool_json = conn
         .query_row(
@@ -3366,119 +3362,6 @@ fn load_run_metadata(
     Ok(metadata)
 }
 
-fn usage_u64(value: &Value, keys: &[&str]) -> u64 {
-    keys.iter()
-        .find_map(|key| {
-            let value = value.get(*key)?;
-            value
-                .as_u64()
-                .or_else(|| value.as_i64().and_then(|item| u64::try_from(item).ok()))
-                .or_else(|| value.as_f64().map(|item| item.max(0.0) as u64))
-                .or_else(|| value.as_str()?.parse::<u64>().ok())
-        })
-        .unwrap_or(0)
-}
-
-fn normalize_ai_token_usage(value: &Value) -> AiTokenUsage {
-    let input_tokens = usage_u64(
-        value,
-        &[
-            "inputTokens",
-            "input_tokens",
-            "totalInputTokens",
-            "promptTokens",
-        ],
-    );
-    let output_tokens = usage_u64(
-        value,
-        &[
-            "outputTokens",
-            "output_tokens",
-            "totalOutputTokens",
-            "completionTokens",
-        ],
-    );
-    AiTokenUsage {
-        input_tokens,
-        output_tokens,
-        cache_read_tokens: usage_u64(
-            value,
-            &[
-                "cacheReadTokens",
-                "cache_read_tokens",
-                "cache_read_input_tokens",
-                "cachedInputTokens",
-            ],
-        ),
-        cache_write_tokens: usage_u64(
-            value,
-            &[
-                "cacheWriteTokens",
-                "cache_write_tokens",
-                "cache_creation_input_tokens",
-            ],
-        ),
-        reasoning_tokens: usage_u64(
-            value,
-            &[
-                "reasoningTokens",
-                "reasoning_tokens",
-                "thoughtsTokens",
-                "thoughts_tokens",
-            ],
-        ),
-        total_tokens: input_tokens.saturating_add(output_tokens),
-    }
-}
-
-fn build_ai_usage_summary(
-    events: &[Value],
-    provider: &str,
-    model_id: &str,
-    model: &str,
-    model_name: &str,
-) -> AiUsageSummary {
-    let main_usage = events
-        .iter()
-        .rev()
-        .find(|event| event.get("type").and_then(Value::as_str) == Some("usage"))
-        .and_then(|event| event.get("usage"))
-        .map(normalize_ai_token_usage)
-        .unwrap_or_default();
-    let mut agent_usage_by_id = HashMap::<String, AiTokenUsage>::new();
-    for (index, event) in events.iter().enumerate() {
-        if event.get("type").and_then(Value::as_str) != Some("agentDone") {
-            continue;
-        }
-        let id = event
-            .get("configuredAgentId")
-            .or_else(|| event.get("agentId"))
-            .and_then(Value::as_str)
-            .filter(|value| !value.trim().is_empty())
-            .map(str::to_string)
-            .unwrap_or_else(|| format!("agent-{index}"));
-        let usage = event
-            .pointer("/result/usage")
-            .map(normalize_ai_token_usage)
-            .unwrap_or_default();
-        agent_usage_by_id.insert(id, usage);
-    }
-    let mut usage = main_usage.clone();
-    for agent_usage in agent_usage_by_id.values() {
-        usage.add_assign(agent_usage);
-    }
-    AiUsageSummary {
-        provider: provider.to_string(),
-        model_id: model_id.to_string(),
-        model: model.to_string(),
-        model_name: model_name.to_string(),
-        reported: !usage.is_empty(),
-        agent_count: agent_usage_by_id.len() as u32,
-        usage,
-        main_usage,
-    }
-}
-
 pub(crate) fn append_ai_usage_summary_event(
     events: &mut Vec<Value>,
     provider: &str,
@@ -3494,25 +3377,150 @@ pub(crate) fn append_ai_usage_summary_event(
     summary
 }
 
+pub(crate) fn persist_ai_message_usage_summary(
+    conn: &Connection,
+    message_id: &str,
+    summary: &AiUsageSummary,
+) -> Result<(), String> {
+    conn.execute(
+        "UPDATE ai_messages
+         SET token_usage_json=?2,token_usage_version=?3
+         WHERE id=?1",
+        params![message_id, to_json(summary)?, AI_USAGE_SCHEMA_VERSION],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn rebuild_ai_message_usage_summary(tool_json: Option<&str>) -> AiUsageSummary {
+    let events = tool_json
+        .and_then(|value| serde_json::from_str::<Vec<Value>>(value).ok())
+        .unwrap_or_default();
+    parse_ai_usage_summary_events(&events).unwrap_or_else(|| {
+        build_ai_usage_summary(&events, "unknown", "unknown", "unknown", "历史记录")
+    })
+}
+
+fn persist_rebuilt_ai_usage_rows(
+    conn: &mut Connection,
+    rows: Vec<(String, Option<String>)>,
+) -> Result<(), String> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let rebuilt = rows
+        .into_iter()
+        .map(|(id, tool_json)| {
+            let summary = rebuild_ai_message_usage_summary(tool_json.as_deref());
+            to_json(&summary).map(|summary_json| (id, summary_json))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    {
+        let mut statement = tx
+            .prepare(
+                "UPDATE ai_messages
+                 SET token_usage_json=?2,token_usage_version=?3
+                 WHERE id=?1 AND token_usage_version<?3",
+            )
+            .map_err(|error| error.to_string())?;
+        for (id, summary_json) in rebuilt {
+            statement
+                .execute(params![id, summary_json, AI_USAGE_SCHEMA_VERSION])
+                .map_err(|error| error.to_string())?;
+        }
+    }
+    tx.commit().map_err(|error| error.to_string())
+}
+
+pub(crate) fn ensure_ai_message_usage_for_session(
+    conn: &mut Connection,
+    session_id: &str,
+) -> Result<(), String> {
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id,tool_json FROM ai_messages
+                 WHERE session_id=?1 AND role='assistant' AND token_usage_version<?2
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let collected = statement
+            .query_map(params![session_id, AI_USAGE_SCHEMA_VERSION], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        collected
+    };
+    persist_rebuilt_ai_usage_rows(conn, rows)
+}
+
+fn ensure_ai_message_usage_since(conn: &mut Connection, since: i64) -> Result<(), String> {
+    let rows = {
+        let mut statement = conn
+            .prepare(
+                "SELECT id,tool_json FROM ai_messages
+                 WHERE role='assistant' AND created_at>=?1 AND token_usage_version<?2
+                 ORDER BY created_at ASC",
+            )
+            .map_err(|error| error.to_string())?;
+        let collected = statement
+            .query_map(params![since, AI_USAGE_SCHEMA_VERSION], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        collected
+    };
+    persist_rebuilt_ai_usage_rows(conn, rows)
+}
+
 fn parse_run_metadata(tool_json: &str) -> RunMetadata {
     let events = serde_json::from_str::<Vec<Value>>(tool_json).unwrap_or_default();
+    let token_usage = parse_ai_usage_summary_events(&events).unwrap_or_else(|| {
+        build_ai_usage_summary(&events, "unknown", "unknown", "unknown", "历史记录")
+    });
     RunMetadata {
         action_counts: parse_run_action_counts_events(&events),
-        token_usage: parse_ai_usage_summary_events(&events),
+        token_usage: Some(token_usage),
     }
 }
 
 fn parse_ai_usage_summary_events(events: &[Value]) -> Option<AiUsageSummary> {
-    if let Some(summary) = events
+    let stored_summary = events
         .iter()
         .rev()
         .find_map(|event| event.get("__desicUsageSummary"))
-        .and_then(|value| serde_json::from_value::<AiUsageSummary>(value.clone()).ok())
-    {
-        return Some(summary);
+        .and_then(|value| serde_json::from_value::<AiUsageSummary>(value.clone()).ok());
+    if let Some(summary) = stored_summary.as_ref() {
+        if summary.schema_version >= AI_USAGE_SCHEMA_VERSION {
+            return Some(summary.clone());
+        }
     }
-    let summary = build_ai_usage_summary(events, "unknown", "unknown", "unknown", "历史记录");
-    summary.reported.then_some(summary)
+    let summary = stored_summary.as_ref();
+    let rebuilt = build_ai_usage_summary(
+        events,
+        summary
+            .map(|item| item.provider.as_str())
+            .unwrap_or("unknown"),
+        summary
+            .map(|item| item.model_id.as_str())
+            .unwrap_or("unknown"),
+        summary.map(|item| item.model.as_str()).unwrap_or("unknown"),
+        summary
+            .map(|item| item.model_name.as_str())
+            .unwrap_or("历史记录"),
+    );
+    if rebuilt.reported || stored_summary.is_some() {
+        Some(rebuilt)
+    } else {
+        None
+    }
 }
 
 fn parse_ai_usage_summary(tool_json: &str) -> Option<AiUsageSummary> {
@@ -4779,7 +4787,11 @@ pub(crate) fn spawn_systematic_profile_signal_feishu(
     status: &str,
     profile_id: &str,
 ) {
-    let level = if status == "submitted" { "success" } else { "warning" };
+    let level = if status == "submitted" {
+        "success"
+    } else {
+        "warning"
+    };
     spawn_feishu_notification(
         app,
         FeishuSendInput {
@@ -8491,7 +8503,13 @@ mod tests {
         // A manual trade on the same account is nobody's automation result.
         insert("f4", "99.0", "-1.0", None, now - 4_000);
         // Older than the window.
-        insert("f5", "50.0", "-5.0", Some("run-a"), now - 30 * 24 * 60 * 60 * 1000);
+        insert(
+            "f5",
+            "50.0",
+            "-5.0",
+            Some("run-a"),
+            now - 30 * 24 * 60 * 60 * 1000,
+        );
 
         // The shipped window is asserted separately; the label shown on the card
         // must describe the same period the query uses.
@@ -8500,17 +8518,33 @@ mod tests {
         let of = |id: &str| rows.iter().find(|row| row.profile_id == id).expect("row");
 
         let a = of("profile-a");
-        assert!((a.net_pnl_usdt - 0.7).abs() < 1e-9, "net was {}", a.net_pnl_usdt);
-        assert!((a.fees_usdt - 0.3).abs() < 1e-9, "fees were {}", a.fees_usdt);
+        assert!(
+            (a.net_pnl_usdt - 0.7).abs() < 1e-9,
+            "net was {}",
+            a.net_pnl_usdt
+        );
+        assert!(
+            (a.fees_usdt - 0.3).abs() < 1e-9,
+            "fees were {}",
+            a.fees_usdt
+        );
         assert_eq!(a.fill_count, 2, "the out-of-window fill must be excluded");
         assert_eq!(a.window_days, 7);
 
         let b = of("profile-b");
-        assert!((b.net_pnl_usdt - 1.7).abs() < 1e-9, "net was {}", b.net_pnl_usdt);
+        assert!(
+            (b.net_pnl_usdt - 1.7).abs() < 1e-9,
+            "net was {}",
+            b.net_pnl_usdt
+        );
         assert_eq!(b.fill_count, 1);
 
         // The unattributed fill must not create a phantom Profile.
-        assert_eq!(rows.len(), 2, "only Profiles with attributed fills are reported");
+        assert_eq!(
+            rows.len(),
+            2,
+            "only Profiles with attributed fills are reported"
+        );
     }
 
     #[test]
@@ -8524,9 +8558,13 @@ mod tests {
         assert!(is_transient_database_contention("Database Is Locked"));
         assert!(is_transient_database_contention("database table is locked"));
         // Genuine faults must still reach the user.
-        assert!(!is_transient_database_contention("no such table: ai_agent_runs"));
+        assert!(!is_transient_database_contention(
+            "no such table: ai_agent_runs"
+        ));
         assert!(!is_transient_database_contention("OKX 下单失败：余额不足"));
-        assert!(!is_transient_database_contention("database disk image is malformed"));
+        assert!(!is_transient_database_contention(
+            "database disk image is malformed"
+        ));
     }
 
     #[test]
@@ -8741,6 +8779,36 @@ mod tests {
             [],
         )
         .expect("insert run");
+        let stale_usage = json!({
+            "schemaVersion": 1,
+            "provider": "test",
+            "modelId": "model",
+            "model": "model",
+            "modelName": "Model",
+            "reported": true,
+            "agentCount": 0,
+            "usage": {
+                "inputTokens": 1,
+                "outputTokens": 1,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "reasoningTokens": 0,
+                "totalTokens": 2
+            },
+            "mainUsage": {
+                "inputTokens": 1,
+                "outputTokens": 1,
+                "cacheReadTokens": 0,
+                "cacheWriteTokens": 0,
+                "reasoningTokens": 0,
+                "totalTokens": 2
+            }
+        });
+        conn.execute(
+            "UPDATE ai_agent_runs SET token_usage_json=?2 WHERE id=?1",
+            params!["run-1", stale_usage.to_string()],
+        )
+        .expect("seed stale run usage cache");
         conn.execute(
             "INSERT INTO ai_messages(id,session_id,role,content,tool_json,created_at)
              VALUES('message-1','background:run-1','assistant','done',?1,11)",
@@ -8751,13 +8819,25 @@ mod tests {
         let first = load_runs(&conn, 50).expect("hydrate legacy run summary");
         assert_eq!(first.len(), 1);
         assert_eq!(first[0].action_counts.opportunity, 1);
-        assert_eq!(first[0].token_usage.as_ref().map(|usage| usage.usage.total_tokens), Some(15));
+        assert_eq!(
+            first[0]
+                .token_usage
+                .as_ref()
+                .map(|usage| usage.usage.total_tokens),
+            Some(15)
+        );
 
         conn.execute("DELETE FROM ai_messages", [])
             .expect("remove raw history after cache write");
         let second = load_runs(&conn, 50).expect("read cached run summary");
         assert_eq!(second[0].action_counts.opportunity, 1);
-        assert_eq!(second[0].token_usage.as_ref().map(|usage| usage.usage.total_tokens), Some(15));
+        assert_eq!(
+            second[0]
+                .token_usage
+                .as_ref()
+                .map(|usage| usage.usage.total_tokens),
+            Some(15)
+        );
     }
 
     #[test]
@@ -8813,6 +8893,154 @@ mod tests {
     }
 
     #[test]
+    fn usage_summary_reconstructs_cumulative_main_usage_and_cache_deltas() {
+        let events = vec![
+            json!({
+                "type": "usage",
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 40,
+                    "totalInputTokens": 100,
+                    "totalOutputTokens": 20
+                }
+            }),
+            json!({
+                "type": "usage",
+                "usage": {
+                    "inputTokens": 200,
+                    "outputTokens": 30,
+                    "cacheReadTokens": 60,
+                    "totalInputTokens": 300,
+                    "totalOutputTokens": 50
+                }
+            }),
+        ];
+        let summary = build_ai_usage_summary(
+            &events,
+            "openai-compatible",
+            "model-1",
+            "model-1",
+            "Model 1",
+        );
+        assert_eq!(summary.schema_version, AI_USAGE_SCHEMA_VERSION);
+        assert_eq!(summary.quality, AiUsageQuality::Reconstructed);
+        assert_eq!(summary.main_usage.input_tokens, 300);
+        assert_eq!(summary.main_usage.output_tokens, 50);
+        assert_eq!(summary.main_usage.cache_read_tokens, 100);
+        assert_eq!(summary.main_usage.total_tokens, 350);
+    }
+
+    #[test]
+    fn usage_summary_prefers_protocol_cache_totals() {
+        let events = vec![
+            json!({
+                "type": "usage",
+                "usage": {
+                    "usageKind": "delta-with-totals",
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 40,
+                    "totalInputTokens": 100,
+                    "totalOutputTokens": 20,
+                    "totalCacheReadTokens": 40
+                }
+            }),
+            json!({
+                "type": "usage",
+                "usage": {
+                    "usageKind": "delta-with-totals",
+                    "inputTokens": 200,
+                    "outputTokens": 30,
+                    "cacheReadTokens": 60,
+                    "totalInputTokens": 300,
+                    "totalOutputTokens": 50,
+                    "totalCacheReadTokens": 100
+                }
+            }),
+        ];
+        let summary = build_ai_usage_summary(&events, "test", "model", "model", "Model");
+        assert_eq!(summary.quality, AiUsageQuality::ProviderReported);
+        assert_eq!(summary.main_usage.input_tokens, 300);
+        assert_eq!(summary.main_usage.output_tokens, 50);
+        assert_eq!(summary.main_usage.cache_read_tokens, 100);
+    }
+
+    #[test]
+    fn usage_summary_handles_mixed_legacy_and_cumulative_snapshots_without_double_counting() {
+        let events = vec![
+            json!({
+                "type": "usage",
+                "usage": {
+                    "usageKind": "delta-with-totals",
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 40,
+                    "totalInputTokens": 100,
+                    "totalOutputTokens": 20,
+                    "totalCacheReadTokens": 40
+                }
+            }),
+            json!({
+                "type": "usage",
+                "usage": {
+                    "usageKind": "cumulative",
+                    "inputTokens": 300,
+                    "outputTokens": 50,
+                    "cacheReadTokens": 100
+                }
+            }),
+        ];
+        let summary = build_ai_usage_summary(&events, "test", "model", "model", "Model");
+        assert_eq!(summary.main_usage.input_tokens, 300);
+        assert_eq!(summary.main_usage.output_tokens, 50);
+        assert_eq!(summary.main_usage.cache_read_tokens, 100);
+    }
+
+    #[test]
+    fn usage_summary_marks_missing_sub_agent_usage_partial() {
+        let events = vec![
+            json!({
+                "type": "usage",
+                "usage": {
+                    "usageKind": "cumulative",
+                    "inputTokens": 100,
+                    "outputTokens": 20
+                }
+            }),
+            json!({
+                "type": "agentDone",
+                "configuredAgentId": "risk",
+                "result": { "status": "completed" }
+            }),
+        ];
+        let summary = build_ai_usage_summary(&events, "test", "model", "model", "Model");
+        assert!(summary.reported);
+        assert_eq!(summary.quality, AiUsageQuality::Partial);
+        assert_eq!(summary.agent_count, 1);
+        assert_eq!(summary.reported_agent_count, 0);
+        assert_eq!(summary.unreported_agent_count, 1);
+    }
+
+    #[test]
+    fn usage_summary_repairs_legacy_claude_full_input_contract() {
+        let events = vec![json!({
+            "type": "usage",
+            "usage": {
+                "inputTokens": 10,
+                "outputTokens": 5,
+                "cacheReadTokens": 90,
+                "totalInputTokens": 10,
+                "totalOutputTokens": 5
+            }
+        })];
+        let summary = build_ai_usage_summary(&events, "claude-code", "claude", "claude", "Claude");
+        assert_eq!(summary.main_usage.input_tokens, 100);
+        assert_eq!(summary.main_usage.output_tokens, 5);
+        assert_eq!(summary.main_usage.total_tokens, 105);
+    }
+
+    #[test]
     fn background_finish_failure_reports_the_rejected_schema_field() {
         let events = json!([
             {
@@ -8853,16 +9081,135 @@ mod tests {
     }
 
     #[test]
+    fn usage_backfill_is_idempotent_and_preserves_raw_tool_history() {
+        let mut conn = Connection::open_in_memory().expect("open usage backfill database");
+        conn.execute_batch(
+            "CREATE TABLE ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL
+             );",
+        )
+        .expect("create usage backfill schema");
+        let events = json!([
+            {
+                "type": "usage",
+                "usage": {
+                    "inputTokens": 100,
+                    "outputTokens": 20,
+                    "cacheReadTokens": 40,
+                    "totalInputTokens": 100,
+                    "totalOutputTokens": 20
+                }
+            },
+            {
+                "type": "usage",
+                "usage": {
+                    "inputTokens": 200,
+                    "outputTokens": 30,
+                    "cacheReadTokens": 60,
+                    "totalInputTokens": 300,
+                    "totalOutputTokens": 50
+                }
+            },
+            {
+                "type": "usageSummary",
+                "__desicUsageSummary": {
+                    "provider": "openai-compatible",
+                    "modelId": "model-1",
+                    "model": "model-1",
+                    "modelName": "Model 1",
+                    "reported": true,
+                    "agentCount": 0,
+                    "usage": {
+                        "inputTokens": 200,
+                        "outputTokens": 30,
+                        "cacheReadTokens": 60,
+                        "cacheWriteTokens": 0,
+                        "reasoningTokens": 0,
+                        "totalTokens": 230
+                    },
+                    "mainUsage": {
+                        "inputTokens": 200,
+                        "outputTokens": 30,
+                        "cacheReadTokens": 60,
+                        "cacheWriteTokens": 0,
+                        "reasoningTokens": 0,
+                        "totalTokens": 230
+                    }
+                }
+            }
+        ]);
+        let tool_json = serde_json::to_string(&events).expect("serialize legacy events");
+        conn.execute(
+            "INSERT INTO ai_messages(id,session_id,role,content,tool_json,status,created_at)
+             VALUES('message-1','session-1','assistant','',?1,'done',1),
+                   ('message-2','session-1','assistant','','[]','done',2)",
+            params![tool_json],
+        )
+        .expect("insert legacy usage messages");
+
+        ensure_ai_message_usage_for_session(&mut conn, "session-1")
+            .expect("backfill usage summaries");
+        let (stored_tool_json, summary_json, version) = conn
+            .query_row(
+                "SELECT tool_json,token_usage_json,token_usage_version
+                 FROM ai_messages WHERE id='message-1'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                    ))
+                },
+            )
+            .expect("read rebuilt usage");
+        let summary: AiUsageSummary =
+            serde_json::from_str(&summary_json).expect("parse rebuilt summary");
+        assert_eq!(stored_tool_json, tool_json);
+        assert_eq!(version, AI_USAGE_SCHEMA_VERSION as i64);
+        assert_eq!(summary.provider, "openai-compatible");
+        assert_eq!(summary.usage.input_tokens, 300);
+        assert_eq!(summary.usage.output_tokens, 50);
+        assert_eq!(summary.usage.cache_read_tokens, 100);
+
+        ensure_ai_message_usage_for_session(&mut conn, "session-1").expect("repeat usage backfill");
+        let repeated = conn
+            .query_row(
+                "SELECT token_usage_json FROM ai_messages WHERE id='message-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read repeated summary");
+        assert_eq!(repeated, summary_json);
+        let unreported: AiUsageSummary = conn
+            .query_row(
+                "SELECT token_usage_json FROM ai_messages WHERE id='message-2'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|value| serde_json::from_str(&value).ok())
+            .expect("parse unreported summary");
+        assert!(!unreported.reported);
+        assert_eq!(unreported.quality, AiUsageQuality::Unreported);
+    }
+
+    #[test]
     fn usage_dashboard_groups_shanghai_days_and_models() {
         const DAY_MS: i64 = 86_400_000;
         const OFFSET_MS: i64 = 8 * 60 * 60 * 1000;
         let now = 1_800_000_000_000_i64;
         let today_start = (now + OFFSET_MS).div_euclid(DAY_MS) * DAY_MS - OFFSET_MS;
-        let conn = Connection::open_in_memory().expect("open usage database");
+        let mut conn = Connection::open_in_memory().expect("open usage database");
         conn.execute_batch(
             "CREATE TABLE ai_messages(
                id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
-               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,status TEXT,created_at INTEGER NOT NULL
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL
              );",
         )
         .expect("create usage schema");
@@ -8914,7 +9261,8 @@ mod tests {
             5,
         );
 
-        let dashboard = load_ai_token_usage_dashboard(&conn, now).expect("load usage dashboard");
+        let dashboard =
+            load_ai_token_usage_dashboard(&mut conn, now).expect("load usage dashboard");
         assert_eq!(dashboard.today.turn_count, 1);
         assert_eq!(dashboard.today.usage.total_tokens, 120);
         assert_eq!(dashboard.yesterday.turn_count, 1);
@@ -9553,7 +9901,9 @@ mod tests {
             "eventTypesVersion": FEISHU_CONFIG_EVENT_TYPES_VERSION
         });
         let normalized_saved = normalized_feishu_event_types(&explicitly_saved);
-        assert!(!normalized_saved.iter().any(|value| value == "strategy_signal"));
+        assert!(!normalized_saved
+            .iter()
+            .any(|value| value == "strategy_signal"));
     }
 
     #[test]

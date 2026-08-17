@@ -529,6 +529,42 @@ mod tests {
     }
 
     #[test]
+    fn cost_aware_trade_rules_separate_facts_from_editable_judgment() {
+        let definitions = default_ai_skill_definitions();
+        let fixed = definitions
+            .iter()
+            .find(|skill| skill.id == "desic-core-operations")
+            .expect("fixed skill");
+        let philosophy = definitions
+            .iter()
+            .find(|skill| skill.id == "trading-philosophy")
+            .expect("trading philosophy");
+
+        for expected in [
+            "estimatedNetProfitAtTarget",
+            "feeDragPctOfGrossProfit",
+            "netRewardRiskRatio",
+            "it does not change notional, absolute fees",
+            "Never present gross target profit as the expected net payoff",
+        ] {
+            assert!(
+                fixed.content.contains(expected),
+                "missing fixed cost rule: {expected}"
+            );
+        }
+        for expected in [
+            "directionally plausible setup can still be economically unattractive",
+            "target is close to the fee-adjusted break-even price",
+            "higher leverage does not improve net profit",
+        ] {
+            assert!(
+                philosophy.content.contains(expected),
+                "missing editable cost judgment: {expected}"
+            );
+        }
+    }
+
+    #[test]
     fn default_skills_include_every_required_skill() {
         let enabled = default_ai_enabled_skills();
         assert_eq!(
@@ -558,8 +594,8 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0x6747_4642_2d8f_9554_u64),
-            ("trading-philosophy", 0xaf42_b47e_755b_3c08_u64),
+            ("desic-core-operations", 0x7133_6f9f_0a42_3ee4_u64),
+            ("trading-philosophy", 0x49ea_5f9d_7db7_ec0c_u64),
             ("okx-news-intelligence", 0x790c_faa6_cc57_d766_u64),
             ("okx-smart-money-analysis", 0x18d3_b51e_1a97_ffe3_u64),
         ];
@@ -680,7 +716,7 @@ mod tests {
             "cannot identify new longs, new shorts, covering, or stops",
             "not proof of participant intent",
             "do not invent a contract size",
-            "leverage changes estimated initial margin only",
+            "leverage changes estimated initial margin and therefore cost and return percentages relative to margin",
             "infer participant intent solely from OI",
         ] {
             assert!(

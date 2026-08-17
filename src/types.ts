@@ -853,7 +853,9 @@ export type LinearUsdtPerpetualEvaluationRequest = {
   equity?: string;
   availableUsdt?: string;
   maxSingleTradeMarginPct?: string;
+  direction?: "long" | "short";
   stopPrice?: string;
+  targetPrice?: string;
   atr?: string;
   entryFeeRate: string;
   exitFeeRate: string;
@@ -876,6 +878,19 @@ export type LinearUsdtPositionMetrics = {
   estimatedRoundTripFeeUsdt: string;
   estimatedStopLossWithFeesUsdt?: string | null;
   stopRiskPctOfEquity?: string | null;
+  breakEvenPrice?: string | null;
+  breakEvenMovePct?: string | null;
+  targetPrice?: string | null;
+  targetMovePct?: string | null;
+  estimatedGrossProfitAtTargetUsdt?: string | null;
+  estimatedExitFeeAtTargetUsdt?: string | null;
+  estimatedRoundTripFeeAtTargetUsdt?: string | null;
+  estimatedNetProfitAtTargetUsdt?: string | null;
+  feeDragPctOfGrossProfit?: string | null;
+  netRewardRiskRatio?: string | null;
+  estimatedRoundTripFeePctOfInitialMargin?: string | null;
+  estimatedNetTargetReturnPctOfInitialMargin?: string | null;
+  estimatedNetTargetProfitPctOfEquity?: string | null;
   atr?: string | null;
   oneAtrPriceLossUsdt?: string | null;
   oneAtrRiskPctOfEquity?: string | null;
@@ -883,6 +898,13 @@ export type LinearUsdtPositionMetrics = {
 
 export type LinearUsdtPerpetualEvaluation = {
   requestedSize: string;
+  direction?: "long" | "short" | null;
+  costAssumptions: {
+    entryFeeRate: string;
+    exitFeeRate: string;
+    slippageIncluded: boolean;
+    fundingIncluded: boolean;
+  };
   normalizedSize: string;
   sizeWasNormalized: boolean;
   candidate: LinearUsdtPositionMetrics;
@@ -1198,6 +1220,9 @@ export type OkxAlgoOrder = {
   sz: string;
   actualSide: string;
   actualSz: string;
+  triggerPx: string;
+  triggerPxType: string;
+  ordPx: string;
   tpTriggerPx: string;
   tpTriggerPxType: string;
   tpOrdPx: string;
@@ -1363,6 +1388,7 @@ export type TradePrecheckRequest = {
   action?: "long" | "short" | "close-long" | "close-short";
   price: string;
   stopPrice?: string;
+  targetPrice?: string;
   atr?: string;
   size: string;
   lever: string;
@@ -1388,6 +1414,11 @@ export type TradePrecheckResponse = {
   estimatedRoundTripFee?: number | null;
   estimatedStopLossWithFees?: number | null;
   stopLossPctOfUsdtEquity?: number | null;
+  breakEvenPrice?: number | null;
+  estimatedNetProfitAtTarget?: number | null;
+  feeDragPctOfGrossProfit?: number | null;
+  netRewardRiskRatio?: number | null;
+  feeRateSource: string;
   perpetualEvaluation?: LinearUsdtPerpetualEvaluation | null;
   liquidationText: string;
   availableUsdt?: number | null;
@@ -1834,21 +1865,37 @@ export type AiTokenUsage = {
   totalTokens: number;
 };
 
+export type AiUsageQuality = "providerReported" | "reconstructed" | "partial" | "unreported";
+
+export type AiUsageCoverage = {
+  inputOutput: boolean;
+  cacheRead: boolean;
+  cacheWrite: boolean;
+  reasoning: boolean;
+};
+
 export type AiUsageSummary = {
+  schemaVersion: number;
   provider: string;
   modelId: string;
   model: string;
   modelName: string;
   reported: boolean;
+  quality: AiUsageQuality;
+  coverage: AiUsageCoverage;
   agentCount: number;
+  reportedAgentCount: number;
+  unreportedAgentCount: number;
   usage: AiTokenUsage;
   mainUsage: AiTokenUsage;
 };
 
 export type AiTokenUsagePeriod = {
   usage: AiTokenUsage;
+  coverage: AiUsageCoverage;
   turnCount: number;
   sessionCount: number;
+  partialTurnCount: number;
   unreportedTurnCount: number;
 };
 
@@ -1864,7 +1911,7 @@ export type AiTokenUsageByModel = {
 
 export type AiTokenUsageDashboard = {
   generatedAt: number;
-  trackedFrom?: number | null;
+  windowStart: number;
   today: AiTokenUsagePeriod;
   yesterday: AiTokenUsagePeriod;
   sevenDays: AiTokenUsagePeriod;
@@ -2094,6 +2141,7 @@ export type AiStoredMessage = {
   content: string;
   reasoning?: string | null;
   toolJson?: string | null;
+  tokenUsage?: AiUsageSummary | null;
   status?: string | null;
   createdAt: number;
 };

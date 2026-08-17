@@ -378,7 +378,11 @@ pub(crate) fn ai_save_config(
         workspace_roots: normalize_ai_workspace_roots(
             update
                 .workspace_roots
-                .or_else(|| existing.as_ref().map(|config| config.workspace_roots.clone()))
+                .or_else(|| {
+                    existing
+                        .as_ref()
+                        .map(|config| config.workspace_roots.clone())
+                })
                 .unwrap_or_default(),
         ),
     };
@@ -565,13 +569,23 @@ fn imported_skill_id(value: &str) -> String {
     let mut id = value
         .trim()
         .chars()
-        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '-' })
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect::<String>();
     while id.contains("--") {
         id = id.replace("--", "-");
     }
     id = id.trim_matches('-').chars().take(80).collect();
-    if id.is_empty() { format!("imported-skill-{}", now_ms()) } else { id }
+    if id.is_empty() {
+        format!("imported-skill-{}", now_ms())
+    } else {
+        id
+    }
 }
 
 fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinition, String> {
@@ -582,7 +596,9 @@ fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinit
         if let Some(end) = rest.find("\n---") {
             let frontmatter = &rest[..end];
             for line in frontmatter.lines() {
-                let Some((key, value)) = line.split_once(':') else { continue };
+                let Some((key, value)) = line.split_once(':') else {
+                    continue;
+                };
                 let value = value.trim().trim_matches(['\"', '\'']);
                 match key.trim() {
                     "name" => name = value.to_string(),
@@ -593,7 +609,11 @@ fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinit
             body = &rest[end + 5..];
         }
     }
-    let id = imported_skill_id(if name.trim().is_empty() { fallback } else { &name });
+    let id = imported_skill_id(if name.trim().is_empty() {
+        fallback
+    } else {
+        &name
+    });
     let description = if description.trim().is_empty() {
         format!("从 {} 导入的 Skill", fallback)
     } else {
@@ -605,7 +625,11 @@ fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinit
     }
     Ok(AiSkillDefinition {
         id: id.clone(),
-        name: if name.trim().is_empty() { id.clone() } else { name.trim().to_string() },
+        name: if name.trim().is_empty() {
+            id.clone()
+        } else {
+            name.trim().to_string()
+        },
         description,
         rules: String::new(),
         content,
@@ -616,17 +640,25 @@ fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinit
 fn read_imported_skill_markdown(source: &Path) -> Result<String, String> {
     if source.is_dir() {
         let path = source.join("SKILL.md");
-        return fs::read_to_string(&path).map_err(|err| format!("读取 {} 失败：{}", path.display(), err));
+        return fs::read_to_string(&path)
+            .map_err(|err| format!("读取 {} 失败：{}", path.display(), err));
     }
-    if source.extension().and_then(|value| value.to_str()).is_some_and(|value| value.eq_ignore_ascii_case("zip")) {
+    if source
+        .extension()
+        .and_then(|value| value.to_str())
+        .is_some_and(|value| value.eq_ignore_ascii_case("zip"))
+    {
         let file = fs::File::open(source).map_err(|err| format!("打开 Skill ZIP 失败：{err}"))?;
-        let mut archive = ZipArchive::new(file).map_err(|err| format!("读取 Skill ZIP 失败：{err}"))?;
+        let mut archive =
+            ZipArchive::new(file).map_err(|err| format!("读取 Skill ZIP 失败：{err}"))?;
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).map_err(|err| err.to_string())?;
             let name = entry.name().replace('\\', "/");
             if name.ends_with("SKILL.md") && !name.contains("../") {
                 let mut contents = String::new();
-                entry.read_to_string(&mut contents).map_err(|err| err.to_string())?;
+                entry
+                    .read_to_string(&mut contents)
+                    .map_err(|err| err.to_string())?;
                 return Ok(contents);
             }
         }
@@ -635,10 +667,17 @@ fn read_imported_skill_markdown(source: &Path) -> Result<String, String> {
     Err("Skill 来源必须是包含 SKILL.md 的目录或 ZIP 文件".to_string())
 }
 
-fn persist_imported_skill(app: &tauri::AppHandle, skill: AiSkillDefinition) -> Result<AiConfigSummary, String> {
+fn persist_imported_skill(
+    app: &tauri::AppHandle,
+    skill: AiSkillDefinition,
+) -> Result<AiConfigSummary, String> {
     let _guard = lock_ai_config_writes()?;
     let mut config = load_ai_config_locked(app)?;
-    if let Some(existing) = config.skill_definitions.iter_mut().find(|item| item.id == skill.id) {
+    if let Some(existing) = config
+        .skill_definitions
+        .iter_mut()
+        .find(|item| item.id == skill.id)
+    {
         *existing = skill.clone();
     } else {
         config.skill_definitions.push(skill.clone());
@@ -657,18 +696,27 @@ fn persist_imported_skill(app: &tauri::AppHandle, skill: AiSkillDefinition) -> R
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_import(app: tauri::AppHandle, source: String) -> Result<AiConfigSummary, String> {
+pub(crate) fn ai_skill_import(
+    app: tauri::AppHandle,
+    source: String,
+) -> Result<AiConfigSummary, String> {
     let source = PathBuf::from(source.trim());
     if !source.is_absolute() {
         return Err("Skill 来源路径必须是绝对路径".to_string());
     }
-    let fallback = source.file_stem().and_then(|value| value.to_str()).unwrap_or("imported-skill");
+    let fallback = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported-skill");
     let markdown = read_imported_skill_markdown(&source)?;
     persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_pick_source(app: tauri::AppHandle, kind: String) -> Result<Option<String>, String> {
+pub(crate) fn ai_skill_pick_source(
+    app: tauri::AppHandle,
+    kind: String,
+) -> Result<Option<String>, String> {
     let selected = match kind.trim() {
         "directory" => app
             .dialog()
@@ -683,7 +731,9 @@ pub(crate) fn ai_skill_pick_source(app: tauri::AppHandle, kind: String) -> Resul
             .blocking_pick_file(),
         _ => return Err("未知的 Skill 来源类型".to_string()),
     };
-    let Some(selected) = selected else { return Ok(None) };
+    let Some(selected) = selected else {
+        return Ok(None);
+    };
     match selected {
         FilePath::Path(path) => Ok(Some(path.to_string_lossy().into_owned())),
         FilePath::Url(_) => Err("Skill 来源必须是本地路径".to_string()),
@@ -691,22 +741,42 @@ pub(crate) fn ai_skill_pick_source(app: tauri::AppHandle, kind: String) -> Resul
 }
 
 #[tauri::command]
-pub(crate) async fn ai_skill_install_git(app: tauri::AppHandle, url: String) -> Result<AiConfigSummary, String> {
+pub(crate) async fn ai_skill_install_git(
+    app: tauri::AppHandle,
+    url: String,
+) -> Result<AiConfigSummary, String> {
     let url = url.trim();
     if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("git@")) {
         return Err("Git 地址只支持 http(s):// 或 git@ 主机格式".to_string());
     }
-    let repo = url.rsplit('/').next().unwrap_or("skill").trim_end_matches(".git");
-    let target = runtime_work_dir().join(".cline").join("imported-git-skills").join(format!("{}-{}", sanitize_skill_dir_name(repo), now_ms()));
-    if let Some(parent) = target.parent() { fs::create_dir_all(parent).map_err(|err| err.to_string())?; }
+    let repo = url
+        .rsplit('/')
+        .next()
+        .unwrap_or("skill")
+        .trim_end_matches(".git");
+    let target = runtime_work_dir()
+        .join(".cline")
+        .join("imported-git-skills")
+        .join(format!("{}-{}", sanitize_skill_dir_name(repo), now_ms()));
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
 
     // 优先系统 git（支持私有仓库与 SSH 地址）。用户未安装 git 时自动
     // 降级为托管平台的源码包接口，GitHub/GitLab 公开仓库无需 git 即可安装。
-    match Command::new("git").args(["clone", "--depth", "1", url]).arg(&target).output().await {
+    match Command::new("git")
+        .args(["clone", "--depth", "1", url])
+        .arg(&target)
+        .output()
+        .await
+    {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
             // git 可用但克隆失败（认证、网络或仓库问题）：保留 git 的原始诊断。
-            return Err(format!("Git 安装失败：{}", String::from_utf8_lossy(&output.stderr).trim()));
+            return Err(format!(
+                "Git 安装失败：{}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            ));
         }
         Err(_) => {
             // 系统没有 git：走 HTTP 源码包下载。
@@ -716,7 +786,10 @@ pub(crate) async fn ai_skill_install_git(app: tauri::AppHandle, url: String) -> 
     }
 
     let markdown = read_imported_skill_markdown(&target)?;
-    let fallback = target.file_name().and_then(|value| value.to_str()).unwrap_or("imported-skill");
+    let fallback = target
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("imported-skill");
     persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
 }
 
@@ -738,7 +811,9 @@ fn skill_source_archive_candidates(url: &str) -> Result<Vec<String>, String> {
         if owner.is_empty() || repo.is_empty() {
             return Err("Git 地址缺少仓库所有者或名称".to_string());
         }
-        return Ok(vec![format!("https://api.github.com/repos/{owner}/{repo}/tarball")]);
+        return Ok(vec![format!(
+            "https://api.github.com/repos/{owner}/{repo}/tarball"
+        )]);
     }
     if host == "gitlab.com" && segments.len() >= 2 {
         let repo = segments
@@ -805,7 +880,9 @@ async fn http_download_skill_archive(url: &str) -> Result<Vec<u8>, String> {
 fn extract_skill_archive(bytes: &[u8], target: &Path) -> Result<(), String> {
     let decoder = flate2::read::GzDecoder::new(bytes);
     let mut archive = tar::Archive::new(decoder);
-    let staging_parent = target.parent().ok_or_else(|| "Skill 目标路径无效".to_string())?;
+    let staging_parent = target
+        .parent()
+        .ok_or_else(|| "Skill 目标路径无效".to_string())?;
     let staging = staging_parent.join(format!(".skill-unpack-{}", now_ms()));
     fs::create_dir_all(&staging).map_err(|error| format!("创建解压目录失败：{error}"))?;
     if let Err(error) = archive.unpack(&staging) {
@@ -878,9 +955,8 @@ pub(crate) fn sync_cline_runtime_scoped_skill(bundle: &AiSkillBundle) -> Result<
         let relative = validated_skill_resource_path(&resource.path)?;
         let target = dir.join(&relative);
         if let Some(parent) = target.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err))?;
         }
         write_file_atomically(&target, resource.contents.as_bytes())?;
     }
@@ -953,10 +1029,8 @@ pub(crate) fn read_cline_skill_resource(
     // Any Skill loaded for this turn may expose its own reference documents; the
     // active set is the authorization boundary, not a hard-coded id. The path
     // checks below remain the actual containment guarantee.
-    let authorized = is_runtime_scoped_skill_id(id)
-        || active_skill_ids
-            .iter()
-            .any(|active| active.trim() == id);
+    let authorized =
+        is_runtime_scoped_skill_id(id) || active_skill_ids.iter().any(|active| active.trim() == id);
     if !authorized {
         return Err(format!("本次会话未加载 Skill：{id}"));
     }
@@ -2523,7 +2597,7 @@ fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
     const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 7] = [
+    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 8] = [
         ("trading-philosophy", 0x28b8_35c6_2b63_9623),
         ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
         ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
@@ -2542,6 +2616,10 @@ fn merge_ai_skill_definitions(
         // was de-biased (waiting cost, directional lean, absence review). Same
         // reasoning: no user edit, so the newer default is strictly better.
         ("trading-philosophy", 0x701f_74f8_3aa4_b270),
+        // Untouched de-biased baseline shipped before target-side fee economics
+        // became deterministic. User-edited philosophy text has a different
+        // fingerprint and remains authoritative.
+        ("trading-philosophy", 0x70bc_d86c_6f81_36cf),
     ];
     let protected_skill_ids = [
         "desic-core-operations",
@@ -2989,7 +3067,8 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
     let original_skill_definitions =
         serde_json::to_string(&config.skill_definitions).unwrap_or_default();
     let original_open_agent = config.open_agent;
-    let original_workspace_roots = serde_json::to_string(&config.workspace_roots).unwrap_or_default();
+    let original_workspace_roots =
+        serde_json::to_string(&config.workspace_roots).unwrap_or_default();
     config.permission_mode = normalize_ai_permission_mode(Some(&config.permission_mode));
     config.reasoning_depth = normalize_ai_reasoning_depth(Some(&config.reasoning_depth));
     config.system_prompt =
@@ -3213,7 +3292,10 @@ mod tests {
             .join("skills")
             .join("trading-philosophy")
             .join("SKILL.md");
-        assert!(snapshot.exists(), "run snapshot must survive interactive prune");
+        assert!(
+            snapshot.exists(),
+            "run snapshot must survive interactive prune"
+        );
         cleanup_run_scoped_workspace(&run_id);
     }
 
@@ -3253,9 +3335,13 @@ mod tests {
         assert!(written.contains("# Systematic strategy authoring"));
         assert!(!written.contains("## 规则"));
 
-        let resource =
-            read_cline_skill_resource("systematic-strategy-authoring", "docs/actions.md", &[], None)
-                .expect("bundled resource is readable");
+        let resource = read_cline_skill_resource(
+            "systematic-strategy-authoring",
+            "docs/actions.md",
+            &[],
+            None,
+        )
+        .expect("bundled resource is readable");
         assert_eq!(resource, "# Action reference\n");
         // A path the bundle never declared must not be readable.
         assert!(read_cline_skill_resource(
@@ -4131,9 +4217,15 @@ VI. Review and evolve
             ]
         );
         let unsupported = skill_source_archive_candidates("https://bitbucket.org/owner/repo.git");
-        assert!(unsupported.is_err(), "non-GitHub/GitLab hosts must be rejected");
+        assert!(
+            unsupported.is_err(),
+            "non-GitHub/GitLab hosts must be rejected"
+        );
         let ssh = skill_source_archive_candidates("git@github.com:owner/repo.git");
-        assert!(ssh.is_err(), "ssh-style urls cannot be downloaded without git");
+        assert!(
+            ssh.is_err(),
+            "ssh-style urls cannot be downloaded without git"
+        );
     }
 
     #[test]
@@ -4145,8 +4237,7 @@ VI. Review and evolve
         ));
         fs::create_dir_all(&root).expect("create archive test directory");
 
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         {
             let mut builder = tar::Builder::new(&mut encoder);
             let skill_md = b"---\nname: demo\ndescription: demo\n---\n";
@@ -4156,14 +4247,22 @@ VI. Review and evolve
             header.set_mode(0o644);
             header.set_cksum();
             builder
-                .append_data(&mut header, "owner-repo-abc123/SKILL.md", skill_md.as_slice())
+                .append_data(
+                    &mut header,
+                    "owner-repo-abc123/SKILL.md",
+                    skill_md.as_slice(),
+                )
                 .expect("append SKILL.md");
             let mut header = tar::Header::new_gnu();
             header.set_size(guide_md.len() as u64);
             header.set_mode(0o644);
             header.set_cksum();
             builder
-                .append_data(&mut header, "owner-repo-abc123/docs/guide.md", guide_md.as_slice())
+                .append_data(
+                    &mut header,
+                    "owner-repo-abc123/docs/guide.md",
+                    guide_md.as_slice(),
+                )
                 .expect("append nested resource");
             builder.finish().expect("finish tar");
         }
@@ -4184,7 +4283,10 @@ VI. Review and evolve
     fn raw_tar_entry(name: &str, contents: &[u8]) -> Vec<u8> {
         let mut header = [0_u8; 512];
         let name_bytes = name.as_bytes();
-        assert!(name_bytes.len() < 100, "test entry name must fit the ustar name field");
+        assert!(
+            name_bytes.len() < 100,
+            "test entry name must fit the ustar name field"
+        );
         header[..name_bytes.len()].copy_from_slice(name_bytes);
         let mode = format!("{:07o}\0", 0o644);
         header[100..108].copy_from_slice(mode.as_bytes());
@@ -4209,8 +4311,7 @@ VI. Review and evolve
     fn skill_source_archive_skips_parent_traversal_entries() {
         let mut raw = raw_tar_entry("repo/../escape.txt", b"evil");
         raw.extend(std::iter::repeat_n(0, 1024)); // end-of-archive blocks
-        let mut encoder =
-            flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         encoder.write_all(&raw).expect("gzip raw tar");
         let bytes = encoder.finish().expect("finish gzip");
         let root = std::env::temp_dir().join(format!(

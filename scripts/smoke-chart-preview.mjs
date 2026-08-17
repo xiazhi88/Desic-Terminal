@@ -127,6 +127,76 @@ async function dragGuideAndExpect(page, guideSelector, targetRatioX, targetRatio
   return count;
 }
 
+async function verifySeriesSwitchRendersCandles(page, symbol) {
+  await page.evaluate((nextSymbol) => {
+    window.dispatchEvent(new CustomEvent("desic:chart-preview-series", {
+      detail: { symbol: nextSymbol }
+    }));
+  }, symbol);
+  await page.waitForFunction(
+    (nextSymbol) => document.querySelector(".chart-preview-page")?.getAttribute("data-preview-series") === nextSymbol,
+    symbol
+  );
+  await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  await page.waitForTimeout(180);
+  const coloredPixels = await page.evaluate(() => {
+    let count = 0;
+    for (const canvas of document.querySelectorAll(".chart-canvas canvas")) {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) continue;
+      const pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+      for (let index = 0; index < pixels.length; index += 4 * 19) {
+        const red = pixels[index];
+        const green = pixels[index + 1];
+        const blue = pixels[index + 2];
+        if ((green > red * 1.25 && green > blue * 1.2 && green > 90)
+          || (red > green * 1.2 && red > blue * 1.1 && red > 90)) count += 1;
+      }
+    }
+    return count;
+  });
+  if (coloredPixels < 20) {
+    throw new Error(`series switch left the candle canvas blank: ${JSON.stringify({ symbol, coloredPixels })}`);
+  }
+}
+
+async function verifyHistoryPaging(page, { failOnce = false } = {}) {
+  const root = page.locator(".chart-preview-page");
+  const earliestBefore = Number(await root.getAttribute("data-earliest-candle-time"));
+  await page.evaluate((shouldFailOnce) => window.dispatchEvent(new CustomEvent("desic:chart-preview-history", {
+    detail: { failOnce: shouldFailOnce }
+  })), failOnce);
+  const box = await page.locator(".chart-canvas").boundingBox();
+  if (!box) throw new Error("chart canvas missing for history paging");
+  const dragTowardHistory = async () => {
+    await page.mouse.move(box.x + box.width * 0.32, box.y + box.height * 0.34);
+    await page.mouse.down();
+    await page.mouse.move(box.x + box.width * 0.88, box.y + box.height * 0.34, { steps: 14 });
+    await page.mouse.up();
+  };
+  await dragTowardHistory();
+  await page.waitForFunction(() => Number(
+    document.querySelector(".chart-preview-page")?.getAttribute("data-history-request-count") || 0
+  ) > 0);
+  if (failOnce) {
+    const earliestAfterFirstAttempt = Number(await root.getAttribute("data-earliest-candle-time"));
+    if (earliestAfterFirstAttempt === earliestBefore) await dragTowardHistory();
+    await page.waitForFunction((initialEarliest) => {
+      const root = document.querySelector(".chart-preview-page");
+      return Number(root?.getAttribute("data-history-request-count") || 0) > 1
+        && Number(root?.getAttribute("data-earliest-candle-time") || 0) < initialEarliest;
+    }, earliestBefore);
+  }
+  const state = {
+    requestCount: Number(await root.getAttribute("data-history-request-count")),
+    earliestAfter: Number(await root.getAttribute("data-earliest-candle-time"))
+  };
+  if (state.requestCount < (failOnce ? 2 : 1) || !(state.earliestAfter < earliestBefore)) {
+    throw new Error(`chart history paging did not prepend older candles: ${JSON.stringify({ earliestBefore, ...state })}`);
+  }
+  await page.getByRole("button", { name: "重置", exact: true }).click();
+}
+
 async function main() {
   const browser = await chromium.launch({ headless: true });
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
@@ -177,6 +247,15 @@ async function main() {
   await page.waitForSelector(".chart-wrap .chart-canvas canvas", { timeout: 30_000 });
   await page.waitForSelector('[data-chart-pane-id="pane-script-script-smoke-ma"]', { timeout: 10_000 });
   await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
+  const layerPersistence = await page.evaluate(async () => {
+    const { parseWorkspaceLayers } = await import("/src/ui/KlineChart.tsx");
+    const legacy = parseWorkspaceLayers({ indicators: true, alerts: true, drawings: true, signals: true, fills: true, tools: true });
+    const explicitlyHidden = parseWorkspaceLayers({ indicators: true, alerts: true, drawings: true, signals: true, fills: true, tools: true, priceLines: false });
+    return { legacyPriceLines: legacy?.priceLines, hiddenPriceLines: explicitlyHidden?.priceLines };
+  });
+  if (layerPersistence.legacyPriceLines !== true || layerPersistence.hiddenPriceLines !== false) {
+    throw new Error(`price-line workspace migration/persistence regressed: ${JSON.stringify(layerPersistence)}`);
+  }
 
   const baseState = await page.evaluate(() => {
     const rect = (selector) => {
@@ -308,6 +387,12 @@ async function main() {
   if (baseState.bodyOverflowX > 2 || baseState.bodyOverflowY > 2) {
     throw new Error(`chart preview has global overflow: ${JSON.stringify(baseState)}`);
   }
+  await verifySeriesSwitchRendersCandles(page, "ETH-USDT-SWAP");
+  await verifySeriesSwitchRendersCandles(page, "BTC-USDT-SWAP");
+  await verifyHistoryPaging(page, { failOnce: true });
+  await verifySeriesSwitchRendersCandles(page, "ETH-USDT-SWAP");
+  await verifyHistoryPaging(page);
+  await verifySeriesSwitchRendersCandles(page, "BTC-USDT-SWAP");
   const chartBoxForHover = await page.locator(".chart-canvas").boundingBox();
   if (!chartBoxForHover) throw new Error("chart canvas missing for indicator hover values");
   await page.mouse.move(chartBoxForHover.x + chartBoxForHover.width * 0.48, chartBoxForHover.y + chartBoxForHover.height * 0.34);
@@ -502,12 +587,14 @@ async function main() {
     y: layerMenuBox.y + layerMenuBox.height / 2
   });
   if (!layerMenuHit) throw new Error(`layer menu is covered or clipped: ${JSON.stringify(layerMenuBox)}`);
-  if (await layerMenu.getByRole("checkbox").count() !== 4) throw new Error("layer menu should contain four checkboxes");
+  if (await layerMenu.getByRole("checkbox").count() !== 5) throw new Error("layer menu should contain five checkboxes");
   if (await layerMenu.getByRole("checkbox", { name: "交易机会" }).count() !== 0) throw new Error("trade opportunity layer must not be present");
   if (await layerMenu.getByRole("checkbox", { name: "提醒" }).count()) throw new Error("alert should not remain in the layer menu");
   if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-layer-menu.png`, fullPage: false });
+  const priceLineLayer = layerMenu.getByRole("checkbox", { name: "价格线" });
   const signalLayer = layerMenu.getByRole("checkbox", { name: "分析观点" });
   const fillLayer = layerMenu.getByRole("checkbox", { name: "真实成交" });
+  if (!(await priceLineLayer.isChecked())) throw new Error("price-line layer should be visible by default");
   if (!(await signalLayer.isChecked()) || !(await fillLayer.isChecked())) throw new Error("opinion/fill layers should be visible by default");
   await signalLayer.click();
   if (await signalLayer.isChecked()) throw new Error("AI signal layer did not toggle off");

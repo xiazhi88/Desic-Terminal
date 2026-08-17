@@ -1,14 +1,67 @@
-import { KlineChart } from "./KlineChart";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { KlineChart, type ChartHistoryLoadOutcome } from "./KlineChart";
 import type { Candle, ChartFillMarker, ChartOrderLine, ChartPositionRange, ChartSignalMarker, Ticker } from "../types";
 import { useTranslation } from "react-i18next";
 import { chartPositionLabel, formatChartAction, formatChartOrderLabel, formatChartPosition } from "../lib/chartTradeSemantics";
 
 export function ChartPreview() {
   const { t } = useTranslation(["trading", "chart"]);
-  const candles = buildPreviewCandles();
+  const [{ symbol, candles }, setPreviewSeries] = useState(() => ({
+    symbol: "BTC-USDT-SWAP",
+    candles: buildPreviewCandles(62800)
+  }));
+  const [historyRequestCount, setHistoryRequestCount] = useState(0);
+  const historyEnabledRef = useRef(false);
+  const historyFailuresRemainingRef = useRef(0);
+  useEffect(() => {
+    const switchSeries = (event: Event) => {
+      const next = (event as CustomEvent<{ symbol?: string }>).detail?.symbol;
+      if (next === "BTC-USDT-SWAP" || next === "ETH-USDT-SWAP") {
+        setPreviewSeries({
+          symbol: next,
+          candles: buildPreviewCandles(next === "ETH-USDT-SWAP" ? 1880 : 62800)
+        });
+        setHistoryRequestCount(0);
+      }
+    };
+    const enableHistory = (event: Event) => {
+      historyEnabledRef.current = true;
+      historyFailuresRemainingRef.current = (event as CustomEvent<{ failOnce?: boolean }>).detail?.failOnce ? 1 : 0;
+    };
+    window.addEventListener("desic:chart-preview-series", switchSeries);
+    window.addEventListener("desic:chart-preview-history", enableHistory);
+    return () => {
+      window.removeEventListener("desic:chart-preview-series", switchSeries);
+      window.removeEventListener("desic:chart-preview-history", enableHistory);
+    };
+  }, []);
+  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }): Promise<ChartHistoryLoadOutcome> => {
+    if (!historyEnabledRef.current) return { status: "deferred" };
+    setHistoryRequestCount((count) => count + 1);
+    if (historyFailuresRemainingRef.current > 0) {
+      historyFailuresRemainingRef.current -= 1;
+      await new Promise((resolve) => window.setTimeout(resolve, 80));
+      return { status: "failed", message: "preview history failure" };
+    }
+    let earliestTime = firstTime;
+    setPreviewSeries((current) => {
+      if (current.candles[0]?.time < firstTime) {
+        earliestTime = current.candles[0].time;
+        return current;
+      }
+      const earlier = buildEarlierPreviewCandles(
+        firstTime,
+        current.candles[0]?.open ?? 62800,
+        80
+      );
+      earliestTime = earlier[0].time;
+      return { ...current, candles: [...earlier, ...current.candles] };
+    });
+    return { status: "loaded", earliestTime };
+  }, []);
   const last = candles[candles.length - 1];
   const ticker: Ticker = {
-    instId: "BTC-USDT-SWAP",
+    instId: symbol,
     last: String(last.close),
     lastSz: "0.12",
     askPx: String(last.close + 0.1),
@@ -24,11 +77,18 @@ export function ChartPreview() {
   };
 
   return (
-    <main className="chart-preview-page">
+    <main
+      className="chart-preview-page"
+      data-preview-series={symbol}
+      data-history-request-count={historyRequestCount}
+      data-earliest-candle-time={candles[0]?.time ?? 0}
+    >
       <div className="chart-preview-shell">
         <KlineChart
           candles={candles}
           ticker={ticker}
+          symbol={symbol}
+          onNeedMoreHistory={loadMoreHistory}
           signals={buildPreviewSignals(candles, t)}
           fills={buildPreviewFills(candles, t)}
           positionRanges={buildPreviewPositionRanges(last.close, t)}
@@ -41,9 +101,9 @@ export function ChartPreview() {
   );
 }
 
-function buildPreviewCandles(): Candle[] {
+function buildPreviewCandles(basePrice: number): Candle[] {
   const start = Date.UTC(2026, 6, 8, 0, 0, 0) / 1000;
-  let price = 62800;
+  let price = basePrice;
   return Array.from({ length: 260 }, (_, index) => {
     const wave = Math.sin(index / 12) * 80 + Math.cos(index / 27) * 130;
     const impulse = index > 190 ? (index - 190) * 5.6 : 0;
@@ -60,6 +120,24 @@ function buildPreviewCandles(): Candle[] {
       low,
       close,
       volume,
+      confirm: true
+    };
+  });
+}
+
+function buildEarlierPreviewCandles(firstTime: number, anchorPrice: number, count: number): Candle[] {
+  return Array.from({ length: count }, (_, index) => {
+    const time = firstTime - (count - index) * 60;
+    const offset = count - index;
+    const close = anchorPrice - Math.sin(offset / 7) * 18 - offset * 0.7;
+    const open = close - Math.cos(offset / 5) * 12;
+    return {
+      time,
+      open,
+      high: Math.max(open, close) + 24,
+      low: Math.min(open, close) - 24,
+      close,
+      volume: 160 + offset * 2,
       confirm: true
     };
   });

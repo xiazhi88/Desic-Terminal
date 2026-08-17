@@ -41,7 +41,7 @@ import { logger } from "../lib/logger";
 import { listenOptional } from "../lib/tauri";
 import { i18n } from "../i18n/runtime";
 import { createChartIndicatorTemplate, loadChartIndicatorTemplates, saveChartIndicatorTemplates, type ChartIndicatorTemplate } from "../lib/chartIndicatorTemplates";
-import { KlineChart, type ChartContextTradeIntent } from "./KlineChart";
+import { DEFAULT_CHART_LAYER_VISIBILITY, KlineChart, type ChartContextTradeIntent, type ChartHistoryLoadOutcome } from "./KlineChart";
 import { ChartQuickTradeDialog } from "./ChartQuickTradeDialog";
 import { ChartRiskRewardTradeDialog } from "./ChartRiskRewardTradeDialog";
 import { SharedChartOrderCancelDialog, SharedChartOrderLineEditDialog, SharedPositionLineTradeDialog } from "./ChartTradeDialogs";
@@ -98,16 +98,6 @@ export type DetachedChartPaneProps = {
   indicatorIds?: readonly string[];
   onIndicatorIdsChange?: (ids: readonly string[]) => void;
   onClosePane?: () => void;
-};
-
-const DEFAULT_LAYER_VISIBILITY: ChartLayerVisibility = {
-  indicators: true,
-  alerts: true,
-  drawings: true,
-  signals: true,
-  fills: true,
-  tools: true,
-  priceLines: true,
 };
 
 const LAYER_LABELS: readonly [ChartLayerKey, string, string][] = [
@@ -312,7 +302,7 @@ export function DetachedChartPane({
   const [riskRewardIntent, setRiskRewardIntent] = useState<import("../types").ChartRiskRewardTradeIntent | null>(null);
   const [toolbarAction, setToolbarAction] = useState<{ token: number; action: "indicators" | "alerts" | "undo" | "redo" } | null>(null);
   const [layerCommand, setLayerCommand] = useState<{ token: number; key: ChartLayerKey } | null>(null);
-  const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(DEFAULT_LAYER_VISIBILITY);
+  const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(DEFAULT_CHART_LAYER_VISIBILITY);
   const [layerMenuOpen, setLayerMenuOpen] = useState(false);
   const [templateMenuOpen, setTemplateMenuOpen] = useState(false);
   const [templateName, setTemplateName] = useState("");
@@ -430,19 +420,30 @@ export function DetachedChartPane({
     };
   }, [accountId, environment, paneId, symbol, timeframe]);
 
-  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }) => {
+  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }): Promise<ChartHistoryLoadOutcome> => {
     const key = `${symbol}\u0000${timeframe}`;
-    if (historyLoadingRef.current || exhaustedHistoryRef.current.has(key) || !Number.isFinite(firstTime) || firstTime <= 0) return;
+    if (!Number.isFinite(firstTime) || firstTime <= 0) return { status: "failed", message: "invalid history cursor" };
+    if (exhaustedHistoryRef.current.has(key)) return { status: "exhausted" };
+    if (historyLoadingRef.current) return { status: "deferred" };
     const seriesEpoch = seriesEpochRef.current;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
     try {
       const page = await fetchHistoricalCandlesBefore(symbol, timeframe, firstTime, 300);
-      if (seriesEpoch !== seriesEpochRef.current) return;
+      if (seriesEpoch !== seriesEpochRef.current) return { status: "deferred" };
       if (page.candles.length > 0) setCandles((current) => mergeCandles(page.candles, current));
-      if (page.exhausted) exhaustedHistoryRef.current.add(key);
+      if (page.exhausted) {
+        exhaustedHistoryRef.current.add(key);
+        return { status: "exhausted" };
+      }
+      const earliestTime = page.earliestTime ?? page.candles[0]?.time;
+      return page.candles.length > 0 && earliestTime
+        ? { status: "loaded", earliestTime }
+        : { status: "deferred" };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logger.error("failed to load detached pane history", error, { paneId, symbol, timeframe, firstTime });
+      return { status: "failed", message };
     } finally {
       if (seriesEpoch === seriesEpochRef.current) {
         historyLoadingRef.current = false;

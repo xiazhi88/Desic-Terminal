@@ -42,7 +42,7 @@ import {
 import { fmtPrice } from "../lib/format";
 import { invokeOptional, isTauriRuntime, listenOptional } from "../lib/tauri";
 import { logger } from "../lib/logger";
-import { KlineChart } from "./KlineChart";
+import { KlineChart, type ChartHistoryLoadOutcome } from "./KlineChart";
 import { i18n } from "../i18n/runtime";
 import { ChartWindowWorkspacePage } from "./ChartWindowWorkspacePage";
 import { TerminalSelect } from "./TerminalSelect";
@@ -365,6 +365,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
   const environmentRef = useRef<"demo" | "live">("demo");
   const historyLoadingRef = useRef(false);
   const historyExhaustedRef = useRef(new Set<string>());
+  const historySeriesEpochRef = useRef(0);
   const aggregateRefreshRef = useRef(false);
   const candleSeriesKeyRef = useRef("");
 
@@ -542,23 +543,44 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
     };
   }, [symbol, timeframe]);
 
-  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }) => {
+  useEffect(() => {
+    historySeriesEpochRef.current += 1;
+    historyLoadingRef.current = false;
+    setHistoryLoading(false);
+  }, [symbol, timeframe]);
+
+  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }): Promise<ChartHistoryLoadOutcome> => {
     const historyKey = `${symbol}\u0000${timeframe}`;
-    if (historyLoadingRef.current || historyExhaustedRef.current.has(historyKey) || !Number.isFinite(firstTime) || firstTime <= 0) return;
+    if (!Number.isFinite(firstTime) || firstTime <= 0) return { status: "failed", message: "invalid history cursor" };
+    if (historyExhaustedRef.current.has(historyKey)) return { status: "exhausted" };
+    if (historyLoadingRef.current) return { status: "deferred" };
+    const seriesEpoch = historySeriesEpochRef.current;
     historyLoadingRef.current = true;
     setHistoryLoading(true);
     try {
       const page = await fetchHistoricalCandlesBefore(symbol, timeframe, firstTime, 300);
+      if (seriesEpoch !== historySeriesEpochRef.current) return { status: "deferred" };
       if (page.candles.length > 0) {
         setCandles((items) => mergeCandles(page.candles, items));
         logger.info("loaded earlier detached chart candles", { symbol, timeframe, firstTime, count: page.candles.length, exhausted: page.exhausted, source: page.source });
       }
-      if (page.exhausted) historyExhaustedRef.current.add(historyKey);
+      if (page.exhausted) {
+        historyExhaustedRef.current.add(historyKey);
+        return { status: "exhausted" };
+      }
+      const earliestTime = page.earliestTime ?? page.candles[0]?.time;
+      return page.candles.length > 0 && earliestTime
+        ? { status: "loaded", earliestTime }
+        : { status: "deferred" };
     } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
       logger.error("failed to load earlier detached chart candles", error, { symbol, timeframe, firstTime });
+      return { status: "failed", message };
     } finally {
-      historyLoadingRef.current = false;
-      setHistoryLoading(false);
+      if (seriesEpoch === historySeriesEpochRef.current) {
+        historyLoadingRef.current = false;
+        setHistoryLoading(false);
+      }
     }
   }, [symbol, timeframe]);
 

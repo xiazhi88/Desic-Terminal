@@ -216,11 +216,7 @@ pub(crate) struct SystematicProfileOrderResponse {
     pub post_fill_take_profit_current_filled_quantity: Option<f64>,
 }
 
-fn normalize_systematic_price(
-    value: f64,
-    tick_size: &str,
-    field: &str,
-) -> Result<f64, String> {
+fn normalize_systematic_price(value: f64, tick_size: &str, field: &str) -> Result<f64, String> {
     if !value.is_finite() || value <= 0.0 {
         return Err(format!("策略 Profile {field} 必须是正数"));
     }
@@ -228,7 +224,8 @@ fn normalize_systematic_price(
     let normalized = desic_trade_domain::normalize_price(&raw, tick_size).map_err(|error| {
         format!(
             "策略 Profile {field} 无法按 tickSz {} 对齐：{}",
-            tick_size.trim(), error
+            tick_size.trim(),
+            error
         )
     })?;
     normalized.parse::<f64>().map_err(|error| {
@@ -253,9 +250,7 @@ async fn normalize_systematic_profile_prices(
     app: &tauri::AppHandle,
     request: &mut SystematicProfileOrderRequest,
 ) -> Result<(), String> {
-    if request.limit_price.is_none()
-        && request.stop_loss.is_none()
-        && request.take_profit.is_none()
+    if request.limit_price.is_none() && request.stop_loss.is_none() && request.take_profit.is_none()
     {
         return Ok(());
     }
@@ -267,23 +262,16 @@ async fn normalize_systematic_profile_prices(
             request.inst_id
         ));
     }
-    request.limit_price = normalize_optional_systematic_price(
-        request.limit_price,
-        tick_size,
-        "开仓限价",
-    )?;
+    request.limit_price =
+        normalize_optional_systematic_price(request.limit_price, tick_size, "开仓限价")?;
     request.stop_loss =
         normalize_optional_systematic_price(request.stop_loss, tick_size, "止损价")?;
-    request.take_profit = normalize_optional_systematic_price(
-        request.take_profit,
-        tick_size,
-        "止盈价",
-    )?;
+    request.take_profit =
+        normalize_optional_systematic_price(request.take_profit, tick_size, "止盈价")?;
     Ok(())
 }
 
-const SYSTEMATIC_PROFILE_PROTECTION_RETRY_DELAYS_MS: &[u64] =
-    &[0, 150, 350, 750, 1_250, 2_000];
+const SYSTEMATIC_PROFILE_PROTECTION_RETRY_DELAYS_MS: &[u64] = &[0, 150, 350, 750, 1_250, 2_000];
 
 async fn reconcile_systematic_profile_protection_order(
     account: &LocalAccount,
@@ -330,13 +318,11 @@ pub(crate) async fn systematic_profile_sync_leverage(
     if !leverage.is_finite() || !(1.0..=50.0).contains(&leverage) {
         return Err("策略 Profile 杠杆必须在 1x 到 50x 之间".to_string());
     }
-    let current = okx_private_get::<OkxLeverageInfo>(
-        &account,
-        &leverage_info_path(inst_id, margin_mode),
-    )
-    .await
-    .map(|response| response.data)
-    .unwrap_or_default();
+    let current =
+        okx_private_get::<OkxLeverageInfo>(&account, &leverage_info_path(inst_id, margin_mode))
+            .await
+            .map(|response| response.data)
+            .unwrap_or_default();
     let already_matched = !current.is_empty()
         && current.iter().all(|row| {
             row.mgn_mode == margin_mode
@@ -378,16 +364,25 @@ pub(crate) async fn systematic_profile_place_order(
         return Err("策略 Profile 返回的合约张数无效".to_string());
     }
     let action = request.action.trim().to_string();
-    if !matches!(action.as_str(), "long" | "short" | "close-long" | "close-short") {
+    if !matches!(
+        action.as_str(),
+        "long" | "short" | "close-long" | "close-short"
+    ) {
         return Err("策略 Profile 返回了不支持的交易动作".to_string());
     }
     let open_action = matches!(action.as_str(), "long" | "short");
     let stop_loss_order_type = request.stop_loss_order_type.trim().to_ascii_lowercase();
     let take_profit_order_type = request.take_profit_order_type.trim().to_ascii_lowercase();
     if !matches!(stop_loss_order_type.as_str(), "market" | "limit")
-        || !matches!(take_profit_order_type.as_str(), "market" | "limit" | "post_fill_limit")
+        || !matches!(
+            take_profit_order_type.as_str(),
+            "market" | "limit" | "post_fill_limit"
+        )
     {
-        return Err("策略 Profile 的止盈止损执行方式无效 / Profile protection execution type is invalid".to_string());
+        return Err(
+            "策略 Profile 的止盈止损执行方式无效 / Profile protection execution type is invalid"
+                .to_string(),
+        );
     }
     let order_type = request.order_type.trim().to_ascii_lowercase();
     if !matches!(order_type.as_str(), "market" | "limit") {
@@ -419,7 +414,7 @@ pub(crate) async fn systematic_profile_place_order(
     };
     let protection_client_order_id = (open_action
         && (request.stop_loss.is_some() || request.take_profit.is_some()))
-        .then(|| stable_client_order_id(&format!("{}:protection", request.execution_key)));
+    .then(|| stable_client_order_id(&format!("{}:protection", request.execution_key)));
     let attach_take_profit = request.take_profit.is_some()
         && matches!(take_profit_order_type.as_str(), "market" | "limit");
     let attach_stop_loss = request.stop_loss.is_some();
@@ -429,16 +424,30 @@ pub(crate) async fn systematic_profile_place_order(
             .ok_or_else(|| "保护单缺少稳定客户端订单 ID".to_string())?;
         Some(vec![AttachedAlgoOrder {
             attach_algo_cl_ord_id: Some(attach_key),
-            tp_trigger_px: attach_take_profit.then(|| request.take_profit).flatten().map(trim_float),
-            tp_ord_px: attach_take_profit.then(|| request.take_profit).flatten().map(|price| {
-                if take_profit_order_type == "limit" { trim_float(price) } else { "-1".to_string() }
-            }),
+            tp_trigger_px: attach_take_profit
+                .then(|| request.take_profit)
+                .flatten()
+                .map(trim_float),
+            tp_ord_px: attach_take_profit
+                .then(|| request.take_profit)
+                .flatten()
+                .map(|price| {
+                    if take_profit_order_type == "limit" {
+                        trim_float(price)
+                    } else {
+                        "-1".to_string()
+                    }
+                }),
             tp_ord_kind: (attach_take_profit && take_profit_order_type == "limit")
                 .then(|| "limit".to_string()),
             tp_trigger_px_type: attach_take_profit.then(|| "last".to_string()),
             sl_trigger_px: request.stop_loss.map(trim_float),
             sl_ord_px: request.stop_loss.map(|price| {
-                if stop_loss_order_type == "limit" { trim_float(price) } else { "-1".to_string() }
+                if stop_loss_order_type == "limit" {
+                    trim_float(price)
+                } else {
+                    "-1".to_string()
+                }
             }),
             sl_trigger_px_type: request.stop_loss.map(|_| "last".to_string()),
             sz: None,
@@ -585,8 +594,8 @@ pub(crate) async fn reconcile_systematic_profile_protection(
     let take_profit_order_type = request.take_profit_order_type.trim().to_ascii_lowercase();
     let attached_protection_requested = request.stop_loss.is_some()
         || (request.take_profit.is_some() && take_profit_order_type != "post_fill_limit");
-    let post_fill_take_profit_requested = request.take_profit.is_some()
-        && take_profit_order_type == "post_fill_limit";
+    let post_fill_take_profit_requested =
+        request.take_profit.is_some() && take_profit_order_type == "post_fill_limit";
     let mut statuses = Vec::new();
     let mut errors = Vec::new();
     let mut attached_can_fallback = attached_protection_requested;
@@ -638,9 +647,9 @@ pub(crate) async fn reconcile_systematic_profile_protection(
                 .await
                 {
                     Ok(_) => statuses.push("fallback_submitted"),
-                    Err(error) => errors.push(format!(
-                        "附加保护未生效，独立保护单补挂失败：{error}"
-                    )),
+                    Err(error) => {
+                        errors.push(format!("附加保护未生效，独立保护单补挂失败：{error}"))
+                    }
                 },
             }
         }
@@ -673,9 +682,7 @@ pub(crate) async fn reconcile_systematic_profile_protection(
                     post_fill_take_profit_current_filled_quantity = result.current_filled_quantity;
                     statuses.push("post_fill_limit_submitted");
                 }
-                Err(error) => errors.push(format!(
-                    "成交后止盈限价单提交失败：{error}"
-                )),
+                Err(error) => errors.push(format!("成交后止盈限价单提交失败：{error}")),
             },
         }
     }
@@ -772,9 +779,7 @@ async fn place_systematic_profile_post_fill_take_profit(
                         current_filled_quantity: order_filled,
                     });
                 }
-                let next_execution_key = format!(
-                    "{base_execution_key}:retry:{client_order_id}"
-                );
+                let next_execution_key = format!("{base_execution_key}:retry:{client_order_id}");
                 client_order_id = stable_client_order_id(&next_execution_key);
                 execution_key = next_execution_key;
                 continue;
@@ -913,8 +918,7 @@ async fn place_systematic_profile_fallback_protection(
                     account_id: Some(request.account_id.clone()),
                     environment: request.environment.clone(),
                     inst_id: request.inst_id.clone(),
-                    algo_id: (!existing.algo_id.trim().is_empty())
-                        .then_some(existing.algo_id),
+                    algo_id: (!existing.algo_id.trim().is_empty()).then_some(existing.algo_id),
                     algo_cl_ord_id: (!existing.algo_cl_ord_id.trim().is_empty())
                         .then_some(existing.algo_cl_ord_id),
                     new_size: Some(trim_float(filled_quantity)),
@@ -956,15 +960,23 @@ async fn place_systematic_profile_fallback_protection(
                 .then(|| request.take_profit)
                 .flatten()
                 .map(|price| {
-                if request.take_profit_order_type.trim().eq_ignore_ascii_case("limit") {
-                    trim_float(price)
-                } else {
-                    "-1".to_string()
-                }
-            }),
+                    if request
+                        .take_profit_order_type
+                        .trim()
+                        .eq_ignore_ascii_case("limit")
+                    {
+                        trim_float(price)
+                    } else {
+                        "-1".to_string()
+                    }
+                }),
             sl_trigger_px: request.stop_loss.map(trim_float),
             sl_ord_px: request.stop_loss.map(|price| {
-                if request.stop_loss_order_type.trim().eq_ignore_ascii_case("limit") {
+                if request
+                    .stop_loss_order_type
+                    .trim()
+                    .eq_ignore_ascii_case("limit")
+                {
                     trim_float(price)
                 } else {
                     "-1".to_string()
@@ -988,11 +1000,12 @@ fn ensure_systematic_profile_submission_current(
     let runtime = app
         .try_state::<crate::systematic::SystematicRuntime>()
         .ok_or_else(|| "策略 Profile 运行时不可用，已阻止提交".to_string())?;
-    if !runtime.live_profile_generation_is_current(
-        &request.profile_id,
-        request.profile_generation,
-    ) {
-        return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
+    if !runtime.live_profile_generation_is_current(&request.profile_id, request.profile_generation)
+    {
+        return Err(
+            "策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission"
+                .to_string(),
+        );
     }
     let conn = open_database(app)?;
     let enabled: i64 = conn
@@ -1005,7 +1018,10 @@ fn ensure_systematic_profile_submission_current(
         .map_err(|error| error.to_string())?
         .ok_or_else(|| "策略 Profile 不存在，已阻止提交".to_string())?;
     if enabled == 0 {
-        return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
+        return Err(
+            "策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -1065,8 +1081,8 @@ pub(crate) async fn systematic_profile_cancel_order_by_client_id(
     if normalize_environment(&account.environment) != normalize_environment(environment) {
         return Err("策略 Profile 账号环境已变化，无法撤销普通委托".to_string());
     }
-    let order = reconcile_order_by_client_id_with_retry(&account, inst_id, client_order_id, false)
-        .await?;
+    let order =
+        reconcile_order_by_client_id_with_retry(&account, inst_id, client_order_id, false).await?;
     let Some(order) = order else {
         return Ok(());
     };
@@ -1103,21 +1119,22 @@ pub(crate) async fn systematic_profile_cancel_order_by_client_id(
     .await
     {
         Ok(_) => Ok(()),
-        Err(error) => match reconcile_order_by_client_id_with_retry(
-            &account,
-            inst_id,
-            client_order_id,
-            false,
-        )
-        .await?
-        {
-            Some(order) if matches!(
-                order.state.trim().to_ascii_lowercase().as_str(),
-                "filled" | "canceled" | "cancelled" | "failed" | "mmp_canceled"
-            ) => Ok(()),
-            None => Ok(()),
-            Some(_) => Err(error),
-        },
+        Err(error) => {
+            match reconcile_order_by_client_id_with_retry(&account, inst_id, client_order_id, false)
+                .await?
+            {
+                Some(order)
+                    if matches!(
+                        order.state.trim().to_ascii_lowercase().as_str(),
+                        "filled" | "canceled" | "cancelled" | "failed" | "mmp_canceled"
+                    ) =>
+                {
+                    Ok(())
+                }
+                None => Ok(()),
+                Some(_) => Err(error),
+            }
+        }
     }
 }
 
@@ -4431,13 +4448,8 @@ pub(crate) async fn reconcile_systematic_profile_execution(
             return Err("策略执行记录绑定的账号凭据已变化，禁止自动恢复".to_string());
         }
     }
-    let Some(order) = reconcile_order_by_client_id_with_retry(
-        &account,
-        inst_id,
-        client_order_id,
-        false,
-    )
-    .await?
+    let Some(order) =
+        reconcile_order_by_client_id_with_retry(&account, inst_id, client_order_id, false).await?
     else {
         return Ok(None);
     };
@@ -4903,7 +4915,9 @@ fn estimated_open_margin_usdt(
             equity: None,
             available_usdt: None,
             max_single_trade_margin_pct: None,
+            direction: None,
             stop_price: None,
+            target_price: None,
             atr: None,
             entry_fee_rate: "0".to_string(),
             exit_fee_rate: "0".to_string(),
@@ -6196,6 +6210,12 @@ pub struct AlgoOrderSummary {
     actual_side: String,
     #[serde(default)]
     actual_sz: String,
+    #[serde(default)]
+    trigger_px: String,
+    #[serde(default)]
+    trigger_px_type: String,
+    #[serde(default)]
+    ord_px: String,
     #[serde(default)]
     tp_trigger_px: String,
     #[serde(default)]
@@ -7849,28 +7869,32 @@ pub async fn okx_list_algo_orders(
 ) -> Result<AlgoOrdersResponse, String> {
     let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     ensure_trade_account(&account, &request.environment).await?;
+    const ALGO_ORDER_TYPE_GROUPS: [&str; 2] = ["conditional,oco", "trigger"];
     let mut orders = Vec::new();
-    let pending = okx_private_get::<AlgoOrderSummary>(
-        &account,
-        "/api/v5/trade/orders-algo-pending?instType=SWAP&ordType=conditional,oco",
-    )
-    .await?;
-    orders.extend(
-        pending
-            .data
-            .into_iter()
-            .map(|item| decorate_algo_order(item, &account, "orders-algo-pending")),
-    );
+    for order_types in ALGO_ORDER_TYPE_GROUPS {
+        let path = format!("/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={order_types}");
+        let pending = okx_private_get::<AlgoOrderSummary>(&account, &path).await?;
+        orders.extend(
+            pending
+                .data
+                .into_iter()
+                .map(|item| decorate_algo_order(item, &account, "orders-algo-pending")),
+        );
+    }
     if request.include_history.unwrap_or(false) {
-        for state in ["effective", "canceled", "order_failed"] {
-            let path = format!("/api/v5/trade/orders-algo-history?instType=SWAP&ordType=conditional,oco&state={state}");
-            if let Ok(envelope) = okx_private_get::<AlgoOrderSummary>(&account, &path).await {
-                orders.extend(
-                    envelope
-                        .data
-                        .into_iter()
-                        .map(|item| decorate_algo_order(item, &account, "orders-algo-history")),
+        for order_types in ALGO_ORDER_TYPE_GROUPS {
+            for state in ["effective", "canceled", "order_failed"] {
+                let path = format!(
+                    "/api/v5/trade/orders-algo-history?instType=SWAP&ordType={order_types}&state={state}"
                 );
+                if let Ok(envelope) = okx_private_get::<AlgoOrderSummary>(&account, &path).await {
+                    orders.extend(
+                        envelope
+                            .data
+                            .into_iter()
+                            .map(|item| decorate_algo_order(item, &account, "orders-algo-history")),
+                    );
+                }
             }
         }
     }
@@ -7883,7 +7907,10 @@ pub async fn okx_list_algo_orders(
     // is locked" and blank the algo order panel, even though the fresh data was
     // in hand. Downgrade the cache write to a warning and still return it.
     if let Err(error) = upsert_algo_order_summaries(&app, &account, &orders) {
-        eprintln!("okx_algo_order_cache_write_failed account={} error={error}", account.id);
+        eprintln!(
+            "okx_algo_order_cache_write_failed account={} error={error}",
+            account.id
+        );
     }
     Ok(AlgoOrdersResponse {
         account_id: account.id,
@@ -8728,6 +8755,11 @@ pub(crate) async fn read_decision_context(
                     action: Some(action.to_string()),
                     price: request.candidate.price.clone().unwrap_or_default(),
                     stop_price,
+                    target_price: request
+                        .candidate
+                        .take_profit
+                        .as_ref()
+                        .and_then(|order| order.trigger_px.clone()),
                     atr: None,
                     size: request.candidate.size.clone(),
                     lever: request
@@ -9815,6 +9847,11 @@ async fn build_trade_opportunity(
             estimated_round_trip_fee: None,
             estimated_stop_loss_with_fees: None,
             stop_loss_pct_of_usdt_equity: None,
+            break_even_price: None,
+            estimated_net_profit_at_target: None,
+            fee_drag_pct_of_gross_profit: None,
+            net_reward_risk_ratio: None,
+            fee_rate_source: "not-applicable".to_string(),
             perpetual_evaluation: None,
             liquidation_text: String::new(),
             available_usdt: None,
@@ -9847,6 +9884,10 @@ async fn build_trade_opportunity(
             action: Some(action.clone()),
             price,
             stop_price,
+            target_price: request
+                .take_profit
+                .as_ref()
+                .and_then(|order| order.trigger_px.clone()),
             atr: None,
             size: request.size.clone(),
             lever: lever.clone(),
@@ -11158,7 +11199,13 @@ fn upsert_algo_order_summaries(
                 order.td_mode,
                 order.ord_type,
                 order.state,
-                if !order.tp_trigger_px.trim().is_empty() { &order.tp_trigger_px } else { &order.sl_trigger_px },
+                if !order.trigger_px.trim().is_empty() {
+                    &order.trigger_px
+                } else if !order.tp_trigger_px.trim().is_empty() {
+                    &order.tp_trigger_px
+                } else {
+                    &order.sl_trigger_px
+                },
                 order.sz,
                 order.actual_sz,
                 order.source_endpoint,
@@ -11177,6 +11224,22 @@ fn upsert_algo_order_summaries(
 mod idempotency_tests {
     use super::*;
     use std::sync::Barrier;
+
+    #[test]
+    fn algo_order_summary_preserves_trigger_order_prices() {
+        let order = serde_json::from_value::<AlgoOrderSummary>(json!({
+            "algoId": "algo-trigger-1",
+            "instId": "BTC-USDT-SWAP",
+            "ordType": "trigger",
+            "triggerPx": "65000",
+            "triggerPxType": "last",
+            "ordPx": "-1"
+        }))
+        .expect("parse trigger algo order");
+        assert_eq!(order.trigger_px, "65000");
+        assert_eq!(order.trigger_px_type, "last");
+        assert_eq!(order.ord_px, "-1");
+    }
 
     fn place_request(order_type: &str) -> PlaceOrderRequest {
         PlaceOrderRequest {
@@ -13677,24 +13740,21 @@ pub async fn trade_precheck(
         .max_single_trade_margin_pct
         .filter(|value| value.is_finite() && *value > 0.0)
         .map(|value| value.clamp(1.0, 100.0));
-    let fee_rate = if request.order_type == "market" {
+    let taker_entry = matches!(request.order_type.as_str(), "market" | "trigger");
+    let actual_entry_fee_rate =
         fee_summary
             .as_ref()
-            .and_then(|fee| fee.taker)
-            .map(f64::abs)
-            .unwrap_or(0.0005)
-    } else {
-        fee_summary
-            .as_ref()
-            .and_then(|fee| fee.maker)
-            .map(f64::abs)
-            .unwrap_or(0.0002)
-    };
-    let exit_fee_rate = fee_summary
-        .as_ref()
-        .and_then(|fee| fee.taker)
+            .and_then(|fee| if taker_entry { fee.taker } else { fee.maker });
+    let actual_exit_fee_rate = fee_summary.as_ref().and_then(|fee| fee.taker);
+    let fee_rate = actual_entry_fee_rate
         .map(f64::abs)
-        .unwrap_or(0.0005);
+        .unwrap_or(if taker_entry { 0.0005 } else { 0.0002 });
+    let exit_fee_rate = actual_exit_fee_rate.map(f64::abs).unwrap_or(0.0005);
+    let fee_rate_source = match (actual_entry_fee_rate, actual_exit_fee_rate) {
+        (Some(_), Some(_)) => "okx-trade-fee",
+        (None, None) => "conservative-default",
+        _ => "okx-trade-fee+fallback",
+    };
     let is_linear_usdt = instrument.ct_type.eq_ignore_ascii_case("linear")
         && instrument.settle_ccy.eq_ignore_ascii_case("USDT");
     let perpetual_evaluation = if is_linear_usdt {
@@ -13708,8 +13768,18 @@ pub async fn trade_precheck(
             equity: usdt_equity.map(trim_float),
             available_usdt: available_usdt.map(trim_float),
             max_single_trade_margin_pct: max_single_trade_margin_pct.map(trim_float),
+            direction: match request.action.as_deref() {
+                Some("long") => Some(desic_trade_domain::LinearUsdtDirection::Long),
+                Some("short") => Some(desic_trade_domain::LinearUsdtDirection::Short),
+                _ => None,
+            },
             stop_price: request
                 .stop_price
+                .as_ref()
+                .filter(|value| !value.trim().is_empty())
+                .cloned(),
+            target_price: request
+                .target_price
                 .as_ref()
                 .filter(|value| !value.trim().is_empty())
                 .cloned(),
@@ -13803,6 +13873,23 @@ pub async fn trade_precheck(
     let stop_loss_pct_of_usdt_equity = perpetual_evaluation.as_ref().and_then(|evaluation| {
         metric_number(evaluation.candidate.stop_risk_pct_of_equity.as_ref())
     });
+    let break_even_price = perpetual_evaluation
+        .as_ref()
+        .and_then(|evaluation| metric_number(evaluation.candidate.break_even_price.as_ref()));
+    let estimated_net_profit_at_target = perpetual_evaluation.as_ref().and_then(|evaluation| {
+        metric_number(
+            evaluation
+                .candidate
+                .estimated_net_profit_at_target_usdt
+                .as_ref(),
+        )
+    });
+    let fee_drag_pct_of_gross_profit = perpetual_evaluation.as_ref().and_then(|evaluation| {
+        metric_number(evaluation.candidate.fee_drag_pct_of_gross_profit.as_ref())
+    });
+    let net_reward_risk_ratio = perpetual_evaluation
+        .as_ref()
+        .and_then(|evaluation| metric_number(evaluation.candidate.net_reward_risk_ratio.as_ref()));
 
     if request.ticket_mode == "open" {
         if perpetual_evaluation
@@ -13840,16 +13927,19 @@ pub async fn trade_precheck(
             }
         }
     }
-    if fee_summary.is_some() {
+    if fee_rate_source == "okx-trade-fee" {
         warnings.push("手续费率来自 OKX trade-fee，最终以实际成交为准".to_string());
-    } else if request.order_type != "market" {
+    } else if !taker_entry {
         warnings.push("普通限价单手续费按默认 maker 费率估算，最终以 OKX 成交为准".to_string());
     } else {
-        warnings.push("市价单手续费按默认 taker 费率估算，最终以 OKX 成交为准".to_string());
+        warnings.push("市价或触发单手续费按默认 taker 费率估算，最终以 OKX 成交为准".to_string());
     }
     if stop_price.is_some() {
         warnings
             .push("止损风险估算包含双边手续费，不包含滑点和资金费；最终以实际成交为准".to_string());
+    }
+    if request.target_price.is_some() {
+        warnings.push("目标净收益已扣除入场与目标退出手续费，但不包含滑点和资金费".to_string());
     }
     warnings.push(
         "liquidationGear 是强平风险提醒档位，不是强平价；空仓时没有可读取的 OKX liqPx".to_string(),
@@ -13894,6 +13984,11 @@ pub async fn trade_precheck(
         estimated_round_trip_fee,
         estimated_stop_loss_with_fees,
         stop_loss_pct_of_usdt_equity,
+        break_even_price,
+        estimated_net_profit_at_target,
+        fee_drag_pct_of_gross_profit,
+        net_reward_risk_ratio,
+        fee_rate_source: fee_rate_source.to_string(),
         perpetual_evaluation,
         liquidation_text: "空仓时没有 OKX liqPx；开仓后以 OKX 实时风险数据为准".to_string(),
         available_usdt,

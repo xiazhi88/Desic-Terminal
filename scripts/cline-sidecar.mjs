@@ -499,7 +499,7 @@ function bindProfileAccountInput(name, input, options = {}) {
 const PERPETUAL_ACCOUNT_RISK_RULE = [
   "effectiveExposureMultiple=名义敞口÷USDT权益，notionalPctOfEquity=effectiveExposureMultiple×100%；前者同时表示每1%标的价格反向变化对应的近似权益损失百分比（忽略费用、资金费和滑点）。例如 notionalPctOfEquity=47.58% 等于 effectiveExposureMultiple=0.4758X，标的反向波动1%时权益约损失0.4758%，不是占用47.58%保证金。",
   "notionalPctOfEquity不超过100%表示账户有效敞口不超过1X；不得仅凭账户余额绝对值、minSz或名义敞口比例描述为高风险、高杠杆、账户太小、容错空间有限或不适合开仓。",
-  "账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。trade.precheck返回blocked=false时必须称为账户可行；没有明确用户风险预算时只报告结构化数值，不自行发明风险阈值。"
+  "账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。具体候选必须同时检查feeRateSource、breakEvenPrice、estimatedNetProfitAtTarget、feeDragPctOfGrossProfit和netRewardRiskRatio，不得用目标毛收益代替净收益。固定张数下杠杆不改变绝对手续费或价格盈亏，只改变保证金相关比例；不得用加杠杆或放宽技术止损修饰弱机会。trade.precheck返回blocked=false时必须称为账户可行；没有明确用户风险预算时只报告结构化数值，不自行发明风险阈值。"
 ].join(" ");
 
 function buildSystemPrompt(config, permissionMode) {
@@ -1335,6 +1335,7 @@ const TRADE_PRECHECK_SCHEMA = {
     ticketMode: { type: "string", enum: ["open", "close"] },
     price: { type: "string", description: "Actual planned order or reference price used for precheck calculations." },
     stopPrice: { type: "string", description: "Technical invalidation or stop trigger price. For long it must be below entry; for short it must be above entry. The backend calculates contract-value-aware stop loss when provided." },
+    targetPrice: { type: "string", description: "Planned take-profit price. For long it must be above entry; for short it must be below entry. When provided, precheck returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
     atr: { type: "string", description: "Optional ATR price distance. The backend converts it into oneAtrPriceLossUsdt and oneAtrRiskPctOfEquity for the requested size." },
     size: { type: "string", description: "OKX contract count. May be fractional; use minSz exactly and align to lotSz without rounding to a whole contract." },
     lever: { type: "string", description: "Current planned or OKX-synced leverage, not the instrument maximum leverage." }
@@ -1349,8 +1350,10 @@ const TRADE_EVALUATE_PLAN_SCHEMA = {
     accountId: { type: "string" },
     instId: { type: "string" },
     orderType: { type: "string", enum: ["limit", "market", "trigger"] },
+    action: { type: "string", enum: ["long", "short"], description: "Trade direction. Required when targetPrice is provided so long/short net target economics are not inferred from prices." },
     price: { type: "string", description: "Planned entry price. Omit to use the current memory ticker." },
     stopPrice: { type: "string", description: "Optional technical invalidation price." },
+    targetPrice: { type: "string", description: "Optional planned take-profit price. With action, returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
     atr: { type: "string", description: "Optional ATR price distance from market.readIndicators. The backend converts it into account PnL for the selected contract size." },
     size: { type: "string", description: "Optional OKX contract count. Omit to evaluate minSz." },
     lever: { type: "string", description: "Planned leverage. Background Profiles inject their frozen target leverage." }
@@ -1973,8 +1976,8 @@ function createDesicTools(sessionId, options = {}) {
     ),
     tool("review.readSkillVersion", "Read the exact immutable Skill version used by this reviewed position. Call only after evidence indicates that a reusable Skill rule may need a cautious change.", REVIEW_READ_SKILL_VERSION_SCHEMA),
     tool("optimizationSuggestion.create", "Create a review-backed candidate Skill change for human preview. This is optional: call only when evidence identifies a reusable Skill-level defect, never merely because one trade lost money. Read the exact baseline first with review.readSkillVersion and submit a complete minimally changed proposedSkill.", OPTIMIZATION_SUGGESTION_SCHEMA),
-    tool("trade.evaluatePlan", "Evaluate a USDT linear perpetual plan locally with the deterministic trade domain. It distinguishes contract count, base quantity, effectiveExposureMultiple, notional exposure, initial margin, stop risk and one-ATR account risk. effectiveExposureMultiple is gross notional/equity and the approximate equity-percent sensitivity to a 1% underlying move before costs. Omit size to evaluate minSz. This tool never creates an execution blocker; use trade.precheck for authoritative exchange/account eligibility.", TRADE_EVALUATE_PLAN_SCHEMA),
-    tool("trade.precheck", "Run a read-only order precheck before placing a trade. For background Profiles the backend injects the frozen maximum single-trade margin percentage and returns one perpetualEvaluation object plus compatibility fields derived from it. effectiveExposureMultiple is gross notional/equity; notionalPctOfEquity is that multiple times 100 and must never be described as margin occupancy or used alone to infer narrow tolerance. marginPctOfEquity is estimated initial margin occupancy. Pass atr and stopPrice when available. timing reports total/instrument/account/limits milliseconds, snapshot source and account-config cache hit. Does not submit an order.", TRADE_PRECHECK_SCHEMA),
+    tool("trade.evaluatePlan", "Evaluate a USDT linear perpetual plan locally with the deterministic trade domain. It distinguishes contract count, base quantity, effectiveExposureMultiple, notional exposure, initial margin, stop risk and one-ATR account risk. With action and targetPrice it also returns fee-adjusted break-even, target gross/net profit, fee drag, net reward/risk and return on margin/equity. Its fee rates are conservative defaults and explicitly exclude slippage and funding. Fixed-size leverage changes margin ratios, not absolute fees or price PnL. Omit size to evaluate minSz. This tool never creates an execution blocker; use trade.precheck for authoritative exchange/account eligibility and account fee rates.", TRADE_EVALUATE_PLAN_SCHEMA),
+    tool("trade.precheck", "Run a read-only order precheck before placing a trade. For background Profiles the backend injects the frozen maximum single-trade margin percentage and returns one perpetualEvaluation object plus compatibility fields derived from it. effectiveExposureMultiple is gross notional/equity; notionalPctOfEquity is that multiple times 100 and must never be described as margin occupancy or used alone to infer narrow tolerance. marginPctOfEquity is estimated initial margin occupancy. Pass action, targetPrice, stopPrice and atr when available; feeRateSource identifies OKX versus fallback rates, and target economics exclude slippage and funding. Fixed-size leverage changes margin ratios, not absolute fees or price PnL. timing reports total/instrument/account/limits milliseconds, snapshot source and account-config cache hit. Does not submit an order.", TRADE_PRECHECK_SCHEMA),
     tool("research.webSearch", "Search public web pages and return titles, URLs, snippets and freshness metadata. Use this for general web research, public strategy references and sources outside the OKX news snapshot.", WEB_SEARCH_SCHEMA),
     profileLeverageEnabled ? tool("trade.setLeverage", "Synchronize the bound Profile account to its immutable target leverage for the requested instrument and margin mode. Call only after trade.precheck reports a leverage mismatch, then rerun trade.precheck. In hedge mode omit posSide so both long and short are synchronized.", SET_LEVERAGE_SCHEMA) : null,
     tool("chart.createDrawing", "Create a local chart drawing such as a trend line, horizontal line, vertical line or rectangle.", CHART_TOOL_SCHEMA),
@@ -2231,6 +2234,27 @@ function mapChunk(sessionId, chunk) {
   return null;
 }
 
+function mapUsagePayload(usage = {}, usageKind = "cumulative") {
+  return {
+    usageKind,
+    inputTokens: usage.inputTokens,
+    outputTokens: usage.outputTokens,
+    cacheReadTokens: usage.cacheReadTokens,
+    cacheWriteTokens: usage.cacheWriteTokens,
+    totalInputTokens: usage.totalInputTokens,
+    totalOutputTokens: usage.totalOutputTokens,
+    totalCacheReadTokens: usage.totalCacheReadTokens,
+    totalCacheWriteTokens: usage.totalCacheWriteTokens,
+    totalCost: usage.totalCost
+  };
+}
+
+function withCumulativeResultUsage(result) {
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result || {};
+  if (!result.usage || typeof result.usage !== "object" || Array.isArray(result.usage)) return result;
+  return { ...result, usage: mapUsagePayload(result.usage, "cumulative") };
+}
+
 function mapCoreEvent(sessionId, event) {
   if (event?.type === "assistant-text-delta") {
     debugAiEvent("assistant-text-delta", { channel: "turn-text", preview: previewText(event.text) });
@@ -2280,7 +2304,7 @@ function mapCoreEvent(sessionId, event) {
     return mapToolCall(sessionId, event);
   }
   if (event?.type === "usage-updated") {
-    return { type: "usage", sessionId, usage: event.usage || {} };
+    return { type: "usage", sessionId, usage: mapUsagePayload(event.usage, "cumulative") };
   }
   if (event?.type === "status-notice") {
     return { type: "status", sessionId, status: "running", message: event.message || "Cline 正在运行" };
@@ -2362,15 +2386,7 @@ function mapCoreEvent(sessionId, event) {
       return {
         type: "usage",
         sessionId,
-        usage: {
-          inputTokens: agentEvent.inputTokens,
-          outputTokens: agentEvent.outputTokens,
-          cacheReadTokens: agentEvent.cacheReadTokens,
-          cacheWriteTokens: agentEvent.cacheWriteTokens,
-          totalInputTokens: agentEvent.totalInputTokens,
-          totalOutputTokens: agentEvent.totalOutputTokens,
-          totalCost: agentEvent.totalCost
-        }
+        usage: mapUsagePayload(agentEvent, "delta-with-totals")
       };
     }
     if (agentEvent?.type === "subagent-start" || agentEvent?.type === "subagent-started") {
@@ -2389,7 +2405,7 @@ function mapCoreEvent(sessionId, event) {
         type: "agentDone",
         sessionId,
         agentId: agentEvent.subAgentId || agentEvent.agentId,
-        result: agentEvent.result || agentEvent.agentResult || {},
+        result: withCumulativeResultUsage(agentEvent.result || agentEvent.agentResult),
         error: agentEvent.error?.message || agentEvent.error,
         status: agentEvent.error ? "failed" : "done"
       };
@@ -2758,7 +2774,7 @@ function createDesicSpawnAgentTool(
         sessionId,
         agentId: context.subAgentId,
         configuredAgentId: undefined,
-        result,
+        result: withCumulativeResultUsage(result),
         error: context.error?.message || context.error,
         status: context.error ? "failed" : "done",
         endedAt: Date.now()
@@ -3034,7 +3050,7 @@ async function runConfiguredProfileAgents(sessionId, command, state, runtimeSess
           text: truncateProfileAgentReport(parsed.text || result?.text),
           finishReason: result?.finishReason,
           iterations: result?.iterations,
-          usage: result?.usage || {},
+          usage: mapUsagePayload(result?.usage, "cumulative"),
           successfulTools
         },
         endedAt: Date.now()

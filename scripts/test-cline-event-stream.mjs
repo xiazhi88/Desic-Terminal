@@ -236,6 +236,31 @@ assert.deepEqual(
   { type: "finalText", sessionId, content: "最终回答", finishReason: "completed", source: "agent-done" }
 );
 
+const legacyUsage = mapCoreEvent(sessionId, wrap({
+  type: "usage",
+  inputTokens: 100,
+  outputTokens: 20,
+  cacheReadTokens: 40,
+  cacheWriteTokens: 5,
+  totalInputTokens: 300,
+  totalOutputTokens: 50,
+  totalCacheReadTokens: 100,
+  totalCacheWriteTokens: 5
+}));
+assert.equal(legacyUsage?.usage?.usageKind, "delta-with-totals");
+assert.equal(legacyUsage?.usage?.inputTokens, 100);
+assert.equal(legacyUsage?.usage?.totalInputTokens, 300);
+assert.equal(legacyUsage?.usage?.totalCacheReadTokens, 100);
+assert.equal(legacyUsage?.usage?.totalCacheWriteTokens, 5);
+
+const cumulativeUsage = mapCoreEvent(sessionId, {
+  type: "usage-updated",
+  usage: { inputTokens: 300, outputTokens: 50, cacheReadTokens: 100 }
+});
+assert.equal(cumulativeUsage?.usage?.usageKind, "cumulative");
+assert.equal(cumulativeUsage?.usage?.inputTokens, 300);
+assert.equal(cumulativeUsage?.usage?.cacheReadTokens, 100);
+
 const stableToolCallId = "call-stable-ticker";
 assert.equal(
   mapCoreEvent(sessionId, {

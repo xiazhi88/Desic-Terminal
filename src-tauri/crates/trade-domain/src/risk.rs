@@ -32,6 +32,13 @@ pub struct LinearUsdtRiskBudget {
     pub minimum_size_applied: bool,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinearUsdtDirection {
+    Long,
+    Short,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LinearUsdtPerpetualEvaluationRequest {
@@ -44,7 +51,9 @@ pub struct LinearUsdtPerpetualEvaluationRequest {
     pub equity: Option<String>,
     pub available_usdt: Option<String>,
     pub max_single_trade_margin_pct: Option<String>,
+    pub direction: Option<LinearUsdtDirection>,
     pub stop_price: Option<String>,
+    pub target_price: Option<String>,
     pub atr: Option<String>,
     pub entry_fee_rate: String,
     pub exit_fee_rate: String,
@@ -71,6 +80,19 @@ pub struct LinearUsdtPositionMetrics {
     pub estimated_round_trip_fee_usdt: String,
     pub estimated_stop_loss_with_fees_usdt: Option<String>,
     pub stop_risk_pct_of_equity: Option<String>,
+    pub break_even_price: Option<String>,
+    pub break_even_move_pct: Option<String>,
+    pub target_price: Option<String>,
+    pub target_move_pct: Option<String>,
+    pub estimated_gross_profit_at_target_usdt: Option<String>,
+    pub estimated_exit_fee_at_target_usdt: Option<String>,
+    pub estimated_round_trip_fee_at_target_usdt: Option<String>,
+    pub estimated_net_profit_at_target_usdt: Option<String>,
+    pub fee_drag_pct_of_gross_profit: Option<String>,
+    pub net_reward_risk_ratio: Option<String>,
+    pub estimated_round_trip_fee_pct_of_initial_margin: Option<String>,
+    pub estimated_net_target_return_pct_of_initial_margin: Option<String>,
+    pub estimated_net_target_profit_pct_of_equity: Option<String>,
     pub atr: Option<String>,
     pub one_atr_price_loss_usdt: Option<String>,
     pub one_atr_risk_pct_of_equity: Option<String>,
@@ -93,8 +115,19 @@ pub struct LinearUsdtTradeCapacity {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LinearUsdtCostAssumptions {
+    pub entry_fee_rate: String,
+    pub exit_fee_rate: String,
+    pub slippage_included: bool,
+    pub funding_included: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct LinearUsdtPerpetualEvaluation {
     pub requested_size: String,
+    pub direction: Option<LinearUsdtDirection>,
+    pub cost_assumptions: LinearUsdtCostAssumptions,
     pub normalized_size: String,
     pub size_was_normalized: bool,
     pub candidate: LinearUsdtPositionMetrics,
@@ -147,6 +180,17 @@ pub fn evaluate_linear_usdt_perpetual(
         .as_deref()
         .map(|value| FixedDecimal::parse_positive("stopPrice", value))
         .transpose()?;
+    let target = request
+        .target_price
+        .as_deref()
+        .map(|value| FixedDecimal::parse_positive("targetPrice", value))
+        .transpose()?;
+    if target.is_some() && request.direction.is_none() {
+        return Err(TradeDomainError::MissingDirectionForTarget);
+    }
+    if let Some(direction) = request.direction {
+        validate_directional_prices(direction, entry, stop, target)?;
+    }
     let atr = request
         .atr
         .as_deref()
@@ -161,7 +205,9 @@ pub fn evaluate_linear_usdt_perpetual(
         contract_value,
         leverage,
         equity,
+        request.direction,
         stop,
+        target,
         atr,
         entry_fee_rate,
         exit_fee_rate,
@@ -172,7 +218,9 @@ pub fn evaluate_linear_usdt_perpetual(
         contract_value,
         leverage,
         equity,
+        request.direction,
         stop,
+        target,
         atr,
         entry_fee_rate,
         exit_fee_rate,
@@ -234,6 +282,13 @@ pub fn evaluate_linear_usdt_perpetual(
 
     Ok(LinearUsdtPerpetualEvaluation {
         requested_size: requested_size.to_plain_string(),
+        direction: request.direction,
+        cost_assumptions: LinearUsdtCostAssumptions {
+            entry_fee_rate: entry_fee_rate.to_plain_string(),
+            exit_fee_rate: exit_fee_rate.to_plain_string(),
+            slippage_included: false,
+            funding_included: false,
+        },
         normalized_size: size.to_plain_string(),
         size_was_normalized: requested_size != size,
         candidate,
@@ -253,6 +308,18 @@ pub fn evaluate_linear_usdt_perpetual(
     })
 }
 
+struct TargetEconomics {
+    target_move_pct: FixedDecimal,
+    gross_profit: FixedDecimal,
+    exit_fee: FixedDecimal,
+    round_trip_fee: FixedDecimal,
+    net_profit: FixedDecimal,
+    fee_drag_pct: FixedDecimal,
+    fee_pct_of_initial_margin: FixedDecimal,
+    net_return_pct_of_initial_margin: FixedDecimal,
+    net_profit_pct_of_equity: Option<FixedDecimal>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn calculate_position_metrics(
     size: FixedDecimal,
@@ -260,7 +327,9 @@ fn calculate_position_metrics(
     contract_value: FixedDecimal,
     leverage: FixedDecimal,
     equity: Option<FixedDecimal>,
+    direction: Option<LinearUsdtDirection>,
     stop: Option<FixedDecimal>,
+    target: Option<FixedDecimal>,
     atr: Option<FixedDecimal>,
     entry_fee_rate: FixedDecimal,
     exit_fee_rate: FixedDecimal,
@@ -285,6 +354,44 @@ fn calculate_position_metrics(
                 .map(|equity| percentage_of(with_fees, equity, "计算止损风险权益比例"))
                 .transpose()?;
             Ok::<_, TradeDomainError>((distance, move_pct, price_loss, with_fees, risk_pct))
+        })
+        .transpose()?;
+    let break_even_values = direction
+        .map(|direction| {
+            let price =
+                calculate_break_even_price(direction, entry, entry_fee_rate, exit_fee_rate)?;
+            let move_pct = percentage_of(
+                absolute_difference(entry, price, "计算盈亏平衡价格距离")?,
+                entry,
+                "计算盈亏平衡价格距离比例",
+            )?;
+            Ok::<_, TradeDomainError>((price, move_pct))
+        })
+        .transpose()?;
+    let target_values = direction
+        .zip(target)
+        .map(|(direction, target)| {
+            calculate_target_economics(
+                direction,
+                base_quantity,
+                entry,
+                target,
+                entry_fee,
+                exit_fee_rate,
+                initial_margin,
+                equity,
+            )
+        })
+        .transpose()?;
+    let net_reward_risk_ratio = target_values
+        .as_ref()
+        .zip(stop_values.as_ref())
+        .map(|(target, (_, _, _, stop_loss_with_fees, _))| {
+            target.net_profit.checked_div_to_scale(
+                *stop_loss_with_fees,
+                PERCENT_OUTPUT_SCALE,
+                "计算含费净盈亏比",
+            )
         })
         .transpose()?;
     let atr_values = atr
@@ -336,6 +443,42 @@ fn calculate_position_metrics(
             .as_ref()
             .and_then(|(_, _, _, _, percent)| *percent)
             .map(FixedDecimal::to_plain_string),
+        break_even_price: break_even_values
+            .as_ref()
+            .map(|(price, _)| price.to_plain_string()),
+        break_even_move_pct: break_even_values
+            .as_ref()
+            .map(|(_, move_pct)| move_pct.to_plain_string()),
+        target_price: target.map(FixedDecimal::to_plain_string),
+        target_move_pct: target_values
+            .as_ref()
+            .map(|values| values.target_move_pct.to_plain_string()),
+        estimated_gross_profit_at_target_usdt: target_values
+            .as_ref()
+            .map(|values| values.gross_profit.to_plain_string()),
+        estimated_exit_fee_at_target_usdt: target_values
+            .as_ref()
+            .map(|values| values.exit_fee.to_plain_string()),
+        estimated_round_trip_fee_at_target_usdt: target_values
+            .as_ref()
+            .map(|values| values.round_trip_fee.to_plain_string()),
+        estimated_net_profit_at_target_usdt: target_values
+            .as_ref()
+            .map(|values| values.net_profit.to_plain_string()),
+        fee_drag_pct_of_gross_profit: target_values
+            .as_ref()
+            .map(|values| values.fee_drag_pct.to_plain_string()),
+        net_reward_risk_ratio: net_reward_risk_ratio.map(FixedDecimal::to_plain_string),
+        estimated_round_trip_fee_pct_of_initial_margin: target_values
+            .as_ref()
+            .map(|values| values.fee_pct_of_initial_margin.to_plain_string()),
+        estimated_net_target_return_pct_of_initial_margin: target_values
+            .as_ref()
+            .map(|values| values.net_return_pct_of_initial_margin.to_plain_string()),
+        estimated_net_target_profit_pct_of_equity: target_values
+            .as_ref()
+            .and_then(|values| values.net_profit_pct_of_equity)
+            .map(FixedDecimal::to_plain_string),
         atr: atr_values.as_ref().map(|(atr, _, _)| atr.to_plain_string()),
         one_atr_price_loss_usdt: atr_values
             .as_ref()
@@ -344,6 +487,115 @@ fn calculate_position_metrics(
             .as_ref()
             .and_then(|(_, _, percent)| *percent)
             .map(FixedDecimal::to_plain_string),
+    })
+}
+
+fn validate_directional_prices(
+    direction: LinearUsdtDirection,
+    entry: FixedDecimal,
+    stop: Option<FixedDecimal>,
+    target: Option<FixedDecimal>,
+) -> Result<(), TradeDomainError> {
+    let direction_name = match direction {
+        LinearUsdtDirection::Long => "long",
+        LinearUsdtDirection::Short => "short",
+    };
+    if let Some(stop) = stop {
+        let valid = match direction {
+            LinearUsdtDirection::Long => {
+                stop.checked_cmp(entry, "校验 long 止损价格")? == Ordering::Less
+            }
+            LinearUsdtDirection::Short => {
+                stop.checked_cmp(entry, "校验 short 止损价格")? == Ordering::Greater
+            }
+        };
+        if !valid {
+            return Err(TradeDomainError::InvalidDirectionalPrice {
+                field: "stopPrice",
+                direction: direction_name,
+            });
+        }
+    }
+    if let Some(target) = target {
+        let valid = match direction {
+            LinearUsdtDirection::Long => {
+                target.checked_cmp(entry, "校验 long 目标价格")? == Ordering::Greater
+            }
+            LinearUsdtDirection::Short => {
+                target.checked_cmp(entry, "校验 short 目标价格")? == Ordering::Less
+            }
+        };
+        if !valid {
+            return Err(TradeDomainError::InvalidDirectionalPrice {
+                field: "targetPrice",
+                direction: direction_name,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn calculate_break_even_price(
+    direction: LinearUsdtDirection,
+    entry: FixedDecimal,
+    entry_fee_rate: FixedDecimal,
+    exit_fee_rate: FixedDecimal,
+) -> Result<FixedDecimal, TradeDomainError> {
+    let one = FixedDecimal::parse_positive("feeBase", "1")?;
+    let (numerator_rate, denominator_rate) = match direction {
+        LinearUsdtDirection::Long => (
+            one.checked_add(entry_fee_rate, "计算 long 盈亏平衡入场费率")?,
+            one.checked_sub(exit_fee_rate, "计算 long 盈亏平衡退出费率")?,
+        ),
+        LinearUsdtDirection::Short => (
+            one.checked_sub(entry_fee_rate, "计算 short 盈亏平衡入场费率")?,
+            one.checked_add(exit_fee_rate, "计算 short 盈亏平衡退出费率")?,
+        ),
+    };
+    entry
+        .checked_mul(numerator_rate, "计算盈亏平衡价格分子")?
+        .checked_div_to_scale(denominator_rate, PERCENT_OUTPUT_SCALE, "计算盈亏平衡价格")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn calculate_target_economics(
+    direction: LinearUsdtDirection,
+    base_quantity: FixedDecimal,
+    entry: FixedDecimal,
+    target: FixedDecimal,
+    entry_fee: FixedDecimal,
+    exit_fee_rate: FixedDecimal,
+    initial_margin: FixedDecimal,
+    equity: Option<FixedDecimal>,
+) -> Result<TargetEconomics, TradeDomainError> {
+    let move_distance = match direction {
+        LinearUsdtDirection::Long => target.checked_sub(entry, "计算 long 目标价格距离")?,
+        LinearUsdtDirection::Short => entry.checked_sub(target, "计算 short 目标价格距离")?,
+    };
+    let target_move_pct = percentage_of(move_distance, entry, "计算目标价格距离比例")?;
+    let gross_profit = base_quantity.checked_mul(move_distance, "计算目标毛收益")?;
+    let target_notional = base_quantity.checked_mul(target, "计算目标退出名义价值")?;
+    let exit_fee = target_notional.checked_mul(exit_fee_rate, "计算目标退出手续费")?;
+    let round_trip_fee = entry_fee.checked_add(exit_fee, "计算目标双边手续费")?;
+    let net_profit = gross_profit.checked_sub(round_trip_fee, "计算目标净收益")?;
+    let fee_drag_pct = percentage_of(round_trip_fee, gross_profit, "计算手续费毛收益占比")?;
+    let fee_pct_of_initial_margin =
+        percentage_of(round_trip_fee, initial_margin, "计算手续费初始保证金占比")?;
+    let net_return_pct_of_initial_margin =
+        percentage_of(net_profit, initial_margin, "计算目标净收益初始保证金占比")?;
+    let net_profit_pct_of_equity = equity
+        .map(|equity| percentage_of(net_profit, equity, "计算目标净收益权益占比"))
+        .transpose()?;
+    Ok(TargetEconomics {
+        target_move_pct,
+        gross_profit,
+        exit_fee,
+        round_trip_fee,
+        net_profit,
+        fee_drag_pct,
+        fee_pct_of_initial_margin,
+        net_return_pct_of_initial_margin,
+        net_profit_pct_of_equity,
     })
 }
 
@@ -572,7 +824,9 @@ mod tests {
             equity: Some("13.3263549612202".to_string()),
             available_usdt: Some("13.3263549612202".to_string()),
             max_single_trade_margin_pct: Some("30".to_string()),
+            direction: Some(LinearUsdtDirection::Long),
             stop_price: Some("64903.1".to_string()),
+            target_price: Some("65698.1".to_string()),
             atr: Some("265".to_string()),
             entry_fee_rate: "0.0002".to_string(),
             exit_fee_rate: "0.0005".to_string(),
@@ -657,6 +911,155 @@ mod tests {
         assert_eq!(
             at_twenty.candidate.estimated_initial_margin_usdt,
             "0.3258405"
+        );
+        assert_eq!(
+            at_ten.candidate.estimated_round_trip_fee_at_target_usdt,
+            at_twenty.candidate.estimated_round_trip_fee_at_target_usdt
+        );
+        assert_eq!(
+            at_ten.candidate.estimated_net_profit_at_target_usdt,
+            at_twenty.candidate.estimated_net_profit_at_target_usdt
+        );
+        let fee_pct_at_ten = at_ten
+            .candidate
+            .estimated_round_trip_fee_pct_of_initial_margin
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        let fee_pct_at_twenty = at_twenty
+            .candidate
+            .estimated_round_trip_fee_pct_of_initial_margin
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!((fee_pct_at_twenty / fee_pct_at_ten - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn target_economics_are_directional_and_fee_adjusted() {
+        let mut long = perpetual_request("10");
+        long.size = "1".to_string();
+        long.entry_price = "100".to_string();
+        long.contract_value = "1".to_string();
+        long.min_size = "1".to_string();
+        long.lot_size = "1".to_string();
+        long.equity = Some("1000".to_string());
+        long.stop_price = Some("95".to_string());
+        long.target_price = Some("110".to_string());
+        long.entry_fee_rate = "0.001".to_string();
+        long.exit_fee_rate = "0.001".to_string();
+        let long_result = evaluate_linear_usdt_perpetual(&long).unwrap();
+        assert_eq!(long_result.cost_assumptions.entry_fee_rate, "0.001");
+        assert!(!long_result.cost_assumptions.slippage_included);
+        assert!(!long_result.cost_assumptions.funding_included);
+        assert_eq!(
+            long_result
+                .candidate
+                .estimated_gross_profit_at_target_usdt
+                .as_deref(),
+            Some("10")
+        );
+        assert_eq!(
+            long_result
+                .candidate
+                .estimated_round_trip_fee_at_target_usdt
+                .as_deref(),
+            Some("0.21")
+        );
+        assert_eq!(
+            long_result
+                .candidate
+                .estimated_net_profit_at_target_usdt
+                .as_deref(),
+            Some("9.79")
+        );
+        assert_eq!(
+            long_result
+                .candidate
+                .fee_drag_pct_of_gross_profit
+                .as_deref(),
+            Some("2.1")
+        );
+        let net_reward_risk = long_result
+            .candidate
+            .net_reward_risk_ratio
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(net_reward_risk > 1.88 && net_reward_risk < 1.89);
+        let long_break_even = long_result
+            .candidate
+            .break_even_price
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(long_break_even > 100.20 && long_break_even < 100.21);
+
+        let mut short = long;
+        short.direction = Some(LinearUsdtDirection::Short);
+        short.stop_price = Some("105".to_string());
+        short.target_price = Some("90".to_string());
+        let short_result = evaluate_linear_usdt_perpetual(&short).unwrap();
+        assert_eq!(
+            short_result
+                .candidate
+                .estimated_net_profit_at_target_usdt
+                .as_deref(),
+            Some("9.81")
+        );
+        let short_break_even = short_result
+            .candidate
+            .break_even_price
+            .as_deref()
+            .unwrap()
+            .parse::<f64>()
+            .unwrap();
+        assert!(short_break_even > 99.80 && short_break_even < 99.81);
+    }
+
+    #[test]
+    fn close_target_can_be_directionally_correct_but_net_negative() {
+        let mut request = perpetual_request("10");
+        request.size = "1".to_string();
+        request.entry_price = "100".to_string();
+        request.contract_value = "1".to_string();
+        request.min_size = "1".to_string();
+        request.lot_size = "1".to_string();
+        request.stop_price = Some("95".to_string());
+        request.target_price = Some("100.1".to_string());
+        request.entry_fee_rate = "0.001".to_string();
+        request.exit_fee_rate = "0.001".to_string();
+        let result = evaluate_linear_usdt_perpetual(&request).unwrap();
+        assert_eq!(
+            result
+                .candidate
+                .estimated_net_profit_at_target_usdt
+                .as_deref(),
+            Some("-0.1001")
+        );
+    }
+
+    #[test]
+    fn rejects_target_without_direction_or_on_the_wrong_side() {
+        let mut request = perpetual_request("10");
+        request.direction = None;
+        assert_eq!(
+            evaluate_linear_usdt_perpetual(&request).unwrap_err(),
+            TradeDomainError::MissingDirectionForTarget
+        );
+
+        request.direction = Some(LinearUsdtDirection::Long);
+        request.target_price = Some("64000".to_string());
+        assert_eq!(
+            evaluate_linear_usdt_perpetual(&request).unwrap_err(),
+            TradeDomainError::InvalidDirectionalPrice {
+                field: "targetPrice",
+                direction: "long"
+            }
         );
     }
 

@@ -15149,6 +15149,7 @@ button {
   width: max-content;
   max-width: 100%;
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 7px;
   margin-top: 8px;
@@ -19884,10 +19885,11 @@ button {
   display: flex;
   align-items: center;
   justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 7px;
   color: #71717a;
   font-size: 9px;
-  white-space: nowrap;
+  white-space: normal;
 }
 
 .automation-run-token-breakdown > span {

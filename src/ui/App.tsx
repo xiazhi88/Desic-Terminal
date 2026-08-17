@@ -239,6 +239,7 @@ import {
   useMarketHotStore
 } from "../lib/marketHotStore";
 import { loadNotificationSettings, saveFeishuConfig, testFeishuNotification } from "../lib/notifications";
+import { isOrdinaryPendingOrder, mergePendingAlgoOrders } from "../lib/pendingOrderClassification";
 import { getActiveTauriListenerCounts, invokeDesktop, invokeOptional, isTauriRuntime, listenOptional } from "../lib/tauri";
 import { useTranslation } from "react-i18next";
 
@@ -247,7 +248,7 @@ import { LANGUAGE_OPTIONS, type LanguagePreference, type SupportedLocale } from 
 import { formatLocalizedDate, formatLocalizedNumber, i18n, languagePreference, saveLanguagePreference, resolvedLocale } from "../i18n/runtime";
 import { ErrorBoundary } from "./ErrorBoundary";
 import { ChartDataTable } from "./ChartDataTable";
-import { KlineChart, type ChartContextTradeIntent } from "./KlineChart";
+import { KlineChart, type ChartContextTradeIntent, type ChartHistoryLoadOutcome } from "./KlineChart";
 import { ChartQuickTradeDialog, persistChartQuickTradeAccountConfig, type ChartQuickTradeAccountConfig } from "./ChartQuickTradeDialog";
 import { SharedChartOrderLineEditDialog, SharedPositionLineTradeDialog } from "./ChartTradeDialogs";
 import { ChartRiskRewardTradeDialog as SharedChartRiskRewardTradeDialog } from "./ChartRiskRewardTradeDialog";
@@ -468,6 +469,30 @@ function buildTerminalPreviewPrivateSnapshot(account?: AccountSummary, includePe
           ordType: "limit",
           px: "63400",
           sz: "0.02",
+          accFillSz: "0",
+          avgPx: "",
+          state: "live",
+          lever: "20",
+          reduceOnly: "false",
+          cTime: String(syncedAt),
+          uTime: String(syncedAt)
+        }, {
+          instId: "BTC-USDT-SWAP",
+          instType: "SWAP",
+          ordId: "preview-trigger-order-65000",
+          clOrdId: "preview-trigger-client-65000",
+          algoId: "preview-trigger-order-65000",
+          algoClOrdId: "preview-trigger-client-65000",
+          isAlgo: true,
+          side: "buy",
+          posSide: "long",
+          tdMode: "cross",
+          ordType: "trigger",
+          px: "",
+          triggerPx: "65000",
+          triggerPxType: "last",
+          ordPx: "-1",
+          sz: "0.03",
           accFillSz: "0",
           avgPx: "",
           state: "live",
@@ -1419,11 +1444,13 @@ function TradingTerminal({
     return snapshot && key ? { [key]: snapshot } : {};
   });
   const [privateStatuses, setPrivateStatuses] = useState<Record<string, PrivateWsStatus>>({});
+  const symbolRef = useRef(symbol);
   const barRef = useRef(bar);
   const selectedAccountIdRef = useRef(selectedAccountId);
   const accountsRef = useRef(accounts);
   const privateWsStatusHandlerRef = useRef<(event: PrivateWsStatus) => void>(() => undefined);
   const triggerPrivateHistorySyncRef = useRef<(account: AccountSummary, reason: "startup" | "periodic" | "reconnect" | "fill") => void>(() => undefined);
+  symbolRef.current = symbol;
   barRef.current = bar;
   selectedAccountIdRef.current = selectedAccountId;
   accountsRef.current = accounts;
@@ -1573,7 +1600,7 @@ function TradingTerminal({
   const klineNotificationCooldownRef = useRef<Record<string, number>>({});
   const derivedCandleRefreshRef = useRef(0);
   const marketCandleRequestSequenceRef = useRef(0);
-  const historyLoadingRef = useRef(false);
+  const historyRequestsRef = useRef(new Map<string, Promise<ChartHistoryLoadOutcome>>());
   const historyExhaustedRef = useRef(new Set<string>());
   const privateHistorySyncRef = useRef<Record<string, number>>({});
   const intelligenceBootstrapRef = useRef<Record<string, number>>({});
@@ -3571,29 +3598,55 @@ function TradingTerminal({
     void syncKlineIntegrity(newSymbols, KLINE_INTEGRITY_INTERVALS, false, undefined, KLINE_REQUIRED_DAYS);
   }, [assetMap, marketAssets?.instruments?.length, pushNotification, watchlist]);
 
-  const loadMoreHistory = useCallback(async ({ firstTime }: { firstTime: number }) => {
-    const historyKey = `${symbol}\u0000${bar}`;
-    if (historyLoadingRef.current || historyExhaustedRef.current.has(historyKey) || !Number.isFinite(firstTime) || firstTime <= 0) return;
-    historyLoadingRef.current = true;
-    setHistoryLoading(true);
-    try {
-      const page = await fetchHistoricalCandlesBefore(symbol, bar, firstTime, 300);
-      logger.info("loaded earlier candles", { symbol, bar, firstTime, count: page.candles.length, exhausted: page.exhausted, source: page.source });
-      if (page.candles.length > 0) {
-        mergeIntoMarketCandles(page.candles);
-      }
-      if (page.exhausted) historyExhaustedRef.current.add(historyKey);
-    } catch (error) {
-      logger.error("failed to load earlier candles", error, { symbol, bar, firstTime });
-      pushNotification({
-        kind: "warning",
-        title: "历史 K 线加载失败",
-        message: `${symbol} ${bar} 更早历史暂未加载：${formatTradeErrorMessage(error)}`
-      });
-    } finally {
-      historyLoadingRef.current = false;
-      setHistoryLoading(false);
+  const loadMoreHistory = useCallback(({ firstTime }: { firstTime: number }): Promise<ChartHistoryLoadOutcome> => {
+    const requestSymbol = symbol;
+    const requestBar = bar;
+    const historyKey = `${requestSymbol}\u0000${requestBar}`;
+    const requestKey = `${historyKey}\u0000${firstTime}`;
+    if (!Number.isFinite(firstTime) || firstTime <= 0) {
+      return Promise.resolve({ status: "failed", message: "invalid history cursor" });
     }
+    if (historyExhaustedRef.current.has(historyKey)) {
+      return Promise.resolve({ status: "exhausted" });
+    }
+    const existing = historyRequestsRef.current.get(requestKey);
+    if (existing) return existing;
+
+    const request = (async (): Promise<ChartHistoryLoadOutcome> => {
+      try {
+        const page = await fetchHistoricalCandlesBefore(requestSymbol, requestBar, firstTime, 300);
+        logger.info("loaded earlier candles", { symbol: requestSymbol, bar: requestBar, firstTime, count: page.candles.length, exhausted: page.exhausted, source: page.source });
+        if (page.candles.length > 0
+          && symbolRef.current === requestSymbol
+          && barRef.current === requestBar) {
+          mergeIntoMarketCandles(page.candles);
+        }
+        if (page.exhausted) {
+          historyExhaustedRef.current.add(historyKey);
+          return { status: "exhausted" };
+        }
+        const earliestTime = page.earliestTime ?? page.candles[0]?.time;
+        if (page.candles.length > 0 && earliestTime) {
+          return { status: "loaded", earliestTime };
+        }
+        return { status: "deferred" };
+      } catch (error) {
+        const message = formatTradeErrorMessage(error);
+        logger.error("failed to load earlier candles", error, { symbol: requestSymbol, bar: requestBar, firstTime });
+        pushNotification({
+          kind: "warning",
+          title: "历史 K 线加载失败",
+          message: `${requestSymbol} ${requestBar} 更早历史暂未加载：${message}`
+        });
+        return { status: "failed", message };
+      } finally {
+        historyRequestsRef.current.delete(requestKey);
+        setHistoryLoading(historyRequestsRef.current.size > 0);
+      }
+    })();
+    historyRequestsRef.current.set(requestKey, request);
+    setHistoryLoading(true);
+    return request;
   }, [bar, pushNotification, symbol]);
 
   const requestAccountBillsArchive = useCallback(async (apply: boolean) => {
@@ -6862,6 +6915,8 @@ function AiTokenUsageDashboardPage({
     [t("range_7d"), summary?.sevenDays]
   ] as const;
   const hasTrackedUsage = (summary?.sevenDays.turnCount ?? 0) > 0;
+  const partialTurnCount = summary?.sevenDays.partialTurnCount ?? 0;
+  const unreportedTurnCount = summary?.sevenDays.unreportedTurnCount ?? 0;
 
   return (
     <div className="data-dashboard ai-usage-dashboard">
@@ -6879,16 +6934,19 @@ function AiTokenUsageDashboardPage({
       </header>
 
       {error ? <div className="data-warning negative"><CircleAlert size={15} /><span>{error}</span></div> : null}
+      {!error && (partialTurnCount > 0 || unreportedTurnCount > 0) ? (
+        <div className="data-warning"><CircleAlert size={15} /><span>{t("tokenUsageIncomplete", { partial: partialTurnCount, unreported: unreportedTurnCount })}</span></div>
+      ) : null}
 
       <section className="ai-usage-period-strip" aria-label={t("tokenUsageOverview")}>
         {periods.map(([label, period]) => (
           <article key={label}>
             <div><span>{label}</span><small>{t("sessionTurnCount", { sessions: period?.sessionCount ?? 0, turns: period?.turnCount ?? 0 })}</small></div>
-            <strong>{formatDashboardTokens(period?.usage.totalTokens)}</strong>
+            <strong>{formatDashboardTokens(period?.usage.totalTokens)}{(period?.partialTurnCount ?? 0) + (period?.unreportedTurnCount ?? 0) > 0 ? "+" : ""}</strong>
             <dl>
               <div><dt>{t("input")}</dt><dd>{formatDashboardTokens(period?.usage.inputTokens)}</dd></div>
               <div><dt>{t("output")}</dt><dd>{formatDashboardTokens(period?.usage.outputTokens)}</dd></div>
-              <div><dt>{t("cacheRead")}</dt><dd>{formatDashboardTokens(period?.usage.cacheReadTokens)}</dd></div>
+              <div><dt>{t("cacheReadIncluded")}</dt><dd>{period?.coverage.cacheRead ? formatDashboardTokens(period.usage.cacheReadTokens) : "--"}</dd></div>
             </dl>
           </article>
         ))}
@@ -6917,7 +6975,7 @@ function AiTokenUsageDashboardPage({
                     <td><strong>{item.modelName || item.model}</strong><small>{item.provider} · {item.model}</small></td>
                     <td>{formatDashboardTokens(item.today.usage.totalTokens)}</td>
                     <td>{formatDashboardTokens(item.yesterday.usage.totalTokens)}</td>
-                    <td><strong>{formatDashboardTokens(item.sevenDays.usage.totalTokens)}</strong></td>
+                    <td><strong>{formatDashboardTokens(item.sevenDays.usage.totalTokens)}{item.sevenDays.partialTurnCount + item.sevenDays.unreportedTurnCount > 0 ? "+" : ""}</strong></td>
                     <td>{formatDashboardTokens(item.sevenDays.usage.inputTokens)} / {formatDashboardTokens(item.sevenDays.usage.outputTokens)}</td>
                     <td>{item.sevenDays.turnCount}</td>
                   </tr>
@@ -6930,7 +6988,7 @@ function AiTokenUsageDashboardPage({
 
       <footer className="data-dashboard-footer">
         <span>{t("statisticsUpdatedAt", { time: summary?.generatedAt ? formatDateTime(summary.generatedAt) : "--" })}</span>
-        <span>{summary?.trackedFrom ? t("trackedFrom", { time: formatDateTime(summary.trackedFrom) }) : t("waitingFirstTokenRecord")}</span>
+        <span>{summary?.windowStart ? t("statisticsWindowStart", { time: formatDateTime(summary.windowStart) }) : t("waitingFirstTokenRecord")}</span>
       </footer>
     </div>
   );
@@ -13261,7 +13319,10 @@ function BottomPanel({
         : items.filter((item) => item.instId === instrumentFilter),
     [instrumentFilter]
   );
-  const filteredAlgoOrders = useMemo(() => filterInstruments(algoOrders), [algoOrders, filterInstruments]);
+  const mergedAlgoOrders = useMemo(
+    () => mergePendingAlgoOrders(algoOrders, snapshot?.orders ?? [], account?.id ?? "", tradeEnvironment),
+    [account?.id, algoOrders, snapshot?.orders, tradeEnvironment]
+  );
   const filteredHistoricalOrders = useMemo(() => filterInstruments(historicalOrders), [filterInstruments, historicalOrders]);
   const filteredHistoricalFills = useMemo(() => filterInstruments(historicalFills), [filterInstruments, historicalFills]);
   const filteredEpisodes = useMemo(() => filterInstruments(episodes), [episodes, filterInstruments]);
@@ -13272,7 +13333,7 @@ function BottomPanel({
   const filterOptions = useMemo(() => {
     const seen = new Set<string>();
     for (const list of [
-      algoOrders as { instId?: string | null }[],
+      mergedAlgoOrders as { instId?: string | null }[],
       snapshot?.orders ?? [],
       historicalOrders,
       historicalFills,
@@ -13291,7 +13352,7 @@ function BottomPanel({
         .sort((left, right) => left.localeCompare(right))
         .map((instId) => ({ value: instId, label: instId }))
     ];
-  }, [accountBills, algoOrders, episodes, historicalFills, historicalOrders, snapshot?.orders, t, tradeAuditEvents]);
+  }, [accountBills, episodes, historicalFills, historicalOrders, mergedAlgoOrders, snapshot?.orders, t, tradeAuditEvents]);
   // A filter pinned to an instrument that has dropped out of the data would show
   // an empty table with no way back, so fall back to showing everything.
   useEffect(() => {
@@ -13303,8 +13364,8 @@ function BottomPanel({
     }
   }, [filterOptions, instrumentFilter]);
   const instrumentFilterTabs = new Set(["orders", "history", "fills", "episodes", "bills", "audit"]);
-  const pendingAlgoOrders = algoOrders.filter(isActiveAlgoOrder);
-  const normalOrders = snapshot?.orders.filter((order) => !["conditional", "oco"].includes(order.ordType)) ?? [];
+  const pendingAlgoOrders = mergedAlgoOrders.filter(isActiveAlgoOrder);
+  const normalOrders = snapshot?.orders.filter(isOrdinaryPendingOrder) ?? [];
   // Tab badges keep counting the whole account so the filter cannot hide the fact
   // that orders exist elsewhere; only the tables narrow.
   const filteredPendingAlgoOrders = filterInstruments(pendingAlgoOrders);
@@ -13472,22 +13533,26 @@ function BottomPanel({
                   );
                 })}
                 {isEmpty && <div className="empty-row">{account ? t("trading:accountDataStatus", { status: formatPrivateWsStatus(privateStatus, t) }) : t("trading:noAccountOpenOrders")}</div>}
-                {snapshot && filteredNormalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdinaryOrPlannedOrders")}</div>}
+                {snapshot && filteredNormalOrders.length === 0 && <div className="empty-row">{t("trading:noOrdinaryOrders")}</div>}
               </>
             )}
             {ordersView === "algo" && (
               <>
                 <div className="table-head algo-orders">
-                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:quantity")}</span><span>{t("trading:takeProfit")}</span><span>{t("trading:stopLoss")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span><span>{t("common:actions")}</span>
+                  <span>{t("trading:contract")}</span><span>{t("trading:direction")}</span><span>{t("common:type")}</span><span>{t("common:quantity")}</span><span>{t("trading:takeProfit")} / {t("trading:triggerPrice")}</span><span>{t("trading:stopLoss")} / {t("trading:orderPriceAfterTrigger")}</span><span>{t("common:status")}</span><span>{t("trading:operator")}</span><span>{t("common:time")}</span><span>{t("common:actions")}</span>
                 </div>
-                {filteredPendingAlgoOrders.map((order) => (
+                {filteredPendingAlgoOrders.map((order) => {
+                  const isTriggerOrder = order.ordType === "trigger";
+                  const primaryTrigger = isTriggerOrder ? order.triggerPx : order.tpTriggerPx;
+                  const secondaryTrigger = isTriggerOrder ? order.ordPx : order.slTriggerPx;
+                  return (
                   <div className="table-row algo-orders" key={order.algoId || order.algoClOrdId || `${order.instId}-${order.cTime}`}>
                     <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode || "--"} />
                     <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
                     <span>{formatAlgoOrderType(order.ordType, t)}<small>{t("trading:notTriggered")}</small></span>
                     <span>{formatAmount(order.sz)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.actualSz)}</small></span>
-                    <span className={clsx("cell-tone", order.tpTriggerPx ? "positive" : "muted")}>{fmtPrice(order.tpTriggerPx)}<small>{t("trading:orderAbbreviation")} {formatAlgoExecPrice(order.tpOrdPx, t)}</small></span>
-                    <span className={clsx("cell-tone", order.slTriggerPx ? "negative" : "muted")}>{fmtPrice(order.slTriggerPx)}<small>{t("trading:orderAbbreviation")} {formatAlgoExecPrice(order.slOrdPx, t)}</small></span>
+                    <span className={clsx("cell-tone", primaryTrigger ? "positive" : "muted")}>{fmtPrice(primaryTrigger)}<small>{isTriggerOrder ? formatTriggerPriceType(order.triggerPxType, t) : `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.tpOrdPx, t)}`}</small></span>
+                    <span className={clsx("cell-tone", secondaryTrigger ? "negative" : "muted")}>{isTriggerOrder ? formatAlgoExecPrice(order.ordPx, t) : fmtPrice(secondaryTrigger)}<small>{isTriggerOrder ? t("trading:orderPriceAfterTrigger") : `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(order.slOrdPx, t)}`}</small></span>
                     <span><b className={clsx("status-pill", toneByState(order.state))}>{formatAlgoState(order.state, t)}</b><small>{order.actualSide || order.failCode || "--"}</small></span>
                     <span>{formatEpisodeOrigin(order.operator || "user", t)}<small>{order.algoId || order.algoClOrdId}</small></span>
                     <span>{formatDateTime(order.uTime || order.cTime)}</span>
@@ -13525,7 +13590,8 @@ function BottomPanel({
                       </button>
                     </span>
                   </div>
-                ))}
+                  );
+                })}
                 {!account && <div className="empty-row">{t("trading:noAccountAlgoOrders")}</div>}
                 {account && filteredPendingAlgoOrders.length === 0 && <div className="empty-row">{t("trading:algoOrdersStatus", { status: formatPrivateDataStatus(algoOrdersStatus, t) })}</div>}
               </>
@@ -14352,7 +14418,11 @@ function AlgoAmendDialog({
   onDone: () => void;
 }) {
   const { t } = useTranslation(["trading", "common"]);
+  const isTriggerOrder = order.ordType === "trigger";
   const [size, setSize] = useState(order.sz || "");
+  const [triggerPrice, setTriggerPrice] = useState(order.triggerPx || "");
+  const [triggerOrderMode, setTriggerOrderMode] = useState<"market" | "limit">(order.ordPx === "-1" || !order.ordPx ? "market" : "limit");
+  const [triggerOrderPrice, setTriggerOrderPrice] = useState(order.ordPx === "-1" ? "" : order.ordPx || "");
   const [tpTrigger, setTpTrigger] = useState(order.tpTriggerPx || "");
   const [tpOrd, setTpOrd] = useState(order.tpOrdPx || "");
   const [slTrigger, setSlTrigger] = useState(order.slTriggerPx || "");
@@ -14371,10 +14441,12 @@ function AlgoAmendDialog({
       algoId: order.algoId,
       algoClOrdId: order.algoClOrdId,
       newSize: size,
-      newTpTriggerPx: tpTrigger,
-      newTpOrdPx: tpOrd,
-      newSlTriggerPx: slTrigger,
-      newSlOrdPx: slOrd,
+      newTriggerPx: isTriggerOrder ? triggerPrice : undefined,
+      newOrdPx: isTriggerOrder ? (triggerOrderMode === "market" ? "-1" : triggerOrderPrice) : undefined,
+      newTpTriggerPx: isTriggerOrder ? undefined : tpTrigger,
+      newTpOrdPx: isTriggerOrder ? undefined : tpOrd,
+      newSlTriggerPx: isTriggerOrder ? undefined : slTrigger,
+      newSlOrdPx: isTriggerOrder ? undefined : slOrd,
       confirmedLive,
       executionKey: createTradeExecutionKey(account.id, tradeEnvironment, order.instId)
     })
@@ -14393,9 +14465,29 @@ function AlgoAmendDialog({
       <div className="ticket-form modal-trade-form">
         <label>{t("trading:quantityContracts")}</label>
         <input value={size} onChange={(event) => setSize(event.target.value)} />
-        <AlgoPriceBlock kind="takeProfit" trigger={tpTrigger} orderPx={tpOrd} estimatedPnl={tpPnl} onTrigger={setTpTrigger} onOrderPx={setTpOrd} />
-        <AlgoPriceBlock kind="stopLoss" trigger={slTrigger} orderPx={slOrd} estimatedPnl={slPnl} onTrigger={setSlTrigger} onOrderPx={setSlOrd} />
-        <button type="button" className="modal-submit" disabled={!account || submitting} onClick={() => (tradeEnvironment === "live" ? setConfirming(true) : submit(false))}>
+        {isTriggerOrder ? (
+          <>
+            <label>{t("trading:triggerPrice")}</label>
+            <input value={triggerPrice} onChange={(event) => setTriggerPrice(event.target.value)} />
+            <label>{t("trading:triggerOrderExecutionMode")}</label>
+            <div className="segmented-row" role="group" aria-label={t("trading:triggerOrderExecutionMode")}>
+              <button type="button" className={clsx(triggerOrderMode === "market" && "active")} onClick={() => setTriggerOrderMode("market")}>{t("trading:market")}</button>
+              <button type="button" className={clsx(triggerOrderMode === "limit" && "active")} onClick={() => setTriggerOrderMode("limit")}>{t("trading:limit")}</button>
+            </div>
+            {triggerOrderMode === "limit" && (
+              <>
+                <label>{t("trading:orderPriceAfterTrigger")}</label>
+                <input value={triggerOrderPrice} onChange={(event) => setTriggerOrderPrice(event.target.value)} />
+              </>
+            )}
+          </>
+        ) : (
+          <>
+            <AlgoPriceBlock kind="takeProfit" trigger={tpTrigger} orderPx={tpOrd} estimatedPnl={tpPnl} onTrigger={setTpTrigger} onOrderPx={setTpOrd} />
+            <AlgoPriceBlock kind="stopLoss" trigger={slTrigger} orderPx={slOrd} estimatedPnl={slPnl} onTrigger={setSlTrigger} onOrderPx={setSlOrd} />
+          </>
+        )}
+        <button type="button" className="modal-submit" disabled={!account || submitting || !Number(size) || (isTriggerOrder && (!Number(triggerPrice) || (triggerOrderMode === "limit" && !Number(triggerOrderPrice))))} onClick={() => (tradeEnvironment === "live" ? setConfirming(true) : submit(false))}>
           {submitting ? t("trading:submitting") : t("trading:submitChanges")}
         </button>
       </div>

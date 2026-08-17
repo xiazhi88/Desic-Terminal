@@ -32,6 +32,11 @@ pub enum TradeDomainError {
         field: &'static str,
     },
     ZeroRiskPerContract,
+    MissingDirectionForTarget,
+    InvalidDirectionalPrice {
+        field: &'static str,
+        direction: &'static str,
+    },
     ArithmeticOverflow {
         operation: &'static str,
     },
@@ -58,6 +63,12 @@ impl fmt::Display for TradeDomainError {
                 write!(formatter, "{order_kind} 订单不应包含 {field}")
             }
             Self::ZeroRiskPerContract => write!(formatter, "每张合约风险必须大于 0"),
+            Self::MissingDirectionForTarget => {
+                write!(formatter, "targetPrice 存在时必须提供 direction")
+            }
+            Self::InvalidDirectionalPrice { field, direction } => {
+                write!(formatter, "{field} 不符合 {direction} 方向的价格关系")
+            }
             Self::ArithmeticOverflow { operation } => {
                 write!(formatter, "十进制运算超出范围：{operation}")
             }
@@ -325,10 +336,17 @@ impl FixedDecimal {
         output_scale: u32,
         operation: &'static str,
     ) -> Result<Self, TradeDomainError> {
-        if self.coefficient < 0 || denominator.coefficient <= 0 {
+        if denominator.coefficient <= 0 {
             return Err(TradeDomainError::ArithmeticOverflow { operation });
         }
-        let (numerator, denominator) = self.checked_align(denominator, operation)?;
+        let negative = self.coefficient < 0;
+        let magnitude = Self::new(
+            self.coefficient
+                .checked_abs()
+                .ok_or(TradeDomainError::ArithmeticOverflow { operation })?,
+            self.scale,
+        );
+        let (numerator, denominator) = magnitude.checked_align(denominator, operation)?;
         let mut coefficient = numerator / denominator;
         let mut remainder = numerator % denominator;
         let mut produced_scale = 0;
@@ -347,6 +365,11 @@ impl FixedDecimal {
             produced_scale += 1;
         }
 
+        if negative {
+            coefficient = coefficient
+                .checked_neg()
+                .ok_or(TradeDomainError::ArithmeticOverflow { operation })?;
+        }
         Ok(Self::new(coefficient, produced_scale))
     }
 

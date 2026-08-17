@@ -23,11 +23,13 @@ assert.match(toClaudePrompt([
 assert.deepEqual(normalizeClaudeUsage({
   input_tokens: 100,
   output_tokens: 20,
-  cache_read_input_tokens: 10
+  cache_read_input_tokens: 10,
+  cache_creation_input_tokens: 5
 }), {
-  inputTokens: 100,
+  inputTokens: 115,
   outputTokens: 20,
   cacheReadTokens: 10,
+  cacheWriteTokens: 5,
   thoughtsTokenCount: 0
 });
 
@@ -97,9 +99,10 @@ assert.equal(parts.filter((part) => part.type === "text").map((part) => part.tex
 assert.deepEqual(parts.find((part) => part.type === "usage"), {
   type: "usage",
   id: parts.find((part) => part.type === "usage").id,
-  inputTokens: 100,
+  inputTokens: 115,
   outputTokens: 20,
   cacheReadTokens: 10,
+  cacheWriteTokens: 5,
   thoughtsTokenCount: 0
 });
 assert.equal(parts.at(-1)?.type, "done");

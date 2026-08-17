@@ -364,12 +364,17 @@ function normalizedUsage(value: unknown) {
   const input = usageValue(usage, ["inputTokens", "input_tokens", "totalInputTokens", "promptTokens"]);
   const output = usageValue(usage, ["outputTokens", "output_tokens", "totalOutputTokens", "completionTokens"]);
   const total = usageValue(usage, ["totalTokens", "total_tokens"]) || input + output;
-  const reported = summary.reported !== false && (input > 0 || output > 0 || total > 0);
+  const reported = typeof summary.reported === "boolean"
+    ? summary.reported
+    : input > 0 || output > 0 || total > 0;
+  const quality = typeof summary.quality === "string" ? summary.quality : reported ? "reconstructed" : "unreported";
   return {
     input,
     output,
     total,
     reported,
+    partial: quality === "partial",
+    unreportedAgentCount: Math.max(0, Number(summary.unreportedAgentCount) || 0),
     model: typeof summary.modelName === "string" ? summary.modelName : typeof summary.model === "string" ? summary.model : "",
     agentCount: Number(summary.agentCount) || 0
   };
@@ -392,6 +397,16 @@ export function AiTokenUsageLine({ usage }: { usage: unknown }) {
           <strong>{formatTokenCount(normalized.total)}</strong>
           <small>{processText("tokenInputOutput", "Input {{input}} · Output {{output}}", "输入 {{input}} · 输出 {{output}}", { input: formatTokenCount(normalized.input), output: formatTokenCount(normalized.output) })}</small>
           {normalized.agentCount > 0 ? <small>{processText("subagentCount", "{{count}} subagents", "{{count}} 个子 Agent", { count: normalized.agentCount })}</small> : null}
+          {normalized.partial ? (
+            <small>{normalized.unreportedAgentCount > 0
+              ? processText(
+                "usagePartiallyReportedAgents",
+                "Known usage only; {{count}} agents did not report usage",
+                "仅显示已知用量；{{count}} 个 Agent 未报告",
+                { count: normalized.unreportedAgentCount }
+              )
+              : processText("usagePartiallyReported", "Known usage only; this turn was partially reported", "仅显示已知用量；本轮统计不完整")}</small>
+          ) : null}
         </>
       ) : <small>{processText("usageNotReported", "Usage was not reported by the model", "模型未报告用量")}</small>}
     </div>
@@ -798,7 +813,7 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
     agents: metadata.agents,
     teamEvents: metadata.teamEvents,
     timeline: metadata.timeline,
-    usage: metadata.usage,
+    usage: message.tokenUsage ?? metadata.usage,
     error: failed,
     errorMessage: failed ? "AI 运行失败" : undefined,
     status: completed ? undefined : message.status ?? undefined

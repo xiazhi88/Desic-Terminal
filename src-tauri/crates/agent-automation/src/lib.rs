@@ -1,3 +1,10 @@
+mod usage;
+
+pub use usage::{
+    build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
+    AI_USAGE_SCHEMA_VERSION,
+};
+
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 

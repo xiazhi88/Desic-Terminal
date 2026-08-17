@@ -1546,8 +1546,11 @@ function runTokenSummary(run: AiAutomationRun) {
   const summary = run.tokenUsage;
   if (!summary) return null;
   if (!summary.reported) return automationText("runTokensNotReported", "Token usage not reported", "Token 未报告");
+  const total = summary.quality === "partial"
+    ? `${formatRunTokenCount(summary.usage.totalTokens)}+`
+    : formatRunTokenCount(summary.usage.totalTokens);
   return automationText("runTokenSummary", "Token {{total}} · {{input}} in / {{output}} out", "Token {{total}} · {{input}} 入 / {{output}} 出", {
-    total: formatRunTokenCount(summary.usage.totalTokens),
+    total,
     input: formatRunTokenCount(summary.usage.inputTokens),
     output: formatRunTokenCount(summary.usage.outputTokens)
   });
@@ -1856,7 +1859,7 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
           <div><Clock3 size={14} /><span>{automationText("runMetricDuration", "Duration", "耗时")}</span><strong>{duration === null ? i18n.t("automation:running") : formatDuration(duration)}</strong></div>
           <div><RadioTower size={14} /><span>{automationText("runMetricTrigger", "Trigger", "触发")}</span><strong>{formatRunTrigger(detail.run.triggerType, detail.trigger)}</strong></div>
           <div><Activity size={14} /><span>{i18n.t("common:time")}</span><strong>{formatDateTime(detail.run.startedAt)}{detail.run.finishedAt ? ` → ${formatDateTime(detail.run.finishedAt)}` : ""}</strong></div>
-          <div><Gauge size={14} /><span>Token</span><strong>{detail.run.tokenUsage?.reported ? formatRunTokenCount(detail.run.tokenUsage.usage.totalTokens) : detail.run.tokenUsage ? automationText("runNotReported", "Not reported", "未报告") : "--"}</strong></div>
+          <div><Gauge size={14} /><span>Token</span><strong>{detail.run.tokenUsage?.reported ? `${formatRunTokenCount(detail.run.tokenUsage.usage.totalTokens)}${detail.run.tokenUsage.quality === "partial" ? "+" : ""}` : detail.run.tokenUsage ? automationText("runNotReported", "Not reported", "未报告") : "--"}</strong></div>
         </div>
       </section>
 
@@ -1873,8 +1876,9 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
               <>
                 <b>{i18n.t("common:input")} {formatRunTokenCount(detail.run.tokenUsage.usage.inputTokens)}</b>
                 <b>{i18n.t("common:output")} {formatRunTokenCount(detail.run.tokenUsage.usage.outputTokens)}</b>
-                {detail.run.tokenUsage.usage.cacheReadTokens > 0 ? <em>{automationText("runCacheRead", "Cache read {{tokens}}", "缓存读取 {{tokens}}", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
+                {detail.run.tokenUsage.coverage.cacheRead ? <em>{automationText("runCacheRead", "Cache read {{tokens}} (included in input)", "缓存读取 {{tokens}}（已含在输入）", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
                 {detail.run.tokenUsage.agentCount > 0 ? <em>{automationText("runSubAgents", "{{count}} sub-Agents", "{{count}} 个子 Agent", { count: detail.run.tokenUsage.agentCount })}</em> : null}
+                {detail.run.tokenUsage.quality === "partial" ? <em>{automationText("runTokenPartial", "Known usage only; reporting is incomplete", "仅显示已知用量；统计不完整")}</em> : null}
               </>
             ) : <em>{automationText("runNoTokenUsage", "The current model did not return Token usage", "当前模型没有返回 Token 用量")}</em>}
           </div>
@@ -3261,6 +3265,16 @@ function ReviewReplayChart({
   const { t } = useTranslation(["automation", "trading", "chart"]);
   const chartCandles = detail?.candles ?? [];
   const symbol = detail?.episode.instId ?? "BTC-USDT-SWAP";
+  const snapshotRevision = detail
+    ? [
+        detail.episode.id,
+        detail.windowStart,
+        detail.windowEnd,
+        chartCandles[0]?.time ?? 0,
+        chartCandles.at(-1)?.time ?? 0,
+        chartCandles.length
+      ].join(":")
+    : "empty";
   const fills = useMemo(() => buildReviewFillMarkers(detail, t), [detail, t]);
   const ticker = useMemo(() => buildReviewTicker(symbol, chartCandles), [chartCandles, symbol]);
   return (
@@ -3272,6 +3286,7 @@ function ReviewReplayChart({
         timeframe={detail?.bar ?? "15m"}
         fills={fills}
         variant="review"
+        snapshotRevision={snapshotRevision}
       />
       {loading ? <div className="automation-review-chart-state">{automationText("reviewChartLoading", "Loading candles and orders for this position...", "正在读取该仓位 K线与订单...")}</div> : null}
       {error ? <div className="automation-review-chart-state danger" data-i18n-skip>{error}</div> : null}
@@ -4923,12 +4938,17 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
     nextWakeAt: null,
     actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
     tokenUsage: {
+      schemaVersion: 2,
       provider: "openai-compatible",
       modelId: "preview-model",
       model: "preview-reasoner",
       modelName: "Preview Reasoner",
       reported: true,
+      quality: "providerReported",
+      coverage: { inputOutput: true, cacheRead: true, cacheWrite: false, reasoning: true },
       agentCount: 4,
+      reportedAgentCount: 4,
+      unreportedAgentCount: 0,
       usage: {
         inputTokens: 182450,
         outputTokens: 12380,

@@ -15,9 +15,10 @@ pub use order::{
     OrderSpec, RegularExecution, TrailingCallback,
 };
 pub use risk::{
-    calculate_linear_usdt_risk_budget, evaluate_linear_usdt_perpetual,
-    LinearUsdtPerpetualEvaluation, LinearUsdtPerpetualEvaluationRequest, LinearUsdtPositionMetrics,
-    LinearUsdtRiskBudget, LinearUsdtRiskBudgetRequest, LinearUsdtTradeCapacity,
+    calculate_linear_usdt_risk_budget, evaluate_linear_usdt_perpetual, LinearUsdtCostAssumptions,
+    LinearUsdtDirection, LinearUsdtPerpetualEvaluation, LinearUsdtPerpetualEvaluationRequest,
+    LinearUsdtPositionMetrics, LinearUsdtRiskBudget, LinearUsdtRiskBudgetRequest,
+    LinearUsdtTradeCapacity,
 };
 pub use status::{
     normalize_terminal_outcome, normalize_terminal_state, summarize_emergency_operation,

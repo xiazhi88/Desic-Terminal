@@ -109,7 +109,8 @@ async function main() {
     usage: {
       input_tokens: 100,
       output_tokens: 20,
-      cache_read_input_tokens: 10
+      cache_read_input_tokens: 10,
+      cache_creation_input_tokens: 5
     }
   });
 }

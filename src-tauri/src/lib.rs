@@ -29,7 +29,10 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     process::Command,
-    sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore, SemaphorePermit},
+    sync::{
+        mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore,
+        SemaphorePermit,
+    },
     time::{sleep, timeout, Duration},
 };
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
@@ -49,17 +52,18 @@ mod trade_support;
 use crate::ai_automation::{
     ai_agent_profile_delete, ai_agent_profile_run_daily_review, ai_agent_profile_run_now,
     ai_agent_profile_save, ai_agent_profile_systematic_conflicts, ai_agent_scheme_delete,
-    ai_agent_scheme_save, ai_automation_overview,
-    ai_automation_run_detail, ai_automation_run_statuses, ai_automation_save_master_enabled,
-    ai_automation_section, ai_automation_summary, ai_optimization_suggestion_update,
-    ai_skill_version_discard, ai_skill_version_publish, ai_token_usage_summary,
-    ai_user_wake_condition_delete, ai_user_wake_condition_save, append_ai_usage_summary_event,
-    background_finish_run, notification_feishu_config_save, notification_feishu_send,
+    ai_agent_scheme_save, ai_automation_overview, ai_automation_run_detail,
+    ai_automation_run_statuses, ai_automation_save_master_enabled, ai_automation_section,
+    ai_automation_summary, ai_optimization_suggestion_update, ai_skill_version_discard,
+    ai_skill_version_publish, ai_token_usage_summary, ai_user_wake_condition_delete,
+    ai_user_wake_condition_save, append_ai_usage_summary_event, background_finish_run,
+    ensure_ai_message_usage_for_session, notification_feishu_config_save, notification_feishu_send,
     notification_feishu_test, notification_settings_summary,
-    notify_automation_run_record_persisted, optimization_suggestion_create, review_complete,
-    review_read_skill_version, start_ai_automation_worker, AiAutomationRuntime,
-    BackgroundFinishRunInput, BackgroundRunContext, FeishuSendInput, OptimizationSuggestionInput,
-    ReviewCompleteInput, ReviewSkillVersionInput,
+    notify_automation_run_record_persisted, optimization_suggestion_create,
+    persist_ai_message_usage_summary, review_complete, review_read_skill_version,
+    start_ai_automation_worker, AiAutomationRuntime, AiUsageSummary, BackgroundFinishRunInput,
+    BackgroundRunContext, FeishuSendInput, OptimizationSuggestionInput, ReviewCompleteInput,
+    ReviewSkillVersionInput,
 };
 use crate::app_updater::{
     app_update_apply_source, app_update_check, app_update_prepare, app_update_restart_source,
@@ -79,7 +83,7 @@ use crate::intelligence::{
     intelligence_derivatives_taker_flow, intelligence_mark_active_instrument,
     intelligence_news_detail, intelligence_news_event_detail, intelligence_news_events_query,
     intelligence_news_feed, intelligence_news_mark_read, intelligence_news_query,
-    intelligence_news_read_state, intelligence_news_reaction_query, intelligence_news_sources,
+    intelligence_news_reaction_query, intelligence_news_read_state, intelligence_news_sources,
     intelligence_sentiment_query, intelligence_settings_save, intelligence_settings_summary,
     intelligence_smart_query, intelligence_smart_signals_query, intelligence_smart_trader_detail,
     intelligence_smart_traders_query, intelligence_summary, intelligence_sync_now,
@@ -97,29 +101,28 @@ use crate::private_history::{
     private_history_status as private_history_status_impl,
 };
 use crate::storage_config::{
-    ai_config_summary, ai_local_auth_status, ai_save_config, ai_skill_import, ai_skill_install_git,
-    ai_skill_pick_source, ai_sidecar_proxy_url,
-    ai_test_connection, export_diagnostics, frontend_log, initialize_runtime_paths,
-    load_accounts_config, load_ai_config, load_notification_webhook, load_proxy_config,
-    load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
-    proxy_config_summary, reqwest_client, runtime_cache_root, runtime_work_dir,
-    save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
-    save_watchlist_config, storage_maintenance, storage_status, test_proxy_config,
-    ui_preferences_summary,
+    ai_config_summary, ai_local_auth_status, ai_save_config, ai_sidecar_proxy_url, ai_skill_import,
+    ai_skill_install_git, ai_skill_pick_source, ai_test_connection, export_diagnostics,
+    frontend_log, initialize_runtime_paths, load_accounts_config, load_ai_config,
+    load_notification_webhook, load_proxy_config, load_watchlist_config, migrate_sensitive_config,
+    proxy_authorization_header, proxy_config_summary, reqwest_client, runtime_cache_root,
+    runtime_work_dir, save_accounts_config, save_notification_webhook, save_proxy_config,
+    save_ui_preferences, save_watchlist_config, storage_maintenance, storage_status,
+    test_proxy_config, ui_preferences_summary,
 };
 use crate::systematic::{
     start_systematic_worker, systematic_backtest_cancel, systematic_backtest_defaults,
-    systematic_backtest_delete, systematic_backtest_detail, systematic_backtest_start, systematic_capture_universe_snapshot,
+    systematic_backtest_delete, systematic_backtest_detail, systematic_backtest_start,
+    systematic_backtests_page, systematic_capture_universe_snapshot,
     systematic_factor_create_default, systematic_factor_evaluate, systematic_factor_save,
-    systematic_overview, systematic_backtests_page, systematic_python_prepare_environment,
+    systematic_optimization_cancel, systematic_optimization_start, systematic_overview,
+    systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
+    systematic_profile_signals, systematic_python_prepare_environment,
     systematic_python_run_sample, systematic_strategy_ai_cancel_session,
     systematic_strategy_ai_execute_tool, systematic_strategy_ai_send_message,
-    systematic_strategy_ai_tool_respond,
-    systematic_optimization_cancel, systematic_optimization_start, systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
-    systematic_profile_signals,
-    systematic_strategy_create_python, systematic_strategy_delete, systematic_strategy_save_python,
-    systematic_strategy_version_detail, systematic_strategy_versions,
-    SystematicRuntime,
+    systematic_strategy_ai_tool_respond, systematic_strategy_create_python,
+    systematic_strategy_delete, systematic_strategy_save_python,
+    systematic_strategy_version_detail, systematic_strategy_versions, SystematicRuntime,
 };
 use crate::trade_commands::{
     capture_trade_opportunity_market_snapshot, materialize_trade_opportunity_commit,
@@ -1146,6 +1149,7 @@ struct AiStoredMessage {
     content: String,
     reasoning: Option<String>,
     tool_json: Option<String>,
+    token_usage: Option<AiUsageSummary>,
     status: Option<String>,
     created_at: i64,
 }
@@ -2022,7 +2026,9 @@ fn open_source_licenses(app: tauri::AppHandle) -> Result<String, String> {
         .map_err(|err| format!("Could not read the Rust license list: {err}"))?;
     let npm_rows = fs::read_to_string(root.join("npm-licenses.json"))
         .ok()
-        .and_then(|raw| serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok())
+        .and_then(|raw| {
+            serde_json::from_str::<serde_json::Map<String, serde_json::Value>>(&raw).ok()
+        })
         .map(|map| {
             let mut rows: Vec<(String, String, String)> = map
                 .into_iter()
@@ -2080,10 +2086,7 @@ fn open_source_licenses(app: tauri::AppHandle) -> Result<String, String> {
         .npm-licenses td:nth-child(2) { width: 18%; }
     </style>";
     let mut page = rust_html.replace("<head>", &format!("<head><meta charset=\"utf-8\">{styles}"));
-    page = page.replace(
-        "</body>",
-        &format!("{npm_section}</body>"),
-    );
+    page = page.replace("</body>", &format!("{npm_section}</body>"));
     Ok(page)
 }
 
@@ -2091,7 +2094,8 @@ fn open_source_licenses(app: tauri::AppHandle) -> Result<String, String> {
 fn historical_fills(
     app: tauri::AppHandle,
     request: HistoricalFillsRequest,
-) -> Result<Vec<HistoricalFillSummary>, String> {    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
+) -> Result<Vec<HistoricalFillSummary>, String> {
+    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     let conn = open_database(&app)?;
     load_historical_fills(
         &conn,
@@ -2151,14 +2155,16 @@ fn chart_trade_source_rows(
             })
         })
         .map_err(|err| err.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|err| err.to_string())
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 fn account_bills(
     app: tauri::AppHandle,
     request: AccountBillsRequest,
-) -> Result<Vec<AccountBillSummary>, String> {    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
+) -> Result<Vec<AccountBillSummary>, String> {
+    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     let conn = open_database(&app)?;
     load_account_bills(
         &conn,
@@ -2370,8 +2376,9 @@ fn ai_load_session(
     app: tauri::AppHandle,
     request: AiSessionLoadRequest,
 ) -> Result<AiSessionSnapshot, String> {
-    let conn = open_database(&app)?;
+    let mut conn = open_database(&app)?;
     let session = load_or_create_ai_session(&conn, &request.session_id)?;
+    ensure_ai_message_usage_for_session(&mut conn, &session.id)?;
     let messages = load_ai_messages(&conn, &session.id)?;
     Ok(AiSessionSnapshot { session, messages })
 }
@@ -2551,9 +2558,9 @@ fn ai_generate_chart_indicator(
         return Err("请输入指标需求".to_string());
     }
     let mut messages = request.messages;
-    let has_current_user_message = messages.last().is_some_and(|message| {
-        message.role == "user" && message.content.trim() == prompt
-    });
+    let has_current_user_message = messages
+        .last()
+        .is_some_and(|message| message.role == "user" && message.content.trim() == prompt);
     if !has_current_user_message {
         messages.push(AiChatMessage {
             id: None,
@@ -3427,6 +3434,8 @@ struct TradePrecheckRequest {
     #[serde(default)]
     stop_price: Option<String>,
     #[serde(default)]
+    target_price: Option<String>,
+    #[serde(default)]
     atr: Option<String>,
     size: String,
     #[serde(default)]
@@ -3444,7 +3453,11 @@ struct TradePlanEvaluationRequest {
     #[serde(default)]
     price: Option<String>,
     #[serde(default)]
+    action: Option<String>,
+    #[serde(default)]
     stop_price: Option<String>,
+    #[serde(default)]
+    target_price: Option<String>,
     #[serde(default)]
     atr: Option<String>,
     #[serde(default)]
@@ -3485,6 +3498,11 @@ struct TradePrecheckResponse {
     estimated_round_trip_fee: Option<f64>,
     estimated_stop_loss_with_fees: Option<f64>,
     stop_loss_pct_of_usdt_equity: Option<f64>,
+    break_even_price: Option<f64>,
+    estimated_net_profit_at_target: Option<f64>,
+    fee_drag_pct_of_gross_profit: Option<f64>,
+    net_reward_risk_ratio: Option<f64>,
+    fee_rate_source: String,
     perpetual_evaluation: Option<desic_trade_domain::LinearUsdtPerpetualEvaluation>,
     liquidation_text: String,
     available_usdt: Option<f64>,
@@ -4256,7 +4274,10 @@ async fn okx_funding_rate(
     {
         return Ok(Some(cached));
     }
-    let path = format!("/api/v5/public/funding-rate?instId={}", url_encode(&inst_id));
+    let path = format!(
+        "/api/v5/public/funding-rate?instId={}",
+        url_encode(&inst_id)
+    );
     let envelope: OkxEnvelope<FundingRate> = get_json(&path).await?;
     let funding = envelope.data.into_iter().next();
     if let Some(value) = funding.as_ref() {
@@ -4353,9 +4374,7 @@ async fn ensure_market_icon_data_url(
     market_icon_data_url(app, icon_path.to_string_lossy().to_string())
 }
 
-async fn wait_for_local_candle_read(
-    flight: &LocalCandleReadFlight,
-) -> Result<Vec<Candle>, String> {
+async fn wait_for_local_candle_read(flight: &LocalCandleReadFlight) -> Result<Vec<Candle>, String> {
     loop {
         let notified = flight.completed.notified();
         if let Some(result) = flight.result.lock().await.clone() {
@@ -4399,15 +4418,15 @@ async fn local_candles(
     let bounded_limit = limit.clamp(1, 1_000);
     let step = bar_ms(&bar).ok_or_else(|| format!("unsupported interval: {bar}"))?;
     let end_open = align_open_time(now_ms(), &bar, step);
-    let start_open = end_open.saturating_sub(
-        step.saturating_mul((bounded_limit as i64).saturating_sub(1)),
-    );
+    let start_open =
+        end_open.saturating_sub(step.saturating_mul((bounded_limit as i64).saturating_sub(1)));
     let source_end_open = if bar == "1m" {
         end_open
     } else {
         end_open.saturating_add(step).saturating_sub(60_000)
     };
-    let flight_key = format!("{inst_id}\u{0}{bar}\u{0}{start_open}\u{0}{source_end_open}\u{0}{bounded_limit}");
+    let flight_key =
+        format!("{inst_id}\u{0}{bar}\u{0}{start_open}\u{0}{source_end_open}\u{0}{bounded_limit}");
     let flights = LOCAL_CANDLE_READ_FLIGHTS.get_or_init(|| Mutex::new(HashMap::new()));
     let (flight, is_leader) = {
         let mut active = flights
@@ -4435,7 +4454,10 @@ async fn local_candles(
         );
         return timeout(Duration::from_secs(10), wait_for_local_candle_read(&flight))
             .await
-            .map_err(|_| "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。".to_string())?;
+            .map_err(|_| {
+                "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。"
+                    .to_string()
+            })?;
     }
 
     let (sender, receiver) = oneshot::channel();
@@ -4495,10 +4517,11 @@ async fn local_candles(
     }
     let result = timeout(Duration::from_secs(10), receiver)
         .await
-        .map_err(|_| "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。".to_string())
-        .and_then(|result| {
-            result.map_err(|_| "图表 K 线读取线程提前结束。".to_string())
+        .map_err(|_| {
+            "图表 K 线读取超过 10 秒，已结束等待。请查看 kline_read request_id 诊断日志。"
+                .to_string()
         })
+        .and_then(|result| result.map_err(|_| "图表 K 线读取线程提前结束。".to_string()))
         .and_then(|result| result);
     let completed = match result {
         Ok(candles) => Ok(candles),
@@ -5286,13 +5309,12 @@ pub(crate) async fn systematic_profile_portfolio_snapshot(
     cutoff_at: i64,
 ) -> Result<serde_json::Value, String> {
     let runtime = app.state::<MarketRuntime>();
-    let snapshot = if let Some(snapshot) = ai_read_memory_account_snapshot(runtime.inner(), Some(account_id))
-        .filter(|value| {
+    let snapshot = if let Some(snapshot) =
+        ai_read_memory_account_snapshot(runtime.inner(), Some(account_id)).filter(|value| {
             value.positions_complete
                 && value.orders_complete
                 && now_ms().saturating_sub(value.synced_at) <= 5_000
-        })
-    {
+        }) {
         snapshot
     } else {
         let snapshot = match okx_private_snapshot(
@@ -5394,7 +5416,11 @@ pub(crate) async fn systematic_profile_portfolio_snapshot(
         .collect::<Vec<_>>();
     let used_margin = positions
         .iter()
-        .filter_map(|value| value.get("usedMarginUsdt").and_then(serde_json::Value::as_f64))
+        .filter_map(|value| {
+            value
+                .get("usedMarginUsdt")
+                .and_then(serde_json::Value::as_f64)
+        })
         .sum::<f64>()
         .min(equity);
     let available_margin = available.min((equity - used_margin).max(0.0));
@@ -5491,18 +5517,21 @@ fn systematic_profile_recent_fills(
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![account_id, environment, inst_id, cutoff_at], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, Option<String>>(1)?,
-                row.get::<_, Option<String>>(2)?,
-                row.get::<_, Option<String>>(3)?,
-                row.get::<_, Option<String>>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, Option<String>>(6)?,
-                row.get::<_, i64>(7)?,
-            ))
-        })
+        .query_map(
+            params![account_id, environment, inst_id, cutoff_at],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                    row.get::<_, Option<String>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, i64>(7)?,
+                ))
+            },
+        )
         .map_err(|error| error.to_string())?;
     let raw_rows = rows
         .collect::<Result<Vec<_>, _>>()
@@ -5707,11 +5736,7 @@ fn private_sequence_value(value: Option<&Value>) -> Option<i64> {
 fn private_position_sequence(value: &Value, data: &[Value]) -> PrivatePositionSequence {
     let sequence_source = data.first().unwrap_or(value);
     PrivatePositionSequence {
-        seq_id: private_sequence_value(
-            value
-                .get("seqId")
-                .or_else(|| sequence_source.get("seqId")),
-        ),
+        seq_id: private_sequence_value(value.get("seqId").or_else(|| sequence_source.get("seqId"))),
         prev_seq_id: private_sequence_value(
             value
                 .get("prevSeqId")
@@ -9075,14 +9100,8 @@ async fn sync_kline_window(
                     )
                     .await?;
                     report.fetched += raw.len();
-                    report.inserted += write_kline_candles(
-                        app,
-                        symbol,
-                        interval,
-                        raw,
-                        "history-repair",
-                    )
-                    .await?;
+                    report.inserted +=
+                        write_kline_candles(app, symbol, interval, raw, "history-repair").await?;
                 }
                 let stale_unconfirmed =
                     stale_unconfirmed_reason_open_times(&report.invalid_reasons);
@@ -12167,7 +12186,8 @@ fn build_account_performance_summary(
     let unattributed_net_pnl = ledger.net_pnl - attributed_net_pnl;
     let unattributed_fees = ledger.fees - attributed_fees;
     if unattributed_net_pnl.abs() > 1e-8 || unattributed_fees.abs() > 1e-8 {
-        warnings.push("部分账户账单未匹配到交易归因，已计入未归因；来源统计覆盖不完整。".to_string());
+        warnings
+            .push("部分账户账单未匹配到交易归因，已计入未归因；来源统计覆盖不完整。".to_string());
         let bucket = attribution.entry("unknown".to_string()).or_default();
         bucket.net_pnl += unattributed_net_pnl;
         bucket.fees += unattributed_fees.max(0.0);
@@ -12238,8 +12258,8 @@ fn build_account_performance_summary(
     }
 
     let start_equity = totals.start_equity;
-    let attribution_complete = unattributed_net_pnl.abs() <= 1e-8
-        && unattributed_fees.abs() <= 1e-8;
+    let attribution_complete =
+        unattributed_net_pnl.abs() <= 1e-8 && unattributed_fees.abs() <= 1e-8;
     let mut summary = AccountPerformanceSummary {
         account_id: account_id.to_string(),
         environment: environment.to_string(),
@@ -12349,8 +12369,14 @@ fn build_equity_curve(
     if equity_rows.is_empty() {
         return Vec::new();
     }
-    let first_time = equity_rows.first().map(|item| item.time).unwrap_or_default();
-    let last_time = equity_rows.last().map(|item| item.time).unwrap_or(first_time);
+    let first_time = equity_rows
+        .first()
+        .map(|item| item.time)
+        .unwrap_or_default();
+    let last_time = equity_rows
+        .last()
+        .map(|item| item.time)
+        .unwrap_or(first_time);
     let sample_start = start_time.unwrap_or(first_time).max(first_time);
     let sample_end = end_time.unwrap_or(last_time).max(last_time);
     let needs_window_sampling = sample_start > first_time || sample_end > last_time;
@@ -13034,10 +13060,7 @@ fn is_recoverable_strategy_ai_tool_error(session_id: &str, message: &str) -> boo
     if !session_id.starts_with("systematic-strategy-ai-") {
         return false;
     }
-    let Some((count, detail)) = message
-        .trim()
-        .split_once(" tool call(s) failed:")
-    else {
+    let Some((count, detail)) = message.trim().split_once(" tool call(s) failed:") else {
         return false;
     };
     count
@@ -13321,7 +13344,10 @@ async fn run_ai_stream(
     // Inserted after construction: the config literal above is already at the
     // json! macro's recursion limit, so one more inline key fails to compile.
     let mut payload = payload;
-    if let Some(config_payload) = payload.get_mut("config").and_then(|value| value.as_object_mut()) {
+    if let Some(config_payload) = payload
+        .get_mut("config")
+        .and_then(|value| value.as_object_mut())
+    {
         config_payload.insert(
             "openAgent".to_string(),
             serde_json::Value::Bool(config.open_agent && run_context.is_none()),
@@ -13338,13 +13364,16 @@ async fn run_ai_stream(
             .and_then(|key| crate::storage_config::run_scoped_workspace_root(key).ok())
             .map(|path| path.to_string_lossy().into_owned());
         let workspace_root = run_scoped_root.unwrap_or_else(|| {
-            config
-                .workspace_roots
-                .first()
-                .cloned()
-                .unwrap_or_else(|| crate::storage_config::runtime_work_dir().to_string_lossy().into_owned())
+            config.workspace_roots.first().cloned().unwrap_or_else(|| {
+                crate::storage_config::runtime_work_dir()
+                    .to_string_lossy()
+                    .into_owned()
+            })
         });
-        config_payload.insert("workspaceRoot".to_string(), serde_json::Value::String(workspace_root));
+        config_payload.insert(
+            "workspaceRoot".to_string(),
+            serde_json::Value::String(workspace_root),
+        );
     }
     let payload = payload;
     emit_ai(
@@ -13711,6 +13740,7 @@ async fn run_ai_stream(
         .and_then(|context| context.run_id.clone());
     let metadata_run_id = persisted_run_id.clone();
     let persisted_usage = final_usage.clone();
+    let persisted_message_id = format!("a-{}", now_ms());
     let persist_result = tokio::task::spawn_blocking(move || {
         let mut conn = open_database(&persist_app)?;
         let tx = conn
@@ -13718,7 +13748,7 @@ async fn run_ai_stream(
             .map_err(|error| error.to_string())?;
         upsert_ai_message(
             &tx,
-            &format!("a-{}", now_ms()),
+            &persisted_message_id,
             &persist_session_id,
             "assistant",
             &persist_assistant_text,
@@ -13726,6 +13756,7 @@ async fn run_ai_stream(
             Some(&tool_json),
             Some(message_status),
         )?;
+        persist_ai_message_usage_summary(&tx, &persisted_message_id, &persisted_usage)?;
         if let Some(run_id) = metadata_run_id.as_deref() {
             crate::ai_automation::persist_ai_automation_run_metadata(
                 &tx,
@@ -15671,7 +15702,9 @@ fn decode_search_html(value: &str) -> String {
         .replace("&lt;", "<")
         .replace("&gt;", ">");
     while let Some(start) = output.find('<') {
-        let Some(end) = output[start..].find('>') else { break };
+        let Some(end) = output[start..].find('>') else {
+            break;
+        };
         output.replace_range(start..start + end + 1, "");
     }
     output.trim().to_string()
@@ -15681,15 +15714,25 @@ fn parse_duckduckgo_results(html: &str, limit: usize) -> Vec<Value> {
     let mut results = Vec::new();
     let mut cursor = 0;
     while results.len() < limit {
-        let Some(marker) = html[cursor..].find("class=\"result__a\"") else { break };
+        let Some(marker) = html[cursor..].find("class=\"result__a\"") else {
+            break;
+        };
         let marker = cursor + marker;
-        let Some(href_start) = html[..marker].rfind("href=\"") else { break };
+        let Some(href_start) = html[..marker].rfind("href=\"") else {
+            break;
+        };
         let href_start = href_start + 6;
-        let Some(href_end) = html[href_start..].find('"') else { break };
+        let Some(href_end) = html[href_start..].find('"') else {
+            break;
+        };
         let href = decode_search_html(&html[href_start..href_start + href_end]);
-        let Some(title_start) = html[marker..].find('>') else { break };
+        let Some(title_start) = html[marker..].find('>') else {
+            break;
+        };
         let title_start = marker + title_start + 1;
-        let Some(title_end) = html[title_start..].find("</a>") else { break };
+        let Some(title_end) = html[title_start..].find("</a>") else {
+            break;
+        };
         let title = decode_search_html(&html[title_start..title_start + title_end]);
         let snippet = html[title_start + title_end..]
             .find("result__snippet")
@@ -15721,7 +15764,11 @@ async fn ai_web_search(request: AiWebSearchRequest) -> Result<Value, String> {
     let mut url = reqwest::Url::parse("https://html.duckduckgo.com/html/")
         .map_err(|err| format!("搜索地址无效：{err}"))?;
     url.query_pairs_mut().append_pair("q", query);
-    if let Some(region) = request.region.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(region) = request
+        .region
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
         url.query_pairs_mut().append_pair("kl", region.trim());
     }
     let response = reqwest_client()?
@@ -15792,11 +15839,7 @@ async fn execute_ai_tool(
             .filter(|value| !value.is_empty())
             .and_then(|key| crate::storage_config::run_scoped_workspace_root(key).ok())
             .map(|root| root.join(".cline").join("skills"));
-        let active = context
-            .active_skill_ids
-            .iter()
-            .cloned()
-            .collect::<Vec<_>>();
+        let active = context.active_skill_ids.iter().cloned().collect::<Vec<_>>();
         let contents = crate::storage_config::read_cline_skill_resource(
             &skill_id,
             &path,
@@ -15820,7 +15863,9 @@ async fn execute_ai_tool(
                     | "strategy.applySource"
             )
         {
-            return Err("AI 交易助手不能访问或修改当前策略编辑器；请操作本会话创建的策略".to_string());
+            return Err(
+                "AI 交易助手不能访问或修改当前策略编辑器；请操作本会话创建的策略".to_string(),
+            );
         }
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }
@@ -15849,7 +15894,8 @@ async fn execute_ai_tool(
     }
     match canonical_name {
         "research.webSearch" => {
-            let request: AiWebSearchRequest = serde_json::from_value(input).map_err(|err| err.to_string())?;
+            let request: AiWebSearchRequest =
+                serde_json::from_value(input).map_err(|err| err.to_string())?;
             ai_web_search(request).await
         }
         "market.readTicker" => {
@@ -18542,7 +18588,7 @@ async fn evaluate_ai_trade_plan_with_account(
             .unwrap_or((None, None, "unavailable".to_string()))
     };
     let order_type = request.order_type.as_deref().unwrap_or("limit");
-    let entry_fee_rate = if order_type == "market" {
+    let entry_fee_rate = if matches!(order_type, "market" | "trigger") {
         "0.0005"
     } else {
         "0.0002"
@@ -18573,7 +18619,15 @@ async fn evaluate_ai_trade_plan_with_account(
                 .max_single_trade_margin_pct
                 .filter(|value| value.is_finite() && *value > 0.0)
                 .map(|value| trim_float(value.clamp(1.0, 100.0))),
+            direction: match request.action.as_deref() {
+                Some("long") => Some(desic_trade_domain::LinearUsdtDirection::Long),
+                Some("short") => Some(desic_trade_domain::LinearUsdtDirection::Short),
+                _ => None,
+            },
             stop_price: request.stop_price.filter(|value| !value.trim().is_empty()),
+            target_price: request
+                .target_price
+                .filter(|value| !value.trim().is_empty()),
             atr: request.atr.filter(|value| !value.trim().is_empty()),
             entry_fee_rate: entry_fee_rate.to_string(),
             exit_fee_rate: "0.0005".to_string(),
@@ -18592,6 +18646,12 @@ async fn evaluate_ai_trade_plan_with_account(
         "priceObservedAt": price_observed_at,
         "accountSnapshotSource": snapshot_source,
         "leverage": leverage,
+        "feeRateSource": "conservative-default",
+        "frictionCoverage": {
+            "feesIncluded": true,
+            "slippageIncluded": false,
+            "fundingIncluded": false
+        },
         "evaluation": evaluation,
         "semantics": {
             "size": "OKX 合约张数",
@@ -18602,8 +18662,11 @@ async fn evaluate_ai_trade_plan_with_account(
             "estimatedInitialMarginUsdt": "名义敞口 ÷ 杠杆，表示预估初始保证金",
             "marginPctOfEquity": "预估初始保证金 ÷ USDT 权益",
             "stopRiskPctOfEquity": "含双边手续费止损 ÷ USDT 权益",
+            "estimatedNetProfitAtTargetUsdt": "目标毛收益减去入场手续费和目标退出手续费；不含滑点与资金费",
+            "netRewardRiskRatio": "目标净收益 ÷ 含双边手续费止损损失",
+            "feeDragPctOfGrossProfit": "目标双边手续费 ÷ 目标毛收益",
             "oneAtrRiskPctOfEquity": "size × ctVal × ATR ÷ USDT 权益；ATR 是价格距离，不是账户亏损",
-            "leverage": "固定张数下，杠杆只改变预估保证金，不改变价格盈亏"
+            "leverage": "固定张数下，杠杆只改变预估保证金及费用相对保证金的比例，不改变绝对手续费或价格盈亏"
         },
         "executionAuthority": {
             "hardBlocker": false,
@@ -18637,7 +18700,9 @@ async fn add_profile_position_sizing_limit(
             account_id: run.account_id.clone(),
             inst_id: inst_id.clone(),
             price: None,
+            action: None,
             stop_price: None,
+            target_price: None,
             atr: None,
             size: None,
             lever: run.target_leverage.to_string(),
@@ -18948,11 +19013,7 @@ fn ai_read_memory_account_snapshot(
     store.private_snapshot.clone()
 }
 
-fn mark_memory_private_snapshot_incomplete(
-    runtime: &MarketRuntime,
-    account_id: &str,
-    error: &str,
-) {
+fn mark_memory_private_snapshot_incomplete(runtime: &MarketRuntime, account_id: &str, error: &str) {
     let Ok(mut store) = runtime.store.lock() else {
         return;
     };
@@ -19361,6 +19422,8 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           content TEXT NOT NULL,
           reasoning TEXT,
           tool_json TEXT,
+          token_usage_json TEXT,
+          token_usage_version INTEGER NOT NULL DEFAULT 0,
           status TEXT,
           created_at INTEGER NOT NULL
         );
@@ -19368,6 +19431,8 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           ON ai_messages(session_id, created_at ASC);
         CREATE INDEX IF NOT EXISTS idx_ai_messages_cleanup
           ON ai_messages(session_id, created_at DESC);
+        CREATE INDEX IF NOT EXISTS idx_ai_messages_usage_window
+          ON ai_messages(role, created_at) WHERE token_usage_json IS NOT NULL;
         CREATE TABLE IF NOT EXISTS okx_orders (
           account_id TEXT NOT NULL,
           environment TEXT NOT NULL,
@@ -20275,7 +20340,7 @@ fn delete_ai_session(conn: &Connection, session_id: &str) -> Result<(), String> 
 fn load_ai_messages(conn: &Connection, session_id: &str) -> Result<Vec<AiStoredMessage>, String> {
     let mut stmt = conn
         .prepare(
-            "SELECT id, session_id, role, content, reasoning, tool_json, status, created_at
+            "SELECT id, session_id, role, content, reasoning, tool_json, token_usage_json, status, created_at
              FROM ai_messages WHERE session_id = ?1 ORDER BY created_at ASC",
         )
         .map_err(|err| err.to_string())?;
@@ -20288,8 +20353,11 @@ fn load_ai_messages(conn: &Connection, session_id: &str) -> Result<Vec<AiStoredM
                 content: row.get(3)?,
                 reasoning: row.get(4)?,
                 tool_json: row.get(5)?,
-                status: row.get(6)?,
-                created_at: row.get(7)?,
+                token_usage: row
+                    .get::<_, Option<String>>(6)?
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                status: row.get(7)?,
+                created_at: row.get(8)?,
             })
         })
         .map_err(|err| err.to_string())?;
@@ -20338,6 +20406,8 @@ fn upsert_ai_message(
            content = excluded.content,
            reasoning = excluded.reasoning,
            tool_json = excluded.tool_json,
+           token_usage_json = NULL,
+           token_usage_version = 0,
            status = excluded.status",
         params![id, session_id, role, content, reasoning, tool_json, status, now_ms()],
     )
@@ -20779,9 +20849,7 @@ fn aggregate_candles_from_1m_with_overlay(
     let start_open = start_time
         .map(|value| align_open_time(value.saturating_mul(1000), bar, step))
         .unwrap_or_else(|| {
-            end_open.saturating_sub(
-                step.saturating_mul((bounded_limit as i64).saturating_sub(1)),
-            )
+            end_open.saturating_sub(step.saturating_mul((bounded_limit as i64).saturating_sub(1)))
         });
     let source_end_open = if bar == "1m" {
         end_open
@@ -22023,8 +22091,7 @@ pub(crate) async fn ensure_okx_long_short_mode(
     if account.exchange.to_lowercase() != "okx" {
         return Err("unsupported exchange".to_string());
     }
-    let config = match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config")
-        .await
+    let config = match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config").await
     {
         Ok(envelope) => envelope
             .data
@@ -22040,7 +22107,7 @@ pub(crate) async fn ensure_okx_long_short_mode(
                     cache.remove(&account_config_cache_key(account));
                 }
             }
-            return Ok(())
+            return Ok(());
         }
         "net_mode" => {}
         other => {
@@ -22050,34 +22117,30 @@ pub(crate) async fn ensure_okx_long_short_mode(
         }
     }
     if !account.permissions.trade {
-        let cause = "API Key 没有交易权限，无法调用持仓模式切换接口 / the API key has no trade permission";
+        let cause =
+            "API Key 没有交易权限，无法调用持仓模式切换接口 / the API key has no trade permission";
         emit_account_position_mode_switch_failed(app, account, cause);
         return Err(account_position_mode_switch_error(cause));
     }
     let request = json!({ "posMode": "long_short_mode" });
-    if let Err(error) = okx_private_post::<Value, _>(
-        account,
-        "/api/v5/account/set-position-mode",
-        &request,
-    )
-    .await
+    if let Err(error) =
+        okx_private_post::<Value, _>(account, "/api/v5/account/set-position-mode", &request).await
     {
         emit_account_position_mode_switch_failed(app, account, &error);
         return Err(account_position_mode_switch_error(&error));
     }
-    let verified = match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config")
-        .await
-    {
-        Ok(envelope) => envelope
-            .data
-            .into_iter()
-            .next()
-            .ok_or_else(|| "OKX 账户配置为空".to_string())?,
-        Err(error) => {
-            emit_account_position_mode_switch_failed(app, account, &error);
-            return Err(account_position_mode_switch_error(&error));
-        }
-    };
+    let verified =
+        match okx_private_get::<OkxAccountConfig>(account, "/api/v5/account/config").await {
+            Ok(envelope) => envelope
+                .data
+                .into_iter()
+                .next()
+                .ok_or_else(|| "OKX 账户配置为空".to_string())?,
+            Err(error) => {
+                emit_account_position_mode_switch_failed(app, account, &error);
+                return Err(account_position_mode_switch_error(&error));
+            }
+        };
     if verified.pos_mode.trim() != "long_short_mode" {
         let cause = format!(
             "切换接口已返回，但重新读取到账户模式仍为 {} / the verified position mode is still {}",
@@ -22301,7 +22364,10 @@ fn okx_position_used_margin(position: &OkxPosition, notional: f64, leverage: f64
         let notional = (notional.is_finite() && notional > 0.0).then_some(notional)?;
         let leverage = (leverage.is_finite() && leverage > 0.0).then_some(leverage)?;
         let estimated = notional / leverage;
-        estimated.is_finite().then_some(estimated).filter(|number| *number > 0.0)
+        estimated
+            .is_finite()
+            .then_some(estimated)
+            .filter(|number| *number > 0.0)
     })
 }
 
@@ -22363,7 +22429,11 @@ fn expand_scientific_float(compact: &str, exponent_index: usize) -> String {
     let expanded = if decimal_index <= 0 {
         format!("0.{}{}", "0".repeat((-decimal_index) as usize), digits)
     } else if decimal_index as usize >= digits.len() {
-        format!("{}{}", digits, "0".repeat(decimal_index as usize - digits.len()))
+        format!(
+            "{}{}",
+            digits,
+            "0".repeat(decimal_index as usize - digits.len())
+        )
     } else {
         let index = decimal_index as usize;
         format!("{}.{}", &digits[..index], &digits[index..])
@@ -23202,21 +23272,25 @@ mod tests {
             "a new database must accept incremental auto_vacuum"
         );
 
-        conn.execute_batch(
-            "CREATE TABLE bulk(id INTEGER PRIMARY KEY, blob TEXT NOT NULL);",
-        )
-        .expect("schema");
+        conn.execute_batch("CREATE TABLE bulk(id INTEGER PRIMARY KEY, blob TEXT NOT NULL);")
+            .expect("schema");
         let payload = "x".repeat(4_000);
         for id in 0..500 {
-            conn.execute("INSERT INTO bulk(id, blob) VALUES(?1, ?2)", params![id, payload])
-                .expect("insert");
+            conn.execute(
+                "INSERT INTO bulk(id, blob) VALUES(?1, ?2)",
+                params![id, payload],
+            )
+            .expect("insert");
         }
         conn.execute_batch("DELETE FROM bulk;").expect("delete");
 
         let free_before: i64 = conn
             .query_row("PRAGMA freelist_count", [], |row| row.get(0))
             .expect("freelist");
-        assert!(free_before > 0, "deleting rows must leave reclaimable pages");
+        assert!(
+            free_before > 0,
+            "deleting rows must leave reclaimable pages"
+        );
 
         reclaim_free_database_pages(&conn);
 
@@ -23310,7 +23384,10 @@ mod tests {
                     |row| row.get::<_, i64>(0),
                 )
                 .expect("read chart snapshot during WAL write");
-            assert_eq!(visible_rows, 1, "uncommitted K-line rows must stay out of the chart snapshot");
+            assert_eq!(
+                visible_rows, 1,
+                "uncommitted K-line rows must stay out of the chart snapshot"
+            );
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
         drop(reader);
@@ -23319,7 +23396,9 @@ mod tests {
 
         let conn = Connection::open(database.path()).expect("reopen WAL database");
         let total_rows = conn
-            .query_row("SELECT COUNT(*) FROM candles", [], |row| row.get::<_, i64>(0))
+            .query_row("SELECT COUNT(*) FROM candles", [], |row| {
+                row.get::<_, i64>(0)
+            })
             .expect("count committed WAL rows");
         assert_eq!(total_rows, 2_001);
     }
@@ -23343,9 +23422,7 @@ mod tests {
         // recent daily archive with an eight-hour delay.
         let day_ms = 86_400_000;
         let today_start = utc_day_start_ms(now);
-        let end_open = today_start
-            .saturating_sub(2 * day_ms)
-            .saturating_sub(step);
+        let end_open = today_start.saturating_sub(2 * day_ms).saturating_sub(step);
         let start_open = end_open
             .saturating_sub(365 * 86_400_000)
             .saturating_add(step);
@@ -23556,11 +23633,18 @@ mod tests {
             margin: "8".to_string(),
             ..Default::default()
         };
-        let isolated_margin = okx_position_used_margin(&isolated, 100.0, 10.0).expect("isolated margin");
+        let isolated_margin =
+            okx_position_used_margin(&isolated, 100.0, 10.0).expect("isolated margin");
         assert!((isolated_margin - 8.0).abs() < 1e-12);
     }
 
-    fn position_fixture(inst_id: &str, pos_side: &str, pos: &str, pos_id: &str, u_time: &str) -> OkxPosition {
+    fn position_fixture(
+        inst_id: &str,
+        pos_side: &str,
+        pos: &str,
+        pos_id: &str,
+        u_time: &str,
+    ) -> OkxPosition {
         OkxPosition {
             inst_id: inst_id.to_string(),
             inst_type: "SWAP".to_string(),
@@ -23606,13 +23690,19 @@ mod tests {
                 .and_then(|position| position.pos.parse::<f64>().ok()),
             Some(4.0)
         );
-        assert!(snapshot.positions.iter().any(|position| position.pos_id == "eth-1"));
+        assert!(snapshot
+            .positions
+            .iter()
+            .any(|position| position.pos_id == "eth-1"));
         merge_private_position_delta(
             &mut snapshot,
             &[position_fixture("BTC-USDT-SWAP", "long", "0", "btc-1", "9")],
             PrivatePositionSequence::default(),
         );
-        assert!(snapshot.positions.iter().any(|position| position.pos_id == "btc-1"));
+        assert!(snapshot
+            .positions
+            .iter()
+            .any(|position| position.pos_id == "btc-1"));
     }
 
     #[test]
@@ -23621,7 +23711,13 @@ mod tests {
             account_id: "account".to_string(),
             environment: "live".to_string(),
             balances: Vec::new(),
-            positions: vec![position_fixture("BTC-USDT-SWAP", "long", "2", "btc-1", "10")],
+            positions: vec![position_fixture(
+                "BTC-USDT-SWAP",
+                "long",
+                "2",
+                "btc-1",
+                "10",
+            )],
             orders: Vec::new(),
             positions_complete: true,
             position_seq_id: Some(10),
@@ -23631,7 +23727,13 @@ mod tests {
         };
         merge_private_position_delta(
             &mut snapshot,
-            &[position_fixture("BTC-USDT-SWAP", "long", "5", "btc-1", "12")],
+            &[position_fixture(
+                "BTC-USDT-SWAP",
+                "long",
+                "5",
+                "btc-1",
+                "12",
+            )],
             PrivatePositionSequence {
                 seq_id: Some(12),
                 prev_seq_id: Some(11),
@@ -23788,12 +23890,21 @@ mod tests {
         let fills = load_historical_fills(&conn, "acc", "demo", Some("BTC-USDT-SWAP"), 10)
             .expect("fill query with joins must not be ambiguous");
         assert_eq!(fills.len(), 3);
-        let ai = fills.iter().find(|fill| fill.bill_id == "bill-ai").expect("ai fill");
+        let ai = fills
+            .iter()
+            .find(|fill| fill.bill_id == "bill-ai")
+            .expect("ai fill");
         assert_eq!(ai.ai_profile_id.as_deref(), Some("ai-p1"));
         assert_eq!(ai.ai_profile_name.as_deref(), Some("网格机器人"));
-        let strategy = fills.iter().find(|fill| fill.bill_id == "bill-sp").expect("strategy fill");
+        let strategy = fills
+            .iter()
+            .find(|fill| fill.bill_id == "bill-sp")
+            .expect("strategy fill");
         assert_eq!(strategy.strategy_name.as_deref(), Some("双EMA策略"));
-        let user = fills.iter().find(|fill| fill.bill_id == "bill-user").expect("user fill");
+        let user = fills
+            .iter()
+            .find(|fill| fill.bill_id == "bill-user")
+            .expect("user fill");
         assert!(user.ai_profile_id.is_none());
         assert!(user.strategy_name.is_none());
     }
@@ -24009,10 +24120,8 @@ mod tests {
 
     #[test]
     fn insufficient_margin_overrides_a_generic_510_parameter_category() {
-        let (category, _, _, retryable) = classify_okx_error(
-            "51008",
-            "Order failed. Insufficient USDT margin in account",
-        );
+        let (category, _, _, retryable) =
+            classify_okx_error("51008", "Order failed. Insufficient USDT margin in account");
         assert_eq!(category, "risk_or_balance");
         assert!(!retryable);
     }
@@ -25636,6 +25745,12 @@ mod tests {
             "ai_optimization_suggestions",
             "proposed_skill_json"
         ));
+        assert!(table_has_column(&conn, "ai_messages", "token_usage_json"));
+        assert!(table_has_column(
+            &conn,
+            "ai_messages",
+            "token_usage_version"
+        ));
     }
 
     #[test]
@@ -26040,13 +26155,23 @@ mod tests {
                 .expect("high timeframe fixture has candles")
                 .time
                 * 1_000;
-            assert_eq!(candles.len(), 300, "{bar} must return the requested recent window");
+            assert_eq!(
+                candles.len(),
+                300,
+                "{bar} must return the requested recent window"
+            );
             assert_eq!(
                 candles.first().map(|candle| candle.time),
                 Some((end_open_ms - step_ms * 299) / 1_000),
             );
-            assert_eq!(candles.last().map(|candle| candle.time), Some(end_open_ms / 1_000));
-            assert!(candles.iter().all(|candle| candle.confirm), "{bar} fixture buckets are complete");
+            assert_eq!(
+                candles.last().map(|candle| candle.time),
+                Some(end_open_ms / 1_000)
+            );
+            assert!(
+                candles.iter().all(|candle| candle.confirm),
+                "{bar} fixture buckets are complete"
+            );
         }
     }
 

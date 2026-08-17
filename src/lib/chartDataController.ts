@@ -149,6 +149,10 @@ export class ChartDataController {
     this.series.delete(toSeriesId(key));
   }
 
+  clearAll(): void {
+    this.series.clear();
+  }
+
   private noChange(key: ChartSeriesKey, state: ChartSeriesState): ChartDataPatch {
     return { type: "noChange", key, cursor: this.cursorFor(state) };
   }

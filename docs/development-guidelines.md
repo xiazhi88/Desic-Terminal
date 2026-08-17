@@ -199,6 +199,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - `desic-core-operations`、`trading-philosophy`、`okx-news-intelligence`、`okx-smart-money-analysis` 是全局必需 Skills：界面必须显示为已启用且不可关闭，Rust 保存和读取配置时必须补齐三项显式 Skill；`desic-core-operations` 继续作为不可编辑的隐式固定规范，不写入 `enabledSkills`。`trading-philosophy` 必需但可定制，升级默认内容时只能迁移完全未修改的旧内置版本，必须保留用户自定义内容；其默认理念约束证据、风险和可修正性，不得把具体指标、周期、盈亏比或风险比例固化为普适规则。
 - 默认系统 Prompt 与四个内置 Skill 的基线统一维护在 `shared/default-ai-config.json`，Rust、前端和 Sidecar 不得各自复制一份。默认基线升级只能按旧内容精确匹配或指纹迁移；任何用户编辑过的 Prompt 或 Skill 都必须原样保留。
 - Cline Core 0.0.56 的 `subscribe` 流式文本和 reasoning 增量位于 `agent_event.payload.event`，并以每段一个 `content_start` 事件发送；sidecar 必须同时映射嵌套的 text、reasoning 和 tool 事件，不能只处理顶层 delta 或等待 `content_end`，否则 UI 会停在 running，直到结束后一次性显示。
+- Cline Legacy `usage` 事件同时携带本次模型调用增量和当前 Run 累计值；统计整轮用量必须优先使用 `totalInputTokens/totalOutputTokens/totalCache*`，旧事件缺少累计缓存时才累加缓存增量，禁止只取最后一条 `inputTokens/outputTokens`。规范化后的 `inputTokens` 是包含缓存读取/写入的完整 prompt 输入，cache 只是细分，`totalTokens=inputTokens+outputTokens` 不得再次加 cache。Reasoning 明细没有可靠上游覆盖时必须标记未报告，不能用 `0` 冒充真实值。
 - Cline 最终正文只认原生 `AgentDoneEvent.text`（同步 `start()` 结果只作为同结构兜底）。`content_start/content_end` 是当前 iteration 的内容块：可作为不落库的正文预览实时显示；出现 tool call 或 `iteration_end.hadToolCalls=true` 时通过结构化事件清空预览并将该轮文本归入过程区，无工具的最后一轮由 `done.text` 替换预览。禁止通过正文前缀、子串重叠、关键词或重复段落匹配来推断“过程/结果”。
 - AI 工具公开的 `startTime/endTime` 统一使用 13 位 Unix 毫秒时间戳；后端可兼容旧秒级值，但不得对已经是毫秒的值再次乘 1000。UTC 日窗口若上层使用 `[start, end)`，传给闭区间工具前必须将 `end` 减 1 毫秒。
 - AI 流式 reasoning/text 落库时应合并相邻 delta，并在工具、代理或审批事件处保留边界；历史加载端只按持久化事件类型恢复，不能通过正文内容猜测或修剪过程文本，也不能假设旧 `tool_json` 已经压缩。
@@ -219,7 +220,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 禁止向交易 Agent 暴露 `run_commands`、Shell、编辑器、apply_patch 或敏感配置读取工具。
 - Subagent 只读，不允许创建/修改机会、交易、通知、提醒或脚本；只有主 Agent 能产生外部副作用。
 - Profile 多 Agent 只允许 `off / auto / custom`；auto 每轮最多 8 个专家，custom 最多配置并启用 10 个成员且至少启用 2 个，启用成员数不能超过 Profile 上限。后台 Run 使用确定性 Subagent 编排，不开启持久 Team，避免长期会话状态替代本轮最新市场和账户证据。
-- Profile 选择 `auto / custom` 时，协作编排 UI 必须明确提示多 Agent 的 Token 成本显著高于常规模式（当前估计 10-50 倍）；提示只用于帮助用户取舍，不能暗中改变成员数量、模型或运行权限。
+- Profile 选择 `auto / custom` 时，协作编排 UI 必须明确提示 Token 用量会随 Agent 数量和迭代次数增加，并引导用户查看 AI 用量看板中的 Provider 报告统计；不得使用缺少同任务对照数据支持的固定倍数，也不能暗中改变成员数量、模型或运行权限。
 - 自定义 Agent 方案属于可复用配置，Profile 必须保存所选方案 ID 和独立成员快照；后续修改或删除方案不得改变已经保存或入队 Run 的成员定义。内置方案只读，用户方案保存时仍执行成员数量、稳定 ID、职责和数据范围校验。
 - 每个 configured Agent 必须有稳定 ID、明确职责和受控数据范围。Sidecar 只暴露范围内工具，Rust 必须按 Run 的冻结 Profile 再校验 configured Agent 与 scope；不得只信任 Sidecar 自报的 `agentRole` 或工具名。
 - delegated Agent 的 `toolCall / toolResult` 事件必须在进入持久化与 UI 前绑定稳定的 configured Agent ID，不能依赖 SDK 是否附带可选 `agentId`。历史事件缺少归属时，UI 只允许用该 Agent 完成报告中的 `successfulTools` 恢复成功计数，并明确其为报告记录，不能补造调用参数、耗时或返回内容。
