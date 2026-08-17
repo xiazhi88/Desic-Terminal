@@ -2005,8 +2005,19 @@ export type FeishuConfigUpdate = {
   eventTypes: string[];
 };
 
+/** Realised result attributed to one Profile over a trailing window. Fills carry
+ *  the money and reference their run, so the Profile is reached through runs. */
+export type AiProfilePerformance = {
+  profileId: string;
+  netPnlUsdt: number;
+  feesUsdt: number;
+  fillCount: number;
+  windowDays: number;
+};
+
 export type AiAutomationSummary = {
   masterEnabled: boolean;
+  profilePerformance?: AiProfilePerformance[];
   agentSchemes: AiAgentScheme[];
   profiles: AiAgentProfile[];
   runs: AiAutomationRun[];
@@ -2020,7 +2031,7 @@ export type AiAutomationSummary = {
 
 export type AiAutomationOverview = Pick<
   AiAutomationSummary,
-  "masterEnabled" | "agentSchemes" | "profiles" | "skillVersions"
+  "masterEnabled" | "agentSchemes" | "profiles" | "skillVersions" | "profilePerformance"
 > & {
   counts: AiAutomationCounts;
 };

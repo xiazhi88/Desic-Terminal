@@ -483,6 +483,23 @@ pub(crate) struct AiAutomationOverview {
     pub agent_schemes: Vec<AiAgentScheme>,
     pub skill_versions: Vec<AiSkillVersionSummary>,
     pub counts: AiAutomationCounts,
+    pub profile_performance: Vec<AiProfilePerformance>,
+}
+
+/// Realised result attributed to one Profile over a trailing window.
+///
+/// A run does not carry money: profit lands on fills. Fills reference the run
+/// that produced them via `agent_run_id`, so the Profile is reached through
+/// `ai_agent_runs`. Fees arrive already signed negative, so the net figure is
+/// `fill_pnl + fee` — the same convention the account performance page uses.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiProfilePerformance {
+    pub profile_id: String,
+    pub net_pnl_usdt: f64,
+    pub fees_usdt: f64,
+    pub fill_count: i64,
+    pub window_days: i64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1061,6 +1078,7 @@ pub(crate) async fn ai_automation_overview(
             agent_schemes: load_agent_schemes(&conn)?,
             skill_versions: load_skill_versions(&conn, 200)?,
             counts: load_automation_counts(&conn)?,
+            profile_performance: load_profile_performance(&conn, PROFILE_PERFORMANCE_WINDOW_DAYS)?,
         })
     })
     .await
@@ -1070,6 +1088,54 @@ pub(crate) async fn ai_automation_overview(
 pub(crate) fn sync_ai_skill_versions(app: &tauri::AppHandle) -> Result<(), String> {
     let conn = open_automation_database(app)?;
     ensure_skill_versions(app, &conn)
+}
+
+/// Trailing window used for the Profile cards. Seven days was too short in
+/// practice: an account that traded a couple of weeks ago showed no result at
+/// all, so the card looked broken rather than quiet. Thirty days covers a normal
+/// review cycle while still describing current behaviour.
+const PROFILE_PERFORMANCE_WINDOW_DAYS: i64 = 30;
+
+/// Aggregates realised profit per Profile over the trailing window.
+///
+/// Only fills that name a run are counted: a manual trade on the same account
+/// is not this Profile's result. Rows with unparsable numbers contribute zero
+/// rather than poisoning the sum.
+fn load_profile_performance(
+    conn: &Connection,
+    window_days: i64,
+) -> Result<Vec<AiProfilePerformance>, String> {
+    let since = now_ms() - window_days * 24 * 60 * 60 * 1000;
+    let mut statement = conn
+        .prepare(
+            "SELECT ar.profile_id,
+                    COALESCE(SUM(CAST(f.fill_pnl AS REAL)), 0.0) AS pnl,
+                    COALESCE(SUM(CAST(f.fee AS REAL)), 0.0) AS fee,
+                    COUNT(*) AS fills
+             FROM okx_fills f
+             JOIN ai_agent_runs ar ON ar.id = f.agent_run_id
+             WHERE f.agent_run_id IS NOT NULL
+               AND f.okx_ts >= ?1
+             GROUP BY ar.profile_id",
+        )
+        .map_err(|err| err.to_string())?;
+    let rows = statement
+        .query_map(params![since], |row| {
+            let pnl: f64 = row.get(1)?;
+            let fee: f64 = row.get(2)?;
+            Ok(AiProfilePerformance {
+                profile_id: row.get(0)?,
+                // Fees are stored negative, so adding them yields the net result.
+                net_pnl_usdt: pnl + fee,
+                fees_usdt: fee.abs(),
+                fill_count: row.get(3)?,
+                window_days,
+            })
+        })
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    Ok(rows)
 }
 
 fn load_automation_counts(conn: &Connection) -> Result<AiAutomationCounts, String> {
@@ -6200,6 +6266,20 @@ pub(crate) fn enqueue_closed_episode_reviews(
     Ok(created)
 }
 
+/// Ticks of uninterrupted contention tolerated before the user is told. At one
+/// retry every two seconds this is roughly half a minute of silent retrying,
+/// long enough to outlast a large backtest report or a candle backfill.
+const CONTENTION_ESCALATION_TICKS: u32 = 15;
+
+/// True when a scheduler error is SQLite lock contention rather than a real
+/// fault. Matched on the text because the error reaches this layer as a String.
+fn is_transient_database_contention(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("database is locked")
+        || lowered.contains("database table is locked")
+        || lowered.contains("database is busy")
+}
+
 pub(crate) fn start_ai_automation_worker(app: tauri::AppHandle) {
     let runtime = app.state::<AiAutomationRuntime>().inner().clone();
     if runtime.started.swap(true, Ordering::SeqCst) {
@@ -6244,12 +6324,31 @@ pub(crate) fn start_ai_automation_worker(app: tauri::AppHandle) {
                 );
             }
         }
+        // Consecutive busy-database ticks. Any completed tick resets it, so only
+        // sustained contention is escalated to the user.
+        let mut consecutive_contention: u32 = 0;
         loop {
             tokio::select! {
                 _ = sleep(Duration::from_secs(2)) => {},
                 _ = runtime.notify.notified() => {},
             }
             if let Err(message) = automation_tick(app.clone(), runtime.clone()).await {
+                // A busy database is a transient peer conflict, not a failure of
+                // this Profile: the next tick a couple of seconds later succeeds.
+                // Reporting it as a run failure sent users to the runs tab for
+                // something that needed no action, so it is logged and retried
+                // instead. Repeated contention still escalates so a genuinely
+                // stuck writer stays visible.
+                if is_transient_database_contention(&message) {
+                    consecutive_contention = consecutive_contention.saturating_add(1);
+                    eprintln!(
+                        "automation_tick database contention (attempt {consecutive_contention}): {message}"
+                    );
+                    if consecutive_contention < CONTENTION_ESCALATION_TICKS {
+                        sleep(Duration::from_secs(2)).await;
+                        continue;
+                    }
+                }
                 let _ = app.emit(
                     AUTOMATION_EVENT,
                     json!({
@@ -6258,7 +6357,10 @@ pub(crate) fn start_ai_automation_worker(app: tauri::AppHandle) {
                         "action": { "tab": "runs" }
                     }),
                 );
+                consecutive_contention = 0;
                 sleep(Duration::from_secs(5)).await;
+            } else {
+                consecutive_contention = 0;
             }
         }
     });
@@ -8360,6 +8462,72 @@ fn load_review_evidence(app: &tauri::AppHandle, episode_id: &str) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_performance_attributes_only_this_profile_s_fills() {
+        let conn = Connection::open_in_memory().expect("database");
+        conn.execute_batch(
+            "CREATE TABLE ai_agent_runs(id TEXT PRIMARY KEY, profile_id TEXT NOT NULL);
+             CREATE TABLE okx_fills(
+               bill_id TEXT PRIMARY KEY, fill_pnl TEXT, fee TEXT,
+               agent_run_id TEXT, okx_ts INTEGER NOT NULL);
+             INSERT INTO ai_agent_runs(id, profile_id) VALUES('run-a','profile-a'),('run-b','profile-b');",
+        )
+        .expect("schema");
+        let now = now_ms();
+        let insert = |bill: &str, pnl: &str, fee: &str, run: Option<&str>, ts: i64| {
+            conn.execute(
+                "INSERT INTO okx_fills(bill_id, fill_pnl, fee, agent_run_id, okx_ts) VALUES(?1,?2,?3,?4,?5)",
+                params![bill, pnl, fee, run, ts],
+            )
+            .expect("insert fill");
+        };
+        // Profile A: a win and a loss inside the window. Fees are stored negative,
+        // so the net figure must be pnl + fee.
+        insert("f1", "1.5", "-0.1", Some("run-a"), now - 1_000);
+        insert("f2", "-0.5", "-0.2", Some("run-a"), now - 2_000);
+        // Profile B, so grouping must keep them apart.
+        insert("f3", "2.0", "-0.3", Some("run-b"), now - 3_000);
+        // A manual trade on the same account is nobody's automation result.
+        insert("f4", "99.0", "-1.0", None, now - 4_000);
+        // Older than the window.
+        insert("f5", "50.0", "-5.0", Some("run-a"), now - 30 * 24 * 60 * 60 * 1000);
+
+        // The shipped window is asserted separately; the label shown on the card
+        // must describe the same period the query uses.
+        assert_eq!(PROFILE_PERFORMANCE_WINDOW_DAYS, 30);
+        let rows = load_profile_performance(&conn, 7).expect("aggregate");
+        let of = |id: &str| rows.iter().find(|row| row.profile_id == id).expect("row");
+
+        let a = of("profile-a");
+        assert!((a.net_pnl_usdt - 0.7).abs() < 1e-9, "net was {}", a.net_pnl_usdt);
+        assert!((a.fees_usdt - 0.3).abs() < 1e-9, "fees were {}", a.fees_usdt);
+        assert_eq!(a.fill_count, 2, "the out-of-window fill must be excluded");
+        assert_eq!(a.window_days, 7);
+
+        let b = of("profile-b");
+        assert!((b.net_pnl_usdt - 1.7).abs() < 1e-9, "net was {}", b.net_pnl_usdt);
+        assert_eq!(b.fill_count, 1);
+
+        // The unattributed fill must not create a phantom Profile.
+        assert_eq!(rows.len(), 2, "only Profiles with attributed fills are reported");
+    }
+
+    #[test]
+    fn database_contention_is_retried_but_real_faults_are_reported() {
+        // The messages SQLite produces when a peer holds the write lock. These
+        // must be retried silently instead of surfacing as a run failure.
+        assert!(is_transient_database_contention("database is locked"));
+        assert!(is_transient_database_contention(
+            "AI 自动化调度异常：database is locked"
+        ));
+        assert!(is_transient_database_contention("Database Is Locked"));
+        assert!(is_transient_database_contention("database table is locked"));
+        // Genuine faults must still reach the user.
+        assert!(!is_transient_database_contention("no such table: ai_agent_runs"));
+        assert!(!is_transient_database_contention("OKX 下单失败：余额不足"));
+        assert!(!is_transient_database_contention("database disk image is malformed"));
+    }
 
     #[test]
     fn review_skill_version_is_limited_to_the_episode_decision_run() {
