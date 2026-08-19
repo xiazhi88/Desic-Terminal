@@ -1,4 +1,8 @@
 use super::*;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use desic_storage_config::{
     AiConfig, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiLocalAuthStatus,
     AiLocalCliStatus, AiModelConfig, AiModelConfigSummary, AiModelConfigUpdate, AiSkillDefinition,
@@ -1368,6 +1372,15 @@ fn ai_cli_candidates(program: &str) -> Vec<PathBuf> {
     unique
 }
 
+#[cfg(windows)]
+fn hide_ai_cli_command_window(command: &mut tokio::process::Command) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_ai_cli_command_window(_command: &mut tokio::process::Command) {}
+
 async fn ai_cli_output(program: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
     let mut command = if cfg!(windows) {
         let mut command = tokio::process::Command::new("cmd");
@@ -1376,6 +1389,7 @@ async fn ai_cli_output(program: &std::path::Path, args: &[&str]) -> Option<std::
     } else {
         tokio::process::Command::new(program)
     };
+    hide_ai_cli_command_window(&mut command);
     command.args(args).kill_on_drop(true);
     tokio::time::timeout(std::time::Duration::from_secs(8), command.output())
         .await
