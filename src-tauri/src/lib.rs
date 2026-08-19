@@ -37,6 +37,7 @@ use tokio::{
 };
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 mod ai_automation;
+mod ai_stream_checkpoint;
 mod app_updater;
 mod chart_alerts;
 mod chart_consumers;
@@ -1717,6 +1718,8 @@ enum AiEvent {
         session_id: String,
         channel: String,
         content: String,
+        reasoning_id: Option<String>,
+        reasoning_summary: Option<bool>,
     },
     #[serde(rename_all = "camelCase")]
     ToolCall {
@@ -2384,8 +2387,12 @@ fn ai_load_session(
 }
 
 #[tauri::command]
-fn ai_list_sessions(app: tauri::AppHandle) -> Result<Vec<AiSession>, String> {
+fn ai_list_sessions(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiRuntime>,
+) -> Result<Vec<AiSession>, String> {
     let conn = open_database(&app)?;
+    reconcile_orphaned_user_ai_sessions(&conn, runtime.inner())?;
     list_ai_sessions(&conn)
 }
 
@@ -2470,10 +2477,18 @@ async fn ai_send_message(
             )?;
         }
     }
-    stop_ai_session(&runtime, &request.session_id)?;
-    app.state::<SystematicRuntime>()
+    if let Err(message) = stop_ai_session(&runtime, &request.session_id) {
+        persist_ai_session_failure(&app, &request.session_id, &message);
+        return Err(message);
+    }
+    if let Err(message) = app
+        .state::<SystematicRuntime>()
         .begin_trading_strategy_ai_session(&request.session_id)
-        .await?;
+        .await
+    {
+        persist_ai_session_failure(&app, &request.session_id, &message);
+        return Err(message);
+    }
 
     let session_id = request.session_id.clone();
     let runtime_inner = runtime.inner().clone();
@@ -2518,19 +2533,14 @@ async fn ai_send_message(
                     message: message.clone(),
                 },
             );
-            if let Ok(conn) = open_database(&app_handle) {
-                let _ = set_ai_session_status(&conn, &task_session_id, "failed");
-                let _ = upsert_ai_message(
-                    &conn,
-                    &format!("a-error-{}", now_ms()),
-                    &task_session_id,
-                    "assistant",
-                    "",
-                    None,
-                    None,
-                    Some(&message),
-                );
-            }
+            persist_ai_session_failure(&app_handle, &task_session_id, &message);
+            emit_ai(
+                &app_handle,
+                AiEvent::Done {
+                    session_id: task_session_id.clone(),
+                    finish_reason: Some("error".to_string()),
+                },
+            );
         }
         if let Ok(mut tasks) = runtime_inner.tasks.lock() {
             tasks.remove(&task_session_id);
@@ -2648,19 +2658,14 @@ fn ai_generate_chart_indicator(
                     message: message.clone(),
                 },
             );
-            if let Ok(conn) = open_database(&app_handle) {
-                let _ = set_ai_session_status(&conn, &task_session_id, "failed");
-                let _ = upsert_ai_message(
-                    &conn,
-                    &format!("a-error-{}", now_ms()),
-                    &task_session_id,
-                    "assistant",
-                    "",
-                    None,
-                    None,
-                    Some(&message),
-                );
-            }
+            persist_ai_session_failure(&app_handle, &task_session_id, &message);
+            emit_ai(
+                &app_handle,
+                AiEvent::Done {
+                    session_id: task_session_id.clone(),
+                    finish_reason: Some("error".to_string()),
+                },
+            );
         }
         if let Ok(mut tasks) = runtime_inner.tasks.lock() {
             tasks.remove(&task_session_id);
@@ -13008,19 +13013,31 @@ fn ai_book_size_sum(levels: &[serde_json::Value]) -> f64 {
         .sum()
 }
 
-fn append_ai_process_event(events: &mut Vec<serde_json::Value>, event_type: &str, content: &str) {
+fn append_ai_process_event(
+    events: &mut Vec<serde_json::Value>,
+    event_type: &str,
+    content: &str,
+    item_id: Option<&str>,
+) {
     if content.is_empty() {
         return;
     }
     if let Some(last) = events.last_mut().and_then(serde_json::Value::as_object_mut) {
-        if last.get("type").and_then(serde_json::Value::as_str) == Some(event_type) {
+        let last_id = last.get("id").and_then(serde_json::Value::as_str);
+        if last.get("type").and_then(serde_json::Value::as_str) == Some(event_type)
+            && last_id == item_id
+        {
             if let Some(serde_json::Value::String(existing)) = last.get_mut("content") {
                 existing.push_str(content);
                 return;
             }
         }
     }
-    events.push(json!({ "type": event_type, "content": content }));
+    let mut event = json!({ "type": event_type, "content": content });
+    if let Some(item_id) = item_id.filter(|value| !value.is_empty()) {
+        event["id"] = serde_json::Value::String(item_id.to_string());
+    }
+    events.push(event);
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -13046,7 +13063,7 @@ fn ai_stream_terminal_state(
         return AiStreamTerminalState {
             message_status: "failed",
             session_status: "failed",
-            synthetic_finish_reason: None,
+            synthetic_finish_reason: Some("error"),
         };
     }
     AiStreamTerminalState {
@@ -13238,9 +13255,26 @@ async fn run_ai_stream(
     let required_tool_satisfied = Arc::new(AtomicBool::new(required_tool_name.is_none()));
     let tool_read_semaphore = Arc::new(Semaphore::new(4));
     let tool_execution_gate = Arc::new(AsyncRwLock::new(()));
+    let persisted_message_id = format!("a-stream-{}-{}", session_id, now_ms());
     let mut assistant_text = String::new();
+    let mut assistant_draft_text = String::new();
     let mut assistant_reasoning = String::new();
     let mut tool_events: Vec<serde_json::Value> = Vec::new();
+    let mut last_stream_checkpoint = Instant::now()
+        .checked_sub(Duration::from_millis(
+            ai_stream_checkpoint::AI_STREAM_CHECKPOINT_INTERVAL_MS,
+        ))
+        .unwrap_or_else(Instant::now);
+    ai_stream_checkpoint::persist_ai_stream_checkpoint(
+        &app,
+        &session_id,
+        &persisted_message_id,
+        "",
+        "",
+        &tool_events,
+        "streaming",
+    )
+    .await?;
     let (event_tx, mut event_rx) = mpsc::unbounded_channel::<AiEvent>();
     runtime
         .session_sinks
@@ -13405,19 +13439,36 @@ async fn run_ai_stream(
         );
         match &event {
             AiEvent::Delta {
-                channel, content, ..
+                channel,
+                content,
+                reasoning_id,
+                reasoning_summary,
+                ..
             } => {
                 if channel == "text-final" {
                     assistant_text.clone_from(content);
+                    assistant_draft_text.clone_from(content);
                 } else if channel == "reasoning-final" {
                     assistant_reasoning.clone_from(content);
-                } else if channel == "text-preview" || channel == "text-preview-clear" {
-                    // Preview events are transient UI state. The authoritative final text
-                    // arrives through AgentDoneEvent and is persisted as text-final.
+                } else if channel == "text-preview" {
+                    assistant_draft_text.clone_from(content);
+                } else if channel == "text-preview-clear" {
+                    assistant_draft_text.clear();
                 } else if channel == "reasoning" {
-                    append_ai_process_event(&mut tool_events, "processReasoning", content);
+                    assistant_reasoning.push_str(content);
+                    append_ai_process_event(
+                        &mut tool_events,
+                        if reasoning_summary.unwrap_or(false) {
+                            "processReasoningSummary"
+                        } else {
+                            "processReasoning"
+                        },
+                        content,
+                        reasoning_id.as_deref(),
+                    );
                 } else {
-                    append_ai_process_event(&mut tool_events, "processText", content);
+                    assistant_draft_text.push_str(content);
+                    append_ai_process_event(&mut tool_events, "processText", content, None);
                 }
             }
             AiEvent::ToolCall {
@@ -13692,6 +13743,37 @@ async fn run_ai_stream(
             }
             AiEvent::Status { .. } => {}
         }
+        let checkpoint_changed = matches!(
+            &event,
+            AiEvent::Delta { .. }
+                | AiEvent::ToolCall { .. }
+                | AiEvent::ToolResult { .. }
+                | AiEvent::Usage { .. }
+                | AiEvent::AgentStart { .. }
+                | AiEvent::AgentDone { .. }
+                | AiEvent::TeamEvent { .. }
+                | AiEvent::ApprovalRequest { .. }
+                | AiEvent::ApprovalResolved { .. }
+        );
+        if checkpoint_changed
+            && last_stream_checkpoint.elapsed()
+                >= Duration::from_millis(ai_stream_checkpoint::AI_STREAM_CHECKPOINT_INTERVAL_MS)
+        {
+            if let Err(error) = ai_stream_checkpoint::persist_ai_stream_checkpoint(
+                &app,
+                &session_id,
+                &persisted_message_id,
+                &assistant_draft_text,
+                &assistant_reasoning,
+                &tool_events,
+                "streaming",
+            )
+            .await
+            {
+                eprintln!("ai stream checkpoint failed for {}: {}", session_id, error);
+            }
+            last_stream_checkpoint = Instant::now();
+        }
         if !recoverable_strategy_tool_error {
             emit_ai(&app, event);
         }
@@ -13730,7 +13812,14 @@ async fn run_ai_stream(
         .map_err(|error| format!("序列化 AI 运行记录失败: {error}"))?;
     let persist_app = app.clone();
     let persist_session_id = session_id.clone();
-    let persist_assistant_text = assistant_text.clone();
+    let persist_assistant_text = if assistant_text.trim().is_empty() {
+        error_message
+            .clone()
+            .filter(|message| !message.trim().is_empty())
+            .unwrap_or_else(|| assistant_draft_text.clone())
+    } else {
+        assistant_text.clone()
+    };
     let persist_reasoning =
         (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.clone());
     let message_status = terminal_state.message_status;
@@ -13740,7 +13829,6 @@ async fn run_ai_stream(
         .and_then(|context| context.run_id.clone());
     let metadata_run_id = persisted_run_id.clone();
     let persisted_usage = final_usage.clone();
-    let persisted_message_id = format!("a-{}", now_ms());
     let persist_result = tokio::task::spawn_blocking(move || {
         let mut conn = open_database(&persist_app)?;
         let tx = conn
@@ -14460,6 +14548,16 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .and_then(|item| item.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            reasoning_id: value
+                .get("reasoningId")
+                .or_else(|| value.get("reasoning_id"))
+                .and_then(|item| item.as_str())
+                .filter(|item| !item.is_empty())
+                .map(str::to_string),
+            reasoning_summary: value
+                .get("reasoningSummary")
+                .or_else(|| value.get("reasoning_summary"))
+                .and_then(|item| item.as_bool()),
         }),
         "toolCall" | "tool_call" => {
             let name = value
@@ -20286,6 +20384,36 @@ fn load_ai_session(conn: &Connection, session_id: &str) -> Result<AiSession, Str
     .map_err(|err| err.to_string())
 }
 
+fn reconcile_orphaned_user_ai_sessions(
+    conn: &Connection,
+    runtime: &AiRuntime,
+) -> Result<(), String> {
+    let active_tasks = runtime
+        .tasks
+        .lock()
+        .map_err(|error| error.to_string())?
+        .keys()
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut stmt = conn
+        .prepare("SELECT id FROM ai_sessions WHERE status='running'")
+        .map_err(|error| error.to_string())?;
+    let running_ids = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    for session_id in running_ids {
+        if ai_session_origin(&session_id) != AiSessionOrigin::User
+            || active_tasks.contains(&session_id)
+        {
+            continue;
+        }
+        upsert_ai_session_failure(conn, &session_id, "AI 运行中断，未收到完成事件")?;
+    }
+    Ok(())
+}
+
 fn list_ai_sessions(conn: &Connection) -> Result<Vec<AiSession>, String> {
     const AUTOMATION_FILTER: &str = "WHERE id GLOB 'background:*' OR id GLOB 'review:*'";
     const USER_FILTER: &str = "WHERE NOT (id GLOB 'background:*' OR id GLOB 'review:*')";
@@ -20341,7 +20469,7 @@ fn load_ai_messages(conn: &Connection, session_id: &str) -> Result<Vec<AiStoredM
     let mut stmt = conn
         .prepare(
             "SELECT id, session_id, role, content, reasoning, tool_json, token_usage_json, status, created_at
-             FROM ai_messages WHERE session_id = ?1 ORDER BY created_at ASC",
+             FROM ai_messages WHERE session_id = ?1 ORDER BY created_at ASC, rowid ASC",
         )
         .map_err(|err| err.to_string())?;
     let rows = stmt
@@ -20387,6 +20515,65 @@ fn set_ai_session_status(conn: &Connection, id: &str, status: &str) -> Result<()
     )
     .map_err(|err| err.to_string())?;
     Ok(())
+}
+
+fn upsert_ai_session_failure(
+    conn: &Connection,
+    session_id: &str,
+    message: &str,
+) -> Result<(), String> {
+    set_ai_session_status(conn, session_id, "failed")?;
+    let latest_user_rowid = conn
+        .query_row(
+            "SELECT MAX(rowid) FROM ai_messages WHERE session_id = ?1 AND role = 'user'",
+            params![session_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| error.to_string())?
+        .unwrap_or(0);
+    conn.execute(
+        "UPDATE ai_messages SET status='interrupted'
+         WHERE rowid = (
+           SELECT rowid FROM ai_messages
+           WHERE session_id = ?1 AND role = 'assistant' AND rowid > ?2
+             AND COALESCE(status, '') IN ('connecting', 'running', 'streaming', 'tooling', 'retrying')
+           ORDER BY rowid DESC LIMIT 1
+         )",
+        params![session_id, latest_user_rowid],
+    )
+    .map_err(|error| error.to_string())?;
+    let failure_already_recorded = conn
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM ai_messages
+                WHERE session_id = ?1
+                  AND role = 'assistant'
+                  AND status IN ('failed', 'error')
+                  AND rowid > ?2
+             )",
+            params![session_id, latest_user_rowid],
+            |row| row.get::<_, bool>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    if failure_already_recorded {
+        return Ok(());
+    }
+    upsert_ai_message(
+        conn,
+        &format!("a-error-{}-{}", session_id, now_ms()),
+        session_id,
+        "assistant",
+        message,
+        None,
+        None,
+        Some("failed"),
+    )
+}
+
+fn persist_ai_session_failure(app: &tauri::AppHandle, session_id: &str, message: &str) {
+    if let Ok(conn) = open_database(app) {
+        let _ = upsert_ai_session_failure(&conn, session_id, message);
+    }
 }
 
 fn upsert_ai_message(
@@ -23962,14 +24149,43 @@ mod tests {
     #[test]
     fn ai_process_deltas_are_coalesced_until_an_event_boundary() {
         let mut events = Vec::new();
-        append_ai_process_event(&mut events, "processReasoning", "价格");
-        append_ai_process_event(&mut events, "processReasoning", "结构");
+        append_ai_process_event(&mut events, "processReasoning", "价格", None);
+        append_ai_process_event(&mut events, "processReasoning", "结构", None);
         events.push(json!({ "type": "toolCall", "name": "market.readCandles" }));
-        append_ai_process_event(&mut events, "processReasoning", "完成");
+        append_ai_process_event(&mut events, "processReasoning", "完成", None);
 
         assert_eq!(events.len(), 3);
         assert_eq!(events[0]["content"], "价格结构");
         assert_eq!(events[2]["content"], "完成");
+    }
+
+    #[test]
+    fn ai_reasoning_summaries_keep_codex_item_boundaries() {
+        let mut events = Vec::new();
+        append_ai_process_event(
+            &mut events,
+            "processReasoningSummary",
+            "Inspecting ",
+            Some("reasoning-1"),
+        );
+        append_ai_process_event(
+            &mut events,
+            "processReasoningSummary",
+            "inputs",
+            Some("reasoning-1"),
+        );
+        append_ai_process_event(
+            &mut events,
+            "processReasoningSummary",
+            "Planning output",
+            Some("reasoning-2"),
+        );
+
+        assert_eq!(events.len(), 2);
+        assert_eq!(events[0]["id"], "reasoning-1");
+        assert_eq!(events[0]["content"], "Inspecting inputs");
+        assert_eq!(events[1]["id"], "reasoning-2");
+        assert_eq!(events[1]["content"], "Planning output");
     }
 
     #[test]
@@ -24073,15 +24289,153 @@ mod tests {
     }
 
     #[test]
-    fn ai_stream_errors_are_persisted_as_failed_without_completed_finish() {
+    fn ai_stream_errors_are_persisted_as_failed_with_error_finish() {
         let failed = ai_stream_terminal_state(false, false, true);
         assert_eq!(failed.message_status, "failed");
         assert_eq!(failed.session_status, "failed");
-        assert_eq!(failed.synthetic_finish_reason, None);
+        assert_eq!(failed.synthetic_finish_reason, Some("error"));
 
         let completed = ai_stream_terminal_state(false, false, false);
         assert_eq!(completed.message_status, "done");
         assert_eq!(completed.synthetic_finish_reason, Some("completed"));
+    }
+
+    #[test]
+    fn ai_stream_checkpoint_updates_one_durable_partial_message() {
+        let conn = Connection::open_in_memory().expect("open stream checkpoint sqlite");
+        conn.execute_batch(
+            "CREATE TABLE ai_messages(
+                id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+                content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,status TEXT,
+                token_usage_json TEXT,token_usage_version INTEGER,created_at INTEGER NOT NULL
+             );",
+        )
+        .expect("create stream checkpoint table");
+        let first_events = vec![json!({"type":"processText","content":"first"})];
+        ai_stream_checkpoint::persist_ai_stream_checkpoint_with_conn(
+            &conn,
+            "session-stream",
+            "assistant-stream",
+            "partial",
+            Some("thinking"),
+            &serde_json::to_string(&first_events).expect("serialize first events"),
+            "streaming",
+        )
+        .expect("persist first stream checkpoint");
+        let second_events = vec![
+            json!({"type":"processText","content":"first"}),
+            json!({"type":"toolResult","toolCallId":"tool-1","ok":true}),
+        ];
+        ai_stream_checkpoint::persist_ai_stream_checkpoint_with_conn(
+            &conn,
+            "session-stream",
+            "assistant-stream",
+            "partial output",
+            Some("thinking more"),
+            &serde_json::to_string(&second_events).expect("serialize second events"),
+            "streaming",
+        )
+        .expect("persist second stream checkpoint");
+        assert_eq!(
+            conn.query_row(
+                "SELECT content || ':' || reasoning || ':' || status FROM ai_messages WHERE id='assistant-stream'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("read stream checkpoint"),
+            "partial output:thinking more:streaming"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_messages WHERE session_id='session-stream'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("stream checkpoint count"),
+            1
+        );
+    }
+
+    #[test]
+    fn orphaned_user_ai_sessions_are_reconciled_to_failed() {
+        let conn = Connection::open_in_memory().expect("open orphan session sqlite");
+        conn.execute_batch(
+            "CREATE TABLE ai_sessions(
+                id TEXT PRIMARY KEY,title TEXT NOT NULL,status TEXT NOT NULL,
+                created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+             );
+             CREATE TABLE ai_messages(
+                id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+                content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,status TEXT,token_usage_json TEXT,token_usage_version INTEGER,created_at INTEGER NOT NULL
+             );
+             INSERT INTO ai_sessions VALUES
+                ('session-orphan','Orphan','running',1,2),
+                ('session-orphan-partial','Partial','running',1,2),
+                ('background:run-1','Background','running',1,2);
+             INSERT INTO ai_messages(id,session_id,role,content,status,created_at) VALUES
+                ('u-partial','session-orphan-partial','user','question','sent',1),
+                ('a-partial','session-orphan-partial','assistant','durable partial output','streaming',2);",
+        )
+        .expect("create orphan session tables");
+
+        reconcile_orphaned_user_ai_sessions(&conn, &AiRuntime::default())
+            .expect("reconcile orphaned sessions");
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM ai_sessions WHERE id='session-orphan'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("orphan status"),
+            "failed"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT content FROM ai_messages WHERE session_id='session-orphan'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("orphan failure message"),
+            "AI 运行中断，未收到完成事件"
+        );
+        upsert_ai_session_failure(&conn, "session-orphan", "AI 运行中断，未收到完成事件")
+            .expect("deduplicate persisted failure");
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_messages WHERE session_id='session-orphan'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("failure message count"),
+            1
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT content || ':' || status FROM ai_messages WHERE id='a-partial'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("partial assistant checkpoint"),
+            "durable partial output:interrupted"
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM ai_messages WHERE session_id='session-orphan-partial'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .expect("partial session message count"),
+            3
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT status FROM ai_sessions WHERE id='background:run-1'",
+                [],
+                |row| row.get::<_, String>(0),
+            )
+            .expect("background status"),
+            "running"
+        );
     }
 
     #[test]

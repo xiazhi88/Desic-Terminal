@@ -64,6 +64,38 @@ async function main() {
     || storedReasoning[0].split("先读取账户和市场上下文").length - 1 !== 1) {
     throw new Error(`stored reasoning event should render once: ${JSON.stringify(storedReasoning)}`);
   }
+  const reasoningSummaries = await completedHistoryMessage.locator(".ai-reasoning-summary").allTextContents();
+  if (reasoningSummaries.length !== 2
+    || reasoningSummaries[0] !== "Inspecting account and market context"
+    || reasoningSummaries[1] !== "Planning the risk review") {
+    throw new Error(`Codex reasoning summaries should remain separate: ${JSON.stringify(reasoningSummaries)}`);
+  }
+  if (await completedHistoryMessage.locator(".ai-reasoning-summaries").count() !== 1) {
+    throw new Error("adjacent Codex reasoning summaries should share one compact process list");
+  }
+  const summaryStyles = await completedHistoryMessage.locator(".ai-reasoning-summary").evaluateAll((items) => items.map((item) => {
+    const style = getComputedStyle(item);
+    const textStyle = getComputedStyle(item.querySelector(".ai-markdown"));
+    const markerStyle = getComputedStyle(item, "::before");
+    return {
+      border: style.borderStyle,
+      background: style.backgroundColor,
+      display: style.display,
+      fontSize: Number.parseFloat(textStyle.fontSize),
+      fontWeight: Number.parseInt(textStyle.fontWeight, 10),
+      markerWidth: Number.parseFloat(markerStyle.width)
+    };
+  }));
+  if (summaryStyles.some((style) => (
+    style.border !== "none"
+    || style.background !== "rgba(0, 0, 0, 0)"
+    || style.display !== "grid"
+    || style.fontSize > 12.1
+    || style.fontWeight > 400
+    || style.markerWidth < 3
+  ))) {
+    throw new Error(`Codex reasoning summaries should use compact secondary typography: ${JSON.stringify(summaryStyles)}`);
+  }
   const completedProcessText = await completedHistoryMessage.locator(":scope > .ai-process").textContent() || "";
   const completedAnswerText = await completedHistoryMessage.locator(":scope > .ai-answer").textContent() || "";
   if (completedProcessText.includes("历史工具状态已合并") || !completedAnswerText.includes("历史工具状态已合并")) {

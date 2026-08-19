@@ -14689,6 +14689,55 @@ button {
   font-size: 12px;
 }
 
+.ai-reasoning-summaries {
+  min-width: 0;
+  max-width: 72ch;
+  display: grid;
+  gap: 0.375rem;
+  padding: 0.125rem 0 0.25rem;
+}
+
+.ai-reasoning-summary {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 0.375rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.5rem;
+  padding: 0;
+  color: rgba(164, 174, 192, 0.68);
+  letter-spacing: 0;
+}
+
+.ai-reasoning-summary::before {
+  content: "";
+  width: 0.25rem;
+  height: 0.25rem;
+  margin-top: 0.45rem;
+  border-radius: 50%;
+  background: rgba(245, 165, 36, 0.56);
+}
+
+.ai-reasoning-summary .ai-markdown {
+  color: inherit;
+  font-size: 0.75rem;
+  font-weight: 400;
+  line-height: 1.5;
+  letter-spacing: 0;
+}
+
+.ai-reasoning-summary .ai-markdown p,
+.ai-reasoning-summary .ai-markdown ul,
+.ai-reasoning-summary .ai-markdown ol {
+  margin: 0;
+}
+
+.ai-reasoning-summary .ai-markdown strong,
+.ai-reasoning-summary .ai-markdown em {
+  color: inherit;
+  font-size: inherit;
+  font-weight: 400;
+}
+
 .ai-agent-list {
   display: grid;
   gap: 7px;

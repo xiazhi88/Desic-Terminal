@@ -3,15 +3,18 @@ import { getRegisteredHandlerAsync } from "@cline/llms";
 import {
   cleanupCodexToolBridges,
   codexErrorMessage,
+  codexProviderMetadataError,
   codexIsolationOverrides,
   codexProviderOverrides,
   createCodexBridgeTool,
   mapCodexProviderPart,
+  normalizeCodexAppServerEvent,
   normalizeCodexUsage,
   resolveWindowsCodexCliPath,
   registerCodexToolBridge,
   registerDesicCodexCliHandler,
-  toCodexMessages
+  toCodexMessages,
+  updateCodexToolBridgeActivity
 } from "./codex-cli-adapter.mjs";
 
 const windowsNpmCodex = "C:\\Users\\tester\\AppData\\Roaming\\npm\\codex.cmd";
@@ -89,6 +92,11 @@ assert.deepEqual(codexProviderOverrides({
   baseUrl: "https://gateway.example.invalid/v1?token=must-not-pass",
   wireApi: "responses"
 }), {});
+assert.deepEqual(codexProviderOverrides(undefined), {});
+const defaultRetryOverrides = codexProviderOverrides(undefined, { defaultRetryPolicy: true });
+assert.equal(defaultRetryOverrides["model_providers.OpenAI.request_max_retries"], 0);
+assert.equal(defaultRetryOverrides["model_providers.OpenAI.stream_max_retries"], 0);
+assert.equal(defaultRetryOverrides["model_providers.OpenAI.stream_idle_timeout_ms"], 30_000);
 
 const detailedError = codexErrorMessage({
   message: "Codex CLI exited with code 1",
@@ -103,14 +111,35 @@ assert.match(codexErrorMessage({
   message: "Codex CLI exited with code 1",
   data: { stderr: "failed to connect: HTTP error: 403 Forbidden, url: wss://api.openai.com/v1/responses" }
 }), /代理出口地区或账户权限/);
-
+assert.equal(codexProviderMetadataError({
+  providerMetadata: { "codex-cli": { error: "turn.failed: Invalid API key" } }
+}), "turn.failed: Invalid API key");
 assert.deepEqual(
   mapCodexProviderPart({ type: "text-delta", text: "完成" }, "response-1"),
   { type: "text", id: "response-1", text: "完成" }
 );
 assert.deepEqual(
-  mapCodexProviderPart({ type: "reasoning-delta", text: "分析" }, "response-1"),
-  { type: "reasoning", id: "response-1", reasoning: "分析" }
+  mapCodexProviderPart({ type: "reasoning-delta", id: "reasoning-1", text: "分析" }, "response-1"),
+  {
+    type: "reasoning",
+    id: "response-1",
+    reasoning: "分析",
+    details: { provider: "codex-app-server", itemId: "reasoning-1", isSummary: false }
+  }
+);
+assert.deepEqual(
+  mapCodexProviderPart({
+    type: "reasoning-delta",
+    id: "reasoning-2",
+    text: "核对输入",
+    providerMetadata: { "codex-app-server": { isSummary: true } }
+  }, "response-1"),
+  {
+    type: "reasoning",
+    id: "response-1",
+    reasoning: "核对输入",
+    details: { provider: "codex-app-server", itemId: "reasoning-2", isSummary: true }
+  }
 );
 assert.equal(mapCodexProviderPart({
   type: "tool-call",
@@ -118,6 +147,56 @@ assert.equal(mapCodexProviderPart({
   providerExecuted: true
 }, "response-1"), null);
 assert.equal(mapCodexProviderPart({ type: "tool-result", result: { ok: true } }, "response-1"), null);
+
+const normalizedTurnCompleted = normalizeCodexAppServerEvent({
+  method: "turn/completed",
+  params: {
+    threadId: "thread-1",
+    turn: {
+      id: "turn-1",
+      status: "completed",
+      items: [
+        { id: "answer-1", type: "agentMessage", text: "完成" },
+        { id: "reasoning-1", type: "reasoning" },
+        { id: "future-1", type: "dynamicToolCall", tool: "future" }
+      ]
+    }
+  }
+});
+assert.equal(normalizedTurnCompleted.params.turn.error, null);
+assert.equal(normalizedTurnCompleted.params.turn.items.length, 2);
+assert.equal(normalizedTurnCompleted.params.turn.items[0].phase, null);
+assert.deepEqual(normalizedTurnCompleted.params.turn.items[1].summary, []);
+assert.deepEqual(normalizedTurnCompleted.params.turn.items[1].content, []);
+const normalizedTurnStart = normalizeCodexAppServerEvent({
+  id: 3,
+  result: { turn: { id: "turn-2", status: "inProgress", items: [] } }
+});
+assert.equal(normalizedTurnStart.result.turn.error, null);
+const normalizedError = normalizeCodexAppServerEvent({
+  method: "error",
+  params: {
+    threadId: "thread-1",
+    turnId: "turn-1",
+    willRetry: false,
+    error: { message: "provider failed" }
+  }
+});
+assert.equal(normalizedError.params.error.codexErrorInfo, null);
+assert.equal(normalizedError.params.error.additionalDetails, null);
+const normalizedNewCodexError = normalizeCodexAppServerEvent({
+  method: "error",
+  params: {
+    error: { message: "budget exhausted", codexErrorInfo: "sessionBudgetExceeded" }
+  }
+});
+assert.equal(normalizedNewCodexError.params.error.codexErrorInfo, "other");
+assert.match(normalizedNewCodexError.params.error.additionalDetails, /sessionBudgetExceeded/);
+const normalizedUsageEvent = normalizeCodexAppServerEvent({
+  method: "thread/tokenUsage/updated",
+  params: { tokenUsage: { total: {}, last: {} } }
+});
+assert.equal(normalizedUsageEvent.params.tokenUsage.modelContextWindow, null);
 
 assert.deepEqual(normalizeCodexUsage({
   inputTokens: { total: 120 },
@@ -172,6 +251,7 @@ const bridgeId = registerCodexToolBridge({
   cwd: process.cwd(),
   reasoningEffort: "medium"
 });
+assert.equal(updateCodexToolBridgeActivity("codex-adapter-test", () => {}), 1);
 const handler = await getRegisteredHandlerAsync("openai-codex-cli", {
   providerId: "openai-codex-cli",
   modelId: "gpt-test-codex",
@@ -184,5 +264,6 @@ assert.equal(first.value.type, "done");
 assert.equal(first.value.success, false);
 assert.match(first.value.error, /Codex CLI/);
 cleanupCodexToolBridges("codex-adapter-test");
+assert.equal(updateCodexToolBridgeActivity("codex-adapter-test", () => {}), 0);
 
 console.log("codex cli adapter tests passed");

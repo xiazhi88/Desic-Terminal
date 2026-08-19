@@ -2156,7 +2156,7 @@ export type AiSessionSnapshot = {
 
 export type AiEvent =
   | { type: "status"; sessionId: string; status: string; message: string }
-  | { type: "delta"; sessionId: string; channel: "text" | "reasoning" | string; content: string }
+  | { type: "delta"; sessionId: string; channel: "text" | "reasoning" | string; content: string; reasoningId?: string | null; reasoningSummary?: boolean | null }
   | { type: "toolCall"; sessionId: string; toolCallId?: string; name: string; arguments: unknown; allowed?: boolean; blocked?: boolean; policy?: string; agentId?: string | null; configuredAgentId?: string | null; parentAgentId?: string | null; startedAt?: number }
   | { type: "toolResult"; sessionId: string; toolCallId?: string; name: string; result: unknown; summary: string; ok: boolean; agentId?: string | null; configuredAgentId?: string | null; parentAgentId?: string | null; startedAt?: number; endedAt?: number; requestedAt?: number; executionStartedAt?: number; executionEndedAt?: number }
   | { type: "usage"; sessionId: string; usage: unknown }

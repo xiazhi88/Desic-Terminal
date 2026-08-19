@@ -5,7 +5,7 @@ import { isAbsolute, join } from "node:path";
 import { existsSync } from "node:fs";
 import { registerAsyncHandler } from "@cline/llms";
 import { streamText } from "ai";
-import { createCodexExec, createLocalMcpServer } from "ai-sdk-provider-codex-cli";
+import { createCodexAppServer, createLocalMcpServer } from "ai-sdk-provider-codex-cli";
 import Ajv from "ajv";
 
 const CODEX_PROVIDER_ID = "openai-codex-cli";
@@ -15,9 +15,110 @@ const schemaValidators = new WeakMap();
 const ajv = new Ajv({ allErrors: true, strict: false });
 let registered = false;
 
+export function normalizeCodexAppServerEvent(value) {
+  if (!value || typeof value !== "object") return value;
+  const supportedItemTypes = new Set([
+    "userMessage",
+    "agentMessage",
+    "plan",
+    "reasoning",
+    "commandExecution",
+    "fileChange",
+    "mcpToolCall",
+    "collabAgentToolCall",
+    "webSearch",
+    "imageView",
+    "enteredReviewMode",
+    "exitedReviewMode",
+    "contextCompaction"
+  ]);
+  const supportedCodexErrorStrings = new Set([
+    "contextWindowExceeded",
+    "usageLimitExceeded",
+    "serverOverloaded",
+    "internalServerError",
+    "unauthorized",
+    "badRequest",
+    "threadRollbackFailed",
+    "sandboxError",
+    "other"
+  ]);
+  const supportedCodexErrorObjects = new Set([
+    "httpConnectionFailed",
+    "responseStreamConnectionFailed",
+    "responseStreamDisconnected",
+    "responseTooManyFailedAttempts"
+  ]);
+  const hasOwn = (target, key) => Object.prototype.hasOwnProperty.call(target, key);
+  const normalizeError = (error) => {
+    if (!error || typeof error !== "object") return error;
+    if (!hasOwn(error, "codexErrorInfo")) error.codexErrorInfo = null;
+    if (!hasOwn(error, "additionalDetails")) error.additionalDetails = null;
+    const info = error.codexErrorInfo;
+    const supported = info === null
+      || (typeof info === "string" && supportedCodexErrorStrings.has(info))
+      || (info && typeof info === "object" && Object.keys(info).some((key) => supportedCodexErrorObjects.has(key)));
+    if (!supported) {
+      const detail = `codexErrorInfo=${typeof info === "string" ? info : JSON.stringify(info)}`;
+      error.additionalDetails = [error.additionalDetails, detail].filter(Boolean).join("; ") || null;
+      error.codexErrorInfo = "other";
+    }
+    return error;
+  };
+  const normalizeItem = (item) => {
+    if (!item || typeof item !== "object") return item;
+    if (item.type === "agentMessage") {
+      if (!hasOwn(item, "phase")) item.phase = null;
+    } else if (item.type === "reasoning") {
+      if (!Array.isArray(item.summary)) item.summary = [];
+      if (!Array.isArray(item.content)) item.content = [];
+    } else if (item.type === "commandExecution") {
+      if (!hasOwn(item, "processId")) item.processId = null;
+      if (!Array.isArray(item.commandActions)) item.commandActions = [];
+      if (!hasOwn(item, "aggregatedOutput")) item.aggregatedOutput = null;
+      if (!hasOwn(item, "exitCode")) item.exitCode = null;
+      if (!hasOwn(item, "durationMs")) item.durationMs = null;
+    } else if (item.type === "mcpToolCall") {
+      if (!hasOwn(item, "result")) item.result = null;
+      if (!hasOwn(item, "error")) item.error = null;
+      if (!hasOwn(item, "durationMs")) item.durationMs = null;
+    } else if (item.type === "collabAgentToolCall") {
+      if (!hasOwn(item, "prompt")) item.prompt = null;
+      if (!Array.isArray(item.receiverThreadIds)) item.receiverThreadIds = [];
+      if (!item.agentsStates || typeof item.agentsStates !== "object") item.agentsStates = {};
+    } else if (item.type === "webSearch" && !hasOwn(item, "action")) {
+      item.action = null;
+    }
+    return item;
+  };
+  const normalizeTurn = (turn) => {
+    if (!turn || typeof turn !== "object") return turn;
+    if (!Array.isArray(turn.items)) turn.items = [];
+    turn.items = turn.items
+      .filter((item) => item && typeof item === "object" && supportedItemTypes.has(item.type))
+      .map(normalizeItem);
+    if (!hasOwn(turn, "error")) turn.error = null;
+    else normalizeError(turn.error);
+    return turn;
+  };
+
+  normalizeItem(value.params?.item);
+  normalizeTurn(value.params?.turn);
+  normalizeTurn(value.result?.turn);
+  if (value.method === "error") normalizeError(value.params?.error);
+  if (value.method === "thread/tokenUsage/updated") {
+    const tokenUsage = value.params?.tokenUsage;
+    if (tokenUsage && typeof tokenUsage === "object" && !hasOwn(tokenUsage, "modelContextWindow")) {
+      tokenUsage.modelContextWindow = null;
+    }
+  }
+  return value;
+}
+
 const CODEX_WRAPPER_SOURCE = `#!/usr/bin/env node
 import { spawn } from "node:child_process";
 
+const normalizeCodexAppServerEvent = ${normalizeCodexAppServerEvent.toString()};
 const actualPath = process.env.DESIC_CODEX_CLI_PATH;
 if (!actualPath) {
   process.stderr.write("Desic Codex launcher is missing the verified CLI path\\n");
@@ -38,12 +139,136 @@ const command = javascriptCli ? process.execPath : actualPath;
 const commandArgs = javascriptCli ? [actualPath, ...args] : args;
 const child = spawn(command, commandArgs, {
   env: process.env,
-  stdio: "inherit",
+  // Keep stdout/stderr observable so a provider failure can stop the CLI
+  // before its own retry/idle window hides the concrete HTTP response.
+  stdio: ["inherit", "pipe", "pipe"],
   // Windows cannot execute a .cmd/.bat file directly through CreateProcess.
   shell: windowsBatchCli,
   windowsHide: true
 });
 
+let stoppedForProviderError = false;
+let stdoutLineBuffer = "";
+let stderrBuffer = "";
+let currentThreadId = "";
+let activeTurn = null;
+const streamedReasoningItemIds = new Set();
+function trackCodexTurnLifecycle(event) {
+  const method = event?.method;
+  const params = event?.params;
+  if (method === "thread/started" && typeof params?.thread?.id === "string") {
+    currentThreadId = params.thread.id;
+    return;
+  }
+  if (method === "turn/started" && typeof params?.turn?.id === "string") {
+    activeTurn = {
+      threadId: typeof params.threadId === "string" ? params.threadId : currentThreadId,
+      turnId: params.turn.id
+    };
+    return;
+  }
+  if (method === "turn/completed" && activeTurn) {
+    const completedTurnId = typeof params?.turn?.id === "string" ? params.turn.id : "";
+    if (!completedTurnId || completedTurnId === activeTurn.turnId) activeTurn = null;
+    return;
+  }
+  if (method === "error" && params?.willRetry !== true && activeTurn) {
+    const errorTurnId = typeof params?.turnId === "string" ? params.turnId : "";
+    if (!errorTurnId || errorTurnId === activeTurn.turnId) activeTurn = null;
+  }
+}
+function stopForProviderError() {
+  if (stoppedForProviderError) return;
+  stoppedForProviderError = true;
+  child.kill("SIGTERM");
+}
+function inspectProviderEvent(event) {
+  if (!event || typeof event !== "object") return;
+  const jsonRpcMessage = event?.params?.error?.message || event?.error?.message || "";
+  const legacyMessage = event?.error?.message || event?.message || "";
+  const structuredFailure = (
+    (event.method === "error" && jsonRpcMessage)
+    || (event.error && jsonRpcMessage)
+    || (["turn.failed", "error"].includes(event.type) && legacyMessage)
+  );
+  if (!structuredFailure) return;
+  // The application owns retries. Make the original provider message terminal
+  // so the SDK reports it instead of hiding it behind an app-server retry.
+  if (event.method === "error" && event.params?.willRetry === true) {
+    event.params.willRetry = false;
+  }
+  stopForProviderError();
+}
+function inspectProviderDiagnostic(chunk) {
+  const text = String(chunk || "");
+  if (!text) return;
+  stderrBuffer = (stderrBuffer + text).slice(-32_000);
+  const explicitTransportFailure = (
+    /unexpected status\\s+5\\d{2}\\b/i.test(stderrBuffer)
+    || /http(?: response)? (?:status|error)(?: code)?\\s*[:=]?\\s*\\(?5\\d{2}\\)?\\b/i.test(stderrBuffer)
+    || /service temporarily unavailable|api_error/i.test(stderrBuffer)
+  );
+  if (explicitTransportFailure) stopForProviderError();
+}
+function preserveReasoningSummaryBoundary(event) {
+  const method = event?.method;
+  const params = event?.params;
+  const itemId = typeof params?.itemId === "string" ? params.itemId : "";
+  if (["reasoningSummaryTextDelta", "item/reasoning/summaryTextDelta"].includes(method) && itemId) {
+    streamedReasoningItemIds.add(itemId);
+    const summaryIndex = Number.isSafeInteger(params.summaryIndex) ? params.summaryIndex : 0;
+    params.itemId = itemId + ":summary:" + summaryIndex;
+  } else if (["reasoningTextDelta", "item/reasoning/textDelta"].includes(method) && itemId) {
+    streamedReasoningItemIds.add(itemId);
+  } else if (method === "item/completed") {
+    const item = params?.item;
+    if (item?.type === "reasoning" && streamedReasoningItemIds.has(item.id)) {
+      item.summary = [];
+      item.content = [];
+      streamedReasoningItemIds.delete(item.id);
+    }
+  }
+  return event;
+}
+function writeNormalizedStdoutLine(rawLine) {
+  let output = rawLine.endsWith("\\r") ? rawLine.slice(0, -1) : rawLine;
+  if (!output) return;
+  try {
+    const parsed = JSON.parse(output);
+    inspectProviderEvent(parsed);
+    trackCodexTurnLifecycle(parsed);
+    preserveReasoningSummaryBoundary(parsed);
+    const event = normalizeCodexAppServerEvent(parsed);
+    output = JSON.stringify(event);
+    if (process.env.DESIC_AI_EVENT_DEBUG === "1") {
+      const eventName = event?.method || (event?.id !== undefined ? "response" : "unknown");
+      process.stderr.write("[desic-codex-app-server] " + eventName + "\\n");
+    }
+  } catch {
+    // Preserve non-JSON diagnostics so the parent provider can report them.
+  }
+  process.stdout.write(output + "\\n");
+}
+function flushNormalizedStdout() {
+  if (!stdoutLineBuffer) return;
+  writeNormalizedStdoutLine(stdoutLineBuffer);
+  stdoutLineBuffer = "";
+}
+child.stdout.on("data", (chunk) => {
+  const text = String(chunk || "");
+  stdoutLineBuffer += text;
+  let newlineIndex = stdoutLineBuffer.indexOf("\\n");
+  while (newlineIndex >= 0) {
+    writeNormalizedStdoutLine(stdoutLineBuffer.slice(0, newlineIndex));
+    stdoutLineBuffer = stdoutLineBuffer.slice(newlineIndex + 1);
+    newlineIndex = stdoutLineBuffer.indexOf("\\n");
+  }
+});
+child.stdout.on("end", flushNormalizedStdout);
+child.stderr.on("data", (chunk) => {
+  process.stderr.write(chunk);
+  inspectProviderDiagnostic(chunk);
+});
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => child.kill(signal));
 }
@@ -51,8 +276,30 @@ child.on("error", (error) => {
   process.stderr.write(\`Unable to start Codex CLI: \${error?.message || String(error)}\\n\`);
   process.exitCode = 1;
 });
-child.on("exit", (code) => {
-  process.exitCode = code ?? 1;
+child.on("close", (code, signal) => {
+  flushNormalizedStdout();
+  const interruptedTurn = activeTurn;
+  if (interruptedTurn) {
+    const exitDescription = signal
+      ? "signal " + signal
+      : "code " + (code ?? "unknown");
+    const stderrDetail = stderrBuffer.replace(/[\\r\\n]+/g, " ").trim().slice(-1_000);
+    const detailSuffix = stderrDetail ? ": " + stderrDetail : "";
+    writeNormalizedStdoutLine(JSON.stringify({
+      method: "error",
+      params: {
+        threadId: interruptedTurn.threadId,
+        turnId: interruptedTurn.turnId,
+        willRetry: false,
+        error: {
+          message: "Codex app-server exited before turn/completed (" + exitDescription + ")" + detailSuffix,
+          codexErrorInfo: "other",
+          additionalDetails: null
+        }
+      }
+    }));
+  }
+  process.exitCode = interruptedTurn && code === 0 ? 1 : code ?? 1;
 });
 `;
 
@@ -167,8 +414,17 @@ function validEnvironmentVariableName(value) {
   return /^[A-Za-z_][A-Za-z0-9_]*$/.test(value);
 }
 
-export function codexProviderOverrides(route) {
-  if (!route || typeof route !== "object") return {};
+export function codexProviderOverrides(route, options = {}) {
+  if (!route || typeof route !== "object") {
+    if (options.defaultRetryPolicy !== true) return {};
+    // Codex CLI's user config owns the provider name. Cover the conventional
+    // spellings without changing the user's endpoint or authentication setup.
+    return Object.fromEntries(["OpenAI", "openai"].flatMap((providerId) => [
+      [`model_providers.${providerId}.request_max_retries`, 0],
+      [`model_providers.${providerId}.stream_max_retries`, 0],
+      [`model_providers.${providerId}.stream_idle_timeout_ms`, 30_000]
+    ]));
+  }
   const providerId = String(route.providerId || "").trim();
   const name = String(route.name || providerId).replace(/[\u0000-\u001f\u007f]/g, "").trim().slice(0, 120);
   const wireApi = String(route.wireApi || "responses").trim();
@@ -345,10 +601,21 @@ export function mapCodexProviderPart(part, responseId) {
     return { type: "text", id: responseId, text: part.text };
   }
   if (part?.type === "reasoning-delta" && part.text) {
-    return { type: "reasoning", id: responseId, reasoning: part.text };
+    const codexMetadata = part.providerMetadata?.["codex-app-server"];
+    return {
+      type: "reasoning",
+      id: responseId,
+      reasoning: part.text,
+      details: {
+        provider: "codex-app-server",
+        itemId: typeof part.id === "string" ? part.id : undefined,
+        isSummary: codexMetadata?.isSummary === true
+      }
+    };
   }
-  // Codex executes tool-call and tool-result parts itself. Returning null is
-  // intentional: Cline must not execute provider-owned calls a second time.
+  // Codex app-server executes tool-call and tool-result parts itself. Returning
+  // null keeps Cline from executing provider-owned calls a second time while the
+  // same app-server turn continues streaming its eventual assistant response.
   return null;
 }
 
@@ -378,6 +645,19 @@ export function cleanupCodexToolBridges(sessionId) {
   sessionBridgeIds.delete(sessionId);
 }
 
+export function updateCodexToolBridgeActivity(sessionId, onProviderActivity) {
+  const ids = sessionBridgeIds.get(sessionId);
+  if (!ids) return 0;
+  let updated = 0;
+  for (const bridgeId of ids) {
+    const bridge = bridges.get(bridgeId);
+    if (!bridge) continue;
+    bridge.onProviderActivity = onProviderActivity;
+    updated += 1;
+  }
+  return updated;
+}
+
 function handlerModelInfo(config) {
   const fallback = {
     id: config.modelId,
@@ -390,20 +670,21 @@ function handlerModelInfo(config) {
   return config.modelInfo ?? config.knownModels?.[config.modelId] ?? fallback;
 }
 
-function codexSettings(config, bridge, serverConfig, isolatedCli) {
+function codexAppServerSettings(config, bridge, serverConfig, isolatedCli) {
   const enabledTools = bridge.tools.map((tool) => tool.name);
   return {
     codexPath: isolatedCli.path,
-    allowNpx: false,
     cwd: bridge.cwd,
     env: isolatedCli.env,
-    approvalMode: "never",
-    sandboxMode: bridge.openAgent ? "workspace-write" : "read-only",
-    skipGitRepoCheck: true,
-    reasoningEffort: bridge.reasoningEffort,
-    reasoningSummary: "auto",
-    logger: false,
+    approvalPolicy: "never",
+    sandboxPolicy: bridge.openAgent ? "workspace-write" : "read-only",
+    effort: bridge.reasoningEffort,
+    summary: "auto",
+    logger: process.env.DESIC_AI_EVENT_DEBUG === "1" ? console : false,
+    verbose: process.env.DESIC_AI_EVENT_DEBUG === "1",
     rmcpClient: true,
+    autoApprove: true,
+    threadMode: "stateless",
     mcpServers: {
       [bridge.bridgeId]: {
         ...serverConfig,
@@ -415,7 +696,7 @@ function codexSettings(config, bridge, serverConfig, isolatedCli) {
     },
     configOverrides: {
       ...codexIsolationOverrides(bridge.openAgent === true),
-      ...codexProviderOverrides(bridge.providerRoute),
+      ...codexProviderOverrides(bridge.providerRoute, { defaultRetryPolicy: true }),
       // Codex owns provider-executed MCP calls. Only the tools already filtered by
       // Desic policy are exposed on this authenticated, per-run loopback server.
       [`mcp_servers.${bridge.bridgeId}.default_tools_approval_mode`]: "approve"
@@ -423,9 +704,17 @@ function codexSettings(config, bridge, serverConfig, isolatedCli) {
   };
 }
 
-function streamChunkError(part) {
-  if (part?.error !== undefined) return new Error(codexErrorMessage(part.error));
-  return new Error("Codex CLI 运行失败");
+export function codexProviderMetadataError(part) {
+  const metadata = part?.providerMetadata?.["codex-cli"];
+  return sanitizeCodexErrorDetail(metadata?.error);
+}
+
+function streamChunkError(part, providerDetail = "") {
+  const message = part?.error !== undefined
+    ? codexErrorMessage(part.error)
+    : "Codex CLI 运行失败";
+  if (!providerDetail || message.includes(providerDetail)) return new Error(message);
+  return new Error(`${message}: ${providerDetail}`);
 }
 
 function createCodexHandler(config) {
@@ -448,13 +737,15 @@ function createCodexHandler(config) {
         bridge.signal = abortSignal;
         let mcpServer;
         let isolatedCli;
+        let provider;
         let lastUsage;
+        let lastProviderError = "";
         try {
           isolatedCli = await createIsolatedCodexCli(bridge.cliPath);
           const localTools = bridge.tools.map((tool) => createCodexBridgeTool(bridge, tool));
           mcpServer = await createLocalMcpServer({ name: bridge.bridgeId, tools: localTools });
-          const provider = createCodexExec({
-            defaultSettings: codexSettings(config, bridge, mcpServer.config, isolatedCli)
+          provider = createCodexAppServer({
+            defaultSettings: codexAppServerSettings(config, bridge, mcpServer.config, isolatedCli)
           });
           const result = streamText({
             model: provider(config.modelId),
@@ -463,13 +754,25 @@ function createCodexHandler(config) {
             abortSignal
           });
           for await (const part of result.fullStream) {
+            bridge.onProviderActivity?.();
+            const isReasoningSummary = part.type === "reasoning-delta"
+              && part.providerMetadata?.["codex-app-server"]?.isSummary === true;
+            if (isReasoningSummary && part.text) {
+              bridge.onReasoningSummary?.({
+                content: part.text,
+                itemId: typeof part.id === "string" ? part.id : undefined
+              });
+              continue;
+            }
             const mapped = mapCodexProviderPart(part, responseId);
             if (mapped) {
               yield mapped;
             } else if (part.type === "finish") {
               lastUsage = part.totalUsage || part.usage || lastUsage;
+            } else if (part.type === "response-metadata") {
+              lastProviderError = codexProviderMetadataError(part) || lastProviderError;
             } else if (part.type === "error") {
-              throw streamChunkError(part);
+              throw streamChunkError(part, lastProviderError);
             }
             // Codex executes MCP tools provider-side. Tool chunks are deliberately
             // observed through the bridge and never returned to Cline for a second execution.
@@ -479,8 +782,13 @@ function createCodexHandler(config) {
           yield { type: "usage", id: responseId, ...usage };
           yield { type: "done", id: responseId, success: true };
         } catch (error) {
-          yield { type: "done", id: responseId, success: false, error: codexErrorMessage(error) };
+          const message = codexErrorMessage(error);
+          const detailedMessage = lastProviderError && !message.includes(lastProviderError)
+            ? `${message}: ${lastProviderError}`
+            : message;
+          yield { type: "done", id: responseId, success: false, error: detailedMessage };
         } finally {
+          await provider?.close().catch(() => {});
           await mcpServer?.stop().catch(() => {});
           await isolatedCli?.cleanup().catch(() => {});
         }

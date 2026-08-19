@@ -76,6 +76,7 @@ export type AiAgentRun = {
 type AiTimelineItem =
   | { id: string; kind: "text"; content: string; createdAt?: number; updatedAt?: number }
   | { id: string; kind: "reasoning"; content: string; createdAt?: number; updatedAt?: number }
+  | { id: string; kind: "reasoning-summary"; content: string; createdAt?: number; updatedAt?: number }
   | { id: string; kind: "tool"; toolId: string; agentId?: string | null; createdAt?: number; updatedAt?: number }
   | { id: string; kind: "agent"; agentId: string; createdAt?: number; updatedAt?: number }
   | { id: string; kind: "approval"; approvalId: string; createdAt?: number; updatedAt?: number }
@@ -84,6 +85,7 @@ type AiTimelineItem =
 type AiProcessGroup =
   | { id: string; kind: "text"; item: Extract<AiTimelineItem, { kind: "text" }> }
   | { id: string; kind: "reasoning"; item: Extract<AiTimelineItem, { kind: "reasoning" }> }
+  | { id: string; kind: "reasoning-summaries"; items: Extract<AiTimelineItem, { kind: "reasoning-summary" }>[] }
   | { id: string; kind: "tools"; items: Extract<AiTimelineItem, { kind: "tool" }>[] }
   | { id: string; kind: "agent"; item: Extract<AiTimelineItem, { kind: "agent" }> }
   | { id: string; kind: "approval"; item: Extract<AiTimelineItem, { kind: "approval" }> }
@@ -468,6 +470,17 @@ export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: {
 
 function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
   if (group.kind === "tools") return <AiToolGroup items={group.items} message={message} now={now} onOpenStrategy={onOpenStrategy} key={group.id} />;
+  if (group.kind === "reasoning-summaries") {
+    return (
+      <div className="ai-reasoning-summaries" role="list" key={group.id}>
+        {group.items.map((item) => (
+          <div className="ai-reasoning-summary" role="listitem" data-i18n-skip key={item.id}>
+            <MarkdownMessage content={item.content} />
+          </div>
+        ))}
+      </div>
+    );
+  }
   if (group.kind === "team") {
     return (
       <details className="ai-process-group ai-team-events" key={group.id}>
@@ -481,6 +494,13 @@ function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onAppro
 
 function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
   if (item.kind === "text") return <MarkdownMessage content={item.content} key={item.id} />;
+  if (item.kind === "reasoning-summary") {
+    return (
+      <div className="ai-reasoning-summary" data-i18n-skip key={item.id}>
+        <MarkdownMessage content={item.content} />
+      </div>
+    );
+  }
   if (item.kind === "reasoning") {
     return (
       <details className="ai-reasoning" key={item.id}>
@@ -584,8 +604,9 @@ export function applyAiEvent(
           if (!novelReasoning) return { ...message, reasoning: nextReasoning, status: "思考中" };
           return appendAiTimelineText(
             { ...message, reasoning: nextReasoning, status: "思考中" },
-            "reasoning",
-            novelReasoning
+            event.reasoningSummary ? "reasoning-summary" : "reasoning",
+            novelReasoning,
+            event.reasoningId ?? undefined
           );
         }
         return appendAiTimelineText(
@@ -798,7 +819,10 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
   const metadata = parseStoredAiMetadata(message.toolJson);
   const storedStatus = message.status?.trim().toLowerCase();
   const failed = storedStatus === "failed" || storedStatus === "error";
-  const completed = failed || storedStatus === "cancelled" || storedStatus === "canceled" || storedStatus === "completed" || storedStatus === "done" || storedStatus === "success" || storedStatus === "idle";
+  const failureDetail = failed
+    ? (message.content.trim() || (!isFailureStatus(message.status ?? undefined) ? message.status ?? "" : ""))
+    : "";
+  const completed = failed || storedStatus === "interrupted" || storedStatus === "cancelled" || storedStatus === "canceled" || storedStatus === "completed" || storedStatus === "done" || storedStatus === "success" || storedStatus === "idle";
   const recovered = recoverLegacyFinalText(message.content, metadata.timeline ?? [], completed && !failed);
   metadata.timeline = recovered.timeline;
   const storedText = recovered.content;
@@ -815,7 +839,7 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
     timeline: metadata.timeline,
     usage: message.tokenUsage ?? metadata.usage,
     error: failed,
-    errorMessage: failed ? "AI 运行失败" : undefined,
+    errorMessage: failed ? normalizeAiFailureMessage(failureDetail) : undefined,
     status: completed ? undefined : message.status ?? undefined
   };
 }
@@ -857,8 +881,12 @@ function parseStoredAiMetadata(toolJson?: string | null): Pick<AiUiMessage, "too
     const visibleEvents = filterInternalAiToolEvents(parsed);
     const metadata = { ...empty };
     metadata.tools = visibleEvents.reduce<AiToolRun[]>((items, item, index) => {
-      if (item?.type === "processText" || item?.type === "processReasoning") {
-        const kind = item.type === "processReasoning" ? "reasoning" : "text";
+      if (item?.type === "processText" || item?.type === "processReasoning" || item?.type === "processReasoningSummary") {
+        const kind = item.type === "processReasoningSummary"
+          ? "reasoning-summary"
+          : item.type === "processReasoning"
+            ? "reasoning"
+            : "text";
         const content = typeof item.content === "string" ? item.content : "";
         if (content) {
           metadata.timeline = appendTimelineText(
@@ -1113,24 +1141,35 @@ function updateTimelineItem(items: AiTimelineItem[] | undefined, id: string, upd
   return items.map((item) => (item.id === id ? { ...item, updatedAt } : item));
 }
 
-export function appendAiTimelineText(message: AiUiMessage, kind: "text" | "reasoning", content: string) {
+export function appendAiTimelineText(
+  message: AiUiMessage,
+  kind: "text" | "reasoning" | "reasoning-summary",
+  content: string,
+  id?: string
+) {
   if (!content) return message;
-  return { ...message, timeline: appendTimelineText(message.timeline, kind, content) };
+  return { ...message, timeline: appendTimelineText(message.timeline, kind, content, id) };
 }
 
 function appendTimelineText(
   items: AiTimelineItem[] | undefined,
-  kind: "text" | "reasoning",
+  kind: "text" | "reasoning" | "reasoning-summary",
   content: string,
   id?: string
 ) {
   const next = [...(items ?? [])];
   const last = next.at(-1);
   const now = Date.now();
-  if (last && (last.kind === "text" || last.kind === "reasoning") && last.kind === kind) {
+  const stableId = id ? `${kind}-${id}` : undefined;
+  if (
+    last
+    && (last.kind === "text" || last.kind === "reasoning" || last.kind === "reasoning-summary")
+    && last.kind === kind
+    && (!stableId || last.id === stableId)
+  ) {
     next[next.length - 1] = { ...last, content: `${last.content}${content}`, updatedAt: now };
   } else {
-    next.push({ id: id ?? `${kind}-${now}-${next.length}`, kind, content, createdAt: now, updatedAt: now });
+    next.push({ id: stableId ?? `${kind}-${now}-${next.length}`, kind, content, createdAt: now, updatedAt: now });
   }
   return next;
 }
@@ -1140,6 +1179,10 @@ function buildProcessGroups(timeline: AiTimelineItem[]) {
   for (const item of timeline) {
     const last = groups.at(-1);
     if (item.kind === "tool" && last?.kind === "tools") {
+      last.items.push(item);
+      continue;
+    }
+    if (item.kind === "reasoning-summary" && last?.kind === "reasoning-summaries") {
       last.items.push(item);
       continue;
     }
@@ -1155,6 +1198,8 @@ function buildProcessGroups(timeline: AiTimelineItem[]) {
       groups.push({ id: item.id, kind: "text", item });
     } else if (item.kind === "reasoning") {
       groups.push({ id: item.id, kind: "reasoning", item });
+    } else if (item.kind === "reasoning-summary") {
+      groups.push({ id: `reasoning-summaries-${item.id}`, kind: "reasoning-summaries", items: [item] });
     } else if (item.kind === "agent") {
       groups.push({ id: item.id, kind: "agent", item });
     } else if (item.kind === "approval") {

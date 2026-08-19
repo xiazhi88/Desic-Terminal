@@ -8,7 +8,8 @@ import defaultAiConfig from "../shared/default-ai-config.json" with { type: "jso
 import {
   cleanupCodexToolBridges,
   registerCodexToolBridge,
-  registerDesicCodexCliHandler
+  registerDesicCodexCliHandler,
+  updateCodexToolBridgeActivity
 } from "./codex-cli-adapter.mjs";
 import {
   cleanupClaudeToolBridges,
@@ -42,7 +43,12 @@ let createAgentTeamsTools;
 let createSpawnAgentTool;
 let createTool;
 const AI_EVENT_DEBUG = process.env.DESIC_AI_EVENT_DEBUG === "1";
-const PROVIDER_NETWORK_MAX_ATTEMPTS = 5;
+// Match DSH's default policy: two retries after the first provider attempt.
+const PROVIDER_NETWORK_MAX_ATTEMPTS = 3;
+// Bound continuous provider inactivity, not total turn duration. Concrete HTTP
+// failures surface immediately; a healthy long stream can run indefinitely as
+// long as Cline keeps publishing activity.
+const AI_REQUEST_IDLE_TIMEOUT_MS = 60_000;
 const toolInputAjv = new Ajv({ allErrors: true, strict: false });
 const toolInputValidators = new WeakMap();
 
@@ -65,7 +71,15 @@ function emit(event) {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 
+function isExpectedAgentAbort(error) {
+  const message = String(error?.message || error || "");
+  if (!/AgentRuntimeAbortError|Run aborted|AbortError/i.test(message)) return false;
+  const state = sessions.get(activeSessionId);
+  return Boolean(state?.abortRequested || state?.cancelled || /AgentRuntimeAbortError|Run aborted/i.test(message));
+}
+
 function reportFatalProcessError(kind, error) {
+  if (kind === "unhandledRejection" && isExpectedAgentAbort(error)) return;
   const message = `${kind}: ${error?.stack || error?.message || String(error)}`;
   try {
     emit({ type: "error", sessionId: activeSessionId, message });
@@ -181,6 +195,51 @@ function claudeEffortFor(model, reasoningEffort) {
   return ["low", "medium", "high", "xhigh"].includes(reasoningEffort) ? reasoningEffort : "high";
 }
 
+function providerHttpError(response, body) {
+  const status = Number(response?.status) || 0;
+  const detail = String(body || "")
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[API key redacted]")
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/gi, "$1[redacted]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 2_000);
+  const message = detail || String(response?.statusText || "").trim() || `HTTP ${status || "error"}`;
+  const error = new Error(`error (${status || "unknown"}): ${message}`);
+  error.name = "ProviderHttpError";
+  error.status = status || undefined;
+  error.code = status ? `HTTP_${status}` : "PROVIDER_HTTP_ERROR";
+  error.providerHttpError = true;
+  error.providerBody = detail;
+  // The sidecar owns bounded retry policy. Do not let Cline's internal retry
+  // loop hide a concrete provider response behind the outer request timeout.
+  error.isRetryable = false;
+  error.retryable = false;
+  return error;
+}
+
+async function fetchProviderResponse(baseFetch, input, init) {
+  const response = await baseFetch(input, init);
+  if (response?.ok !== false) return response;
+  let body = "";
+  try {
+    body = await response.clone().text();
+  } catch {
+    // Keep the HTTP status when a provider response cannot be cloned/read.
+  }
+  throw providerHttpError(response, body);
+}
+
+function isOfficialOpenAiBaseUrl(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return true;
+  try {
+    const url = new URL(raw);
+    return url.protocol === "https:" && url.hostname.toLowerCase() === "api.openai.com";
+  } catch {
+    return false;
+  }
+}
+
 function createProviderFetch(config, reasoningEffort, baseFetch = globalThis.fetch) {
   const provider = normalizeProviderId(config).toLowerCase();
   const model = String(config.model || "").trim().toLowerCase();
@@ -188,19 +247,21 @@ function createProviderFetch(config, reasoningEffort, baseFetch = globalThis.fet
   const adaptsGrok = provider === "xai" && model === "grok-4.5";
   const adaptsKimi = provider === "moonshot" && model.startsWith("kimi-");
   const adaptsDoubao = provider === "doubao";
-  if ((!adaptsClaude && !adaptsGrok && !adaptsKimi && !adaptsDoubao) || typeof baseFetch !== "function") {
-    return undefined;
-  }
+  const adaptsOpenAiProxy = provider === "openai-native" && !isOfficialOpenAiBaseUrl(config.baseUrl);
+  if (typeof baseFetch !== "function") return undefined;
   return async (input, init = {}) => {
-    if (typeof init.body !== "string") return baseFetch(input, init);
+    if (!adaptsClaude && !adaptsGrok && !adaptsKimi && !adaptsDoubao && !adaptsOpenAiProxy) {
+      return fetchProviderResponse(baseFetch, input, init);
+    }
+    if (typeof init.body !== "string") return fetchProviderResponse(baseFetch, input, init);
     let body;
     try {
       body = JSON.parse(init.body);
     } catch {
-      return baseFetch(input, init);
+      return fetchProviderResponse(baseFetch, input, init);
     }
     if (!body || typeof body !== "object" || String(body.model || "").toLowerCase() !== model) {
-      return baseFetch(input, init);
+      return fetchProviderResponse(baseFetch, input, init);
     }
 
     if (adaptsClaude) {
@@ -240,8 +301,12 @@ function createProviderFetch(config, reasoningEffort, baseFetch = globalThis.fet
       } else {
         delete body.thinking;
       }
+    } else if (adaptsOpenAiProxy) {
+      // OpenAI-compatible Responses gateways commonly reject this optional
+      // Cline default even when they otherwise support the endpoint.
+      delete body.truncation;
     }
-    return baseFetch(input, { ...init, body: JSON.stringify(body) });
+    return fetchProviderResponse(baseFetch, input, { ...init, body: JSON.stringify(body) });
   };
 }
 
@@ -280,17 +345,195 @@ function optionalPositiveIntConfig(value) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
 }
 
+function providerErrorDetail(error) {
+  const parts = [];
+  const seen = new Set();
+  let current = error;
+  while (current && !seen.has(current) && parts.length < 6) {
+    seen.add(current);
+    if (typeof current === "string") {
+      parts.push(current);
+      break;
+    }
+    if (typeof current === "object") {
+      if (current.code !== undefined) parts.push(`code=${String(current.code)}`);
+      if (current.status !== undefined) parts.push(`status=${String(current.status)}`);
+      if (current.type !== undefined) parts.push(`type=${String(current.type)}`);
+      if (current.message !== undefined) parts.push(String(current.message));
+      current = current.cause;
+      continue;
+    }
+    parts.push(String(current));
+    break;
+  }
+  return parts.join(": ").trim();
+}
+
+function isProviderHttpResponseError(error) {
+  const seen = new Set();
+  let current = error;
+  for (let depth = 0; current && depth < 6 && !seen.has(current); depth += 1) {
+    seen.add(current);
+    if (current?.providerHttpError === true || current?.name === "ProviderHttpError") return true;
+    current = current?.cause;
+  }
+  const detail = providerErrorDetail(error);
+  return /error \(\d{3}\):\s*\{[^}]*\"(?:type|message)\"/i.test(detail);
+}
+
+function isProviderRetryNotice(value) {
+  const detail = String(value || "").trim();
+  return /reconnecting|retrying/i.test(detail)
+    && (/(?:status|http|error)\s*[:=(]?\s*5\d{2}/i.test(detail)
+      || /service temporarily unavailable|service unavailable|api_error/i.test(detail));
+}
+
 function isTransientAiNetworkError(error) {
-  const message = String(error?.message || error || "");
-  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bETIMEDOUT\b|\bEPIPE\b|Connect Timeout Error|ConnectTimeoutError|UND_ERR_CONNECT_TIMEOUT|fetch failed|socket hang up|stream disconnected|servers are currently overloaded|service unavailable|temporarily unavailable|\b(?:502|503|504)\b/i.test(message);
+  const detail = providerErrorDetail(error);
+  if (!detail || isProviderHttpResponseError(error)) return false;
+  if (/\b(?:401|403)\b|invalid[_ -]?credential|invalid api key|insufficient[_ -]?quota|quota exceeded|out of budget|billing|context (?:window|length)|too (?:large|long) for (?:this |the )?model/i.test(detail)) {
+    return false;
+  }
+  const statusMatch = detail.match(/\bstatus[=: ]+(\d{3})\b|\bHTTP\s+(\d{3})\b/i);
+  const status = Number(statusMatch?.[1] || statusMatch?.[2] || 0);
+  if ([408, 409, 429].includes(status) || status >= 500 && status <= 599) return true;
+  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bECONNABORTED\b|\bETIMEDOUT\b|\bEPIPE\b|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|SocketError|other side closed|fetch failed|socket hang up|socket connection (?:was )?closed|stream disconnected|stream ended before|premature (?:stream|close)|connection (?:closed|lost|reset|refused)|upstream.?connect|servers are currently overloaded|service unavailable|temporarily unavailable|overloaded|rate.?limit|too many requests|\b(?:408|409|429|500|502|503|504|524)\b|timed? out|terminated/i.test(detail);
 }
 
 function networkRetryDelay(attempt) {
-  return Math.min(2_000, 500 * (2 ** Math.max(0, attempt - 1)));
+  const base = Math.min(8_000, 500 * (2 ** Math.max(0, attempt - 1)));
+  return Math.round(base * (1 - Math.random() * 0.1));
 }
 
 function wait(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function aiRequestIdleTimeoutMs(config) {
+  const configured = optionalPositiveIntConfig(config?.requestTimeoutMs);
+  if (configured) return Math.min(configured, 10 * 60 * 1000);
+  const provider = normalizeProviderId(config).toLowerCase();
+  if (provider === "openai-codex-cli" || provider === "claude-code") return null;
+  return AI_REQUEST_IDLE_TIMEOUT_MS;
+}
+
+function requestTimedOutResult(envelope, knownError = "") {
+  const message = String(knownError || "Request timed out.").trim() || "Request timed out.";
+  const failedResult = { finishReason: "error", errorMessage: message, text: message };
+  return envelope ? { result: failedResult } : failedResult;
+}
+
+function withProviderIdleTimeout(promise, state, timeoutMs, message = "Request timed out.") {
+  state.lastProviderActivityAt = Date.now();
+  // Local CLI providers own a supervised child process and surface transport,
+  // JSON-RPC, provider, and exit failures directly. A silent reasoning interval
+  // is not enough evidence to terminate an otherwise live CLI turn.
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) return promise;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let timer;
+    const finish = (handler, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      handler(value);
+    };
+    const checkIdle = () => {
+      if (settled) return;
+      const idleMs = Date.now() - Number(state.lastProviderActivityAt || 0);
+      const remainingMs = timeoutMs - idleMs;
+      if (remainingMs <= 0) {
+        finish(reject, new Error(message));
+        return;
+      }
+      timer = setTimeout(checkIdle, remainingMs);
+    };
+    timer = setTimeout(checkIdle, timeoutMs);
+    promise.then(
+      (value) => finish(resolve, value),
+      (error) => finish(reject, error)
+    );
+  });
+}
+
+async function abortProviderAttempt(abort, state) {
+  state.abortRequested = true;
+  try {
+    await abort?.();
+  } catch {
+    // Preserve the provider error even if abort also fails.
+  }
+}
+
+async function runProviderNetworkRetry({ sessionId, state, operation, abort, envelope = false, timeoutMs = AI_REQUEST_IDLE_TIMEOUT_MS }) {
+  let lastError = "";
+  for (let attempt = 1; attempt <= PROVIDER_NETWORK_MAX_ATTEMPTS; attempt += 1) {
+    if (state.abortController?.signal.aborted || state.cancelled) {
+      throw new Error("AI 请求已取消");
+    }
+    lastError = "";
+    let result;
+    let rejectProviderError;
+    const providerError = new Promise((_, reject) => {
+      rejectProviderError = reject;
+    });
+    state.providerErrorReject = rejectProviderError;
+    try {
+      const operationPromise = operation();
+      // Cline may reject its internal run after abort has already won the race.
+      // Attach an explicit sink so expected aborts cannot become unhandledRejection.
+      operationPromise.catch(() => undefined);
+      result = await withProviderIdleTimeout(
+        Promise.race([operationPromise, providerError]),
+        state,
+        timeoutMs,
+        "Request timed out."
+      );
+    } catch (error) {
+      if (error?.message === "Request timed out.") {
+        await abortProviderAttempt(abort, state);
+        return requestTimedOutResult(envelope, state.retryableNetworkError);
+      }
+      lastError = providerErrorDetail(error);
+      if (!isTransientAiNetworkError(error)) throw error;
+      const failedResult = { finishReason: "error", errorMessage: lastError, text: lastError };
+      result = envelope ? { result: failedResult } : failedResult;
+    } finally {
+      if (state.providerErrorReject === rejectProviderError) state.providerErrorReject = null;
+    }
+    const resultValue = result?.result || result;
+    const finishReason = String(resultValue?.finishReason || resultValue?.status || "").toLowerCase();
+    const resultError = resultValue?.errorMessage || resultValue?.error || resultText(result);
+    const retryableError = lastError || (isTransientAiNetworkError(resultError) ? resultError : "");
+    if (!retryableError) {
+      state.retryableNetworkError = "";
+      return result;
+    }
+    // Once text or a tool call reached the provider event stream, restarting the
+    // turn could duplicate side effects. Surface the transport failure instead.
+    if (state.hasProviderProgress) {
+      await abortProviderAttempt(abort, state);
+      return result;
+    }
+    if (attempt >= PROVIDER_NETWORK_MAX_ATTEMPTS) {
+      await abortProviderAttempt(abort, state);
+      const failedResult = { finishReason: "error", errorMessage: retryableError, text: retryableError };
+      return envelope ? { result: failedResult } : failedResult;
+    }
+    const delay = networkRetryDelay(attempt);
+    emit({
+      type: "status",
+      sessionId,
+      status: "retrying",
+      message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_ATTEMPTS - 1}）`
+    });
+    state.retryableNetworkError = retryableError;
+    state.hasProviderProgress = false;
+    await abortProviderAttempt(abort, state);
+    await wait(delay);
+  }
+  const failedResult = { finishReason: "error", errorMessage: lastError || "AI 网络重试失败", text: lastError || "AI 网络重试失败" };
+  return envelope ? { result: failedResult } : failedResult;
 }
 
 function toolInputTypeLabel(type) {
@@ -2255,14 +2498,37 @@ function withCumulativeResultUsage(result) {
   return { ...result, usage: mapUsagePayload(result.usage, "cumulative") };
 }
 
+function codexReasoningDeltaFields(event) {
+  const candidates = [event?.metadata, event?.details, event?.metadata?.details];
+  for (const candidate of candidates) {
+    if (!candidate || typeof candidate !== "object" || Array.isArray(candidate)) continue;
+    const details = candidate["codex-app-server"] ?? candidate.codexAppServer ?? candidate;
+    if (!details || typeof details !== "object" || Array.isArray(details)) continue;
+    if (details.provider !== "codex-app-server" && details.isSummary !== true) continue;
+    return {
+      reasoningId: typeof details.itemId === "string" && details.itemId ? details.itemId : undefined,
+      reasoningSummary: details.isSummary === true
+    };
+  }
+  return {};
+}
+
 function mapCoreEvent(sessionId, event) {
   if (event?.type === "assistant-text-delta") {
     debugAiEvent("assistant-text-delta", { channel: "turn-text", preview: previewText(event.text) });
     return event.text ? { type: "turnText", sessionId, mode: "delta", content: event.text, source: "assistant-text-delta" } : null;
   }
   if (event?.type === "assistant-reasoning-delta") {
-    debugAiEvent("assistant-reasoning-delta", { channel: "reasoning", preview: previewText(event.text) });
-    return event.text ? { type: "delta", sessionId, channel: "reasoning", content: event.text } : null;
+    const reasoningFields = codexReasoningDeltaFields(event);
+    debugAiEvent("assistant-reasoning-delta", {
+      channel: "reasoning",
+      reasoningId: reasoningFields.reasoningId,
+      reasoningSummary: reasoningFields.reasoningSummary,
+      preview: previewText(event.text)
+    });
+    return event.text
+      ? { type: "delta", sessionId, channel: "reasoning", content: event.text, ...reasoningFields }
+      : null;
   }
   if (event?.type === "assistant-message") {
     const text = textFromMessage(event.message);
@@ -2334,7 +2600,15 @@ function mapCoreEvent(sessionId, event) {
       return agentEvent.text ? { type: "turnText", sessionId, mode: "delta", content: agentEvent.text, source: agentEvent.type } : null;
     }
     if (agentEvent?.type === "assistant-reasoning-delta") {
-      return agentEvent.text ? { type: "delta", sessionId, channel: "reasoning", content: agentEvent.text } : null;
+      return agentEvent.text
+        ? {
+            type: "delta",
+            sessionId,
+            channel: "reasoning",
+            content: agentEvent.text,
+            ...codexReasoningDeltaFields(agentEvent)
+          }
+        : null;
     }
     if (agentEvent?.type === "content_start") {
       return mapContentEvent(sessionId, agentEvent, nestedContext);
@@ -2502,6 +2776,7 @@ function bindConfiguredAgentToolEvent(event, config = {}) {
 }
 
 function emitMappedCoreEvent(state, sessionId, config, event) {
+  if (!state.cancelled) state.lastProviderActivityAt = Date.now();
   const mapped = bindConfiguredAgentToolEvent(mapCoreEvent(sessionId, event), config);
   if (!mapped || state.cancelled) return;
   const policyMapped = annotateToolEvent(mapped, config);
@@ -2520,8 +2795,14 @@ function emitMappedCoreEvent(state, sessionId, config, event) {
   ].includes(policyMapped.type)) {
     return;
   }
+  if (policyMapped.type === "status" && isProviderRetryNotice(policyMapped.message)) {
+    state.retryableNetworkError = policyMapped.message;
+    state.providerErrorReject?.(new Error(policyMapped.message));
+    return;
+  }
   if (policyMapped.type === "error" && isTransientAiNetworkError(policyMapped.message)) {
     state.retryableNetworkError = policyMapped.message;
+    state.providerErrorReject?.(new Error(policyMapped.message));
     return;
   }
   if (policyMapped.type === "status" && policyMapped.status === "failed" && state.retryableNetworkError) {
@@ -2584,7 +2865,13 @@ function createRuntimeConfig(
         parentAgentId: policyConfig.agentRole === "main"
           ? undefined
           : String(policyConfig.parentAgentId || command.sessionId),
+        onProviderActivity: bridgeOptions.onProviderActivity,
+        onReasoningSummary: (event) => {
+          bridgeOptions.onProviderActivity?.();
+          bridgeOptions.onReasoningSummary?.(event);
+        },
         onToolEvent: (event) => {
+          bridgeOptions.onProviderActivity?.();
           bridgeOptions.onProviderToolEvent?.(event);
           const mapped = bindConfiguredAgentToolEvent(mapCoreEvent(command.sessionId, event), policyConfig);
           if (mapped) emit(annotateToolEvent(mapped, policyConfig));
@@ -2732,7 +3019,10 @@ function createDesicSpawnAgentTool(
       "advisor",
       subAgentTools(null, { agentId: runtimeSessionId }),
       runtimeSessionId,
-      { onProviderToolEvent: onConfiguredAgentEvent }
+      {
+        onProviderActivity: () => { state.lastProviderActivityAt = Date.now(); },
+        onProviderToolEvent: onConfiguredAgentEvent
+      }
     )
   );
   return createSpawnAgentTool({
@@ -3218,7 +3508,8 @@ function createDesicTeamTools(sessionId, command, state, runtimeSessionId = toCl
       { ...command, config: teamConfig },
       "advisor",
       createBaseTools(),
-      runtimeSessionId
+      runtimeSessionId,
+      { onProviderActivity: () => { state.lastProviderActivityAt = Date.now(); } }
     )
   );
   const runtime = new AgentTeamsRuntime({
@@ -3262,6 +3553,7 @@ function normalizeCommand(input) {
 
 async function sendMessage(cline, input) {
   const command = normalizeCommand(input);
+  const requestTimeout = aiRequestIdleTimeoutMs(command.config);
   const sessionId = command.sessionId;
   const runtimeSessionId = toClineRuntimeSessionId(sessionId);
   const preserveConversation = preservesClineConversation(sessionId, command.config);
@@ -3296,9 +3588,13 @@ async function sendMessage(cline, input) {
     conversationFingerprint,
     hasProviderProgress: false,
     retryableNetworkError: "",
+    providerErrorReject: null,
+    abortRequested: false,
+    lastProviderActivityAt: Date.now(),
     abortController: new AbortController()
   };
   sessions.set(sessionId, state);
+  updateCodexToolBridgeActivity(sessionId, () => { state.lastProviderActivityAt = Date.now(); });
   emit({ type: "status", sessionId, status: "connecting", message: "初始化 ClineCore" });
   try {
     cline = await withRejectTimeout(ensureCline(), 30_000, "ClineCore 初始化超时");
@@ -3317,12 +3613,24 @@ async function sendMessage(cline, input) {
       && canResumeClineConversation(sessionId, existingCoreSession, command.config);
     if (canResumeExisting) {
       emit({ type: "status", sessionId, status: "running", message: "继续已有 AI 会话" });
-      const result = await cline.send({
-        sessionId: runtimeSessionId,
-        prompt
+      const result = await runProviderNetworkRetry({
+        sessionId,
+        state,
+        operation: () => cline.send({
+          sessionId: runtimeSessionId,
+          prompt
+        }),
+        abort: () => cline.abort(runtimeSessionId).catch(() => undefined),
+        timeoutMs: requestTimeout
       });
+      const resultValue = result?.result || result;
       const text = resultText(result);
-      const finishReason = result?.finishReason || "completed";
+      const finishReason = resultValue?.finishReason || "completed";
+      if (finishReason === "error") {
+        const errorMessage = resultValue?.errorMessage || resultValue?.error || text || "AI 模型响应失败";
+        emit({ type: "error", sessionId, message: errorMessage });
+        emit({ type: "status", sessionId, status: "failed", message: errorMessage });
+      }
       if (!state.cancelled && finishReason !== "error" && text) {
         const lifecycle = reduceAssistantTextLifecycle(state, {
           type: "finalText",
@@ -3403,7 +3711,28 @@ async function sendMessage(cline, input) {
     }
     const hasPersistedMessages = restoringConversation && initialMessages.length > 0;
     const startInput = {
-      config: createRuntimeConfig(coordinatorCommand, permissionMode, mainTools, runtimeSessionId),
+      config: createRuntimeConfig(
+        coordinatorCommand,
+        permissionMode,
+        mainTools,
+        runtimeSessionId,
+        {
+          onProviderActivity: () => { state.lastProviderActivityAt = Date.now(); },
+          onReasoningSummary: (event) => {
+            if (state.cancelled || !event?.content) return;
+            state.hasProviderProgress = true;
+            state.iterationReasoningStreamed = true;
+            emit({
+              type: "delta",
+              sessionId,
+              channel: "reasoning",
+              content: event.content,
+              reasoningId: event.itemId,
+              reasoningSummary: true
+            });
+          }
+        }
+      ),
       localRuntime: {
         configExtensions: ["skills"]
       },
@@ -3416,47 +3745,34 @@ async function sendMessage(cline, input) {
       interactive: preserveConversation,
       ...(hasPersistedMessages ? { initialMessages } : {})
     };
-    let startResult = null;
-    for (let attempt = 1; attempt <= PROVIDER_NETWORK_MAX_ATTEMPTS; attempt += 1) {
-      state.retryableNetworkError = "";
-      try {
-        startResult = await cline.start(startInput);
-      } catch (error) {
-        if (!isTransientAiNetworkError(error)) throw error;
-        state.retryableNetworkError = error?.message || String(error);
-        startResult = { result: { finishReason: "error" } };
-      }
-      const finishReason = String(startResult?.result?.finishReason || startResult?.result?.status || "").toLowerCase();
-      const resultError = resultText(startResult);
-      const retryableError = state.retryableNetworkError
-        || (isTransientAiNetworkError(resultError) ? resultError : "");
-      if (!retryableError) break;
-      if (attempt >= PROVIDER_NETWORK_MAX_ATTEMPTS) {
-        emit({ type: "error", sessionId, message: retryableError });
-        emit({ type: "status", sessionId, status: "failed", message: "failed" });
-        break;
-      }
-      const delay = networkRetryDelay(attempt);
-      emit({
-        type: "status",
-        sessionId,
-        status: "retrying",
-        message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_ATTEMPTS}）`
-      });
-      state.hasProviderProgress = false;
-      await cline.abort(runtimeSessionId).catch(() => undefined);
-      await wait(delay);
-      if (state.cancelled) return;
-    }
+    let startResult = await runProviderNetworkRetry({
+      sessionId,
+      state,
+      operation: () => cline.start(startInput),
+      abort: () => cline.abort(runtimeSessionId).catch(() => undefined),
+      envelope: true,
+      timeoutMs: requestTimeout
+    });
     if (!startResult) throw new Error("ClineCore 未返回运行结果");
     if (preserveConversation) {
       persistentClineConversationSessions.set(runtimeSessionId, conversationFingerprint);
     }
-    if (hasPersistedMessages) {
-      startResult.result = await cline.send({ sessionId: runtimeSessionId, prompt });
+    if (hasPersistedMessages && startResult.result?.finishReason !== "error") {
+      startResult.result = await runProviderNetworkRetry({
+        sessionId,
+        state,
+        operation: () => cline.send({ sessionId: runtimeSessionId, prompt }),
+        abort: () => cline.abort(runtimeSessionId).catch(() => undefined),
+        timeoutMs: requestTimeout
+      });
     }
     let text = resultText(startResult);
     const finishReason = startResult.result?.finishReason || "completed";
+    if (finishReason === "error") {
+      const errorMessage = startResult.result?.errorMessage || startResult.result?.error || text || "AI 模型响应失败";
+      emit({ type: "error", sessionId, message: errorMessage });
+      emit({ type: "status", sessionId, status: "failed", message: errorMessage });
+    }
     if (!state.cancelled && finishReason !== "error" && text) {
       const lifecycle = reduceAssistantTextLifecycle(state, {
         type: "finalText",
@@ -3675,6 +3991,7 @@ if (isDirectRun) {
 
 export {
   PERPETUAL_ACCOUNT_RISK_RULE,
+  aiRequestIdleTimeoutMs,
   bindConfiguredAgentToolEvent,
   bindProfileAccountInput,
   buildSystemPrompt,
@@ -3698,6 +4015,7 @@ export {
   profileAgentClaimsAffordabilityVeto,
   profileAgentToolEvidenceError,
   reduceAssistantTextLifecycle,
+  runProviderNetworkRetry,
   rememberBackgroundOpportunityCommitResult,
   rememberDecisionContext,
   validateToolInput,

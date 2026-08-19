@@ -8653,9 +8653,17 @@ function statusLabel(status: string, t?: UiTranslation) {
   if (status === "connecting") return t ? t("automation:connecting") : "连接中";
   if (status === "running" || status === "streaming") return t ? t("automation:generating") : "生成中";
   if (status === "tooling") return t ? t("automation:usingTools") : "工具中";
+  if (status === "retrying") return "重试连接中";
   if (status === "failed") return t ? t("common:failed") : "失败";
   if (status === "stopped") return t ? t("automation:stopped") : "已停止";
   return t ? t("automation:idle") : "空闲";
+}
+
+function aiRuntimeStatusFromSession(status: string) {
+  const normalized = status.trim().toLowerCase();
+  if (normalized === "failed" || normalized === "error") return "failed";
+  if (["connecting", "running", "streaming", "tooling", "retrying"].includes(normalized)) return normalized;
+  return "idle";
 }
 
 const defaultAiMessages: AiUiMessage[] = [
@@ -8675,6 +8683,16 @@ const previewLegacyToolMessage = storedMessageToUiMessage({
   content: "",
   status: "completed",
   toolJson: JSON.stringify([
+    {
+      type: "processReasoningSummary",
+      id: "preview-reasoning-summary-1",
+      content: "**Inspecting account and market context**"
+    },
+    {
+      type: "processReasoningSummary",
+      id: "preview-reasoning-summary-2",
+      content: "**Planning the risk review**"
+    },
     {
       type: "processReasoning",
       content: "先读取账户和市场上下文，再核对风险限制，最后给出只读结论。"
@@ -8938,6 +8956,7 @@ const AI_PANEL_MIN_HEIGHT = 420;
 
 type AiDockPosition = { x: number; y: number };
 type AiPanelSize = { width: number; height: number };
+type AiSessionViewCache = { messages: AiUiMessage[]; status: string };
 
 function clampAiDockPosition(position: AiDockPosition): AiDockPosition {
   if (typeof window === "undefined") return position;
@@ -9008,6 +9027,7 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
   const messagesRef = useRef<AiUiMessage[]>(messages);
   const statusRef = useRef(status);
   const sessionIdRef = useRef(sessionId);
+  const sessionViewCacheRef = useRef<Map<string, AiSessionViewCache>>(new Map());
   const slowTimeoutRef = useRef<number | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const inputRef = useRef<HTMLTextAreaElement | null>(null);
@@ -9035,7 +9055,7 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
   const suppressDockClickRef = useRef(false);
   const aiDockRenderCountRef = useRef(0);
   aiDockRenderCountRef.current += 1;
-  const isStreaming = status === "connecting" || status === "running" || status === "streaming" || status === "tooling";
+  const isStreaming = status === "connecting" || status === "running" || status === "streaming" || status === "tooling" || status === "retrying";
   const chatModel = config?.models.find((model) => model.id === chatModelId) ?? config?.models[0] ?? null;
   const visibleSessions = useMemo(
     () => sessions.filter((session) => session.origin === sessionHistoryTab),
@@ -9095,6 +9115,11 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
   useEffect(() => {
     statusRef.current = status;
   }, [status]);
+
+  useEffect(() => {
+    if (preview) return;
+    sessionViewCacheRef.current.set(sessionId, { messages, status });
+  }, [messages, preview, sessionId, status]);
 
   useEffect(() => {
     if (!isStreaming) {
@@ -9172,6 +9197,7 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
         setSessionTitle(snapshot.session.title || t("automation:tradingAssistant"));
         setSessionHistoryTab("user");
         sessionIdRef.current = snapshot.session.id;
+        setStatus(aiRuntimeStatusFromSession(snapshot.session.status));
         const restored = snapshotToUiMessages(snapshot);
         if (restored.length > 0) setMessages(restored);
         void refreshSessions();
@@ -9182,15 +9208,66 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
     });
     const listenerCleanup = createDeferredCleanupSlot();
     void listenAiEvents((event) => {
-      if (event.sessionId !== sessionIdRef.current) return;
+      const active = event.sessionId === sessionIdRef.current;
+      const cached = sessionViewCacheRef.current.get(event.sessionId) ?? {
+        messages: active ? messagesRef.current : [],
+        status: active ? statusRef.current : "idle"
+      };
+      let nextStatus = cached.status;
+      let nextMessages = cached.messages;
+      applyAiEvent(
+        event,
+        (value) => { nextStatus = value; },
+        (update) => {
+          nextMessages = typeof update === "function" ? update(nextMessages) : update;
+        }
+      );
+      sessionViewCacheRef.current.set(event.sessionId, { messages: nextMessages, status: nextStatus });
+      if (!active) return;
       if (event.type === "status" || event.type === "delta" || event.type === "done" || event.type === "error") clearAiTimers("slow");
-      applyAiEvent(event, setStatus, setMessages);
+      setStatus(nextStatus);
+      setMessages(nextMessages);
     }).then((unlisten) => listenerCleanup.settle(unlisten));
     return () => {
       listenerCleanup.dispose();
       clearAiTimers();
     };
   }, [clearAiTimers, preview, refreshSessions]);
+
+  // Tauri events are not replayed. Reconcile the durable session state as a
+  // fallback so an early sidecar/command failure cannot leave the dock stuck.
+  useEffect(() => {
+    if (preview || !["connecting", "streaming", "tooling", "running", "retrying"].includes(status)) return;
+    let disposed = false;
+    let interval: number | null = null;
+    const reconcile = async () => {
+      const snapshot = await loadAiSession(sessionIdRef.current).catch((error) => {
+        logger.debug("ai session terminal reconciliation failed", { error: error instanceof Error ? error.message : String(error) });
+        return null;
+      });
+      if (disposed || !snapshot || snapshot.session.id !== sessionIdRef.current) return;
+      const normalized = snapshot.session.status.trim().toLowerCase();
+      if (!["failed", "error", "stopped", "cancelled", "canceled", "idle", "completed", "done", "success"].includes(normalized)) return;
+      clearAiTimers();
+      const restored = snapshotToUiMessages(snapshot);
+      if (restored.length > 0) setMessages(restored);
+      setStatus(["failed", "error"].includes(normalized) ? "failed" : "idle");
+      void refreshSessions();
+      if (interval !== null) {
+        window.clearInterval(interval);
+        interval = null;
+      }
+    };
+    const start = window.setTimeout(() => {
+      void reconcile();
+      interval = window.setInterval(() => void reconcile(), 2_000);
+    }, 2_000);
+    return () => {
+      disposed = true;
+      window.clearTimeout(start);
+      if (interval !== null) window.clearInterval(interval);
+    };
+  }, [clearAiTimers, preview, refreshSessions, status]);
 
   useEffect(() => {
     if (preview) return;
@@ -9291,9 +9368,6 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
     setCreatingSession(true);
     try {
       clearAiTimers();
-      if (isStreaming) {
-        await stopAiMessage(sessionIdRef.current).catch((error) => logger.warn("ai stop before new session failed", error));
-      }
       const snapshot = await createAiSession();
       if (!snapshot) {
         setStatus("failed");
@@ -9318,24 +9392,25 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
     } finally {
       setCreatingSession(false);
     }
-  }, [clearAiTimers, creatingSession, isStreaming, preview, refreshSessions]);
+  }, [clearAiTimers, creatingSession, preview, refreshSessions]);
 
   const switchSession = useCallback(async (targetSessionId: string) => {
     if (preview || targetSessionId === sessionIdRef.current) return;
     try {
       clearAiTimers();
-      if (isStreaming) {
-        await stopAiMessage(sessionIdRef.current).catch((error) => logger.warn("ai stop before switching session failed", error));
-      }
-      setStatus("idle");
       setSessionsStatus(t("automation:loadingSession"));
       const snapshot = await loadAiSession(targetSessionId);
       if (!snapshot) return;
+      const cached = sessionViewCacheRef.current.get(targetSessionId);
+      const restoredMessages = cached ? cached.messages : snapshotToUiMessages(snapshot);
+      const restoredStatus = cached ? cached.status : aiRuntimeStatusFromSession(snapshot.session.status);
       setSessionId(snapshot.session.id);
       setSessionTitle(snapshot.session.title || t("automation:newSession"));
       setSessionHistoryTab(snapshot.session.origin);
       sessionIdRef.current = snapshot.session.id;
-      setMessages(snapshotToUiMessages(snapshot));
+      setStatus(restoredStatus);
+      setMessages(restoredMessages);
+      sessionViewCacheRef.current.set(targetSessionId, { messages: restoredMessages, status: restoredStatus });
       setInput("");
       setSessionsStatus("");
       await refreshSessions();
@@ -9343,7 +9418,7 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
       logger.error("ai session switch failed", error);
       setSessionsStatus(error instanceof Error ? error.message : t("automation:switchSessionFailed"));
     }
-  }, [clearAiTimers, isStreaming, preview, refreshSessions]);
+  }, [clearAiTimers, preview, refreshSessions]);
 
   const startRenameSession = useCallback((session: AiSession) => {
     setRenamingSessionId(session.id);
@@ -9901,7 +9976,18 @@ const MemoAiDock = memo(AiDock);
 
 function snapshotToUiMessages(snapshot: AiSessionSnapshot) {
   const mapped = snapshot.messages.map(storedMessageToUiMessage);
-  if (mapped.length > 0) return mapped;
+  const deduplicated = mapped.filter((message, index) => {
+    const previous = mapped[index - 1];
+    return !(
+      message.role === "assistant"
+      && message.error
+      && previous?.role === "assistant"
+      && previous.error
+      && message.text === previous.text
+      && message.errorMessage === previous.errorMessage
+    );
+  });
+  if (deduplicated.length > 0) return deduplicated;
   return [
     {
       id: "welcome",

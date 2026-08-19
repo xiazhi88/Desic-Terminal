@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { bindConfiguredAgentToolEvent, buildSystemPrompt, createDesicTools, createProviderFetch, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { aiRequestIdleTimeoutMs, bindConfiguredAgentToolEvent, buildSystemPrompt, createDesicTools, createProviderFetch, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, runProviderNetworkRetry, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const sessionId = "indicator-stream-test";
 const wrap = (event) => ({
@@ -188,6 +188,26 @@ assert.deepEqual(
 );
 
 assert.deepEqual(
+  mapCoreEvent(sessionId, wrap({
+    type: "assistant-reasoning-delta",
+    text: "Inspecting inputs",
+    metadata: {
+      provider: "codex-app-server",
+      itemId: "reasoning-1",
+      isSummary: true
+    }
+  })),
+  {
+    type: "delta",
+    sessionId,
+    channel: "reasoning",
+    content: "Inspecting inputs",
+    reasoningId: "reasoning-1",
+    reasoningSummary: true
+  }
+);
+
+assert.deepEqual(
   mapCoreEvent(sessionId, wrap({ type: "content_start", contentType: "text", text: "准备生成指标", accumulated: "准备生成指标" })),
   {
     type: "turnText",
@@ -318,12 +338,132 @@ for (const message of [
   "getaddrinfo ENOTFOUND api.deepseek.com",
   "getaddrinfo EAI_AGAIN api.deepseek.com",
   "Connect Timeout Error (UND_ERR_CONNECT_TIMEOUT)",
-  "fetch failed: socket hang up"
+  "fetch failed: socket hang up",
+  "Cannot connect to API: other side closed: SocketError: other side closed (UND_ERR_SOCKET)",
+  "HTTP 429 rate limit"
 ]) {
   assert.equal(isTransientAiNetworkError(message), true, message);
 }
 assert.equal(isTransientAiNetworkError("HTTP 401 invalid API key"), false);
-assert.equal(isTransientAiNetworkError("HTTP 429 rate limit"), false);
+assert.equal(isTransientAiNetworkError("HTTP 429 insufficient_quota"), false);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli" }), null);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "claude-code" }), null);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native" }), 60_000);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli", requestTimeoutMs: 500 }), 500);
+
+const localCliSilentState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: true,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+let localCliAbortCount = 0;
+const localCliSilentResult = await runProviderNetworkRetry({
+  sessionId,
+  state: localCliSilentState,
+  operation: () => new Promise((resolve) => {
+    setTimeout(() => resolve({ finishReason: "completed", text: "CLI response after silence" }), 40);
+  }),
+  abort: async () => { localCliAbortCount += 1; },
+  timeoutMs: aiRequestIdleTimeoutMs({ provider: "openai-codex-cli" })
+});
+assert.equal(localCliSilentResult.finishReason, "completed");
+assert.equal(localCliAbortCount, 0);
+
+let providerAbortCount = 0;
+const providerErrorState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: true,
+  retryableNetworkError: "",
+  providerErrorReject: null
+};
+const providerErrorStartedAt = Date.now();
+const immediateProviderError = await runProviderNetworkRetry({
+  sessionId,
+  state: providerErrorState,
+  operation: () => {
+    queueMicrotask(() => providerErrorState.providerErrorReject?.(new Error("Request timed out.")));
+    return new Promise(() => {});
+  },
+  abort: async () => { providerAbortCount += 1; },
+  timeoutMs: 5_000
+});
+assert.equal(immediateProviderError.finishReason, "error");
+assert.equal(immediateProviderError.errorMessage, "Request timed out.");
+assert.equal(providerAbortCount, 1);
+assert.ok(Date.now() - providerErrorStartedAt < 1_000, "provider error should fail before the idle timeout");
+const activeStreamState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: false,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+const activeStreamStartedAt = Date.now();
+const activeStreamResult = await runProviderNetworkRetry({
+  sessionId,
+  state: activeStreamState,
+  operation: () => new Promise((resolve) => {
+    const activity = setInterval(() => {
+      activeStreamState.lastProviderActivityAt = Date.now();
+    }, 5);
+    setTimeout(() => {
+      clearInterval(activity);
+      resolve({ finishReason: "completed", text: "long stream completed" });
+    }, 75);
+  }),
+  abort: async () => {},
+  timeoutMs: 20
+});
+assert.equal(activeStreamResult.finishReason, "completed");
+assert.ok(Date.now() - activeStreamStartedAt >= 60, "provider activity should extend the idle timeout beyond total duration");
+const observed503State = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: false,
+  retryableNetworkError: 'error (503): {"message":"Service temporarily unavailable","type":"api_error"}',
+  providerErrorReject: null,
+  abortRequested: false
+};
+const observed503Result = await runProviderNetworkRetry({
+  sessionId,
+  state: observed503State,
+  operation: () => new Promise(() => {}),
+  abort: async () => {},
+  timeoutMs: 10
+});
+assert.equal(observed503Result.errorMessage, observed503State.retryableNetworkError);
+let failedStatusAttempts = 0;
+let failedStatusAborts = 0;
+const failedStatusRetry = await runProviderNetworkRetry({
+  sessionId,
+  state: {
+    abortController: new AbortController(),
+    cancelled: false,
+    hasProviderProgress: false,
+    retryableNetworkError: "",
+    providerErrorReject: null,
+    abortRequested: false
+  },
+  operation: async () => {
+    failedStatusAttempts += 1;
+    if (failedStatusAttempts === 1) {
+      return { result: { status: "failed", errorMessage: "Reconnecting... 1/5 (unexpected status 503 Service Unavailable)" } };
+    }
+    return { result: { status: "completed", text: "ok" } };
+  },
+  abort: async () => { failedStatusAborts += 1; },
+  timeoutMs: 5_000
+});
+assert.equal(failedStatusRetry.result.status, "completed");
+assert.equal(failedStatusAttempts, 2);
+assert.equal(failedStatusAborts, 1);
 
 const textState = {
   pendingTurnText: "",
@@ -432,7 +572,44 @@ await doubaoFetch("https://ark.cn-beijing.volces.com/api/v3/chat/completions", {
 });
 const adaptedDoubaoBody = JSON.parse(capturedClaudeRequests.at(-1).init.body);
 assert.equal(adaptedDoubaoBody.thinking, undefined);
-assert.equal(createProviderFetch({ provider: "deepseek", model: "deepseek-v4-pro" }, "medium", captureFetch), undefined);
+const proxiedOpenAiFetch = createProviderFetch({
+  provider: "openai-native",
+  model: "gpt-test",
+  baseUrl: "http://gateway.example/v1"
+}, "medium", captureFetch);
+await proxiedOpenAiFetch("http://gateway.example/v1/responses", {
+  method: "POST",
+  body: JSON.stringify({ model: "gpt-test", input: "hello", truncation: "auto" })
+});
+const proxiedOpenAiBody = JSON.parse(capturedClaudeRequests.at(-1).init.body);
+assert.equal(proxiedOpenAiBody.truncation, undefined);
+
+const officialOpenAiFetch = createProviderFetch({
+  provider: "openai-native",
+  model: "gpt-test",
+  baseUrl: "https://api.openai.com/v1"
+}, "medium", captureFetch);
+await officialOpenAiFetch("https://api.openai.com/v1/responses", {
+  method: "POST",
+  body: JSON.stringify({ model: "gpt-test", input: "hello", truncation: "auto" })
+});
+const officialOpenAiBody = JSON.parse(capturedClaudeRequests.at(-1).init.body);
+assert.equal(officialOpenAiBody.truncation, "auto");
+
+const failingProviderFetch = createProviderFetch({ provider: "openai-native", model: "gpt-test" }, "medium", async () => new Response(
+  JSON.stringify({ message: "Service temporarily unavailable", type: "api_error" }),
+  { status: 503, headers: { "content-type": "application/json" } }
+));
+await assert.rejects(
+  () => failingProviderFetch("https://gateway.invalid/v1/responses", { method: "POST" }),
+  (error) => {
+    assert.equal(error.name, "ProviderHttpError");
+    assert.equal(error.status, 503);
+    assert.equal(error.message, 'error (503): {"message":"Service temporarily unavailable","type":"api_error"}');
+    assert.equal(isTransientAiNetworkError(error), false);
+    return true;
+  }
+);
 
 await loadClineSdk();
 const modelFacingPrompt = buildSystemPrompt({
