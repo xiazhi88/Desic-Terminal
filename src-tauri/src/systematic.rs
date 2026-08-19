@@ -6,6 +6,8 @@
 //! Profile execution never gives Python an order API: it translates one
 //! validated returned action through the existing audited trade commands.
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     fs,
@@ -18,21 +20,17 @@ use std::{
     },
     time::Instant,
 };
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
 
 use desic_systematic::{
-    recommended_backtest_workers, score_kline_blend, BacktestEngine, BacktestJobControl,
-    BacktestMetrics, BacktestReport, BacktestRequest, BacktestStatistics, ClosedBar, ClosedTrade,
-    EndOfRunPolicy, EquityPoint, ExecutionAssumptions, Fill, FillReason,
-    FillSide, InstrumentContract, KlineBlendFactorDefinition, KlineFactorFeatures,
-    MarginAssumptions, MarketBar, MarketDataWindow, OpenPositionSummary, PositionSizing,
-    ReplaySnapshot, BacktestPositionSizingOutcome, StrategyContextSnapshot,
-    VirtualPortfolio, resolve_backtest_position_sizing,
-    resolve_position_sizing,
+    recommended_backtest_workers, resolve_backtest_position_sizing, resolve_position_sizing,
+    score_kline_blend, BacktestEngine, BacktestJobControl, BacktestMetrics,
+    BacktestPositionSizingOutcome, BacktestReport, BacktestRequest, BacktestStatistics, ClosedBar,
+    ClosedTrade, EndOfRunPolicy, EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide,
+    InstrumentContract, KlineBlendFactorDefinition, KlineFactorFeatures, MarginAssumptions,
+    MarketBar, MarketDataWindow, OpenPositionSummary, PositionSizing, ReplaySnapshot,
     StatefulEventDrivenStrategy, StrategyAction, StrategyActionEvent, StrategyContext,
-    StrategyExecution, SystematicError, TimeframeAggregator, TradeSide,
-    VisualRuleDefinition, ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
+    StrategyContextSnapshot, StrategyExecution, SystematicError, TimeframeAggregator, TradeSide,
+    VirtualPortfolio, VisualRuleDefinition, ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
 };
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -142,21 +140,16 @@ const SYSTEMATIC_PYTHON_PACKAGE_INDEXES: &[(&str, &str)] = &[
 const SYSTEMATIC_STRATEGY_AI_SKILL_ID: &str = "systematic-strategy-authoring";
 /// The always-loaded Skill body. Its YAML frontmatter is generated at sync time
 /// from the definition, so this constant holds only the Markdown body.
-const SYSTEMATIC_STRATEGY_AI_SKILL_BODY: &str = include_str!(
-    "../resources/skills/systematic-strategy-authoring/SKILL.md.body"
-);
-const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_ACTIONS: &str = include_str!(
-    "../resources/skills/systematic-strategy-authoring/docs/actions.md"
-);
-const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_CONTEXT: &str = include_str!(
-    "../resources/skills/systematic-strategy-authoring/docs/context.md"
-);
-const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_PRE_WRITE_AUDIT: &str = include_str!(
-    "../resources/skills/systematic-strategy-authoring/docs/pre-write-audit.md"
-);
-const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_RESEARCH_WORKFLOW: &str = include_str!(
-    "../resources/skills/systematic-strategy-authoring/docs/research-workflow.md"
-);
+const SYSTEMATIC_STRATEGY_AI_SKILL_BODY: &str =
+    include_str!("../resources/skills/systematic-strategy-authoring/SKILL.md.body");
+const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_ACTIONS: &str =
+    include_str!("../resources/skills/systematic-strategy-authoring/docs/actions.md");
+const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_CONTEXT: &str =
+    include_str!("../resources/skills/systematic-strategy-authoring/docs/context.md");
+const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_PRE_WRITE_AUDIT: &str =
+    include_str!("../resources/skills/systematic-strategy-authoring/docs/pre-write-audit.md");
+const SYSTEMATIC_STRATEGY_AI_SKILL_DOC_RESEARCH_WORKFLOW: &str =
+    include_str!("../resources/skills/systematic-strategy-authoring/docs/research-workflow.md");
 const SYSTEMATIC_STRATEGY_AI_EDITOR_TOOL_EVENT: &str = "systematic:strategy-ai-editor-tool";
 const SYSTEMATIC_STRATEGY_AI_EDITOR_READ_TIMEOUT: Duration = Duration::from_secs(8);
 const SYSTEMATIC_STRATEGY_AI_EDITOR_APPLY_TIMEOUT: Duration = Duration::from_secs(20);
@@ -432,7 +425,10 @@ impl SystematicRuntime {
         Ok(())
     }
 
-    pub(crate) async fn begin_trading_strategy_ai_session(&self, session_id: &str) -> Result<(), String> {
+    pub(crate) async fn begin_trading_strategy_ai_session(
+        &self,
+        session_id: &str,
+    ) -> Result<(), String> {
         let mut sessions = self.strategy_ai_sessions.lock().await;
         if let Some(existing) = sessions.get(session_id) {
             if !matches!(existing.kind, StrategyAiSessionKind::TradingResearch) {
@@ -468,14 +464,22 @@ impl SystematicRuntime {
     }
 
     async fn require_strategy_ai_session(&self, session_id: &str) -> Result<(), String> {
-        if self.strategy_ai_sessions.lock().await.contains_key(session_id) {
+        if self
+            .strategy_ai_sessions
+            .lock()
+            .await
+            .contains_key(session_id)
+        {
             Ok(())
         } else {
             Err("策略 AI 会话已结束或未初始化".to_string())
         }
     }
 
-    async fn strategy_ai_session_kind(&self, session_id: &str) -> Result<StrategyAiSessionKind, String> {
+    async fn strategy_ai_session_kind(
+        &self,
+        session_id: &str,
+    ) -> Result<StrategyAiSessionKind, String> {
         self.strategy_ai_sessions
             .lock()
             .await
@@ -1424,18 +1428,29 @@ pub(crate) struct SystematicBacktestDeleteRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SystematicOptimizationStartRequest {
     pub strategy_id: String,
-    #[serde(default)] pub strategy_version: Option<u32>,
+    #[serde(default)]
+    pub strategy_version: Option<u32>,
     pub inst_id: String,
-    #[serde(default)] pub start_at: Option<i64>,
-    #[serde(default)] pub end_at: Option<i64>,
-    #[serde(default)] pub initial_equity_usdt: Option<f64>,
-    #[serde(default)] pub preload_bars: Option<usize>,
-    #[serde(default)] pub execution: Option<ExecutionAssumptions>,
-    #[serde(default)] pub leverage: Option<f64>,
-    #[serde(default)] pub margin_safety_multiplier: Option<f64>,
-    #[serde(default)] pub position_sizing: Option<PositionSizing>,
-    #[serde(default)] pub end_of_run_policy: Option<EndOfRunPolicy>,
-    #[serde(default)] pub candidate_budget: Option<usize>,
+    #[serde(default)]
+    pub start_at: Option<i64>,
+    #[serde(default)]
+    pub end_at: Option<i64>,
+    #[serde(default)]
+    pub initial_equity_usdt: Option<f64>,
+    #[serde(default)]
+    pub preload_bars: Option<usize>,
+    #[serde(default)]
+    pub execution: Option<ExecutionAssumptions>,
+    #[serde(default)]
+    pub leverage: Option<f64>,
+    #[serde(default)]
+    pub margin_safety_multiplier: Option<f64>,
+    #[serde(default)]
+    pub position_sizing: Option<PositionSizing>,
+    #[serde(default)]
+    pub end_of_run_policy: Option<EndOfRunPolicy>,
+    #[serde(default)]
+    pub candidate_budget: Option<usize>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1483,13 +1498,21 @@ pub(crate) struct SystematicProfileSaveRequest {
     pub stop_loss_order_type: String,
 }
 
-fn default_true() -> bool { true }
-fn default_margin_mode() -> String { "cross".to_string() }
-fn default_market_order_type() -> String { "market".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_margin_mode() -> String {
+    "cross".to_string()
+}
+fn default_market_order_type() -> String {
+    "market".to_string()
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct SystematicProfileDeleteRequest { pub profile_id: String }
+pub(crate) struct SystematicProfileDeleteRequest {
+    pub profile_id: String,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -1919,11 +1942,26 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
         "TEXT NOT NULL DEFAULT '[]'",
     )?;
     ensure_systematic_column(conn, "systematic_backtests", "timing_json", "TEXT")?;
-    ensure_systematic_column(conn, "systematic_optimizations", "strategy_version", "INTEGER")?;
-    ensure_systematic_column(conn, "systematic_optimizations", "candidate_budget", "INTEGER")?;
+    ensure_systematic_column(
+        conn,
+        "systematic_optimizations",
+        "strategy_version",
+        "INTEGER",
+    )?;
+    ensure_systematic_column(
+        conn,
+        "systematic_optimizations",
+        "candidate_budget",
+        "INTEGER",
+    )?;
     ensure_systematic_column(conn, "systematic_optimizations", "sampling_mode", "TEXT")?;
     ensure_systematic_column(conn, "systematic_optimizations", "sampling_seed", "TEXT")?;
-    ensure_systematic_column(conn, "systematic_optimizations", "baseline_validation_calmar", "REAL")?;
+    ensure_systematic_column(
+        conn,
+        "systematic_optimizations",
+        "baseline_validation_calmar",
+        "REAL",
+    )?;
     ensure_systematic_column(conn, "systematic_optimizations", "started_at", "INTEGER")?;
     ensure_systematic_column(conn, "systematic_optimizations", "elapsed_ms", "INTEGER")?;
     ensure_systematic_column(
@@ -1990,7 +2028,8 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
          ) SELECT id,version,name,description,definition_json,source_hash,updated_at
            FROM systematic_strategies",
         [],
-    ).map_err(|error| error.to_string())?;
+    )
+    .map_err(|error| error.to_string())?;
 
     let now = now_ms();
     let factor_id = "builtin-kline-blend-v1";
@@ -2110,7 +2149,9 @@ fn reset_systematic_sizing_dependent_records(conn: &Connection) -> Result<(), St
     };
 
     if conn.is_autocommit() {
-        let transaction = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+        let transaction = conn
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
         transaction
             .execute_batch(reset_sql)
             .map_err(|error| error.to_string())?;
@@ -2193,13 +2234,10 @@ pub(crate) fn start_systematic_worker(
             // Coalesce a burst of incoming candle events. The latest confirmed
             // cutoff per instrument is the only actionable point-in-time input.
             for (inst_id, cutoff_at) in live_runtime.take_live_profile_cutoffs() {
-                let market_data_error = ensure_live_profile_market_window(
-                    &live_app,
-                    &inst_id,
-                    cutoff_at,
-                )
-                .await
-                .err();
+                let market_data_error =
+                    ensure_live_profile_market_window(&live_app, &inst_id, cutoff_at)
+                        .await
+                        .err();
                 if let Some(error) = market_data_error.as_deref() {
                     emit_systematic_event(
                         &live_app,
@@ -2294,11 +2332,7 @@ pub(crate) async fn systematic_overview(
             (Some(snapshot), Some(factor)) => compute_factor_rows(&conn, snapshot, factor)?,
             _ => Vec::new(),
         };
-        let backtests_page = load_backtest_page(
-            &conn,
-            1,
-            SYSTEMATIC_BACKTEST_HISTORY_PAGE_SIZE,
-        )?;
+        let backtests_page = load_backtest_page(&conn, 1, SYSTEMATIC_BACKTEST_HISTORY_PAGE_SIZE)?;
         Ok(SystematicOverview {
             universe: universe
                 .as_ref()
@@ -2508,14 +2542,8 @@ pub(crate) async fn systematic_strategy_create_python(
             Some(value) => normalize_strategy_name(value)?,
             None => next_available_strategy_name(&app, "Blank Python strategy")?,
         };
-        save_python_strategy(
-            &app,
-            None,
-            &id,
-            &name,
-            description,
-            definition,
-        ).map(|result| result.strategy)
+        save_python_strategy(&app, None, &id, &name, description, definition)
+            .map(|result| result.strategy)
     })
     .await
 }
@@ -2630,7 +2658,12 @@ pub(crate) async fn systematic_backtest_delete(
     request: SystematicBacktestDeleteRequest,
 ) -> Result<(), String> {
     validate_run_id(&request.run_id)?;
-    if runtime.jobs.lock().map_err(|_| "Systematic backtest queue lock is unavailable".to_string())?.contains_key(&request.run_id) {
+    if runtime
+        .jobs
+        .lock()
+        .map_err(|_| "Systematic backtest queue lock is unavailable".to_string())?
+        .contains_key(&request.run_id)
+    {
         return Err("Cancel the queued or running backtest before deleting it".to_string());
     }
     run_systematic_blocking(move || {
@@ -2714,26 +2747,58 @@ async fn start_strategy_ai_optimization(
     request: SystematicOptimizationStartRequest,
 ) -> Result<SystematicOptimizationView, String> {
     let backtest_request = SystematicBacktestStartRequest {
-        strategy_id: request.strategy_id.clone(), inst_id: request.inst_id.clone(), start_at: request.start_at, end_at: request.end_at,
+        strategy_id: request.strategy_id.clone(),
+        inst_id: request.inst_id.clone(),
+        start_at: request.start_at,
+        end_at: request.end_at,
         strategy_version: request.strategy_version,
-        initial_equity_usdt: request.initial_equity_usdt, preload_bars: request.preload_bars, execution: request.execution,
-        leverage: request.leverage, margin_safety_multiplier: request.margin_safety_multiplier, position_sizing: request.position_sizing, end_of_run_policy: request.end_of_run_policy,
+        initial_equity_usdt: request.initial_equity_usdt,
+        preload_bars: request.preload_bars,
+        execution: request.execution,
+        leverage: request.leverage,
+        margin_safety_multiplier: request.margin_safety_multiplier,
+        position_sizing: request.position_sizing,
+        end_of_run_policy: request.end_of_run_policy,
     };
     let app_for_prepare = app.clone();
-    let prepared = run_systematic_blocking(move || prepare_backtest(&app_for_prepare, backtest_request)).await?;
+    let prepared =
+        run_systematic_blocking(move || prepare_backtest(&app_for_prepare, backtest_request))
+            .await?;
     let definition = prepared.strategy.0.definition.clone();
     let interpreter = prepared.strategy.0.interpreter.clone();
     let base_request = prepared.request;
     let pinned_strategy_version = base_request.strategy_version.parse::<u32>().ok();
     let candidate_budget = normalize_optimization_budget(request.candidate_budget)?;
-    let candidate_plan = optimization_parameter_candidates(&definition, candidate_budget, &request.strategy_id, pinned_strategy_version)?;
-    if candidate_plan.candidates.is_empty() { return Err("Select at least one numeric parameter to test before starting optimization".to_string()); }
-    let split_index = base_request.preload_bars + ((base_request.bars.len() - base_request.preload_bars) * 7 / 10);
-    if split_index <= base_request.preload_bars || split_index >= base_request.bars.len().saturating_sub(10) { return Err("The requested range is too short for a 70/30 train-validation optimization split".to_string()); }
+    let candidate_plan = optimization_parameter_candidates(
+        &definition,
+        candidate_budget,
+        &request.strategy_id,
+        pinned_strategy_version,
+    )?;
+    if candidate_plan.candidates.is_empty() {
+        return Err(
+            "Select at least one numeric parameter to test before starting optimization"
+                .to_string(),
+        );
+    }
+    let split_index = base_request.preload_bars
+        + ((base_request.bars.len() - base_request.preload_bars) * 7 / 10);
+    if split_index <= base_request.preload_bars
+        || split_index >= base_request.bars.len().saturating_sub(10)
+    {
+        return Err(
+            "The requested range is too short for a 70/30 train-validation optimization split"
+                .to_string(),
+        );
+    }
     let temporary_run_id = base_request.run_id.clone();
     let train_end_at = base_request.bars[split_index - 1].close_time_ms;
     let validation_start_at = base_request.bars[split_index].open_time_ms;
-    let validation_end_at = base_request.bars.last().map(|bar| bar.close_time_ms).unwrap_or(0);
+    let validation_end_at = base_request
+        .bars
+        .last()
+        .map(|bar| bar.close_time_ms)
+        .unwrap_or(0);
     let optimization_id = systematic_id("optimization");
     let control = BacktestJobControl::new(candidate_plan.candidates.len() as u64);
     {
@@ -2804,11 +2869,23 @@ pub(crate) async fn systematic_profile_delete(
     let deleted = run_systematic_blocking(move || {
         validate_id(&request.profile_id, "profile ID")?;
         let conn = open_database(&app)?;
-        conn.execute("DELETE FROM systematic_profile_signals WHERE profile_id=?1", [&request.profile_id]).map_err(|error| error.to_string())?;
-        let deleted = conn.execute("DELETE FROM systematic_profiles WHERE id=?1", [&request.profile_id]).map_err(|error| error.to_string())?;
-        if deleted == 0 { return Err("Profile was not found".to_string()); }
+        conn.execute(
+            "DELETE FROM systematic_profile_signals WHERE profile_id=?1",
+            [&request.profile_id],
+        )
+        .map_err(|error| error.to_string())?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM systematic_profiles WHERE id=?1",
+                [&request.profile_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if deleted == 0 {
+            return Err("Profile was not found".to_string());
+        }
         Ok(())
-    }).await;
+    })
+    .await;
     if deleted.is_ok() {
         runtime.bump_live_profile_generation(&profile_id);
         runtime.invalidate_live_profile_runner(&profile_id);
@@ -3494,13 +3571,8 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
         }
         "strategy.readCurrentSource" => {
             require_empty_strategy_ai_tool_input(&input)?;
-            let current = request_current_strategy_ai_source(
-                &app,
-                &runtime,
-                session_id,
-                tool_name,
-            )
-            .await?;
+            let current =
+                request_current_strategy_ai_source(&app, &runtime, session_id, tool_name).await?;
             runtime
                 .record_strategy_ai_read_revision(session_id, current.revision)
                 .await?;
@@ -3512,19 +3584,11 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
         }
         "strategy.testCurrentSource" => {
             require_empty_strategy_ai_tool_input(&input)?;
-            let current = request_current_strategy_ai_source(
-                &app,
-                &runtime,
-                session_id,
-                tool_name,
-            )
-            .await?;
+            let current =
+                request_current_strategy_ai_source(&app, &runtime, session_id, tool_name).await?;
             let source = normalize_python_strategy_source(&current.source)?;
-            let definition = load_python_strategy_definition_for_ai_test(
-                &app,
-                &current.strategy_id,
-                source,
-            )?;
+            let definition =
+                load_python_strategy_definition_for_ai_test(&app, &current.strategy_id, source)?;
             let interpreter = local_python_venv_interpreter_path(&local_python_venv_path());
             if !local_python_runtime_view().available || !interpreter.is_file() {
                 return Err(
@@ -3555,16 +3619,12 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
                 .require_strategy_ai_read_revision(session_id, request.expected_revision)
                 .await?;
             let strategy_id = runtime.strategy_ai_session_strategy_id(session_id).await?;
-            let definition = load_python_strategy_definition_for_ai_test(
-                &app,
-                &strategy_id,
-                source.clone(),
-            )?;
+            let definition =
+                load_python_strategy_definition_for_ai_test(&app, &strategy_id, source.clone())?;
             let interpreter = local_python_venv_interpreter_path(&local_python_venv_path());
             if !local_python_runtime_view().available || !interpreter.is_file() {
                 return Err(
-                    "无法在写入前验证策略：当前机器没有已准备好的 Desic Python 环境"
-                        .to_string(),
+                    "无法在写入前验证策略：当前机器没有已准备好的 Desic Python 环境".to_string(),
                 );
             }
             run_systematic_blocking(move || {
@@ -3613,10 +3673,8 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             let name = normalize_strategy_name(&request.name)?;
             let description = normalize_strategy_description(&request.description)?;
             let parameters = normalize_python_strategy_parameters(request.parameters)?;
-            let parameter_tuning = normalize_python_strategy_parameter_tuning(
-                &parameters,
-                request.parameter_tuning,
-            )?;
+            let parameter_tuning =
+                normalize_python_strategy_parameter_tuning(&parameters, request.parameter_tuning)?;
             let definition = PythonStrategyDefinition {
                 schema_version: "desic.systematic.strategy/v1".to_string(),
                 protocol: SYSTEMATIC_PYTHON_PROTOCOL.to_string(),
@@ -3668,10 +3726,8 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             let name = normalize_strategy_name(&request.name)?;
             let description = normalize_strategy_description(&request.description)?;
             let parameters = normalize_python_strategy_parameters(request.parameters)?;
-            let parameter_tuning = normalize_python_strategy_parameter_tuning(
-                &parameters,
-                request.parameter_tuning,
-            )?;
+            let parameter_tuning =
+                normalize_python_strategy_parameter_tuning(&parameters, request.parameter_tuning)?;
             let definition = PythonStrategyDefinition {
                 schema_version: "desic.systematic.strategy/v1".to_string(),
                 protocol: SYSTEMATIC_PYTHON_PROTOCOL.to_string(),
@@ -3808,8 +3864,15 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             runtime
                 .require_strategy_ai_owned_strategy(session_id, &request.strategy_id)
                 .await?;
-            if request.parameters.as_ref().is_some_and(|value| !value.as_object().is_some_and(|items| items.is_empty())) {
-                return Err("回测参数必须先保存为不可变策略版本；strategy.backtest 不接受临时参数覆盖".to_string());
+            if request
+                .parameters
+                .as_ref()
+                .is_some_and(|value| !value.as_object().is_some_and(|items| items.is_empty()))
+            {
+                return Err(
+                    "回测参数必须先保存为不可变策略版本；strategy.backtest 不接受临时参数覆盖"
+                        .to_string(),
+                );
             }
             let backtest_request = SystematicBacktestStartRequest {
                 strategy_id: request.strategy_id,
@@ -3825,7 +3888,13 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
                 position_sizing: None,
                 end_of_run_policy: None,
             };
-            let view = start_strategy_ai_backtest(app.clone(), runtime.inner().clone(), backtest_request, false).await?;
+            let view = start_strategy_ai_backtest(
+                app.clone(),
+                runtime.inner().clone(),
+                backtest_request,
+                false,
+            )
+            .await?;
             Ok(json!({ "run": view, "queued": true }))
         }
         "strategy.getBacktestResult" => {
@@ -3852,7 +3921,8 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             runtime
                 .require_strategy_ai_owned_strategy(session_id, &request.strategy_id)
                 .await?;
-            strategy_ai_backtest_slice(&app, &request.strategy_id, &request.run_id, request.limit).await
+            strategy_ai_backtest_slice(&app, &request.strategy_id, &request.run_id, request.limit)
+                .await
         }
         "strategy.getBacktestDiagnostics" => {
             let request: StrategyAiBacktestSliceInput =
@@ -3873,7 +3943,13 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             runtime
                 .require_strategy_ai_owned_strategy(session_id, &request.strategy_id)
                 .await?;
-            strategy_ai_compare_backtests(&app, &request.strategy_id, &request.left_run_id, &request.right_run_id).await
+            strategy_ai_compare_backtests(
+                &app,
+                &request.strategy_id,
+                &request.left_run_id,
+                &request.right_run_id,
+            )
+            .await
         }
         "strategy.optimize" => {
             let request: StrategyAiOptimizeInput =
@@ -3897,7 +3973,12 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
                 end_of_run_policy: None,
                 candidate_budget: None,
             };
-            let view = start_strategy_ai_optimization(app.clone(), runtime.inner().clone(), optimization_request).await?;
+            let view = start_strategy_ai_optimization(
+                app.clone(),
+                runtime.inner().clone(),
+                optimization_request,
+            )
+            .await?;
             Ok(json!({ "optimization": view, "queued": true, "split": "70/30 train-validation" }))
         }
         "strategy.getOptimizationResult" => {
@@ -3908,7 +3989,8 @@ pub(crate) async fn systematic_strategy_ai_execute_tool(
             runtime
                 .require_strategy_ai_owned_strategy(session_id, &request.strategy_id)
                 .await?;
-            strategy_ai_optimization_result(&app, &request.strategy_id, &request.optimization_id).await
+            strategy_ai_optimization_result(&app, &request.strategy_id, &request.optimization_id)
+                .await
         }
         _ => Err(format!("未知策略编辑器工具：{tool_name}")),
     }
@@ -3986,7 +4068,9 @@ async fn strategy_ai_market_sample(
         let end_at = request.end_at.unwrap_or_else(now_ms).max(0);
         let start_at = request
             .start_at
-            .unwrap_or_else(|| end_at.saturating_sub(DEFAULT_BACKTEST_DAYS * 24 * 60 * ONE_MINUTE_MS))
+            .unwrap_or_else(|| {
+                end_at.saturating_sub(DEFAULT_BACKTEST_DAYS * 24 * 60 * ONE_MINUTE_MS)
+            })
             .max(0);
         if end_at < start_at {
             return Err("行情结束时间不能早于开始时间".to_string());
@@ -4007,13 +4091,15 @@ async fn strategy_ai_market_sample(
         let rows = statement
             .query_map(params![inst_id, start_at, end_at, limit as i64], |row| {
                 let number = |index| -> rusqlite::Result<f64> {
-                    row.get::<_, String>(index)?.parse::<f64>().map_err(|error| {
-                        rusqlite::Error::FromSqlConversionFailure(
-                            index,
-                            rusqlite::types::Type::Text,
-                            Box::new(error),
-                        )
-                    })
+                    row.get::<_, String>(index)?
+                        .parse::<f64>()
+                        .map_err(|error| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                index,
+                                rusqlite::types::Type::Text,
+                                Box::new(error),
+                            )
+                        })
                 };
                 Ok(json!({
                     "openTimeMs": row.get::<_, i64>(0)?,
@@ -4229,7 +4315,6 @@ async fn strategy_ai_compare_backtests(
     })
     .await
 }
-
 
 async fn strategy_ai_optimization_result(
     app: &tauri::AppHandle,
@@ -4543,7 +4628,9 @@ pub(crate) async fn systematic_backtest_detail(
             preload_bar_count,
             |evaluation_count| {
                 let default_offset = evaluation_count.saturating_sub(limit);
-                let offset = requested_offset.unwrap_or(default_offset).min(evaluation_count);
+                let offset = requested_offset
+                    .unwrap_or(default_offset)
+                    .min(evaluation_count);
                 bar_offset = offset;
                 (offset, offset.saturating_add(limit).min(evaluation_count))
             },
@@ -4927,8 +5014,8 @@ pub(crate) fn compact_legacy_backtest_reports(conn: &Connection) -> Result<usize
                 Value::from(bar_count as u64),
             );
         }
-        let compact = serde_json::to_string(&Value::Object(report))
-            .map_err(|error| error.to_string())?;
+        let compact =
+            serde_json::to_string(&Value::Object(report)).map_err(|error| error.to_string())?;
         conn.execute(
             "UPDATE systematic_backtests SET report_json=?2 WHERE id=?1",
             params![run_id, compact],
@@ -4952,7 +5039,10 @@ pub(crate) fn compact_legacy_backtest_reports(conn: &Connection) -> Result<usize
 /// re-serialises the whole window (~0.5 s for 524k bars), so this is for callers
 /// that genuinely need the complete series; replay paging uses
 /// [`load_backtest_snapshot_window`].
-#[cfg_attr(not(test), expect(dead_code, reason = "integrity check for whole-window callers"))]
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "integrity check for whole-window callers")
+)]
 fn load_backtest_snapshot_bars(
     conn: &Connection,
     snapshot_id: &str,
@@ -5191,8 +5281,7 @@ fn encode_equity_series(points: &[EquityPoint]) -> Vec<EquitySeriesChunk> {
 
 fn deflate_bytes(raw: &[u8]) -> Vec<u8> {
     use std::io::Write;
-    let mut encoder =
-        flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+    let mut encoder = flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder
         .write_all(raw)
         .and_then(|()| encoder.finish())
@@ -5420,17 +5509,20 @@ fn save_python_strategy(
                 "SELECT version,name,description,definition_json
                  FROM systematic_strategies WHERE id=?1 AND kind='python'",
                 [id],
-                |row| Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, String>(3)?,
-                )),
+                |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                },
             )
             .optional()
             .map_err(|error| error.to_string())?
             .ok_or_else(|| {
-                "Python strategy was not found or cannot replace a different strategy type".to_string()
+                "Python strategy was not found or cannot replace a different strategy type"
+                    .to_string()
             })?;
         if python_strategy_snapshot_is_unchanged(
             &current.1,
@@ -5441,9 +5533,8 @@ fn save_python_strategy(
             &definition_json,
         ) {
             return Ok(SystematicPythonStrategySaveResult {
-                strategy: load_strategy_view(&conn, id)?.ok_or_else(|| {
-                    "Saved Python strategy was not found".to_string()
-                })?,
+                strategy: load_strategy_view(&conn, id)?
+                    .ok_or_else(|| "Saved Python strategy was not found".to_string())?,
                 created_version: false,
             });
         }
@@ -5466,11 +5557,20 @@ fn save_python_strategy(
         "INSERT OR REPLACE INTO systematic_strategy_versions(
            strategy_id,version,name,description,definition_json,source_hash,created_at
          ) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-        params![id, version, name, description, definition_json, source_hash, now],
+        params![
+            id,
+            version,
+            name,
+            description,
+            definition_json,
+            source_hash,
+            now
+        ],
     )
     .map_err(|error| error.to_string())?;
     Ok(SystematicPythonStrategySaveResult {
-        strategy: load_strategy_view(&conn, id)?.ok_or_else(|| "Saved Python strategy was not found".to_string())?,
+        strategy: load_strategy_view(&conn, id)?
+            .ok_or_else(|| "Saved Python strategy was not found".to_string())?,
         created_version: true,
     })
 }
@@ -5594,11 +5694,8 @@ fn prepare_backtest(
     // yet for the run list. A read-only connection never blocks on the writer
     // under WAL.
     let conn = open_read_database(app)?;
-    let (strategy, strategy_snapshot) = load_backtest_strategy_version(
-        &conn,
-        &request.strategy_id,
-        request.strategy_version,
-    )?;
+    let (strategy, strategy_snapshot) =
+        load_backtest_strategy_version(&conn, &request.strategy_id, request.strategy_version)?;
     let window = resolve_backtest_data_window(&conn, &request, &strategy)?;
     let inst_id = window.inst_id.clone();
     let bars = load_backtest_bars(&conn, &inst_id, window.preload_start_open, window.end_open)?;
@@ -5676,7 +5773,13 @@ fn prepare_backtest(
     // never held at once.
     drop(conn);
     let write_conn = open_database(app)?;
-    persist_prepared_backtest(&write_conn, &backtest_request, &strategy, &data_hash, created_at)?;
+    persist_prepared_backtest(
+        &write_conn,
+        &backtest_request,
+        &strategy,
+        &data_hash,
+        created_at,
+    )?;
     Ok(PreparedBacktest {
         request: backtest_request,
         strategy,
@@ -5843,13 +5946,8 @@ fn spawn_backtest_worker(
                 } else {
                     control.complete();
                 }
-                let initial_timing = backtest_timing_value(
-                    &run,
-                    worker_us,
-                    python_startup_us,
-                    &python_timing,
-                    0,
-                );
+                let initial_timing =
+                    backtest_timing_value(&run, worker_us, python_startup_us, &python_timing, 0);
                 let persist_started = Instant::now();
                 let _ = persist_backtest_result(
                     &app,
@@ -5912,7 +6010,9 @@ struct OptimizationCandidatePlan {
 fn normalize_optimization_budget(value: Option<usize>) -> Result<usize, String> {
     match value.unwrap_or(DEFAULT_PYTHON_TUNING_BUDGET) {
         30 | 100 | 300 => Ok(value.unwrap_or(DEFAULT_PYTHON_TUNING_BUDGET)),
-        other => Err(format!("Optimization test size must be 30, 100, or 300 candidates (received {other})")),
+        other => Err(format!(
+            "Optimization test size must be 30, 100, or 300 candidates (received {other})"
+        )),
     }
 }
 
@@ -5937,31 +6037,66 @@ fn optimization_parameter_candidates(
     strategy_id: &str,
     strategy_version: Option<u32>,
 ) -> Result<OptimizationCandidatePlan, String> {
-    let parameters = definition.parameters.as_object().ok_or_else(|| "Strategy parameters must be an object".to_string())?;
+    let parameters = definition
+        .parameters
+        .as_object()
+        .ok_or_else(|| "Strategy parameters must be an object".to_string())?;
     let mut dimensions = Vec::new();
     for (key, range) in &definition.parameter_tuning {
-        let current = parameters.get(key).and_then(Value::as_f64).ok_or_else(|| format!("Tuned parameter {key} must be numeric"))?;
-        if !range.min.is_finite() || !range.max.is_finite() || !range.step.is_finite() || range.step <= 0.0 || range.min > range.max { return Err(format!("Tuning range for {key} is invalid")); }
+        let current = parameters
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("Tuned parameter {key} must be numeric"))?;
+        if !range.min.is_finite()
+            || !range.max.is_finite()
+            || !range.step.is_finite()
+            || range.step <= 0.0
+            || range.min > range.max
+        {
+            return Err(format!("Tuning range for {key} is invalid"));
+        }
         let count = ((range.max - range.min) / range.step).floor() as usize + 1;
-        if count == 0 || count > MAX_PYTHON_TUNING_CANDIDATES { return Err(format!("Tuning range for {key} has too many values")); }
+        if count == 0 || count > MAX_PYTHON_TUNING_CANDIDATES {
+            return Err(format!("Tuning range for {key} has too many values"));
+        }
         let mut values = Vec::with_capacity(count);
-        for index in 0..count { values.push((range.min + range.step * index as f64).min(range.max)); }
-        if !values.iter().any(|value| (*value - current).abs() < 1e-10) { values.push(current); }
+        for index in 0..count {
+            values.push((range.min + range.step * index as f64).min(range.max));
+        }
+        if !values.iter().any(|value| (*value - current).abs() < 1e-10) {
+            values.push(current);
+        }
         dimensions.push((key.clone(), values));
     }
     if dimensions.is_empty() {
-        return Ok(OptimizationCandidatePlan { candidates: Vec::new(), mode: "grid".to_string(), seed: String::new() });
+        return Ok(OptimizationCandidatePlan {
+            candidates: Vec::new(),
+            mode: "grid".to_string(),
+            seed: String::new(),
+        });
     }
     let mut baseline = parameters.clone();
     for (key, values) in &dimensions {
-        let current = parameters.get(key).and_then(Value::as_f64).ok_or_else(|| format!("Tuned parameter {key} must be numeric"))?;
-        baseline.insert(key.clone(), json!(values.iter().copied().find(|value| (*value - current).abs() < 1e-10).unwrap_or(current)));
+        let current = parameters
+            .get(key)
+            .and_then(Value::as_f64)
+            .ok_or_else(|| format!("Tuned parameter {key} must be numeric"))?;
+        baseline.insert(
+            key.clone(),
+            json!(values
+                .iter()
+                .copied()
+                .find(|value| (*value - current).abs() < 1e-10)
+                .unwrap_or(current)),
+        );
     }
     let seed = optimization_seed(definition, budget, strategy_id, strategy_version);
     let mut total = 1usize;
     for (_, values) in &dimensions {
         total = total.saturating_mul(values.len());
-        if total > budget { break; }
+        if total > budget {
+            break;
+        }
     }
     let mut candidates = vec![baseline.clone()];
     let mode = if total <= budget { "grid" } else { "sampled" };
@@ -5969,22 +6104,34 @@ fn optimization_parameter_candidates(
         let mut seen = HashSet::new();
         seen.insert(serde_json::to_string(&baseline).map_err(|error| error.to_string())?);
         let seed_bytes = hex_to_bytes(&seed);
-        let mut state = seed_bytes.iter().take(8).fold(0_u64, |acc, byte| (acc << 8) | u64::from(*byte));
+        let mut state = seed_bytes
+            .iter()
+            .take(8)
+            .fold(0_u64, |acc, byte| (acc << 8) | u64::from(*byte));
         let target = budget.min(MAX_PYTHON_TUNING_CANDIDATES);
         let max_attempts = target.saturating_mul(2_000).max(2_000);
         for _ in 0..max_attempts {
-            if candidates.len() >= target { break; }
+            if candidates.len() >= target {
+                break;
+            }
             let mut item = baseline.clone();
             for (key, values) in &dimensions {
-                state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+                state = state
+                    .wrapping_mul(6364136223846793005)
+                    .wrapping_add(1442695040888963407);
                 let index = (state as usize) % values.len();
                 item.insert(key.clone(), json!(values[index]));
             }
             let encoded = serde_json::to_string(&item).map_err(|error| error.to_string())?;
-            if seen.insert(encoded) { candidates.push(item); }
+            if seen.insert(encoded) {
+                candidates.push(item);
+            }
         }
         if candidates.len() < target {
-            return Err("Unable to build a unique deterministic candidate set for this tuning plan".to_string());
+            return Err(
+                "Unable to build a unique deterministic candidate set for this tuning plan"
+                    .to_string(),
+            );
         }
     } else {
         let mut grid = vec![baseline.clone()];
@@ -5992,8 +6139,14 @@ fn optimization_parameter_candidates(
             let mut next = Vec::new();
             for candidate in grid {
                 for value in &values {
-                    if next.len() >= budget { return Err(format!("Optimization exceeds the selected {budget}-candidate budget")); }
-                    let mut item = candidate.clone(); item.insert(key.clone(), json!(value)); next.push(item);
+                    if next.len() >= budget {
+                        return Err(format!(
+                            "Optimization exceeds the selected {budget}-candidate budget"
+                        ));
+                    }
+                    let mut item = candidate.clone();
+                    item.insert(key.clone(), json!(value));
+                    next.push(item);
                 }
             }
             grid = next;
@@ -6003,20 +6156,35 @@ fn optimization_parameter_candidates(
         candidates.clear();
         candidates.push(baseline);
         for item in grid {
-            if candidates.len() >= budget { break; }
+            if candidates.len() >= budget {
+                break;
+            }
             let encoded = serde_json::to_string(&item).map_err(|error| error.to_string())?;
-            if seen.insert(encoded) { candidates.push(item); }
+            if seen.insert(encoded) {
+                candidates.push(item);
+            }
         }
     }
-    Ok(OptimizationCandidatePlan { candidates: candidates.into_iter().map(Value::Object).collect(), mode: mode.to_string(), seed })
+    Ok(OptimizationCandidatePlan {
+        candidates: candidates.into_iter().map(Value::Object).collect(),
+        mode: mode.to_string(),
+        seed,
+    })
 }
 
 fn hex_to_bytes(value: &str) -> Vec<u8> {
-    value.as_bytes().chunks(2).filter_map(|pair| {
-        let high = (*pair.first()? as char).to_digit(16)?;
-        let low = pair.get(1).and_then(|byte| (*byte as char).to_digit(16)).unwrap_or(0);
-        Some(((high << 4) | low) as u8)
-    }).collect()
+    value
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|pair| {
+            let high = (*pair.first()? as char).to_digit(16)?;
+            let low = pair
+                .get(1)
+                .and_then(|byte| (*byte as char).to_digit(16))
+                .unwrap_or(0);
+            Some(((high << 4) | low) as u8)
+        })
+        .collect()
 }
 
 fn spawn_optimization_worker(
@@ -6396,8 +6564,10 @@ async fn record_optimization_outcome(
                         params![
                             optimization_id,
                             candidate.index as i64,
-                            serde_json::to_string(&candidate.train_metrics).map_err(|error| error.to_string())?,
-                            serde_json::to_string(&candidate.validation_metrics).map_err(|error| error.to_string())?,
+                            serde_json::to_string(&candidate.train_metrics)
+                                .map_err(|error| error.to_string())?,
+                            serde_json::to_string(&candidate.validation_metrics)
+                                .map_err(|error| error.to_string())?,
                             candidate.validation_calmar,
                             now_ms(),
                         ],
@@ -6511,7 +6681,11 @@ async fn persist_optimization_terminal_state(
                     params![
                         optimization_id,
                         residual_status,
-                        if cancelled { "Optimization cancelled" } else { "Optimization worker stopped before this candidate completed" },
+                        if cancelled {
+                            "Optimization cancelled"
+                        } else {
+                            "Optimization worker stopped before this candidate completed"
+                        },
                         now_ms(),
                     ],
                 )
@@ -6548,7 +6722,8 @@ async fn persist_optimization_terminal_state(
             let error = if status == "cancelled" {
                 requested_error.or_else(|| Some("Optimization cancelled".to_string()))
             } else if status == "failed" {
-                requested_error.or_else(|| Some("Optimization did not complete all candidates".to_string()))
+                requested_error
+                    .or_else(|| Some("Optimization did not complete all candidates".to_string()))
             } else {
                 None
             };
@@ -6783,7 +6958,6 @@ fn persist_backtest_progress_on(
     .map_err(|error| error.to_string())?;
     Ok(())
 }
-
 
 fn backtest_timing_value(
     run: &desic_systematic::BacktestRunResult,
@@ -7447,9 +7621,7 @@ fn load_strategy_version_snapshot(
     requested_version: Option<u32>,
 ) -> Result<StrategyVersionSnapshot, String> {
     let current_version = current_python_strategy_version(conn, id)?;
-    let version = requested_version
-        .map(i64::from)
-        .unwrap_or(current_version);
+    let version = requested_version.map(i64::from).unwrap_or(current_version);
     if version <= 0 {
         return Err("Strategy version must be greater than zero".to_string());
     }
@@ -7459,14 +7631,16 @@ fn load_strategy_version_snapshot(
              FROM systematic_strategy_versions
              WHERE strategy_id=?1 AND version=?2",
             params![id, version],
-            |row| Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-                row.get::<_, i64>(5)?,
-            )),
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                ))
+            },
         )
         .optional()
         .map_err(|error| error.to_string())?
@@ -7553,11 +7727,14 @@ fn load_strategy_versions_page(
     current_python_strategy_version(conn, strategy_id)?;
     let page = requested_page.max(1);
     let page_size = requested_page_size.clamp(1, 100);
-    let total = conn.query_row(
-        "SELECT COUNT(*) FROM systematic_strategy_versions WHERE strategy_id=?1",
-        [strategy_id],
-        |row| row.get::<_, i64>(0),
-    ).map_err(|error| error.to_string())?.max(0) as usize;
+    let total = conn
+        .query_row(
+            "SELECT COUNT(*) FROM systematic_strategy_versions WHERE strategy_id=?1",
+            [strategy_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())?
+        .max(0) as usize;
     let offset = (page.saturating_sub(1) as usize).saturating_mul(page_size as usize);
     let mut statement = conn.prepare(
         "SELECT v.strategy_id,v.version,v.name,v.description,v.source_hash,v.created_at,
@@ -7570,22 +7747,28 @@ fn load_strategy_versions_page(
          ORDER BY v.version DESC
          LIMIT ?2 OFFSET ?3"
     ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map(
-        params![strategy_id, i64::from(page_size), offset as i64],
-        |row| Ok(SystematicStrategyVersionSummary {
-            strategy_id: row.get(0)?,
-            version: row.get::<_, i64>(1)?.max(1) as u32,
-            name: row.get(2)?,
-            description: row.get(3)?,
-            source_hash: row.get(4)?,
-            created_at: row.get(5)?,
-            backtest_count: row.get::<_, i64>(6)?.max(0) as usize,
-            completed_backtest_count: row.get::<_, i64>(7)?.max(0) as usize,
-            profile_count: row.get::<_, i64>(8)?.max(0) as usize,
-            enabled_profile_count: row.get::<_, i64>(9)?.max(0) as usize,
-        }),
-    ).map_err(|error| error.to_string())?;
-    let items = rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![strategy_id, i64::from(page_size), offset as i64],
+            |row| {
+                Ok(SystematicStrategyVersionSummary {
+                    strategy_id: row.get(0)?,
+                    version: row.get::<_, i64>(1)?.max(1) as u32,
+                    name: row.get(2)?,
+                    description: row.get(3)?,
+                    source_hash: row.get(4)?,
+                    created_at: row.get(5)?,
+                    backtest_count: row.get::<_, i64>(6)?.max(0) as usize,
+                    completed_backtest_count: row.get::<_, i64>(7)?.max(0) as usize,
+                    profile_count: row.get::<_, i64>(8)?.max(0) as usize,
+                    enabled_profile_count: row.get::<_, i64>(9)?.max(0) as usize,
+                })
+            },
+        )
+        .map_err(|error| error.to_string())?;
+    let items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
     Ok(SystematicStrategyVersionsPageView {
         items,
         page,
@@ -7603,8 +7786,9 @@ fn load_strategy_version_detail(
     let snapshot = load_strategy_version_snapshot(conn, strategy_id, Some(version))?;
     let (backtest_count, completed_backtest_count, profile_count, enabled_profile_count) =
         strategy_version_usage_counts(conn, strategy_id, snapshot.version)?;
-    let protection_capabilities = inspect_python_strategy_protection_capabilities(&snapshot.definition)
-        .unwrap_or_else(|_| SystematicProtectionCapabilities::unknown());
+    let protection_capabilities =
+        inspect_python_strategy_protection_capabilities(&snapshot.definition)
+            .unwrap_or_else(|_| SystematicProtectionCapabilities::unknown());
     Ok(SystematicStrategyVersionDetail {
         strategy_id: strategy_id.to_string(),
         version: snapshot.version as u32,
@@ -7621,7 +7805,11 @@ fn load_strategy_version_detail(
     })
 }
 
-fn has_ai_profile_conflict(conn: &Connection, account_id: &str, environment: &str) -> Result<bool, String> {
+fn has_ai_profile_conflict(
+    conn: &Connection,
+    account_id: &str,
+    environment: &str,
+) -> Result<bool, String> {
     if !crate::ai_automation::automation_master_enabled_with_conn(conn) {
         return Ok(false);
     }
@@ -7634,7 +7822,9 @@ fn has_ai_profile_conflict(conn: &Connection, account_id: &str, environment: &st
 
 fn normalize_profile_name(value: &str) -> Result<String, String> {
     let name = value.trim();
-    if name.is_empty() || name.len() > 120 { return Err("Profile name must be 1-120 characters".to_string()); }
+    if name.is_empty() || name.len() > 120 {
+        return Err("Profile name must be 1-120 characters".to_string());
+    }
     Ok(name.to_string())
 }
 
@@ -7644,7 +7834,9 @@ fn normalize_protection_order_type(value: &str, label: &str) -> Result<String, S
         other => other.to_string(),
     };
     if !matches!(normalized.as_str(), "market" | "limit" | "post_fill_limit") {
-        return Err(format!("Profile {label} must be market, limit, or post_fill_limit"));
+        return Err(format!(
+            "Profile {label} must be market, limit, or post_fill_limit"
+        ));
     }
     if label.contains("stop") && normalized == "post_fill_limit" {
         return Err("Profile stop-loss execution does not support post_fill_limit".to_string());
@@ -7663,48 +7855,56 @@ fn validate_profile_protection_order_types(
     {
         return Err("Profile selects limit take-profit execution, but the pinned strategy version does not declare take-profit protection".to_string());
     }
-    if stop_loss_order_type == "limit"
-        && !capabilities.has_stop_loss
-        && !capabilities.unknown
-    {
+    if stop_loss_order_type == "limit" && !capabilities.has_stop_loss && !capabilities.unknown {
         return Err("Profile selects limit stop-loss execution, but the pinned strategy version does not declare stop-loss protection".to_string());
     }
     Ok(())
 }
 
-fn save_systematic_profile(app: &tauri::AppHandle, request: SystematicProfileSaveRequest) -> Result<SystematicProfileView, String> {
+fn save_systematic_profile(
+    app: &tauri::AppHandle,
+    request: SystematicProfileSaveRequest,
+) -> Result<SystematicProfileView, String> {
     let name = normalize_profile_name(&request.name)?;
     validate_id(&request.strategy_id, "strategy ID")?;
-    if request.account_id.trim().is_empty() { return Err("Profile account is required".to_string()); }
+    if request.account_id.trim().is_empty() {
+        return Err("Profile account is required".to_string());
+    }
     let inst_id = normalize_usdt_swap(&request.inst_id)?;
     let environment = normalize_environment(&request.environment);
-    if !matches!(environment.as_str(), "demo" | "live") { return Err("Profile environment must be demo or live".to_string()); }
-    if !request.leverage.is_finite() || !(1.0..=50.0).contains(&request.leverage) { return Err("Profile leverage must be between 1x and 50x".to_string()); }
+    if !matches!(environment.as_str(), "demo" | "live") {
+        return Err("Profile environment must be demo or live".to_string());
+    }
+    if !request.leverage.is_finite() || !(1.0..=50.0).contains(&request.leverage) {
+        return Err("Profile leverage must be between 1x and 50x".to_string());
+    }
     if !matches!(request.margin_mode.trim(), "cross" | "isolated") {
         return Err("Profile margin mode must be cross or isolated".to_string());
     }
-    let take_profit_order_type = normalize_protection_order_type(
-        &request.take_profit_order_type,
-        "take-profit execution",
-    )?;
-    let stop_loss_order_type = normalize_protection_order_type(
-        &request.stop_loss_order_type,
-        "stop-loss execution",
-    )?;
+    let take_profit_order_type =
+        normalize_protection_order_type(&request.take_profit_order_type, "take-profit execution")?;
+    let stop_loss_order_type =
+        normalize_protection_order_type(&request.stop_loss_order_type, "stop-loss execution")?;
     request
         .position_sizing
         .validate()
         .map_err(|error| format!("Profile position sizing is invalid: {error}"))?;
     for (value, label) in [(request.daily_loss_limit_usdt, "daily loss limit")] {
-        if !value.is_finite() || value <= 0.0 { return Err(format!("Profile {label} must be a positive finite value")); }
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!("Profile {label} must be a positive finite value"));
+        }
     }
-    if !request.allow_long && !request.allow_short { return Err("Profile must allow at least one direction".to_string()); }
+    if !request.allow_long && !request.allow_short {
+        return Err("Profile must allow at least one direction".to_string());
+    }
     if request.cooldown_seconds > 86_400 {
         return Err("Profile action cooldown must not exceed 86,400 seconds".to_string());
     }
     let account = load_local_account_secret(app, Some(request.account_id.trim()))?;
     if normalize_environment(&account.environment) != environment {
-        return Err("Profile account environment does not match the selected environment".to_string());
+        return Err(
+            "Profile account environment does not match the selected environment".to_string(),
+        );
     }
     let conn = open_database(app)?;
     let id = request
@@ -7721,7 +7921,10 @@ fn save_systematic_profile(app: &tauri::AppHandle, request: SystematicProfileSav
         .optional()
         .map_err(|error| error.to_string())?;
     if existing_enabled == Some(1) {
-        return Err("Stop this Profile before changing its strategy, account, contract, or risk settings".to_string());
+        return Err(
+            "Stop this Profile before changing its strategy, account, contract, or risk settings"
+                .to_string(),
+        );
     }
     if request.enabled {
         return Err("Save Profile disabled, then use the explicit activation control after reviewing its settings".to_string());
@@ -7730,13 +7933,19 @@ fn save_systematic_profile(app: &tauri::AppHandle, request: SystematicProfileSav
     // do not send strategyVersion. A newly selected strategy still resolves
     // to its latest immutable snapshot.
     let preserved_version = if request.strategy_version.is_none() {
-        request.id.as_deref().map(|profile_id| {
-            conn.query_row(
+        request
+            .id
+            .as_deref()
+            .map(|profile_id| {
+                conn.query_row(
                 "SELECT strategy_version FROM systematic_profiles WHERE id=?1 AND strategy_id=?2",
                 params![profile_id, request.strategy_id],
                 |row| row.get::<_, i64>(0),
             ).optional().map_err(|error| error.to_string())
-        }).transpose()?.flatten().map(|value| value.max(1) as u32)
+            })
+            .transpose()?
+            .flatten()
+            .map(|value| value.max(1) as u32)
     } else {
         None
     };
@@ -7748,22 +7957,31 @@ fn save_systematic_profile(app: &tauri::AppHandle, request: SystematicProfileSav
     let version = snapshot.version;
     let definition_json = snapshot.definition_json;
     let source_hash = snapshot.source_hash;
-    let position_sizing_json = serde_json::to_string(&request.position_sizing)
-        .map_err(|error| error.to_string())?;
+    let position_sizing_json =
+        serde_json::to_string(&request.position_sizing).map_err(|error| error.to_string())?;
     let completed_backtest: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM systematic_backtests WHERE strategy_id=?1 AND strategy_version=?2 AND inst_id=?3 AND status='completed')",
         params![request.strategy_id, version.to_string(), inst_id], |row| row.get(0),
     ).map_err(|error| error.to_string())?;
-    if !completed_backtest { return Err("Profile requires a completed backtest for this exact strategy version and contract".to_string()); }
-    let protection_capabilities = inspect_python_strategy_protection_capabilities(&snapshot.definition)
-        .map_err(|error| format!("Profile could not inspect the pinned strategy protection declarations: {error}"))?;
+    if !completed_backtest {
+        return Err(
+            "Profile requires a completed backtest for this exact strategy version and contract"
+                .to_string(),
+        );
+    }
+    let protection_capabilities =
+        inspect_python_strategy_protection_capabilities(&snapshot.definition).map_err(|error| {
+            format!(
+                "Profile could not inspect the pinned strategy protection declarations: {error}"
+            )
+        })?;
     validate_profile_protection_order_types(
         &protection_capabilities,
         &take_profit_order_type,
         &stop_loss_order_type,
     )?;
-    let protection_capabilities_json = serde_json::to_string(&protection_capabilities)
-        .map_err(|error| error.to_string())?;
+    let protection_capabilities_json =
+        serde_json::to_string(&protection_capabilities).map_err(|error| error.to_string())?;
     let now = now_ms();
     conn.execute(
         "INSERT INTO systematic_profiles(
@@ -7794,42 +8012,68 @@ fn load_systematic_profiles(conn: &Connection) -> Result<Vec<SystematicProfileVi
     let mut statement = conn.prepare(
         "SELECT id,name,strategy_id,strategy_version,inst_id,account_id,environment,enabled,status,leverage,margin_mode,position_sizing_json,daily_loss_limit_usdt,cooldown_seconds,allow_long,allow_short,notify_on_signal,take_profit_order_type,stop_loss_order_type,protection_capabilities_json,updated_at,last_action_at,last_error FROM systematic_profiles ORDER BY enabled DESC,updated_at DESC,name COLLATE NOCASE ASC"
     ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| profile_view_from_row(conn, row)).map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+    let rows = statement
+        .query_map([], |row| profile_view_from_row(conn, row))
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
-fn load_systematic_profile(conn: &Connection, id: &str) -> Result<Option<SystematicProfileView>, String> {
+fn load_systematic_profile(
+    conn: &Connection,
+    id: &str,
+) -> Result<Option<SystematicProfileView>, String> {
     conn.query_row(
         "SELECT id,name,strategy_id,strategy_version,inst_id,account_id,environment,enabled,status,leverage,margin_mode,position_sizing_json,daily_loss_limit_usdt,cooldown_seconds,allow_long,allow_short,notify_on_signal,take_profit_order_type,stop_loss_order_type,protection_capabilities_json,updated_at,last_action_at,last_error FROM systematic_profiles WHERE id=?1",
         [id], |row| profile_view_from_row(conn, row),
     ).optional().map_err(|error| error.to_string())
 }
 
-fn profile_view_from_row(conn: &Connection, row: &rusqlite::Row<'_>) -> rusqlite::Result<SystematicProfileView> {
+fn profile_view_from_row(
+    conn: &Connection,
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SystematicProfileView> {
     let account_id: String = row.get(5)?;
     let environment: String = row.get(6)?;
     let position_sizing_json: String = row.get(11)?;
-    let position_sizing = serde_json::from_str::<PositionSizing>(&position_sizing_json).map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            11,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
-    })?;
+    let position_sizing =
+        serde_json::from_str::<PositionSizing>(&position_sizing_json).map_err(|error| {
+            rusqlite::Error::FromSqlConversionFailure(
+                11,
+                rusqlite::types::Type::Text,
+                Box::new(error),
+            )
+        })?;
     let protection_capabilities_json: String = row.get(19)?;
-    let protection_capabilities = serde_json::from_str::<SystematicProtectionCapabilities>(
-        &protection_capabilities_json,
-    )
-    .unwrap_or_else(|_| SystematicProtectionCapabilities::unknown());
+    let protection_capabilities =
+        serde_json::from_str::<SystematicProtectionCapabilities>(&protection_capabilities_json)
+            .unwrap_or_else(|_| SystematicProtectionCapabilities::unknown());
     let ai_conflict = has_ai_profile_conflict(conn, &account_id, &environment).unwrap_or(false);
     Ok(SystematicProfileView {
-        id: row.get(0)?, name: row.get(1)?, strategy_id: row.get(2)?, strategy_version: row.get::<_, i64>(3)?.max(1) as u32,
-        inst_id: row.get(4)?, account_id, environment, enabled: row.get::<_, i64>(7)? != 0, status: row.get(8)?,
-        leverage: row.get(9)?, margin_mode: row.get(10)?, position_sizing, daily_loss_limit_usdt: row.get(12)?,
-        cooldown_seconds: row.get::<_, i64>(13)?.max(0) as u64, allow_long: row.get::<_, i64>(14)? != 0, allow_short: row.get::<_, i64>(15)? != 0,
+        id: row.get(0)?,
+        name: row.get(1)?,
+        strategy_id: row.get(2)?,
+        strategy_version: row.get::<_, i64>(3)?.max(1) as u32,
+        inst_id: row.get(4)?,
+        account_id,
+        environment,
+        enabled: row.get::<_, i64>(7)? != 0,
+        status: row.get(8)?,
+        leverage: row.get(9)?,
+        margin_mode: row.get(10)?,
+        position_sizing,
+        daily_loss_limit_usdt: row.get(12)?,
+        cooldown_seconds: row.get::<_, i64>(13)?.max(0) as u64,
+        allow_long: row.get::<_, i64>(14)? != 0,
+        allow_short: row.get::<_, i64>(15)? != 0,
         notify_on_signal: row.get::<_, i64>(16)? != 0,
-        take_profit_order_type: row.get(17)?, stop_loss_order_type: row.get(18)?, protection_capabilities,
-        updated_at: row.get(20)?, last_action_at: row.get(21)?, last_error: row.get(22)?, ai_conflict,
+        take_profit_order_type: row.get(17)?,
+        stop_loss_order_type: row.get(18)?,
+        protection_capabilities,
+        updated_at: row.get(20)?,
+        last_action_at: row.get(21)?,
+        last_error: row.get(22)?,
+        ai_conflict,
     })
 }
 
@@ -7965,7 +8209,10 @@ fn load_backtest_page(
         )
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map(params![i64::from(page_size), offset], backtest_view_from_row)
+        .query_map(
+            params![i64::from(page_size), offset],
+            backtest_view_from_row,
+        )
         .map_err(|error| error.to_string())?;
     let items = rows
         .collect::<Result<Vec<_>, _>>()
@@ -7980,30 +8227,54 @@ fn load_backtest_page(
 }
 
 fn load_optimization_views(conn: &Connection) -> Result<Vec<SystematicOptimizationView>, String> {
-    let mut statement = conn.prepare(
-        "SELECT id,strategy_id,inst_id,status,candidate_count,completed_count,
+    let mut statement = conn
+        .prepare(
+            "SELECT id,strategy_id,inst_id,status,candidate_count,completed_count,
                 strategy_version,candidate_budget,sampling_mode,worker_count,
                 train_end_at,validation_start_at,validation_end_at,best_parameters_json,
                 best_validation_calmar,baseline_validation_calmar,created_at,finished_at,error,
                 started_at,elapsed_ms,estimated_remaining_ms
-         FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30"
-    ).map_err(|error| error.to_string())?;
-    let rows = statement.query_map([], |row| {
-        let best_parameters_json: Option<String> = row.get(13)?;
-        Ok(SystematicOptimizationView {
-            id: row.get(0)?, strategy_id: row.get(1)?, inst_id: row.get(2)?, status: row.get(3)?,
-            candidate_count: row.get::<_, i64>(4)?.max(0) as usize, completed_count: row.get::<_, i64>(5)?.max(0) as usize,
-            strategy_version: row.get::<_, Option<i64>>(6)?.map(|value| value.max(1) as u32),
-            candidate_budget: row.get::<_, Option<i64>>(7)?.map(|value| value.max(1) as usize),
-            sampling_mode: row.get(8)?,
-            worker_count: row.get::<_, Option<i64>>(9)?.map(|value| value.max(1) as usize),
-            train_end_at: row.get(10)?, validation_start_at: row.get(11)?, validation_end_at: row.get(12)?,
-            best_parameters: best_parameters_json.and_then(|value| serde_json::from_str(&value).ok()), best_validation_calmar: row.get(14)?, baseline_validation_calmar: row.get(15)?,
-            created_at: row.get(16)?, finished_at: row.get(17)?, error: row.get(18)?,
-            started_at: row.get(19)?, elapsed_ms: row.get(20)?, estimated_remaining_ms: row.get(21)?,
+         FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            let best_parameters_json: Option<String> = row.get(13)?;
+            Ok(SystematicOptimizationView {
+                id: row.get(0)?,
+                strategy_id: row.get(1)?,
+                inst_id: row.get(2)?,
+                status: row.get(3)?,
+                candidate_count: row.get::<_, i64>(4)?.max(0) as usize,
+                completed_count: row.get::<_, i64>(5)?.max(0) as usize,
+                strategy_version: row
+                    .get::<_, Option<i64>>(6)?
+                    .map(|value| value.max(1) as u32),
+                candidate_budget: row
+                    .get::<_, Option<i64>>(7)?
+                    .map(|value| value.max(1) as usize),
+                sampling_mode: row.get(8)?,
+                worker_count: row
+                    .get::<_, Option<i64>>(9)?
+                    .map(|value| value.max(1) as usize),
+                train_end_at: row.get(10)?,
+                validation_start_at: row.get(11)?,
+                validation_end_at: row.get(12)?,
+                best_parameters: best_parameters_json
+                    .and_then(|value| serde_json::from_str(&value).ok()),
+                best_validation_calmar: row.get(14)?,
+                baseline_validation_calmar: row.get(15)?,
+                created_at: row.get(16)?,
+                finished_at: row.get(17)?,
+                error: row.get(18)?,
+                started_at: row.get(19)?,
+                elapsed_ms: row.get(20)?,
+                estimated_remaining_ms: row.get(21)?,
+            })
         })
-    }).map_err(|error| error.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>().map_err(|error| error.to_string())
+        .map_err(|error| error.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
 }
 
 fn load_backtest_view(
@@ -8027,11 +8298,7 @@ fn load_backtest_view(
 fn backtest_view_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SystematicBacktestView> {
     let strategy_version_raw = row.get::<_, String>(3)?;
     let strategy_version = strategy_version_raw.parse::<u32>().map_err(|error| {
-        rusqlite::Error::FromSqlConversionFailure(
-            3,
-            rusqlite::types::Type::Text,
-            Box::new(error),
-        )
+        rusqlite::Error::FromSqlConversionFailure(3, rusqlite::types::Type::Text, Box::new(error))
     })?;
     let metrics_raw: Option<String> = row.get(13)?;
     let preview_raw: Option<String> = row.get(14)?;
@@ -8096,7 +8363,10 @@ impl LivePythonProfileRunner {
     fn launch(profile: &EnabledLiveProfile) -> Result<Self, String> {
         let interpreter = local_python_venv_interpreter_path(&local_python_venv_path());
         if !local_python_runtime_view().available || !interpreter.is_file() {
-            return Err("Desic Python environment is unavailable; Profile execution was not started".to_string());
+            return Err(
+                "Desic Python environment is unavailable; Profile execution was not started"
+                    .to_string(),
+            );
         }
         let runner = LocalPythonStrategyRunner::launch(
             LocalPythonBacktestSpec {
@@ -8142,7 +8412,13 @@ impl LivePythonProfileRunner {
             .event_series(market, include_history)
             .map_err(|error| error.to_string())?;
         self.initial_market_sent = true;
-        if !self.started && self.runner.handlers.iter().any(|handler| handler == "on_start") {
+        if !self.started
+            && self
+                .runner
+                .handlers
+                .iter()
+                .any(|handler| handler == "on_start")
+        {
             let output = self
                 .runner
                 .invoke(make_event("start", series.clone()))
@@ -8251,7 +8527,8 @@ fn update_live_profile_signal(
     error: Option<&str>,
 ) -> Result<(), String> {
     let (kind, quantity, reason) = profile_action_summary(action);
-    let details_json = live_profile_signal_details_with_action(conn, profile_id, cutoff_at, action)?;
+    let details_json =
+        live_profile_signal_details_with_action(conn, profile_id, cutoff_at, action)?;
     conn.execute(
         "UPDATE systematic_profile_signals
          SET action_kind=?3,quantity=?4,reason=?5,status=?6,order_id=?7,client_order_id=?8,error=?9,
@@ -8314,9 +8591,9 @@ fn record_live_profile_execution_intent(
     take_profit: Option<f64>,
 ) -> Result<(), String> {
     let (kind, quantity, reason) = profile_action_summary(action);
-    let mut details = serde_json::from_str::<Value>(
-        &live_profile_signal_details_with_action(conn, profile_id, cutoff_at, action)?,
-    )
+    let mut details = serde_json::from_str::<Value>(&live_profile_signal_details_with_action(
+        conn, profile_id, cutoff_at, action,
+    )?)
     .map_err(|error| error.to_string())?;
     let object = details
         .as_object_mut()
@@ -8506,9 +8783,9 @@ fn update_live_profile_protection_reconciliation(
         if let Some(execution_key) = fallback_execution_key {
             protection.insert(
                 "fallbackClientOrderId".to_string(),
-                json!(crate::trade_commands::systematic_profile_client_order_id(&format!(
-                    "{execution_key}:fallback-protection"
-                ))),
+                json!(crate::trade_commands::systematic_profile_client_order_id(
+                    &format!("{execution_key}:fallback-protection")
+                )),
             );
         }
     }
@@ -8529,7 +8806,10 @@ fn update_live_profile_protection_reconciliation(
             profile_id,
             cutoff_at,
             signal_status,
-            result.error.as_deref().map(|value| truncate_text(value, 2_000)),
+            result
+                .error
+                .as_deref()
+                .map(|value| truncate_text(value, 2_000)),
             serde_json::to_string(&Value::Object(details)).map_err(|error| error.to_string())?,
             now_ms(),
         ],
@@ -8648,8 +8928,8 @@ fn reconcile_live_profile_protections(
             continue;
         };
         let action_value = details.get("action").cloned();
-        let Some(action) = action_value
-            .and_then(|value| serde_json::from_value::<StrategyAction>(value).ok())
+        let Some(action) =
+            action_value.and_then(|value| serde_json::from_value::<StrategyAction>(value).ok())
         else {
             continue;
         };
@@ -8723,7 +9003,10 @@ fn reconcile_live_profile_protections(
             crate::trade_commands::reconcile_systematic_profile_protection(
                 &app,
                 &request,
-                order_id.as_deref().or(client_order_id.as_deref()).unwrap_or(""),
+                order_id
+                    .as_deref()
+                    .or(client_order_id.as_deref())
+                    .unwrap_or(""),
                 &protection_client_order_id,
             ),
         );
@@ -8950,12 +9233,7 @@ async fn recover_stale_systematic_profile_signals(
                         "UPDATE systematic_profile_signals
                          SET protection_client_order_id=?3,updated_at=?4
                          WHERE profile_id=?1 AND cutoff_at=?2",
-                        params![
-                            profile_id,
-                            cutoff_at,
-                            protection_client_order_id,
-                            now_ms()
-                        ],
+                        params![profile_id, cutoff_at, protection_client_order_id, now_ms()],
                     )
                     .map_err(|error| error.to_string())?;
                 }
@@ -9031,18 +9309,18 @@ fn profile_action_summary(action: &StrategyAction) -> (String, Option<f64>, Stri
             None,
             reason.clone().unwrap_or_default(),
         ),
-        StrategyAction::OpenLong { quantity, reason, .. } => {
-            ("open_long".to_string(), Some(*quantity), reason.clone())
-        }
-        StrategyAction::OpenShort { quantity, reason, .. } => {
-            ("open_short".to_string(), Some(*quantity), reason.clone())
-        }
-        StrategyAction::CloseLong { quantity, reason, .. } => {
-            ("close_long".to_string(), Some(*quantity), reason.clone())
-        }
-        StrategyAction::CloseShort { quantity, reason, .. } => {
-            ("close_short".to_string(), Some(*quantity), reason.clone())
-        }
+        StrategyAction::OpenLong {
+            quantity, reason, ..
+        } => ("open_long".to_string(), Some(*quantity), reason.clone()),
+        StrategyAction::OpenShort {
+            quantity, reason, ..
+        } => ("open_short".to_string(), Some(*quantity), reason.clone()),
+        StrategyAction::CloseLong {
+            quantity, reason, ..
+        } => ("close_long".to_string(), Some(*quantity), reason.clone()),
+        StrategyAction::CloseShort {
+            quantity, reason, ..
+        } => ("close_short".to_string(), Some(*quantity), reason.clone()),
         StrategyAction::SetProtection { reason, .. } => {
             ("set_protection".to_string(), None, reason.clone())
         }
@@ -9066,10 +9344,11 @@ fn live_profile_requested_protection_client_order_id(
     let has_take_profit = protection
         .get("takeProfit")
         .is_some_and(|value| !value.is_null());
-    (has_stop_loss || has_take_profit)
-        .then(|| crate::trade_commands::systematic_profile_client_order_id(&format!(
+    (has_stop_loss || has_take_profit).then(|| {
+        crate::trade_commands::systematic_profile_client_order_id(&format!(
             "{execution_key}:protection"
-        )))
+        ))
+    })
 }
 
 fn record_live_profile_cycle_error(
@@ -9152,7 +9431,8 @@ fn prior_live_profile_failure_streak(
     let mut streak = 0_i64;
     for row in rows {
         let (status, reason) = row.map_err(|error| error.to_string())?;
-        let host_sizing_failure = status == "blocked" && reason == "host position sizing blocked the action";
+        let host_sizing_failure =
+            status == "blocked" && reason == "host position sizing blocked the action";
         if status != "error" && !host_sizing_failure {
             break;
         }
@@ -9196,8 +9476,7 @@ fn record_live_profile_runtime_error_with_streak_floor(
     let stored_error = if auto_stopped {
         format!(
             "Profile stopped after {} consecutive runtime errors: {}",
-            SYSTEMATIC_PROFILE_RUNTIME_ERROR_LIMIT,
-            error
+            SYSTEMATIC_PROFILE_RUNTIME_ERROR_LIMIT, error
         )
     } else {
         error.to_string()
@@ -9290,7 +9569,9 @@ fn live_portfolio_pending_open_quantity(portfolio: &Value, inst_id: &str, side: 
                 .get("filledQuantity")
                 .and_then(Value::as_f64)
                 .unwrap_or(0.0);
-            (quantity - filled_quantity).is_finite().then_some((quantity - filled_quantity).max(0.0))
+            (quantity - filled_quantity)
+                .is_finite()
+                .then_some((quantity - filled_quantity).max(0.0))
         })
         .sum()
 }
@@ -9313,7 +9594,8 @@ fn resolve_live_profile_action(
     portfolio: &Value,
     execution_price: f64,
 ) -> Result<StrategyAction, String> {
-    let current_position_contracts = |side: &str| live_portfolio_side_quantity(portfolio, &profile.inst_id, side);
+    let current_position_contracts =
+        |side: &str| live_portfolio_side_quantity(portfolio, &profile.inst_id, side);
     let current_open_contracts = |side: &str| {
         current_position_contracts(side)
             + live_portfolio_pending_open_quantity(portfolio, &profile.inst_id, side)
@@ -9369,7 +9651,9 @@ fn resolve_live_profile_action(
         } => {
             let quantity = current_position_contracts("long");
             if quantity <= 0.0 {
-                return Err("Profile close action has no current long position to close".to_string());
+                return Err(
+                    "Profile close action has no current long position to close".to_string()
+                );
             }
             Ok(StrategyAction::CloseLong {
                 quantity,
@@ -9386,7 +9670,9 @@ fn resolve_live_profile_action(
         } => {
             let quantity = current_position_contracts("short");
             if quantity <= 0.0 {
-                return Err("Profile close action has no current short position to close".to_string());
+                return Err(
+                    "Profile close action has no current short position to close".to_string(),
+                );
             }
             Ok(StrategyAction::CloseShort {
                 quantity,
@@ -9410,7 +9696,12 @@ fn profile_daily_realized_loss_usdt(
          FROM okx_fills
          WHERE account_id=?1 AND environment=?2 AND inst_id=?3
            AND COALESCE(okx_ts,synced_at)>=?4",
-        params![profile.account_id, profile.environment, profile.inst_id, day_start],
+        params![
+            profile.account_id,
+            profile.environment,
+            profile.inst_id,
+            day_start
+        ],
         |row| row.get::<_, f64>(0),
     )
     .map_err(|error| error.to_string())
@@ -9559,10 +9850,7 @@ fn mark_live_profile_resting_take_profit_by_order_id(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default();
-        let Some(protection) = details
-            .get_mut("protection")
-            .and_then(Value::as_object_mut)
-        else {
+        let Some(protection) = details.get_mut("protection").and_then(Value::as_object_mut) else {
             continue;
         };
         let matches_order = protection
@@ -9619,10 +9907,7 @@ fn mark_live_profile_resting_take_profits(
             .ok()
             .and_then(|value| value.as_object().cloned())
             .unwrap_or_default();
-        let Some(protection) = details
-            .get_mut("protection")
-            .and_then(Value::as_object_mut)
-        else {
+        let Some(protection) = details.get_mut("protection").and_then(Value::as_object_mut) else {
             continue;
         };
         let Some(client_order_id) = protection
@@ -9647,7 +9932,10 @@ fn mark_live_profile_resting_take_profits(
             ],
         )
         .map_err(|error| error.to_string())?;
-        if !client_order_ids.iter().any(|value| value == &client_order_id) {
+        if !client_order_ids
+            .iter()
+            .any(|value| value == &client_order_id)
+        {
             client_order_ids.push(client_order_id);
         }
     }
@@ -9656,8 +9944,8 @@ fn mark_live_profile_resting_take_profits(
 
 fn live_profile_market_window_bounds(cutoff_at: i64) -> (i64, i64) {
     let last_open = cutoff_at.saturating_sub(ONE_MINUTE_MS);
-    let history_span = (SYSTEMATIC_LIVE_HISTORY_BAR_LIMIT.saturating_sub(1) as i64)
-        .saturating_mul(ONE_MINUTE_MS);
+    let history_span =
+        (SYSTEMATIC_LIVE_HISTORY_BAR_LIMIT.saturating_sub(1) as i64).saturating_mul(ONE_MINUTE_MS);
     (last_open.saturating_sub(history_span), last_open)
 }
 
@@ -9690,7 +9978,9 @@ fn live_profile_market_window_status(
     cutoff_at: i64,
 ) -> Result<LiveProfileMarketWindowStatus, String> {
     let bars = load_confirmed_tail(conn, inst_id, cutoff_at, SYSTEMATIC_LIVE_HISTORY_BAR_LIMIT)?;
-    Ok(live_profile_market_window_status_from_bars(&bars, cutoff_at))
+    Ok(live_profile_market_window_status_from_bars(
+        &bars, cutoff_at,
+    ))
 }
 
 fn live_profile_market_window_status_from_bars(
@@ -9742,13 +10032,8 @@ async fn refresh_live_profile_recent_candles(
 ) -> Result<(), String> {
     let end_open = cutoff_at.saturating_sub(ONE_MINUTE_MS);
     let start_open = end_open.saturating_sub(5 * ONE_MINUTE_MS);
-    let candles = fetch_recent_market_candles(
-        inst_id,
-        SYSTEMATIC_INTERVAL,
-        start_open,
-        end_open,
-    )
-    .await?;
+    let candles =
+        fetch_recent_market_candles(inst_id, SYSTEMATIC_INTERVAL, start_open, end_open).await?;
     if candles.is_empty() {
         return Ok(());
     }
@@ -9795,7 +10080,9 @@ async fn ensure_live_profile_market_window(
     if !repaired.ready {
         refresh_live_profile_recent_candles(app, inst_id, cutoff_at)
             .await
-            .map_err(|error| format!("Unable to refresh the latest closed Profile candles: {error}"))?;
+            .map_err(|error| {
+                format!("Unable to refresh the latest closed Profile candles: {error}")
+            })?;
         repaired = wait_for_live_profile_market_window(app, inst_id, cutoff_at).await?;
     }
     if !repaired.ready {
@@ -9900,8 +10187,19 @@ fn run_live_profile_cycle(
         )) {
             Ok(value) => value,
             Err(error) => {
-                let action = StrategyAction::NoAction { reason: Some("account snapshot unavailable".to_string()) };
-                update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "error", None, None, Some(&error))?;
+                let action = StrategyAction::NoAction {
+                    reason: Some("account snapshot unavailable".to_string()),
+                };
+                update_live_profile_signal(
+                    &conn,
+                    &profile.id,
+                    cutoff_at,
+                    &action,
+                    "error",
+                    None,
+                    None,
+                    Some(&error),
+                )?;
                 let auto_stopped = record_live_profile_runtime_error(&conn, &profile.id, &error)?;
                 if auto_stopped {
                     emit_live_profile_auto_stopped(app, &profile, &error);
@@ -9934,8 +10232,19 @@ fn run_live_profile_cycle(
             Ok(action) => action,
             Err(error) => {
                 runtime.invalidate_live_profile_runner(&profile.id);
-                let no_action = StrategyAction::NoAction { reason: Some("strategy runtime error".to_string()) };
-                update_live_profile_signal(&conn, &profile.id, cutoff_at, &no_action, "error", None, None, Some(&error))?;
+                let no_action = StrategyAction::NoAction {
+                    reason: Some("strategy runtime error".to_string()),
+                };
+                update_live_profile_signal(
+                    &conn,
+                    &profile.id,
+                    cutoff_at,
+                    &no_action,
+                    "error",
+                    None,
+                    None,
+                    Some(&error),
+                )?;
                 let auto_stopped = record_live_profile_runtime_error(&conn, &profile.id, &error)?;
                 if auto_stopped {
                     emit_live_profile_auto_stopped(app, &profile, &error);
@@ -9966,12 +10275,8 @@ fn run_live_profile_cycle(
                     None,
                     Some(&error),
                 )?;
-                let auto_stopped = record_live_profile_sizing_error(
-                    &conn,
-                    &profile.id,
-                    cutoff_at,
-                    &error,
-                )?;
+                let auto_stopped =
+                    record_live_profile_sizing_error(&conn, &profile.id, cutoff_at, &error)?;
                 if auto_stopped {
                     emit_live_profile_auto_stopped(app, &profile, &error);
                 }
@@ -9980,7 +10285,16 @@ fn run_live_profile_cycle(
             }
         };
         if matches!(action, StrategyAction::NoAction { .. }) {
-            update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "no_action", None, None, None)?;
+            update_live_profile_signal(
+                &conn,
+                &profile.id,
+                cutoff_at,
+                &action,
+                "no_action",
+                None,
+                None,
+                None,
+            )?;
             if live_profile_submission_allowed(&conn, runtime, &profile.id, profile_generation)? {
                 update_live_profile_status(&conn, &profile.id, "running", None, false)?;
             }
@@ -9993,7 +10307,8 @@ fn run_live_profile_cycle(
                 runtime,
                 &profile.id,
                 profile_generation,
-            )? && profile_owns_live_order(&conn, &profile.id, order_id)? {
+            )? && profile_owns_live_order(&conn, &profile.id, order_id)?
+            {
                 tauri::async_runtime::block_on(
                     crate::trade_commands::systematic_profile_cancel_order(
                         app.clone(),
@@ -10005,18 +10320,25 @@ fn run_live_profile_cycle(
                     ),
                 )
             } else {
-                Err(if live_profile_submission_allowed(
-                    &conn,
-                    runtime,
-                    &profile.id,
-                    profile_generation,
-                )? {
-                    "Strategy can cancel only a current order submitted by this Profile".to_string()
-                } else {
-                    "策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string()
-                })
+                Err(
+                    if live_profile_submission_allowed(
+                        &conn,
+                        runtime,
+                        &profile.id,
+                        profile_generation,
+                    )? {
+                        "Strategy can cancel only a current order submitted by this Profile"
+                            .to_string()
+                    } else {
+                        "策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string()
+                    },
+                )
             };
-            let cancellation_status = if cancellation.is_ok() { "submitted" } else { "blocked" };
+            let cancellation_status = if cancellation.is_ok() {
+                "submitted"
+            } else {
+                "blocked"
+            };
             match cancellation {
                 Ok(()) => {
                     if let Err(error) = mark_live_profile_resting_take_profit_by_order_id(
@@ -10030,11 +10352,29 @@ fn run_live_profile_cycle(
                             profile.id, order_id, error
                         );
                     }
-                    update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "submitted", Some(order_id), None, None)?;
+                    update_live_profile_signal(
+                        &conn,
+                        &profile.id,
+                        cutoff_at,
+                        &action,
+                        "submitted",
+                        Some(order_id),
+                        None,
+                        None,
+                    )?;
                     update_live_profile_status(&conn, &profile.id, "running", None, true)?;
                 }
                 Err(error) => {
-                    update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "blocked", Some(order_id), None, Some(&error))?;
+                    update_live_profile_signal(
+                        &conn,
+                        &profile.id,
+                        cutoff_at,
+                        &action,
+                        "blocked",
+                        Some(order_id),
+                        None,
+                        Some(&error),
+                    )?;
                     update_live_profile_blocked_status(&conn, &profile.id, &error)?;
                 }
             }
@@ -10083,7 +10423,16 @@ fn run_live_profile_cycle(
         let execution = match execution {
             Ok(execution) => execution,
             Err(error) => {
-                update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "blocked", None, None, Some(&error))?;
+                update_live_profile_signal(
+                    &conn,
+                    &profile.id,
+                    cutoff_at,
+                    &action,
+                    "blocked",
+                    None,
+                    None,
+                    Some(&error),
+                )?;
                 update_live_profile_blocked_status(&conn, &profile.id, &error)?;
                 if profile.notify_on_signal {
                     crate::ai_automation::spawn_systematic_profile_signal_feishu(
@@ -10103,12 +10452,7 @@ fn run_live_profile_cycle(
         };
         let quantity = quantity.ok_or_else(|| "Strategy action has no quantity".to_string())?;
         let execution_key = format!("systematic:{}:{}:{}", profile.id, cutoff_at, kind);
-        if !live_profile_submission_allowed(
-            &conn,
-            runtime,
-            &profile.id,
-            profile_generation,
-        )? {
+        if !live_profile_submission_allowed(&conn, runtime, &profile.id, profile_generation)? {
             let error = "策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission";
             update_live_profile_signal(
                 &conn,
@@ -10148,89 +10492,95 @@ fn run_live_profile_cycle(
             "close-short" => Some("open_short"),
             _ => None,
         };
-        let result = (|| -> Result<crate::trade_commands::SystematicProfileOrderResponse, String> {
-            if !live_profile_submission_allowed(
-                &conn,
-                runtime,
-                &profile.id,
-                profile_generation,
-            )? {
-                return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
-            }
-            if let Some(open_action_kind) = close_protection_action_kind {
-                let client_order_ids = mark_live_profile_resting_take_profits(
+        let result =
+            (|| -> Result<crate::trade_commands::SystematicProfileOrderResponse, String> {
+                if !live_profile_submission_allowed(
                     &conn,
+                    runtime,
                     &profile.id,
-                    open_action_kind,
-                    "closing",
-                )?;
-                for client_order_id in client_order_ids {
+                    profile_generation,
+                )? {
+                    return Err("策略 Profile 已停用，已在提交前阻断本轮动作 / Profile was stopped before submission".to_string());
+                }
+                if let Some(open_action_kind) = close_protection_action_kind {
+                    let client_order_ids = mark_live_profile_resting_take_profits(
+                        &conn,
+                        &profile.id,
+                        open_action_kind,
+                        "closing",
+                    )?;
+                    for client_order_id in client_order_ids {
+                        tauri::async_runtime::block_on(
+                            crate::trade_commands::systematic_profile_cancel_order_by_client_id(
+                                app.clone(),
+                                &profile.account_id,
+                                &profile.environment,
+                                &profile.inst_id,
+                                &client_order_id,
+                                "策略主动平仓，撤销成交后止盈限价单",
+                            ),
+                        )
+                        .map_err(|error| {
+                            format!(
+                            "撤销成交后止盈限价单 {client_order_id} 失败，已阻止平仓提交：{error}"
+                        )
+                        })?;
+                    }
+                }
+                if matches!(execution.0, "long" | "short") {
                     tauri::async_runtime::block_on(
-                        crate::trade_commands::systematic_profile_cancel_order_by_client_id(
+                        crate::trade_commands::systematic_profile_sync_leverage(
                             app.clone(),
                             &profile.account_id,
                             &profile.environment,
                             &profile.inst_id,
-                            &client_order_id,
-                            "策略主动平仓，撤销成交后止盈限价单",
+                            &profile.margin_mode,
+                            profile.leverage,
+                            &profile.id,
                         ),
-                    )
-                    .map_err(|error| {
-                        format!(
-                            "撤销成交后止盈限价单 {client_order_id} 失败，已阻止平仓提交：{error}"
-                        )
-                    })?;
+                    )?;
                 }
-            }
-            if matches!(execution.0, "long" | "short") {
-                tauri::async_runtime::block_on(crate::trade_commands::systematic_profile_sync_leverage(
-                    app.clone(),
-                    &profile.account_id,
-                    &profile.environment,
-                    &profile.inst_id,
-                    &profile.margin_mode,
-                    profile.leverage,
-                    &profile.id,
-                ))?;
-            }
-            let (order_type, limit_price) = match &action {
-                StrategyAction::OpenLong { execution, .. }
-                | StrategyAction::OpenShort { execution, .. }
-                | StrategyAction::CloseLong { execution, .. }
-                | StrategyAction::CloseShort { execution, .. } => {
-                    (match execution.order_type {
-                        desic_systematic::StrategyOrderType::Market => "market".to_string(),
-                        desic_systematic::StrategyOrderType::Limit => "limit".to_string(),
-                    }, execution.limit_price)
-                }
-                _ => return Err("Strategy action has no executable order type".to_string()),
-            };
-            tauri::async_runtime::block_on(crate::trade_commands::systematic_profile_place_order(
-                app.clone(),
-                crate::trade_commands::SystematicProfileOrderRequest {
-                    profile_id: profile.id.clone(),
-                    profile_generation,
-                    account_id: profile.account_id.clone(),
-                    environment: profile.environment.clone(),
-                    inst_id: profile.inst_id.clone(),
-                    margin_mode: profile.margin_mode.clone(),
-                    leverage: profile.leverage,
-                    action: execution.0.to_string(),
-                    order_type,
-                    limit_price,
-                    quantity,
-                    reason: reason.clone(),
-                    execution_key,
-                    stop_loss: execution.1,
-                    take_profit: execution.2,
-                    stop_loss_order_type: profile.stop_loss_order_type.clone(),
-                    take_profit_order_type: profile.take_profit_order_type.clone(),
-                    take_profit_client_order_id: None,
-                    take_profit_closed_quantity: None,
-                    take_profit_current_filled_quantity: None,
-                },
-            ))
-        })();
+                let (order_type, limit_price) = match &action {
+                    StrategyAction::OpenLong { execution, .. }
+                    | StrategyAction::OpenShort { execution, .. }
+                    | StrategyAction::CloseLong { execution, .. }
+                    | StrategyAction::CloseShort { execution, .. } => (
+                        match execution.order_type {
+                            desic_systematic::StrategyOrderType::Market => "market".to_string(),
+                            desic_systematic::StrategyOrderType::Limit => "limit".to_string(),
+                        },
+                        execution.limit_price,
+                    ),
+                    _ => return Err("Strategy action has no executable order type".to_string()),
+                };
+                tauri::async_runtime::block_on(
+                    crate::trade_commands::systematic_profile_place_order(
+                        app.clone(),
+                        crate::trade_commands::SystematicProfileOrderRequest {
+                            profile_id: profile.id.clone(),
+                            profile_generation,
+                            account_id: profile.account_id.clone(),
+                            environment: profile.environment.clone(),
+                            inst_id: profile.inst_id.clone(),
+                            margin_mode: profile.margin_mode.clone(),
+                            leverage: profile.leverage,
+                            action: execution.0.to_string(),
+                            order_type,
+                            limit_price,
+                            quantity,
+                            reason: reason.clone(),
+                            execution_key,
+                            stop_loss: execution.1,
+                            take_profit: execution.2,
+                            stop_loss_order_type: profile.stop_loss_order_type.clone(),
+                            take_profit_order_type: profile.take_profit_order_type.clone(),
+                            take_profit_client_order_id: None,
+                            take_profit_closed_quantity: None,
+                            take_profit_current_filled_quantity: None,
+                        },
+                    ),
+                )
+            })();
         match result {
             Ok(order) => {
                 if let Some(open_action_kind) = close_protection_action_kind {
@@ -10275,13 +10625,7 @@ fn run_live_profile_cycle(
                     order.post_fill_take_profit_closed_quantity,
                     order.post_fill_take_profit_current_filled_quantity,
                 )?;
-                update_live_profile_status(
-                    &conn,
-                    &profile.id,
-                    "running",
-                    None,
-                    true,
-                )?;
+                update_live_profile_status(&conn, &profile.id, "running", None, true)?;
                 if profile.notify_on_signal {
                     crate::ai_automation::spawn_systematic_profile_signal_feishu(
                         app,
@@ -10309,7 +10653,16 @@ fn run_live_profile_cycle(
                 events.push(json!({"type":"profileSignal","profileId":profile.id,"instId":profile.inst_id,"cutoffAt":cutoff_at,"action":kind,"status":"submitted","protectionStatus":order.protection_status,"timestamp":now_ms()}));
             }
             Err(error) => {
-                update_live_profile_signal(&conn, &profile.id, cutoff_at, &action, "blocked", None, None, Some(&error))?;
+                update_live_profile_signal(
+                    &conn,
+                    &profile.id,
+                    cutoff_at,
+                    &action,
+                    "blocked",
+                    None,
+                    None,
+                    Some(&error),
+                )?;
                 update_live_profile_blocked_status(&conn, &profile.id, &error)?;
                 if profile.notify_on_signal {
                     crate::ai_automation::spawn_systematic_profile_signal_feishu(
@@ -10852,15 +11205,14 @@ async fn ensure_local_python_environment(
         // Creation source: the bundled CPython shipped in the app resources
         // first, then the machine PATH as a fallback for development builds
         // and corrupted bundles.
-        let (interpreter, python_source): (LocalPythonInterpreter, String) =
-            if let Some(bundled) = bundled.as_ref() {
-                if let Some(verified) =
-                    verify_bundled_python_interpreter(&bundled.interpreter).await
-                {
-                    (verified, bundled.source_id.clone())
-                } else {
-                    let Some(system) = detect_local_python_interpreter().await? else {
-                        return Ok(local_python_runtime_unavailable_view(
+        let (interpreter, python_source): (LocalPythonInterpreter, String) = if let Some(bundled) =
+            bundled.as_ref()
+        {
+            if let Some(verified) = verify_bundled_python_interpreter(&bundled.interpreter).await {
+                (verified, bundled.source_id.clone())
+            } else {
+                let Some(system) = detect_local_python_interpreter().await? else {
+                    return Ok(local_python_runtime_unavailable_view(
                             "missingPython",
                             format!(
                                 "Python {}.{} to {}.{} was not found on PATH. Install a supported Python version and add it to PATH, then refresh this panel.",
@@ -10872,13 +11224,13 @@ async fn ensure_local_python_environment(
                             false,
                             None,
                         ));
-                    };
-                    let source_id = format!("system:{}", system.version);
-                    (system, source_id)
-                }
-            } else {
-                let Some(system) = detect_local_python_interpreter().await? else {
-                    return Ok(local_python_runtime_unavailable_view(
+                };
+                let source_id = format!("system:{}", system.version);
+                (system, source_id)
+            }
+        } else {
+            let Some(system) = detect_local_python_interpreter().await? else {
+                return Ok(local_python_runtime_unavailable_view(
                         "missingPython",
                         format!(
                             "Python {}.{} to {}.{} was not found on PATH. Install a supported Python version and add it to PATH, then refresh this panel.",
@@ -10890,10 +11242,10 @@ async fn ensure_local_python_environment(
                         false,
                         None,
                     ));
-                };
-                let source_id = format!("system:{}", system.version);
-                (system, source_id)
             };
+            let source_id = format!("system:{}", system.version);
+            (system, source_id)
+        };
         let staging = environment_root.join(format!(
             "venv-building-{}",
             SYSTEMATIC_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
@@ -11208,7 +11560,11 @@ fn local_python_command_failure_detail(stdout: &[u8], stderr: &[u8]) -> Option<S
     let stderr = String::from_utf8_lossy(stderr);
     let stdout = String::from_utf8_lossy(stdout);
     // pip reports its hard failures on stderr, but some tools only use stdout.
-    let source = if stderr.trim().is_empty() { &stdout } else { &stderr };
+    let source = if stderr.trim().is_empty() {
+        &stdout
+    } else {
+        &stderr
+    };
     let lines = source
         .lines()
         .map(str::trim)
@@ -11250,10 +11606,7 @@ async fn run_local_python_command(
         .map_err(|_| format!("Timed out while trying to {action}"))?
         .map_err(|error| format!("Could not {action}: {error}"))?;
     if !output.status.success() {
-        let mut message = format!(
-            "Could not {action} (Python exited with {}).",
-            output.status
-        );
+        let mut message = format!("Could not {action} (Python exited with {}).", output.status);
         match local_python_command_failure_detail(&output.stdout, &output.stderr) {
             Some(detail) => message.push_str(&format!(" {detail}")),
             None => message.push_str(
@@ -11501,9 +11854,7 @@ impl PythonMarketSeriesCursor {
             }
             for series in &mut self.series {
                 series.aggregator.push_validated(bar).map_err(|error| {
-                    python_runtime_error(format!(
-                        "Could not rewind market timeframe: {error}"
-                    ))
+                    python_runtime_error(format!("Could not rewind market timeframe: {error}"))
                 })?;
             }
             self.last_base_close_time_ms = Some(bar.close_time_ms);
@@ -11736,7 +12087,11 @@ impl LocalPythonStrategyRunner {
                 values
                     .iter()
                     .filter_map(Value::as_str)
-                    .filter(|interval| STRATEGY_TIMEFRAMES.iter().any(|(known, _)| known == interval))
+                    .filter(|interval| {
+                        STRATEGY_TIMEFRAMES
+                            .iter()
+                            .any(|(known, _)| known == interval)
+                    })
                     .map(ToOwned::to_owned)
                     .collect::<Vec<_>>()
             })
@@ -11779,7 +12134,11 @@ impl LocalPythonStrategyRunner {
         let request_id = format!("local-{}", self.request_sequence);
         let mut message = match payload {
             Value::Object(message) => message,
-            _ => return Err(python_runtime_error("Local Python request payload is invalid")),
+            _ => {
+                return Err(python_runtime_error(
+                    "Local Python request payload is invalid",
+                ))
+            }
         };
         message.insert(
             "protocol".to_string(),
@@ -11858,11 +12217,8 @@ impl LocalPythonStrategyRunner {
             python_runtime_error("Local Python runner returned no strategy output")
         })?;
         let decode_started = Instant::now();
-        let action = strategy_action_from_python_output(
-            output,
-            expected_as_of_ms,
-            &expected_instrument_id,
-        );
+        let action =
+            strategy_action_from_python_output(output, expected_as_of_ms, &expected_instrument_id);
         self.timing.action_decode_us = self
             .timing
             .action_decode_us
@@ -11879,10 +12235,9 @@ impl LocalPythonStrategyRunner {
         let expected = events
             .iter()
             .map(|event| {
-                let as_of_ms = event
-                    .get("asOfMs")
-                    .and_then(Value::as_i64)
-                    .ok_or_else(|| python_runtime_error("Local Python event has no as-of timestamp"))?;
+                let as_of_ms = event.get("asOfMs").and_then(Value::as_i64).ok_or_else(|| {
+                    python_runtime_error("Local Python event has no as-of timestamp")
+                })?;
                 let instrument_id = event
                     .get("instrumentId")
                     .and_then(Value::as_str)
@@ -11945,13 +12300,16 @@ impl LocalPythonStrategyRunner {
                 return Err(python_runtime_error(self.explain_runner_failure(&error)));
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                let detail = self.explain_runner_failure("the Python process did not answer in time");
+                let detail =
+                    self.explain_runner_failure("the Python process did not answer in time");
                 self.abort();
                 return Err(python_runtime_error(detail));
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 self.abort();
-                return Err(python_runtime_error(self.explain_runner_failure("the Python runner disconnected")));
+                return Err(python_runtime_error(
+                    self.explain_runner_failure("the Python runner disconnected"),
+                ));
             }
         };
         serde_json::from_str::<Value>(raw.trim())
@@ -12070,21 +12428,19 @@ impl LocalPythonStrategyRunner {
                 reason,
                 diagnostics,
                 ..
-            } => {
-                match resolve(TradeSide::Long)? {
-                    BacktestPositionSizingOutcome::Sized(resolution) => Ok(StrategyAction::OpenLong {
-                        quantity: resolution.contracts,
-                        execution,
-                        stop_loss,
-                        take_profit,
-                        reason,
-                        diagnostics,
-                    }),
-                    BacktestPositionSizingOutcome::Skipped { reason } => {
-                        Ok(backtest_position_sizing_skip_action(reason))
-                    }
+            } => match resolve(TradeSide::Long)? {
+                BacktestPositionSizingOutcome::Sized(resolution) => Ok(StrategyAction::OpenLong {
+                    quantity: resolution.contracts,
+                    execution,
+                    stop_loss,
+                    take_profit,
+                    reason,
+                    diagnostics,
+                }),
+                BacktestPositionSizingOutcome::Skipped { reason } => {
+                    Ok(backtest_position_sizing_skip_action(reason))
                 }
-            }
+            },
             StrategyAction::OpenShort {
                 execution,
                 stop_loss,
@@ -12092,21 +12448,19 @@ impl LocalPythonStrategyRunner {
                 reason,
                 diagnostics,
                 ..
-            } => {
-                match resolve(TradeSide::Short)? {
-                    BacktestPositionSizingOutcome::Sized(resolution) => Ok(StrategyAction::OpenShort {
-                        quantity: resolution.contracts,
-                        execution,
-                        stop_loss,
-                        take_profit,
-                        reason,
-                        diagnostics,
-                    }),
-                    BacktestPositionSizingOutcome::Skipped { reason } => {
-                        Ok(backtest_position_sizing_skip_action(reason))
-                    }
+            } => match resolve(TradeSide::Short)? {
+                BacktestPositionSizingOutcome::Sized(resolution) => Ok(StrategyAction::OpenShort {
+                    quantity: resolution.contracts,
+                    execution,
+                    stop_loss,
+                    take_profit,
+                    reason,
+                    diagnostics,
+                }),
+                BacktestPositionSizingOutcome::Skipped { reason } => {
+                    Ok(backtest_position_sizing_skip_action(reason))
                 }
-            }
+            },
             StrategyAction::CloseLong {
                 execution,
                 reason,
@@ -12132,7 +12486,6 @@ impl LocalPythonStrategyRunner {
             action => Ok(action),
         }
     }
-
 }
 
 impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
@@ -12245,7 +12598,12 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
                 self.resolve_backtest_action_for_portfolio(
                     action,
                     &snapshot.portfolio,
-                    snapshot.market.bars.last().map(|bar| bar.close).unwrap_or(0.0),
+                    snapshot
+                        .market
+                        .bars
+                        .last()
+                        .map(|bar| bar.close)
+                        .unwrap_or(0.0),
                 )
             })
             .collect()
@@ -12283,8 +12641,8 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
         // Sixteen keeps the probe cheap for genuinely active strategies while
         // letting long flat stretches recover their batching quickly.
         const DIRECT_STREAK_BEFORE_BATCHING: usize = 16;
-        let empty_account = context.portfolio().position.is_none()
-            && context.portfolio().open_orders.is_empty();
+        let empty_account =
+            context.portfolio().position.is_none() && context.portfolio().open_orders.is_empty();
         if self.adaptive_no_action_batch_size == 1 && empty_account {
             if matches!(action, StrategyAction::NoAction { .. }) {
                 self.direct_empty_no_action_streak =
@@ -12318,7 +12676,10 @@ fn protection_capabilities_from_action_sites(
 ) -> SystematicProtectionCapabilities {
     let mut capabilities = SystematicProtectionCapabilities::default();
     for site in action_sites {
-        if !matches!(site.get("method").and_then(Value::as_str), Some("open_long" | "open_short")) {
+        if !matches!(
+            site.get("method").and_then(Value::as_str),
+            Some("open_long" | "open_short")
+        ) {
             continue;
         }
         if site
@@ -12361,7 +12722,9 @@ fn inspect_python_strategy_protection_capabilities(
         "protection-capability-inspection-v1",
     )
     .map_err(|error| error.to_string())?;
-    Ok(protection_capabilities_from_action_sites(&runner.action_sites))
+    Ok(protection_capabilities_from_action_sites(
+        &runner.action_sites,
+    ))
 }
 
 fn python_runtime_error(reason: impl Into<String>) -> SystematicError {
@@ -12528,13 +12891,7 @@ fn python_portfolio_from_parts(
     let fill_count = fills.len();
     let trade_count = closed_trades.len();
     if ledger_unchanged {
-        return python_portfolio_value(
-            portfolio,
-            positions,
-            Vec::new(),
-            Vec::new(),
-            "append",
-        );
+        return python_portfolio_value(portfolio, positions, Vec::new(), Vec::new(), "append");
     }
     let replace_ledger = !ledger_cursor.initialized
         || fill_count < ledger_cursor.fills_seen
@@ -12686,10 +13043,12 @@ fn python_trade_side(side: TradeSide) -> &'static str {
 
 fn python_fill_action(fill: &Fill) -> &'static str {
     match fill.reason {
-        FillReason::TargetIncrease | FillReason::TargetFlipEntry | FillReason::LimitEntry => match fill.side {
-            FillSide::Buy => "open_long",
-            FillSide::Sell => "open_short",
-        },
+        FillReason::TargetIncrease | FillReason::TargetFlipEntry | FillReason::LimitEntry => {
+            match fill.side {
+                FillSide::Buy => "open_long",
+                FillSide::Sell => "open_short",
+            }
+        }
         FillReason::TargetDecrease
         | FillReason::TargetFlipExit
         | FillReason::LimitExit
@@ -13339,7 +13698,9 @@ fn ensure_strategy_name_available(
         )
         .map_err(|error| error.to_string())?;
     if duplicate {
-        return Err(format!("A strategy named \"{name}\" already exists. Choose a different name."));
+        return Err(format!(
+            "A strategy named \"{name}\" already exists. Choose a different name."
+        ));
     }
     Ok(())
 }
@@ -13711,16 +14072,17 @@ fn truncate_text(value: &str, maximum_bytes: usize) -> String {
 }
 
 fn emit_systematic_event(app: &tauri::AppHandle, payload: Value) {
-    let notify_center_event = payload
-        .get("type")
-        .and_then(Value::as_str)
-        .is_some_and(|event_type| {
-            matches!(
-                event_type,
-                "systematicProfileProtectionWarning"
-                    | "systematicProfileExecutionRecoveryFailed"
-            )
-        });
+    let notify_center_event =
+        payload
+            .get("type")
+            .and_then(Value::as_str)
+            .is_some_and(|event_type| {
+                matches!(
+                    event_type,
+                    "systematicProfileProtectionWarning"
+                        | "systematicProfileExecutionRecoveryFailed"
+                )
+            });
     if notify_center_event {
         let _ = app.emit(SYSTEMATIC_PROFILE_NOTIFICATION_EVENT, payload.clone());
     }
@@ -13763,7 +14125,10 @@ mod tests {
         let detail = local_python_command_failure_detail(b"", stderr.as_bytes())
             .expect("a failing pip run must produce a reason");
 
-        assert!(detail.contains("403"), "must keep the HTTP status: {detail}");
+        assert!(
+            detail.contains("403"),
+            "must keep the HTTP status: {detail}"
+        );
         assert!(
             detail.contains("tuna.tsinghua.edu.cn"),
             "must name the failing index: {detail}"
@@ -13823,7 +14188,10 @@ mod tests {
             "must keep the raw diagnostic: {}",
             missing.reason
         );
-        assert_eq!(missing.interpreter_label.as_deref(), Some("Python 3.11 (python)"));
+        assert_eq!(
+            missing.interpreter_label.as_deref(),
+            Some("Python 3.11 (python)")
+        );
     }
 
     #[test]
@@ -13944,12 +14312,13 @@ mod tests {
         assert!(ready.ready);
         assert!(ready.continuous);
 
-        let missing_latest = live_profile_market_window_status_from_bars(
-            &complete[..complete.len() - 1],
-            cutoff_at,
-        );
+        let missing_latest =
+            live_profile_market_window_status_from_bars(&complete[..complete.len() - 1], cutoff_at);
         assert!(!missing_latest.ready);
-        assert_eq!(missing_latest.last_close_time_ms, Some(cutoff_at - ONE_MINUTE_MS));
+        assert_eq!(
+            missing_latest.last_close_time_ms,
+            Some(cutoff_at - ONE_MINUTE_MS)
+        );
 
         let with_gap = (0..SYSTEMATIC_LIVE_HISTORY_BAR_LIMIT)
             .map(|index| {
@@ -14045,7 +14414,7 @@ mod tests {
     }
 
     #[test]
-fn strategy_authoring_skill_is_scoped_to_the_current_editor() {
+    fn strategy_authoring_skill_is_scoped_to_the_current_editor() {
         let bundle = systematic_strategy_authoring_skill();
         let skill = &bundle.definition;
         assert_eq!(skill.id, SYSTEMATIC_STRATEGY_AI_SKILL_ID);
@@ -14073,16 +14442,16 @@ fn strategy_authoring_skill_is_scoped_to_the_current_editor() {
         assert!(skill.content.contains("strategy_applySource"));
         assert!(skill.content.contains("strategy_readDevelopmentDocs"));
         assert!(skill.content.contains("skill_readResource"));
-        assert!(skill
-            .content
-            .contains("never receives a quantity"));
+        assert!(skill.content.contains("never receives a quantity"));
         assert!(skill.content.contains("stopLossPrice"));
         // Normalize whitespace so the assertion survives Markdown rewrapping.
-        let flat = skill.content.split_whitespace().collect::<Vec<_>>().join(" ");
-        assert!(flat.contains("mandatory test obligation"));
-        assert!(skill
+        let flat = skill
             .content
-            .contains("does not satisfy this obligation"));
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(flat.contains("mandatory test obligation"));
+        assert!(skill.content.contains("does not satisfy this obligation"));
 
         // Progressive disclosure keeps the resident body small enough that the
         // detailed contract does not have to be resent on every turn.
@@ -14268,9 +14637,14 @@ fn strategy_authoring_skill_is_scoped_to_the_current_editor() {
     #[test]
     fn strategy_ai_test_fixture_is_current_time_bounded() {
         let event = strategy_ai_test_event("bar");
-        assert_eq!(event["asOfMs"], SYSTEMATIC_STRATEGY_AI_TEST_FIXTURE_AS_OF_MS);
+        assert_eq!(
+            event["asOfMs"],
+            SYSTEMATIC_STRATEGY_AI_TEST_FIXTURE_AS_OF_MS
+        );
         assert_eq!(event["snapshotId"], "ai-static-fixture-v1");
-        let series = event["market"]["series"].as_array().expect("fixture series");
+        let series = event["market"]["series"]
+            .as_array()
+            .expect("fixture series");
         assert_eq!(series.len(), STRATEGY_TIMEFRAMES.len());
         for item in series {
             let bars = item["bars"].as_array().expect("fixture bars");
@@ -14490,13 +14864,12 @@ def on_bar(ctx):
             end_of_run_policy: desic_systematic::EndOfRunPolicy::CloseAtLastClose,
         };
 
-        let result =
-            BacktestEngine::run_stateful(
-                &request,
-                &mut runner,
-                &desic_systematic::CancellationToken::default(),
-            )
-                .expect("batched python backtest must not expose future bars");
+        let result = BacktestEngine::run_stateful(
+            &request,
+            &mut runner,
+            &desic_systematic::CancellationToken::default(),
+        )
+        .expect("batched python backtest must not expose future bars");
         assert_eq!(result.status, desic_systematic::BacktestStatus::Completed);
         assert!(result.report.fills.len() >= 2);
     }
@@ -14789,9 +15162,15 @@ def on_bar(ctx):
         let action_sites = result["actionSites"]
             .as_array()
             .expect("action site coverage");
-        assert!(action_sites.iter().any(|site| site["method"] == "open_long"));
-        assert!(action_sites.iter().any(|site| site["method"] == "open_short"));
-        assert!(action_sites.iter().any(|site| site["method"] == "set_protection"));
+        assert!(action_sites
+            .iter()
+            .any(|site| site["method"] == "open_long"));
+        assert!(action_sites
+            .iter()
+            .any(|site| site["method"] == "open_short"));
+        assert!(action_sites
+            .iter()
+            .any(|site| site["method"] == "set_protection"));
         let capabilities = protection_capabilities_from_action_sites(action_sites);
         assert!(capabilities.has_stop_loss);
         assert!(capabilities.has_take_profit);
@@ -14968,14 +15347,32 @@ def on_bar(ctx):
         )
         .expect("current strategy");
         for (version, description, definition_json, source_hash, created_at) in [
-            (1_i64, "first snapshot", &version_one_json, "hash-v1", 10_i64),
-            (2_i64, "current version", &version_two_json, "hash-v2", 20_i64),
+            (
+                1_i64,
+                "first snapshot",
+                &version_one_json,
+                "hash-v1",
+                10_i64,
+            ),
+            (
+                2_i64,
+                "current version",
+                &version_two_json,
+                "hash-v2",
+                20_i64,
+            ),
         ] {
             conn.execute(
                 "INSERT INTO systematic_strategy_versions(
                    strategy_id,version,name,description,definition_json,source_hash,created_at
                  ) VALUES('versioned-python',?1,'Versioned Python',?2,?3,?4,?5)",
-                params![version, description, definition_json, source_hash, created_at],
+                params![
+                    version,
+                    description,
+                    definition_json,
+                    source_hash,
+                    created_at
+                ],
             )
             .expect("strategy snapshot");
         }
@@ -15095,15 +15492,18 @@ def on_bar(ctx):
                 "systematic_strategies" | "systematic_strategy_versions" => 1,
                 _ => 0,
             };
-            assert_eq!(remaining, expected, "legacy artifact reset mismatch in {table}");
+            assert_eq!(
+                remaining, expected,
+                "legacy artifact reset mismatch in {table}"
+            );
         }
         let rule_packages: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM systematic_registry_packages WHERE kind='rule'",
                 [],
                 |row| row.get(0),
-        )
-        .expect("rule package count");
+            )
+            .expect("rule package count");
         assert_eq!(rule_packages, 1);
         let profile_columns = conn
             .prepare("PRAGMA table_info(systematic_profiles)")
@@ -15132,24 +15532,51 @@ def on_bar(ctx):
         )
         .expect("profile");
 
-        assert!(!record_live_profile_runtime_error(&conn, "runtime-profile", "first error").expect("first error"));
-        assert!(!record_live_profile_runtime_error(&conn, "runtime-profile", "second error").expect("second error"));
+        assert!(
+            !record_live_profile_runtime_error(&conn, "runtime-profile", "first error")
+                .expect("first error")
+        );
+        assert!(
+            !record_live_profile_runtime_error(&conn, "runtime-profile", "second error")
+                .expect("second error")
+        );
         update_live_profile_blocked_status(&conn, "runtime-profile", "risk block")
             .expect("risk block resets runtime streak");
         assert_eq!(
             live_profile_runtime_error_streak(&conn, "runtime-profile").expect("reset streak"),
             0
         );
-        assert!(!record_live_profile_runtime_error(&conn, "runtime-profile", "first error after block").expect("first error after block"));
+        assert!(!record_live_profile_runtime_error(
+            &conn,
+            "runtime-profile",
+            "first error after block"
+        )
+        .expect("first error after block"));
         update_live_profile_status(&conn, "runtime-profile", "running", None, false)
             .expect("normal cycle resets runtime streak");
         assert_eq!(
-            live_profile_runtime_error_streak(&conn, "runtime-profile").expect("normal reset streak"),
+            live_profile_runtime_error_streak(&conn, "runtime-profile")
+                .expect("normal reset streak"),
             0
         );
-        assert!(!record_live_profile_runtime_error(&conn, "runtime-profile", "first consecutive error").expect("first consecutive error"));
-        assert!(!record_live_profile_runtime_error(&conn, "runtime-profile", "second consecutive error").expect("second consecutive error"));
-        assert!(record_live_profile_runtime_error(&conn, "runtime-profile", "third consecutive error").expect("third consecutive error"));
+        assert!(!record_live_profile_runtime_error(
+            &conn,
+            "runtime-profile",
+            "first consecutive error"
+        )
+        .expect("first consecutive error"));
+        assert!(!record_live_profile_runtime_error(
+            &conn,
+            "runtime-profile",
+            "second consecutive error"
+        )
+        .expect("second consecutive error"));
+        assert!(record_live_profile_runtime_error(
+            &conn,
+            "runtime-profile",
+            "third consecutive error"
+        )
+        .expect("third consecutive error"));
 
         let state: (i64, String, i64, String) = conn
             .query_row(
@@ -15203,7 +15630,14 @@ def on_bar(ctx):
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .expect("state");
-        assert_eq!(state, (0, "stopped".to_string(), SYSTEMATIC_PROFILE_RUNTIME_ERROR_LIMIT));
+        assert_eq!(
+            state,
+            (
+                0,
+                "stopped".to_string(),
+                SYSTEMATIC_PROFILE_RUNTIME_ERROR_LIMIT
+            )
+        );
     }
 
     #[test]
@@ -15249,9 +15683,19 @@ def on_bar(ctx):
         migrate_systematic(&conn).expect("migration");
         for (id, cutoff_at, action_kind, status) in [
             ("profile-signal-action", 100_i64, "open_long", "submitted"),
-            ("profile-signal-no-action", 200_i64, "no_action", "no_action"),
+            (
+                "profile-signal-no-action",
+                200_i64,
+                "no_action",
+                "no_action",
+            ),
             ("profile-signal-error", 300_i64, "no_action", "error"),
-            ("profile-signal-sizing-block", 350_i64, "no_action", "blocked"),
+            (
+                "profile-signal-sizing-block",
+                350_i64,
+                "no_action",
+                "blocked",
+            ),
         ] {
             conn.execute(
                 "INSERT INTO systematic_profile_signals(
@@ -15388,8 +15832,7 @@ def on_bar(ctx):
             assert_eq!(definition.entrypoint, "on_bar");
         }
 
-        let (_, blank) = builtin_python_strategy_template(Some("blank"))
-            .expect("blank template");
+        let (_, blank) = builtin_python_strategy_template(Some("blank")).expect("blank template");
         assert_eq!(blank.parameters, json!({}));
         assert!(blank.source.contains("ctx.no_action"));
         assert!(!blank.source.contains("ctx.open_long"));
@@ -15399,8 +15842,14 @@ def on_bar(ctx):
 
     #[test]
     fn optimization_candidates_are_deterministic_and_bounded() {
-        assert_eq!(normalize_optimization_budget(None).expect("default budget"), 100);
-        assert_eq!(normalize_optimization_budget(Some(30)).expect("fast budget"), 30);
+        assert_eq!(
+            normalize_optimization_budget(None).expect("default budget"),
+            100
+        );
+        assert_eq!(
+            normalize_optimization_budget(Some(30)).expect("fast budget"),
+            30
+        );
         assert!(normalize_optimization_budget(Some(31)).is_err());
         let mut tuning = BTreeMap::new();
         tuning.insert(
@@ -15427,13 +15876,21 @@ def on_bar(ctx):
             parameters: json!({ "fastPeriod": 10, "stopLossPct": 0.01 }),
             parameter_tuning: tuning,
         };
-        let candidates = optimization_parameter_candidates(&definition, 100, "test", Some(1)).expect("candidate grid").candidates;
+        let candidates = optimization_parameter_candidates(&definition, 100, "test", Some(1))
+            .expect("candidate grid")
+            .candidates;
         assert_eq!(candidates.len(), 4);
         assert_eq!(candidates[0]["fastPeriod"], 10.0);
         assert_eq!(candidates[0]["stopLossPct"], 0.01);
-        assert!(candidates.iter().any(|candidate| candidate["fastPeriod"] == 8.0));
-        assert!(candidates.iter().any(|candidate| candidate["stopLossPct"] == 0.02));
-        let repeated = optimization_parameter_candidates(&definition, 100, "test", Some(1)).expect("same candidate grid").candidates;
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate["fastPeriod"] == 8.0));
+        assert!(candidates
+            .iter()
+            .any(|candidate| candidate["stopLossPct"] == 0.02));
+        let repeated = optimization_parameter_candidates(&definition, 100, "test", Some(1))
+            .expect("same candidate grid")
+            .candidates;
         assert_eq!(candidates, repeated);
 
         let mut oversized = definition.clone();
@@ -15580,7 +16037,11 @@ def on_bar(ctx):
             .map(|index| EquityPoint {
                 time_ms: 1_755_100_800_000 + index as i64 * ONE_MINUTE_MS,
                 equity_usdt: 10_000.0 + (index as f64) / 3.0,
-                realized_cash_usdt: if index == 5 { -0.0 } else { 9_997.504_554_390_676 },
+                realized_cash_usdt: if index == 5 {
+                    -0.0
+                } else {
+                    9_997.504_554_390_676
+                },
                 unrealized_pnl_usdt: match index {
                     0 => f64::MIN_POSITIVE,
                     1 => -1.797_693_134_862_315_7e308,
@@ -15591,7 +16052,11 @@ def on_bar(ctx):
             .collect::<Vec<_>>();
 
         let chunks = encode_equity_series(&points);
-        assert_eq!(chunks.len(), 3, "expected one chunk per {EQUITY_SERIES_CHUNK_BARS} bars");
+        assert_eq!(
+            chunks.len(),
+            3,
+            "expected one chunk per {EQUITY_SERIES_CHUNK_BARS} bars"
+        );
         assert!(chunks
             .iter()
             .all(|chunk| chunk.codec == EQUITY_SERIES_CODEC_UNIFORM));
@@ -15656,7 +16121,8 @@ def on_bar(ctx):
             .collect::<Vec<_>>();
         let chunk = encode_equity_series(&points).remove(0);
 
-        let unknown = decode_equity_chunk(chunk.start_ms, chunk.step_ms, "f64x9+lzma", &chunk.payload);
+        let unknown =
+            decode_equity_chunk(chunk.start_ms, chunk.step_ms, "f64x9+lzma", &chunk.payload);
         assert!(unknown.is_err(), "unknown codec must not be guessed");
 
         let truncated = deflate_bytes(&[0u8; 20]);
@@ -15755,11 +16221,7 @@ def on_bar(ctx):
             "INSERT INTO systematic_data_snapshots(
                id,inst_id,interval,start_at,end_at,bar_count,data_hash,bars_json,source,created_at
              ) VALUES('snap-window','BTC-USDT-SWAP','1m',?1,?2,?3,'hash','','test',0)",
-            params![
-                base,
-                base + total as i64 * ONE_MINUTE_MS,
-                total as i64
-            ],
+            params![base, base + total as i64 * ONE_MINUTE_MS, total as i64],
         )
         .expect("insert snapshot");
 
@@ -15893,7 +16355,10 @@ def on_bar(ctx):
         .expect("insert live series");
 
         let archived = archive_backtest_series(&conn).expect("archive");
-        assert_eq!(archived, 4, "only the oldest runs beyond the window archive");
+        assert_eq!(
+            archived, 4,
+            "only the oldest runs beyond the window archive"
+        );
 
         let remaining: Vec<String> = conn
             .prepare("SELECT DISTINCT run_id FROM systematic_backtest_series ORDER BY run_id")
@@ -16061,7 +16526,9 @@ def on_bar(ctx):
                 unrealized_pnl_usdt: 0.0,
             })
             .collect::<Vec<_>>();
-        let json_bytes = serde_json::to_string(&points).expect("curve serializes").len();
+        let json_bytes = serde_json::to_string(&points)
+            .expect("curve serializes")
+            .len();
         let stored_bytes = encode_equity_series(&points)
             .iter()
             .map(|chunk| chunk.payload.len())

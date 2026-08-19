@@ -8348,6 +8348,8 @@ pub struct TradeOpportunityCreateRequest {
     inst_id: String,
     td_mode: String,
     intent: String,
+    exit_kind: Option<String>,
+    close_fraction: Option<String>,
     direction: String,
     #[serde(default)]
     size: String,
@@ -8440,6 +8442,8 @@ pub struct TradeOpportunitySummary {
     pub inst_id: String,
     td_mode: String,
     intent: String,
+    exit_kind: Option<String>,
+    close_fraction: Option<String>,
     direction: String,
     ticket_mode: String,
     action: String,
@@ -9680,6 +9684,8 @@ pub async fn trade_opportunity_revise(
         const ALLOWED_REVISION_FIELDS: &[&str] = &[
             "tdMode",
             "orderType",
+            "exitKind",
+            "closeFraction",
             "price",
             "size",
             "lever",
@@ -9945,6 +9951,8 @@ async fn build_trade_opportunity(
         inst_id: request.inst_id,
         td_mode: request.td_mode,
         intent: request.intent,
+        exit_kind: optional_string(request.exit_kind),
+        close_fraction: optional_string(request.close_fraction),
         direction: request.direction,
         ticket_mode,
         action,
@@ -10405,6 +10413,35 @@ fn validate_trade_opportunity_request(
     ) {
         reasons.push("intent 必须是 open、close、cancel 或 amend".to_string());
     }
+    let exit_kind = optional_string(request.exit_kind.clone());
+    if let Some(kind) = exit_kind.as_deref() {
+        if !matches!(
+            kind,
+            "take_profit" | "stop_loss" | "strategy_exit" | "emergency"
+        ) {
+            reasons.push(
+                "exitKind 必须是 take_profit、stop_loss、strategy_exit 或 emergency".to_string(),
+            );
+        }
+    }
+    if request.intent == "close" && exit_kind.is_none() {
+        reasons
+            .push("平仓机会必须提供 exitKind，用于区分止盈、止损、策略退出和紧急退出".to_string());
+    }
+    if request.intent != "close" && exit_kind.is_some() {
+        reasons.push("exitKind 只能用于 intent=close".to_string());
+    }
+    if let Some(close_fraction) = optional_string(request.close_fraction.clone()) {
+        let valid_fraction = close_fraction
+            .parse::<f64>()
+            .ok()
+            .is_some_and(|value| value.is_finite() && value > 0.0 && value <= 1.0);
+        if request.intent != "close" {
+            reasons.push("closeFraction 只能用于 intent=close".to_string());
+        } else if !valid_fraction {
+            reasons.push("closeFraction 必须是大于 0 且不超过 1 的小数".to_string());
+        }
+    }
     if !is_order_management && !matches!(request.direction.as_str(), "long" | "short") {
         reasons.push("direction 必须是 long 或 short".to_string());
     }
@@ -10462,6 +10499,20 @@ fn validate_trade_opportunity_request(
             .and_then(|order| optional_string(order.trigger_px.clone()))
             .is_some();
         let has_attached_protection = has_take_profit || has_stop_loss;
+        if request.intent == "close" {
+            match (exit_kind.as_deref(), request.order_type.as_str()) {
+                (Some("take_profit"), "trigger") => reasons.push(
+                    "止盈平仓不能使用 trigger；请使用 limit，或目标已达到时使用 market".to_string(),
+                ),
+                (Some("stop_loss"), "limit") => reasons.push(
+                    "止损平仓不能使用 limit；请使用 trigger，或立即退出时使用 market".to_string(),
+                ),
+                (Some("emergency"), "limit" | "trigger") => {
+                    reasons.push("紧急退出必须使用 market".to_string())
+                }
+                _ => {}
+            }
+        }
         if request.intent == "close" && has_attached_protection {
             reasons.push(
                 "平仓机会的限价或触发价就是退出条件，不能同时填写 takeProfit 或 stopLoss；请将保护价作为 price，并清空附加保护字段"
@@ -10493,6 +10544,8 @@ fn trade_opportunity_fingerprint(
         "instId": request.inst_id.trim().to_ascii_uppercase(),
         "tdMode": request.td_mode.trim().to_ascii_lowercase(),
         "intent": request.intent.trim().to_ascii_lowercase(),
+        "exitKind": request.exit_kind.as_deref().map(|value| value.trim().to_ascii_lowercase()).unwrap_or_default(),
+        "closeFraction": request.close_fraction.as_deref().map(normalize_fingerprint_number).unwrap_or_default(),
         "direction": request.direction.trim().to_ascii_lowercase(),
         "size": normalize_fingerprint_number(&request.size),
         "orderType": request.order_type.trim().to_ascii_lowercase(),
@@ -10554,6 +10607,20 @@ fn expire_trade_opportunities(conn: &Connection, now: i64) -> Result<(), String>
     Ok(())
 }
 
+fn same_active_close_exit(
+    intent: &str,
+    existing_exit_kind: Option<&str>,
+    existing_size: &str,
+    requested_exit_kind: Option<&str>,
+    requested_size: &str,
+) -> bool {
+    intent == "close"
+        && existing_exit_kind.is_some()
+        && existing_exit_kind == requested_exit_kind
+        && normalize_fingerprint_number(existing_size)
+            == normalize_fingerprint_number(requested_size)
+}
+
 fn find_similar_trade_opportunity(
     conn: &Connection,
     request: &TradeOpportunityCreateRequest,
@@ -10604,6 +10671,15 @@ fn find_similar_trade_opportunity(
             }
         }
         if candidate.fingerprint == fingerprint {
+            return Ok(Some(candidate));
+        }
+        if same_active_close_exit(
+            request.intent.as_str(),
+            candidate.exit_kind.as_deref(),
+            &candidate.size,
+            request.exit_kind.as_deref(),
+            &request.size,
+        ) {
             return Ok(Some(candidate));
         }
         if candidate.order_type != request.order_type {
@@ -10695,8 +10771,8 @@ fn save_trade_opportunity(conn: &Connection, item: &TradeOpportunitySummary) -> 
           reason, source_session_id, origin_type, strategy_kind, strategy_id, strategy_version_id,
           strategy_run_id, signal_id, factor_pool_version_id, revision, fingerprint, expires_at, agent_profile_id, agent_run_id,
           related_opportunity_id, duplicate_resolution, duplicate_resolution_reason, decision_context_id, execution_key, status, estimated_margin, estimated_fee, available_usdt, precheck_json,
-          market_snapshot_json, execution_result_json, order_id, client_order_id, algo_id, algo_client_order_id, error, created_at, updated_at
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56)",
+          market_snapshot_json, execution_result_json, order_id, client_order_id, algo_id, algo_client_order_id, error, created_at, updated_at, exit_kind, close_fraction
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58)",
         params![
             item.id,
             item.account_id,
@@ -10754,6 +10830,8 @@ fn save_trade_opportunity(conn: &Connection, item: &TradeOpportunitySummary) -> 
             item.error,
             item.created_at,
             item.updated_at,
+            item.exit_kind,
+            item.close_fraction,
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -10910,6 +10988,8 @@ fn trade_opportunity_from_row(
         inst_id: row.get("inst_id")?,
         td_mode: row.get("td_mode")?,
         intent: row.get("intent")?,
+        exit_kind: row.get("exit_kind")?,
+        close_fraction: row.get("close_fraction")?,
         direction: row.get("direction")?,
         ticket_mode: row.get("ticket_mode")?,
         action: row.get("action")?,
@@ -11421,6 +11501,8 @@ mod idempotency_tests {
             inst_id: "BTC-USDT-SWAP".to_string(),
             td_mode: "cross".to_string(),
             intent: "open".to_string(),
+            exit_kind: None,
+            close_fraction: None,
             direction: "long".to_string(),
             size: "0.01".to_string(),
             order_type: "limit".to_string(),
@@ -11467,6 +11549,7 @@ mod idempotency_tests {
     fn trigger_candidates_reject_inline_protective_exit_before_context() {
         let mut close_trigger = decision_context_request();
         close_trigger.intent = "close".to_string();
+        close_trigger.exit_kind = Some("stop_loss".to_string());
         close_trigger.direction = "short".to_string();
         close_trigger.order_type = "trigger".to_string();
         close_trigger.price = Some("64078".to_string());
@@ -11498,6 +11581,61 @@ mod idempotency_tests {
         let open_error = validate_trade_opportunity_request(&open_trigger)
             .expect_err("trigger open with an attached take profit must be rejected");
         assert!(open_error.contains("计划委托暂不支持附加止盈止损"));
+    }
+
+    #[test]
+    fn close_exit_kind_separates_take_profit_from_stop_loss() {
+        let mut take_profit = decision_context_request();
+        take_profit.intent = "close".to_string();
+        take_profit.exit_kind = Some("take_profit".to_string());
+        take_profit.order_type = "limit".to_string();
+        take_profit.price = Some("66000".to_string());
+        take_profit.close_fraction = Some("0.4".to_string());
+        validate_trade_opportunity_request(&take_profit)
+            .expect("limit close with take-profit exit kind is valid");
+
+        let mut stop_loss = take_profit.clone();
+        stop_loss.exit_kind = Some("stop_loss".to_string());
+        stop_loss.order_type = "trigger".to_string();
+        stop_loss.price = Some("64000".to_string());
+        validate_trade_opportunity_request(&stop_loss)
+            .expect("trigger close with stop-loss exit kind is valid");
+        assert_ne!(
+            trade_opportunity_fingerprint(&take_profit).expect("take-profit fingerprint"),
+            trade_opportunity_fingerprint(&stop_loss).expect("stop-loss fingerprint")
+        );
+        assert!(same_active_close_exit(
+            "close",
+            Some("take_profit"),
+            "0.100",
+            Some("take_profit"),
+            "0.1"
+        ));
+        assert!(!same_active_close_exit(
+            "close",
+            Some("take_profit"),
+            "0.100",
+            Some("take_profit"),
+            "0.05"
+        ));
+
+        let mut reached_target = take_profit.clone();
+        reached_target.order_type = "market".to_string();
+        reached_target.price = None;
+        validate_trade_opportunity_request(&reached_target)
+            .expect("market close with take-profit exit kind is valid when target is reached");
+
+        let mut missing_kind = take_profit.clone();
+        missing_kind.exit_kind = None;
+        let missing_error = validate_trade_opportunity_request(&missing_kind)
+            .expect_err("close without exit kind is invalid");
+        assert!(missing_error.contains("必须提供 exitKind"));
+
+        let mut mismatched_kind = take_profit;
+        mismatched_kind.exit_kind = Some("stop_loss".to_string());
+        let mismatch_error = validate_trade_opportunity_request(&mismatched_kind)
+            .expect_err("stop loss cannot use a limit close");
+        assert!(mismatch_error.contains("止损平仓不能使用 limit"));
     }
 
     #[test]
@@ -11796,7 +11934,7 @@ mod idempotency_tests {
         conn.execute_batch(
             "CREATE TABLE trade_opportunities (
                id TEXT PRIMARY KEY,account_id TEXT,environment TEXT NOT NULL,inst_id TEXT NOT NULL,
-               td_mode TEXT NOT NULL,intent TEXT NOT NULL,direction TEXT NOT NULL,ticket_mode TEXT NOT NULL,
+               td_mode TEXT NOT NULL,intent TEXT NOT NULL,exit_kind TEXT,close_fraction TEXT,direction TEXT NOT NULL,ticket_mode TEXT NOT NULL,
                action TEXT NOT NULL,order_type TEXT NOT NULL,price TEXT,size TEXT NOT NULL,lever TEXT,
                entry_condition TEXT,take_profit_json TEXT,stop_loss_json TEXT,invalidation_price TEXT,
                max_slippage_bps REAL,confidence REAL,time_horizon TEXT,strategy_name TEXT,evidence_json TEXT,
@@ -11864,6 +12002,11 @@ mod idempotency_tests {
         assert_eq!(reused.id, "opp-existing");
         assert_eq!(reused.duplicate_resolution.as_deref(), Some("reuse"));
         assert!(reused.conflict.is_none());
+        save_trade_opportunity(&conn, &reused)
+            .expect("persist opportunity with structured exit columns");
+        let persisted =
+            load_trade_opportunity(&conn, "opp-existing").expect("reload persisted opportunity");
+        assert_eq!(persisted.id, reused.id);
         assert_eq!(
             conn.query_row(
                 "SELECT consumed_opportunity_id FROM ai_decision_contexts WHERE id='decision-1'",

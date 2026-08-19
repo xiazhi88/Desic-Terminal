@@ -587,7 +587,7 @@ function validateBackgroundOpportunityCommitInput(input) {
 
 function invalidToolArgumentsResult(name, issues) {
   const opportunityHint = name === "tradeOpportunity.create"
-    ? "evidence 与 riskNotes 必须分别作为顶层字符串数组；expiresAt、maxSlippageBps 等字段必须放在对象顶层。修正完整参数后重新调用 tradeOpportunity.create。"
+    ? "evidence 与 riskNotes 必须分别作为顶层字符串数组；close 必须提供 exitKind，止盈使用 take_profit+limit，止损使用 stop_loss+trigger；expiresAt、maxSlippageBps 等字段必须放在对象顶层。修正完整参数后重新调用 tradeOpportunity.create。"
     : name === "market.readDecisionContext"
       ? "仅在形成字段完整、准备提交的可执行候选时调用；open/close 的 size 必须大于 0，limit/trigger 必须提供 price。若结论是 wait/abandon 且没有新候选，直接调用 background.finishRun，不得用 size=0 或缺失价格占位。"
       : "请按工具字段定义修正参数类型后重新调用。";
@@ -1028,6 +1028,12 @@ const TRADE_OPPORTUNITY_SCHEMA = {
       enum: ["open", "close", "cancel", "amend"],
       description: "open/close for position trading. cancel/amend for managing an existing order."
     },
+    exitKind: {
+      type: "string",
+      enum: ["take_profit", "stop_loss", "strategy_exit", "emergency"],
+      description: "Required for intent=close. Distinguishes profit-taking from invalidation protection."
+    },
+    closeFraction: { type: "string", description: "Optional fraction of the current position represented by this close opportunity; size remains the authoritative contract quantity." },
     direction: { type: "string", enum: ["long", "short"] },
     size: {
       type: "string",
@@ -1037,7 +1043,7 @@ const TRADE_OPPORTUNITY_SCHEMA = {
     orderType: {
       type: "string",
       enum: ["limit", "market", "trigger", "cancel", "amend"],
-      description: "Use limit/market/trigger for open/close. A trigger is its own planned entry or protective exit and cannot carry takeProfit/stopLoss. Use cancel for intent=cancel and amend for intent=amend."
+      description: "Use limit/market/trigger for open/close. For intent=close, pair exitKind=take_profit with limit/market, exitKind=stop_loss with trigger/market, and exitKind=emergency with market. A trigger is its own planned entry or protective exit and cannot carry takeProfit/stopLoss. Use cancel for intent=cancel and amend for intent=amend."
     },
     price: {
       type: "string",
@@ -1094,6 +1100,13 @@ const TRADE_OPPORTUNITY_SCHEMA = {
     decisionContextId: { type: "string", description: "Fresh market.readDecisionContext id for this exact candidate. Required in background automation runs." }
   },
   allOf: [
+    {
+      if: {
+        required: ["intent"],
+        properties: { intent: { const: "close" } }
+      },
+      then: { required: ["exitKind"] }
+    },
     {
       if: {
         required: ["intent"],

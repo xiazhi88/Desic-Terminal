@@ -583,7 +583,7 @@ mod tests {
         for expected in [
             "never silently ignore an unprotected position",
             "intent=close",
-            "takeProfit/stopLoss fields attach only to a new open order",
+            "Existing-position close opportunities must not use takeProfit/stopLoss fields",
             "opening the opposite direction while a position already exists is a hedge",
             "unwind or invalidation condition",
         ] {
@@ -594,7 +594,7 @@ mod tests {
         }
         for expected in [
             "Existing exposure is a live decision",
-            "An unprotected position requires an explicit hold-and-exit plan",
+            "Treat stop-loss protection and take-profit availability as separate statuses",
             "Do not create an accidental hedge",
         ] {
             assert!(
@@ -634,8 +634,8 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0xf9a7_b003_17c7_a4e9_u64),
-            ("trading-philosophy", 0x6d82_4f43_18eb_a276_u64),
+            ("desic-core-operations", 0x2975_3acf_b147_e510_u64),
+            ("trading-philosophy", 0xebdb_a0a9_c0fd_658d_u64),
             ("okx-news-intelligence", 0x790c_faa6_cc57_d766_u64),
             ("okx-smart-money-analysis", 0x18d3_b51e_1a97_ffe3_u64),
         ];

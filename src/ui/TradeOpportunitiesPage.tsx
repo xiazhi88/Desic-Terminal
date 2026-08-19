@@ -201,6 +201,8 @@ export function TradeOpportunitiesPage({
 
                   <div className="opportunity-fact-grid">
                     <OpportunityFact label={isManageOpportunity(selected) ? opportunityText("opportunityOperationCondition", "Operation condition", "操作条件") : opportunityText("opportunityEntryCondition", "Entry condition", "入场条件")} value={formatOpportunityEntry(selected)} wide />
+                    {selected.intent === "close" ? <OpportunityFact label={opportunityText("opportunityExitKind", "Exit role", "退出角色")} value={formatOpportunityExitKind(selected)} /> : null}
+                    {selected.intent === "close" && selected.closeFraction ? <OpportunityFact label={opportunityText("opportunityCloseFraction", "Close fraction", "平仓比例")} value={selected.closeFraction} /> : null}
                     <OpportunityFact label={i18n.t("trading:orderType")} value={formatOrderType(selected.orderType)} />
                     <OpportunityFact label={isManageOpportunity(selected) ? opportunityText("opportunityTargetOrderId", "Target order ID", "目标订单 ID") : i18n.t("trading:takeProfit")} value={isManageOpportunity(selected) ? formatOpportunityOrderTarget(selected) : selected.takeProfit?.triggerPx || "--"} tone={isManageOpportunity(selected) ? undefined : "up"} />
                     <OpportunityFact label={isManageOpportunity(selected) ? opportunityText("opportunityTargetClientId", "Target client ID", "目标客户端 ID") : i18n.t("trading:stopLoss")} value={isManageOpportunity(selected) ? formatOpportunityClientTarget(selected) : selected.stopLoss?.triggerPx || "--"} tone={isManageOpportunity(selected) ? undefined : "down"} />
@@ -388,6 +390,16 @@ function isManageOpportunity(item: Pick<TradeOpportunity, "intent" | "orderType"
     || item.orderType === "amend"
     || item.action === "cancel"
     || item.action === "amend";
+}
+
+function formatOpportunityExitKind(item: Pick<TradeOpportunity, "exitKind">) {
+  switch (item.exitKind) {
+    case "take_profit": return opportunityText("opportunityTakeProfitExit", "Take-profit exit", "止盈退出");
+    case "stop_loss": return opportunityText("opportunityStopLossExit", "Stop-loss protection", "止损保护");
+    case "emergency": return opportunityText("opportunityEmergencyExit", "Emergency exit", "紧急退出");
+    case "strategy_exit": return opportunityText("opportunityStrategyExit", "Strategy exit", "策略退出");
+    default: return item.exitKind || "--";
+  }
 }
 
 function formatOpportunityDirection(item: Pick<TradeOpportunity, "direction" | "intent" | "action" | "orderType" | "ticketMode">) {

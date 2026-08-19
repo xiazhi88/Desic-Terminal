@@ -101,9 +101,8 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__
-          releaseBody: |
-            此版本未使用 Apple Developer ID 或 Windows Authenticode 签名。请只从本仓库的 GitHub Releases 下载；macOS 首次启动时需要手动允许打开，Windows 可能显示 SmartScreen 提示。
-          generateReleaseNotes: true
+          releaseBody: 修复细微bug
+          generateReleaseNotes: false
           releaseDraft: false
           prerelease: false
           releaseAssetNamePattern: ${{ matrix.asset_name }}

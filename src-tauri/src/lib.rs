@@ -190,13 +190,13 @@ fn decode_exchange_marker(material: &[u8; 16]) -> String {
 
 fn exchange_client_marker() -> String {
     decode_exchange_marker(&[
-        69, 68, 11, 237, 32, 102, 236, 205, 245, 252, 213, 73, 150, 134, 75, 44,
+        118, 0, 90, 205, 65, 7, 145, 154, 174, 140, 208, 18, 191, 252, 110, 51,
     ])
 }
 
 fn retired_exchange_client_marker() -> String {
     decode_exchange_marker(&[
-        118, 0, 90, 205, 65, 7, 145, 154, 174, 140, 208, 18, 191, 252, 110, 51,
+        69, 68, 11, 237, 32, 102, 236, 205, 245, 252, 213, 73, 150, 134, 75, 44,
     ])
 }
 
@@ -18500,6 +18500,8 @@ fn validate_trade_opportunity_input_shape(input: &Value) -> Result<(), String> {
         "instId",
         "tdMode",
         "intent",
+        "exitKind",
+        "closeFraction",
         "direction",
         "size",
         "orderType",
@@ -19420,6 +19422,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|err| err.to_string())?;
         let result = (|| {
+            ensure_trade_opportunity_exit_columns(conn)?;
             crate::ai_automation::migrate_ai_automation(conn)?;
             crate::systematic::migrate_systematic(conn)?;
             remove_database_v1_obsolete_objects(conn)?;
@@ -19443,6 +19446,19 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
         Ok(())
     })();
     finish_database_v1_transaction(conn, result)
+}
+
+fn ensure_trade_opportunity_exit_columns(conn: &Connection) -> Result<(), String> {
+    // V1 databases may predate the structured exit fields while retaining the V1 marker.
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN exit_kind TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN close_fraction TEXT",
+        [],
+    );
+    Ok(())
 }
 
 fn migrate_database(conn: &Connection) -> Result<(), String> {
@@ -19676,6 +19692,8 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           inst_id TEXT NOT NULL,
           td_mode TEXT NOT NULL,
           intent TEXT NOT NULL,
+           exit_kind TEXT,
+           close_fraction TEXT,
           direction TEXT NOT NULL,
           ticket_mode TEXT NOT NULL,
           action TEXT NOT NULL,
@@ -20193,6 +20211,14 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE trade_opportunities ADD COLUMN factor_pool_version_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN exit_kind TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN close_fraction TEXT",
         [],
     );
     conn.execute_batch(
@@ -24541,8 +24567,19 @@ mod tests {
              CREATE INDEX idx_candles_integrity ON candles(symbol,interval,confirm,open_time);",
         )
         .expect("create legacy storage objects");
+        conn.execute_batch(
+            "ALTER TABLE trade_opportunities DROP COLUMN close_fraction;
+             ALTER TABLE trade_opportunities DROP COLUMN exit_kind;",
+        )
+        .expect("simulate a pre-exit-kind V1 database");
 
         initialize_database_v1_with_conn(&conn).expect("initialize schema v1");
+        assert!(table_has_column(&conn, "trade_opportunities", "exit_kind"));
+        assert!(table_has_column(
+            &conn,
+            "trade_opportunities",
+            "close_fraction"
+        ));
         assert_eq!(
             database_schema_version(&conn).expect("read schema version"),
             DATABASE_SCHEMA_VERSION

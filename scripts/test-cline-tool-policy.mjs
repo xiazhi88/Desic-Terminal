@@ -9,7 +9,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
-import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, preservesClineConversation } from "./cline-sidecar.mjs";
+import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -344,6 +344,35 @@ expectPolicy(
 
 const providerOpportunity = toProviderToolName("tradeOpportunity.create");
 expectPolicy({ permissionMode: "copilot", agentRole: "main" }, providerOpportunity, enabled);
+expectTrue(
+  "close take-profit opportunity requires and accepts exitKind",
+  validateTradeOpportunityInput({
+    environment: "demo",
+    instId: "BTC-USDT-SWAP",
+    tdMode: "cross",
+    intent: "close",
+    exitKind: "take_profit",
+    direction: "long",
+    size: "1",
+    orderType: "limit",
+    price: "66000",
+    reason: "validated resistance target"
+  }).valid
+);
+expectTrue(
+  "close opportunity without exitKind is rejected by schema",
+  !validateTradeOpportunityInput({
+    environment: "demo",
+    instId: "BTC-USDT-SWAP",
+    tdMode: "cross",
+    intent: "close",
+    direction: "long",
+    size: "1",
+    orderType: "limit",
+    price: "66000",
+    reason: "missing exit role"
+  }).valid
+);
 expectPolicy({ permissionMode: "copilot", agentRole: "main" }, "totally_unknown_tool", disabled);
 
 const unknown = describeToolPolicy("totally_unknown_tool", { permissionMode: "limited_auto", agentRole: "main" });

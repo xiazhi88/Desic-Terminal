@@ -52,7 +52,7 @@ assert.deepEqual(
     errorCode: "invalid_tool_arguments",
     summary: "工具参数无效，未执行",
     errors: malformedValidation.issues,
-    correction: "evidence 与 riskNotes 必须分别作为顶层字符串数组；expiresAt、maxSlippageBps 等字段必须放在对象顶层。修正完整参数后重新调用 tradeOpportunity.create。"
+    correction: "evidence 与 riskNotes 必须分别作为顶层字符串数组；close 必须提供 exitKind，止盈使用 take_profit+limit，止损使用 stop_loss+trigger；expiresAt、maxSlippageBps 等字段必须放在对象顶层。修正完整参数后重新调用 tradeOpportunity.create。"
   }
 );
 

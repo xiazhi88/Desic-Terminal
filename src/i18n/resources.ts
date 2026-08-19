@@ -278,6 +278,7 @@ const enUS: LocaleCatalog = {
     suggestions: "Optimization suggestions", notifications: "Notifications", loadingWorkspace: "Loading AI Automation",
     running: "Running", completed: "Completed", failed: "Failed", pending: "Pending", stopped: "Stopped",
     analysisResult: "Analysis result", mainAgent: "Main Agent", profileModel: "Profile model", noProfiles: "No Profiles yet",
+    opportunityExitKind: "Exit role", opportunityTakeProfitExit: "Take-profit exit", opportunityStopLossExit: "Stop-loss protection", opportunityStrategyExit: "Strategy exit", opportunityEmergencyExit: "Emergency exit", opportunityCloseFraction: "Close fraction",
     loadingSection: "Loading section", review: "Review", preview: "Preview", adopt: "Adopt", reject: "Reject",
     workbenchAllProfiles: "All Profiles", workbenchCommandDesktopOnly: "AI Automation commands are only available in the desktop app.",
     workbenchActionFailed: "{{action}} failed", workbenchEnabled: "AI Automation enabled", workbenchPaused: "AI Automation paused",
@@ -857,7 +858,8 @@ const zhCN: LocaleCatalog = {
   automation: {
     title: "AI 自动化", profiles: "Profiles", runs: "运行记录", wakeConditions: "观察计划", reviews: "复盘", suggestions: "优化建议", notifications: "通知",
     loadingWorkspace: "正在加载 AI 自动化工作台", running: "运行中", completed: "已完成", failed: "失败", pending: "待处理", stopped: "已停止",
-    analysisResult: "分析结果", mainAgent: "主 Agent", profileModel: "Profile 模型", noProfiles: "暂无 Profile", loadingSection: "正在加载", review: "复盘", preview: "预览", adopt: "采用", reject: "拒绝",
+    analysisResult: "分析结果", mainAgent: "主 Agent", profileModel: "Profile 模型", noProfiles: "暂无 Profile",
+    opportunityExitKind: "退出角色", opportunityTakeProfitExit: "止盈退出", opportunityStopLossExit: "止损保护", opportunityStrategyExit: "策略退出", opportunityEmergencyExit: "紧急退出", opportunityCloseFraction: "平仓比例", loadingSection: "正在加载", review: "复盘", preview: "预览", adopt: "采用", reject: "拒绝",
     workbenchAllProfiles: "全部 Profile", workbenchCommandDesktopOnly: "当前环境不能调用 AI 自动化命令。", workbenchActionFailed: "{{action}}失败",
     workbenchEnabled: "AI 自动化已开启", workbenchPaused: "AI 自动化已暂停", workbenchEnabledMessage: "已允许启用的 Profile 接收唤醒事件。",
     workbenchPausedMessage: "新的自动化唤醒将暂停。", workbenchDesktopOnly: "AI 自动化工作台仅在桌面端可用。", workbenchEmptyOverview: "自动化概览为空。",

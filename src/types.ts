@@ -1475,6 +1475,8 @@ export type TradeOpportunityCreateRequest = {
   instId: string;
   tdMode: "cross" | "isolated";
   intent: "open" | "close" | "cancel" | "amend";
+  exitKind?: "take_profit" | "stop_loss" | "strategy_exit" | "emergency" | string | null;
+  closeFraction?: string | null;
   direction: "long" | "short";
   size?: string;
   orderType: "limit" | "market" | "trigger" | "cancel" | "amend";
