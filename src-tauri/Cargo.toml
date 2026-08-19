@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.30"
+version = "0.1.31"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
@@ -47,6 +47,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "nat
 futures-util = "0.3"
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
 tokio-native-tls = "0.3"
+url = "2"
 native-tls = "0.2"
 rusqlite = { version = "0.33", features = ["bundled"] }
 hmac = "0.12"

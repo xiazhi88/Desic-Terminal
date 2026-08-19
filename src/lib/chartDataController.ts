@@ -29,6 +29,39 @@ export type ChartDataPatch =
   | (ChartDataPatchBase & { type: "prepend"; candles: Candle[] })
   | (ChartDataPatchBase & { type: "noChange" });
 
+export type CandleIndexState = {
+  map: Map<number, Candle>;
+  index: Map<number, number>;
+};
+
+export function updateCandleIndexes(current: CandleIndexState, canonicalCandles: readonly Candle[], patch: ChartDataPatch): CandleIndexState {
+  const canPatchCandleIndexes = patch.type === "append"
+    && current.index.size + patch.candles.length === canonicalCandles.length;
+  if (canPatchCandleIndexes) {
+    const firstNewIndex = canonicalCandles.length - patch.candles.length;
+    for (let index = firstNewIndex; index < canonicalCandles.length; index += 1) {
+      const candle = canonicalCandles[index];
+      current.map.set(candle.time, candle);
+      current.index.set(candle.time, index);
+    }
+    return current;
+  }
+
+  if (patch.type === "updateLatest" && current.index.size === canonicalCandles.length) {
+    const latestIndex = canonicalCandles.length - 1;
+    const candle = canonicalCandles[latestIndex];
+    current.map.set(candle.time, candle);
+    current.index.set(candle.time, latestIndex);
+    return current;
+  }
+
+  if (patch.type === "noChange" && current.index.size === canonicalCandles.length) return current;
+  return {
+    map: new Map(canonicalCandles.map((candle) => [candle.time, candle])),
+    index: new Map(canonicalCandles.map((candle, index) => [candle.time, index]))
+  };
+}
+
 type ChartSeriesState = {
   candles: Candle[];
   exhausted: boolean;
@@ -171,6 +204,21 @@ function toSeriesId({ symbol, timeframe }: ChartSeriesKey): string {
 }
 
 function normalizeCandles(candles: readonly Candle[]): Candle[] {
+  if (candles.length === 0) return [];
+
+  // REST pages and the normal realtime path are already canonical. Avoid
+  // allocating a Map and sorting the full series unless input is irregular.
+  let previousTime = Number.NEGATIVE_INFINITY;
+  let canonical = true;
+  for (const candle of candles) {
+    if (!isValidCandle(candle) || candle.time <= previousTime) {
+      canonical = false;
+      break;
+    }
+    previousTime = candle.time;
+  }
+  if (canonical) return [...candles];
+
   const byTime = new Map<number, Candle>();
   for (const candle of candles) {
     if (!isValidCandle(candle)) continue;

@@ -39,6 +39,7 @@ import {
 } from "../lib/okx";
 import { logger } from "../lib/logger";
 import { listenOptional } from "../lib/tauri";
+import { subscribeMarketEvents } from "../lib/marketEventBus";
 import { i18n } from "../i18n/runtime";
 import { createChartIndicatorTemplate, loadChartIndicatorTemplates, saveChartIndicatorTemplates, type ChartIndicatorTemplate } from "../lib/chartIndicatorTemplates";
 import { DEFAULT_CHART_LAYER_VISIBILITY, KlineChart, type ChartContextTradeIntent, type ChartHistoryLoadOutcome } from "./KlineChart";
@@ -65,15 +66,6 @@ const EMPTY_FILLS: HistoricalFillSummary[] = [];
 const EMPTY_ORDERS: OkxAlgoOrder[] = [];
 const EMPTY_POSITIONS: OkxPosition[] = [];
 const EMPTY_PENDING_ORDERS: OkxPendingOrder[] = [];
-
-type TauriMarketEvent =
-  | { type: "ticker"; ticker: Ticker }
-  | { type: "orderBook"; instId?: string; book: OrderBook }
-  | { type: "trade"; instId?: string; trade: Trade }
-  | { type: "candle"; instId?: string; bar?: string; candle: Candle }
-  | { type: "fundingRate"; funding: FundingRate }
-  | { type: "privateSnapshot"; snapshot: PrivateAccountSnapshot }
-  | { type: "privateOrder"; accountId: string; environment: string; order: OkxPendingOrder };
 
 export type DetachedChartPaneProps = {
   paneId: string;
@@ -387,7 +379,7 @@ export function DetachedChartPane({
   useEffect(() => {
     let mounted = true;
     let unlisten: (() => void) | null = null;
-    void listenOptional<TauriMarketEvent>("market:event", (event) => {
+    unlisten = subscribeMarketEvents((event) => {
       if (!mounted) return;
       if (event.type === "ticker" && event.ticker.instId === symbol) setTicker(event.ticker);
       if (event.type === "orderBook" && event.instId === symbol) setOrderBook(event.book);
@@ -413,7 +405,7 @@ export function DetachedChartPane({
           return { ...current, orders: isActivePendingOrder(event.order) ? [event.order, ...orders] : orders, syncedAt: Date.now() };
         });
       }
-    }).then((cleanup) => { unlisten = cleanup; });
+    });
     return () => {
       mounted = false;
       unlisten?.();

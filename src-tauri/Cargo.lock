@@ -725,7 +725,7 @@ dependencies = [
 
 [[package]]
 name = "desic-terminal"
-version = "0.1.30"
+version = "0.1.31"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -760,6 +760,7 @@ dependencies = [
  "tokio-native-tls",
  "tokio-tungstenite",
  "toml 0.8.2",
+ "url",
  "windows-sys 0.61.2",
  "zip 2.4.2",
 ]

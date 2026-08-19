@@ -4921,6 +4921,33 @@ button {
   cursor: crosshair;
 }
 
+.chart-order-drag-preview-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  z-index: 5;
+  height: 0;
+  border-top: 1px dashed rgba(183, 146, 255, 0.9);
+  pointer-events: none;
+  filter: drop-shadow(0 0 5px rgba(183, 146, 255, 0.4));
+}
+
+.chart-order-drag-preview-line span {
+  position: absolute;
+  right: 14px;
+  top: 4px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: rgba(24, 16, 45, 0.92);
+  color: #efe8ff;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  font-weight: 800;
+}
+
+.chart-order-drag-preview-line.positive { border-color: #66dca9; }
+.chart-order-drag-preview-line.negative { border-color: #f27c8a; }
+
 .chart-order-drag-readout {
   position: absolute;
   right: 14px;

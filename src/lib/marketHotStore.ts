@@ -204,6 +204,32 @@ export function replaceMarketCandles(candles: Candle[]) {
 }
 
 export function mergeMarketCandles(current: Candle[], incoming: Candle[]) {
+  if (incoming.length === 0) return current;
+
+  // The live stream normally delivers one candle at the end of an already
+  // ordered series. Keep that path allocation-light; irregular history
+  // repairs continue through the canonical merge below.
+  const last = current[current.length - 1];
+  if (last && incoming.length === 1) {
+    const candle = incoming[0];
+    if (candle.time > last.time) {
+      const next = [...current, candle];
+      return next.length > MAX_RENDERED_CANDLES ? next.slice(-MAX_RENDERED_CANDLES) : next;
+    }
+    if (candle.time === last.time) {
+      if (last.confirm && !candle.confirm) return current;
+      return [...current.slice(0, -1), candle];
+    }
+  }
+
+  // A batch that is strictly newer than the current tail is also safe to
+  // append directly. Duplicate, older, or interior candles use the full
+  // merge so confirmation precedence and ordering remain unchanged.
+  if (last && incoming[0].time > last.time && isStrictlyIncreasingCandleTimes(incoming)) {
+    const next = [...current, ...incoming];
+    return next.length > MAX_RENDERED_CANDLES ? next.slice(-MAX_RENDERED_CANDLES) : next;
+  }
+
   const merged = new Map(current.map((item) => [item.time, item]));
   for (const candle of incoming) {
     const existing = merged.get(candle.time);
@@ -213,6 +239,13 @@ export function mergeMarketCandles(current: Candle[], incoming: Candle[]) {
   return [...merged.values()]
     .sort((left, right) => left.time - right.time)
     .slice(-MAX_RENDERED_CANDLES);
+}
+
+function isStrictlyIncreasingCandleTimes(candles: readonly Candle[]) {
+  for (let index = 1; index < candles.length; index += 1) {
+    if (candles[index].time <= candles[index - 1].time) return false;
+  }
+  return true;
 }
 
 export function applyLivePriceToLatestCandle(candles: Candle[], rawPrice: string | number | null | undefined): Candle[] {

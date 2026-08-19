@@ -83,6 +83,8 @@ import type {
 } from "../types";
 import { logger } from "./logger";
 import { createDeferredCleanupSlot } from "./deferredCleanup";
+import { subscribeMarketEvents } from "./marketEventBus";
+import type { MarketEvent } from "./marketEvents";
 import { invokeDesktop, invokeOptional, isTauriRuntime, listenOptional } from "./tauri";
 
 const REST_BASE = "https://openapi.okx.com";
@@ -866,20 +868,7 @@ export type MarketCallbacks = {
   onPrivateStatus?: (status: PrivateWsStatus) => void;
 };
 
-type TauriMarketEvent =
-  | { type: "status"; status: string }
-  | ({ type: "publicStatus" } & PublicWsStatus)
-  | { type: "ticker"; ticker: Ticker }
-  | { type: "orderBook"; instId?: string; book: OrderBook }
-  | { type: "trade"; instId?: string; trade: Trade }
-  | { type: "trades"; instId?: string; trades: Trade[] }
-  | { type: "renderBatch"; orderBooks: Record<string, OrderBook>; trades: Record<string, Trade[]> }
-  | { type: "candle"; instId?: string; bar?: string; candle: Candle }
-  | { type: "fundingRate"; funding: FundingRate }
-  | { type: "privateSnapshot"; snapshot: PrivateAccountSnapshot }
-  | { type: "privateOrder"; accountId: string; environment: string; order: OkxPendingOrder }
-  | ({ type: "privateStatus" } & PrivateWsStatus)
-  | { type: "error"; message: string };
+export type TauriMarketEvent = MarketEvent;
 
 type MarketStreamErrorState = {
   firstAt: number;
@@ -918,7 +907,7 @@ export function connectMarketStream(
       browserFallback = connectOkxPublic(instId, bar, callbacks, watchlist);
     };
 
-    void listenOptional<TauriMarketEvent>("market:event", (event) => {
+    const marketEventCleanup = subscribeMarketEvents((event) => {
       if (closed) return;
       if (event.type === "status") callbacks.onStatus?.(event.status);
       if (event.type === "publicStatus") {
@@ -971,7 +960,8 @@ export function connectMarketStream(
         }
         callbacks.onStatus?.(event.message);
       }
-    }).then((cleanup) => listenerCleanup.settle(cleanup));
+    });
+    listenerCleanup.settle(marketEventCleanup);
 
     void invokeDesktop<void>("start_market_stream", { instId, bar, watchlist, sessionId })
       .catch(() => startBrowserFallback());

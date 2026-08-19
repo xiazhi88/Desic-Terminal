@@ -2290,7 +2290,7 @@ fn merge_balance_position_update(
     });
 }
 
-fn update_private_snapshot(
+pub(crate) fn update_private_snapshot(
     app: &tauri::AppHandle,
     runtime: &MarketRuntime,
     mut snapshot: PrivateAccountSnapshot,
@@ -2523,6 +2523,85 @@ pub(crate) fn remove_pending_order_from_snapshot(
                         order.cl_ord_id.trim() == cl_ord_id
                     });
             !same_id
+        });
+    });
+}
+
+/// Applies a locally accepted pending order before the private WS update arrives.
+/// A rejected/terminal order or a locally cancelled identity is never projected.
+pub(crate) fn upsert_pending_order_in_snapshot(
+    app: &tauri::AppHandle,
+    runtime: &MarketRuntime,
+    account: &LocalAccount,
+    order: OkxPendingOrder,
+) {
+    let order = normalize_pending_order_identity(order);
+    if !pending_order_has_identity(&order)
+        || is_terminal_pending_order_state(&order.state)
+        || pending_order_is_cancelled(runtime, account, &order)
+    {
+        return;
+    }
+    mutate_private_snapshot(app, runtime, account, |snapshot| {
+        if let Some(existing) = snapshot
+            .orders
+            .iter_mut()
+            .find(|existing| pending_orders_match_identity(existing, &order))
+        {
+            *existing = order;
+        } else {
+            snapshot.orders.push(order);
+        }
+    });
+}
+
+/// Reconciles algorithm orders from a successful pending-order read into the
+/// private snapshot without replacing balances, positions, or ordinary orders.
+/// A very recent local submission is kept briefly because OKX can expose it on
+/// the pending endpoint a moment after accepting the order.
+pub(crate) fn reconcile_active_algo_orders_in_snapshot(
+    app: &tauri::AppHandle,
+    runtime: &MarketRuntime,
+    account: &LocalAccount,
+    active_orders: &[OkxPendingOrder],
+    inst_id: Option<&str>,
+) {
+    let active_orders = active_orders
+        .iter()
+        .filter(|order| !pending_order_is_cancelled(runtime, account, order))
+        .cloned()
+        .collect::<Vec<_>>();
+    let recent_cutoff = now_ms().saturating_sub(15_000);
+    mutate_private_snapshot(app, runtime, account, |snapshot| {
+        for order in &active_orders {
+            if inst_id.is_some_and(|value| value != order.inst_id) {
+                continue;
+            }
+            if let Some(existing) = snapshot
+                .orders
+                .iter_mut()
+                .find(|existing| pending_orders_match_identity(existing, order))
+            {
+                *existing = order.clone();
+            } else {
+                snapshot.orders.push(order.clone());
+            }
+        }
+        snapshot.orders.retain(|existing| {
+            if !existing.is_algo || inst_id.is_some_and(|value| value != existing.inst_id) {
+                return true;
+            }
+            if active_orders
+                .iter()
+                .any(|order| pending_orders_match_identity(existing, order))
+            {
+                return true;
+            }
+            let newest_order_time = [existing.c_time.as_str(), existing.u_time.as_str()]
+                .into_iter()
+                .filter_map(|value| value.parse::<i64>().ok())
+                .max();
+            newest_order_time.is_none_or(|value| value >= recent_cutoff)
         });
     });
 }

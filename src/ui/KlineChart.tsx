@@ -28,7 +28,7 @@ import { listChartAlerts, loadChartWorkspace, saveChartWorkspace } from "../lib/
 import { listenOptional } from "../lib/tauri";
 import { createDeferredCleanupSlot } from "../lib/deferredCleanup";
 import { buildChartAlertIndicatorOptions } from "../lib/chartAlertIndicators";
-import { ChartDataController, type ChartDataPatch } from "../lib/chartDataController";
+import { ChartDataController, updateCandleIndexes, type ChartDataPatch } from "../lib/chartDataController";
 import {
   INDICATOR_DEFINITIONS,
   calculateIndicator,
@@ -513,6 +513,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const onChartCrosshairTimeRef = useRef<Props["onChartCrosshairTime"]>(onChartCrosshairTime);
   const onChartCrosshairPositionRef = useRef<Props["onChartCrosshairPosition"]>(onChartCrosshairPosition);
   const onChartVisibleRangeRef = useRef<Props["onChartVisibleRange"]>(onChartVisibleRange);
+  const chartInteractionFrameRef = useRef<number | null>(null);
+  const pendingCrosshairPositionRef = useRef<ChartCrosshairPosition | null | undefined>(undefined);
+  const pendingVisibleRangeRef = useRef<ChartVisibleLogicalRange | null | undefined>(undefined);
   const onOrderLineEditRef = useRef<Props["onOrderLineEdit"]>(onOrderLineEdit);
   const onOrderLineCancelRef = useRef<Props["onOrderLineCancel"]>(onOrderLineCancel);
   const onPositionLineTradeIntentRef = useRef<Props["onPositionLineTradeIntent"]>(onPositionLineTradeIntent);
@@ -1239,36 +1242,45 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     const activeContainer = containerRef.current;
     const chart = createTradingChart(containerRef.current, []);
 
-    const unsubscribeCrosshair = chart.onCrosshairMove((position) => {
-      onChartCrosshairTimeRef.current?.(position?.time ?? null);
-      onChartCrosshairPositionRef.current?.(position);
-      if (!position) {
-        setHoverStats(null);
-        return;
-      }
-      const candle = candleMapRef.current.get(position.time);
-      if (!candle) return;
-      setHoverStats({
-        time: candle.time,
-        open: candle.open,
-        high: candle.high,
-        low: candle.low,
-        close: candle.close,
-        volume: candle.volume,
-        indicatorValues: [
-          ...(managedIndicatorHoverValuesRef.current.get(candle.time) ?? []),
-          ...(scriptIndicatorHoverValuesRef.current.get(candle.time) ?? [])
-        ]
-      });
-    });
+    const flushPendingChartInteraction = () => {
+      chartInteractionFrameRef.current = null;
 
-    const unsubscribeRange = chart.onVisibleRangeChange((range) => {
-      let effectiveRange = range;
-      if (reviewVariantRef.current && range) {
+      const pendingCrosshair = pendingCrosshairPositionRef.current;
+      pendingCrosshairPositionRef.current = undefined;
+      if (pendingCrosshair !== undefined) {
+        onChartCrosshairTimeRef.current?.(pendingCrosshair?.time ?? null);
+        onChartCrosshairPositionRef.current?.(pendingCrosshair);
+        if (!pendingCrosshair) {
+          setHoverStats(null);
+        } else {
+          const candle = candleMapRef.current.get(pendingCrosshair.time);
+          if (candle) {
+            setHoverStats({
+              time: candle.time,
+              open: candle.open,
+              high: candle.high,
+              low: candle.low,
+              close: candle.close,
+              volume: candle.volume,
+              indicatorValues: [
+                ...(managedIndicatorHoverValuesRef.current.get(candle.time) ?? []),
+                ...(scriptIndicatorHoverValuesRef.current.get(candle.time) ?? [])
+              ]
+            });
+          }
+        }
+      }
+
+      const pendingRange = pendingVisibleRangeRef.current;
+      pendingVisibleRangeRef.current = undefined;
+      if (pendingRange === undefined) return;
+
+      let effectiveRange = pendingRange;
+      if (reviewVariantRef.current && pendingRange) {
         const target = replayViewportTargetRef.current;
         const now = performance.now();
         const currentCandles = candlesRef.current;
-        const invalid = range.from < -0.5 || range.to > currentCandles.length - 0.5;
+        const invalid = pendingRange.from < -0.5 || pendingRange.to > currentCandles.length - 0.5;
         if (target && now < target.expiresAt && target.firstTime === currentCandles[0]?.time && invalid) {
           effectiveRange = target.range;
           if (target.spacing !== null) chart.setBarSpacing(target.spacing);
@@ -1281,6 +1293,20 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       setVisibleLogicalRange(effectiveRange);
       requestMoreHistoryIfNeeded(effectiveRange);
       onChartVisibleRangeRef.current?.(effectiveRange);
+    };
+    const scheduleChartInteractionFlush = () => {
+      if (chartInteractionFrameRef.current !== null) return;
+      chartInteractionFrameRef.current = window.requestAnimationFrame(flushPendingChartInteraction);
+    };
+
+    const unsubscribeCrosshair = chart.onCrosshairMove((position) => {
+      pendingCrosshairPositionRef.current = position;
+      scheduleChartInteractionFlush();
+    });
+
+    const unsubscribeRange = chart.onVisibleRangeChange((range) => {
+      pendingVisibleRangeRef.current = range;
+      scheduleChartInteractionFlush();
     });
     const resizeObserver = new ResizeObserver(() => setCoordinateVersion((version) => version + 1));
     resizeObserver.observe(activeContainer);
@@ -1290,6 +1316,12 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     return () => {
       unsubscribeCrosshair();
       unsubscribeRange();
+      if (chartInteractionFrameRef.current !== null) {
+        window.cancelAnimationFrame(chartInteractionFrameRef.current);
+        chartInteractionFrameRef.current = null;
+      }
+      pendingCrosshairPositionRef.current = undefined;
+      pendingVisibleRangeRef.current = undefined;
       resizeObserver.disconnect();
       chart.destroy();
       chartRef.current = null;
@@ -1475,8 +1507,13 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       && (reviewSnapshotChanged || canonicalCandles[0]?.time !== renderedFirstTimeRef.current);
     let replayTargetRange: ChartVisibleLogicalRange | null = null;
     const prependedCount = patch.type === "prepend" ? patch.candles.length : 0;
-    candleMapRef.current = new Map(canonicalCandles.map((candle) => [candle.time, candle]));
-    candleIndexRef.current = new Map(canonicalCandles.map((candle, index) => [candle.time, index]));
+    const indexed = updateCandleIndexes(
+      { map: candleMapRef.current, index: candleIndexRef.current },
+      canonicalCandles,
+      patch
+    );
+    candleMapRef.current = indexed.map;
+    candleIndexRef.current = indexed.index;
     if (canonicalCandles.length === 0) {
       chart.replaceSnapshot([], []);
       for (const key of indicatorSeriesKeysRef.current) chart.removeIndicator(key);
@@ -3492,7 +3529,15 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         </div>
       )}
       {draggingOrderLine && (
-        <div className="chart-order-drag-readout" style={{ top: Math.max(84, draggingOrderLine.y - 16) }}>
+        <>
+          <div
+            className={clsx("chart-order-drag-preview-line", draggingOrderLine.line.tone)}
+            style={{ top: draggingOrderLine.y }}
+            aria-hidden="true"
+          >
+            <span>{formatChartNumber(draggingOrderLine.price)}</span>
+          </div>
+          <div className="chart-order-drag-readout" style={{ top: Math.max(84, draggingOrderLine.y - 16) }}>
           <strong>{orderLineDragTitle(draggingOrderLine.line)}</strong>
           <span>{t("chart:newPrice", { price: formatChartNumber(draggingOrderLine.price) })}</span>
           {orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price) && (
@@ -3500,7 +3545,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
               {formatOrderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)}
             </em>
           )}
-        </div>
+          </div>
+        </>
       )}
       {draggingPositionLine && (
         <>

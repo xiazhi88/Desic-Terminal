@@ -101,7 +101,24 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__
-          releaseBody: 修复细微bug
+          releaseBody: |
+            ## Desic Terminal v0.1.31
+
+            ### 交易与行情
+            - 支持拖动 K 线价格线快速设置下单价格，并在拖动挂单时显示预览线。
+            - 交易弹窗显示止盈、止损、当前价平仓和限价平仓的预估盈亏。
+            - 优化 K 线实时事件合并，避免历史补数影响实时行情、盘口和下单体验。
+
+            ### 账户状态与历史数据
+            - 以私有 WebSocket 和本地已接受交易事件作为当前账户状态优先来源，REST 仅用于修复和兜底。
+            - 修复当前持仓、当前委托与历史列表状态不一致的问题。
+            - 完整/不完整的策略委托读取分别处理，避免部分接口失败时误删真实委托。
+            - 从 OKX 账户账单补齐缺失的开平仓成交，并重建历史持仓 episode，修复历史持仓长期显示为“持仓中”的问题。
+            - 增强启动和定时历史同步，避免旧同步水位或悬挂请求阻塞后续更新。
+
+            ### AI 与更新
+            - AI 账户读取优先使用新鲜、完整、账号绑定的内存快照，必要时再回退 REST。
+            - 增强 updater 的代理兼容性，改善 GitHub 更新源访问失败时的更新体验。
           generateReleaseNotes: false
           releaseDraft: false
           prerelease: false

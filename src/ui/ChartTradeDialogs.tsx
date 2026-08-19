@@ -19,6 +19,26 @@ function Confirm({ title, message, onCancel, onConfirm, confirmText }: { title: 
   return <Shell title={title} compact onClose={onCancel}><p>{message}</p><div className="modal-actions"><button type="button" ref={ref} onClick={onCancel}>{t("cancel")}</button><button type="button" className="danger-action" onClick={onConfirm}>{confirmText}</button></div></Shell>;
 }
 
+function estimateChartPositionPnl(position: OkxPosition, targetPrice: number, size: string, instrument?: OkxInstrumentSummary) {
+  const entry = Number(position.avgPx);
+  const target = Number(targetPrice);
+  const quantity = Number(size);
+  const contractValue = Number(instrument?.ctVal);
+  if (![entry, target, quantity, contractValue].every(Number.isFinite) || entry <= 0 || target <= 0 || quantity <= 0 || contractValue <= 0) return undefined;
+  const isShort = String(position.posSide).toLowerCase() === "short"
+    || (String(position.posSide).toLowerCase() === "net" && Number(position.pos) < 0);
+  return (target - entry) * quantity * contractValue * (isShort ? -1 : 1);
+}
+
+function estimateChartPositionPnlRatio(position: OkxPosition, targetPrice: number) {
+  const entry = Number(position.avgPx);
+  const target = Number(targetPrice);
+  if (!Number.isFinite(entry) || !Number.isFinite(target) || entry <= 0 || target <= 0) return undefined;
+  const isShort = String(position.posSide).toLowerCase() === "short"
+    || (String(position.posSide).toLowerCase() === "net" && Number(position.pos) < 0);
+  return ((target - entry) / entry) * 100 * (isShort ? -1 : 1);
+}
+
 export function SharedChartOrderLineEditDialog({ edit, environment, position, instrument, onClose, onSubmit }: { edit: ChartOrderLineEdit; environment: "demo" | "live"; position?: OkxPosition; instrument?: OkxInstrumentSummary; onClose: () => void; onSubmit: (edit: ChartOrderLineEdit, confirmedLive: boolean) => void | Promise<void> }) {
   const { t } = useTranslation(["trading", "common"]);
   const trigger = edit.line.editKind === "algo-trigger";
@@ -51,7 +71,15 @@ export function SharedPositionLineTradeDialog({ account, intent, position, instr
   const executionIntent: PositionLineTradeIntent = supportsClose ? { ...intent, kind: closeMode === "market" ? "market_close" : "limit_close" } : intent;
   const submitSize = normalizeChartSize(size, instrument, { max, enforceMin: false });
   const orderPx = executionIntent.kind === "market_close" ? "-1" : executionIntent.kind === "limit_close" ? normalizeChartPrice(intent.targetPrice, instrument) : orderMode === "market" ? "-1" : normalizeChartPrice(orderPrice, instrument);
+  const previewPrice = executionIntent.kind === "market_close"
+    ? intent.currentPrice
+    : executionIntent.kind === "limit_close"
+      ? intent.targetPrice
+      : orderMode === "market" ? intent.currentPrice : Number(orderPrice);
+  const estimatedPnl = position ? estimateChartPositionPnl(position, previewPrice, submitSize, instrument) : undefined;
+  const estimatedRatio = position ? estimateChartPositionPnlRatio(position, previewPrice) : undefined;
+  const hasEstimate = Number.isFinite(estimatedPnl);
   const title = executionIntent.kind === "market_close" ? t("trading:marketClosePosition") : executionIntent.kind === "limit_close" ? t("trading:limitCloseAtCurrentPrice") : t("trading:setProtectionPrice");
   const submit = (confirmedLive: boolean) => { void Promise.resolve(onSubmit(executionIntent, submitSize, orderPx, confirmedLive)).catch(() => undefined); };
-  return <><Shell title={title} description={`${intent.instId} · ${intent.posSide}`} className="trade-action-modal position-line-trade-modal" onClose={onClose}><div className="position-line-summary"><span>{t("trading:averageEntryPrice")} <b>{fmtPrice(intent.entryPrice)}</b></span><span>{t("trading:currentPrice")} <b>{fmtPrice(intent.currentPrice)}</b></span><span>{t("trading:targetPrice")} <b>{fmtPrice(intent.targetPrice)}</b></span></div><div className="ticket-form modal-trade-form"><label>{t("trading:quantityContracts")}</label><input value={size} onChange={(event) => setSize(event.target.value)} onBlur={() => setSize(submitSize)} />{supportsClose && <><label>{t("trading:positionCloseMode")}</label><div className="segmented-row"><button type="button" className={closeMode === "limit" ? "active" : ""} onClick={() => setCloseMode("limit")}>{t("trading:limitAtCurrentPrice")}</button><button type="button" className={closeMode === "market" ? "active" : ""} onClick={() => setCloseMode("market")}>{t("trading:market")}</button></div></>}{!supportsClose && <><label>{t("trading:strategyOrderPrice")}</label><div className="segmented-row"><button type="button" className={orderMode === "market" ? "active" : ""} onClick={() => setOrderMode("market")}>{t("trading:market")}</button><button type="button" className={orderMode === "limit" ? "active" : ""} onClick={() => setOrderMode("limit")}>{t("trading:limit")}</button></div>{orderMode === "limit" && <input value={orderPrice} onChange={(event) => setOrderPrice(event.target.value)} />}</>}<button type="button" className={clsx("modal-submit", environment === "live" && "danger")} disabled={!account || !submitSize || Number(submitSize) <= 0} onClick={() => environment === "live" ? setConfirming(true) : submit(false)}>{environment === "live" ? t("trading:confirmLiveOperation") : title}</button></div></Shell>{confirming && <Confirm title={t("trading:confirmLiveActionTitle", { action: title })} message={`${intent.instId} · ${submitSize}`} confirmText={t("trading:confirmSubmit")} onCancel={() => setConfirming(false)} onConfirm={() => { setConfirming(false); submit(true); }} />}</>;
+  return <><Shell title={title} description={`${intent.instId} · ${intent.posSide}`} className="trade-action-modal position-line-trade-modal" onClose={onClose}><div className="position-line-summary"><span>{t("trading:averageEntryPrice")} <b>{fmtPrice(intent.entryPrice)}</b></span><span>{t("trading:currentPrice")} <b>{fmtPrice(intent.currentPrice)}</b></span><span>{t("trading:targetPrice")} <b>{fmtPrice(previewPrice)}</b></span><span>{t("trading:estimatedPnl")} <b className={clsx(hasEstimate ? Number(estimatedPnl) >= 0 ? "estimate-positive" : "estimate-negative" : "cell-tone muted")}>{hasEstimate ? `${Number(estimatedPnl) >= 0 ? "+" : ""}${Number(estimatedPnl).toLocaleString("en-US", { maximumFractionDigits: 2 })} USDT` : "--"}</b></span><span>{t("trading:returnRate")} <b className={clsx(Number(estimatedRatio) >= 0 ? "estimate-positive" : "estimate-negative")}>{Number.isFinite(estimatedRatio) ? `${Number(estimatedRatio) >= 0 ? "+" : ""}${Number(estimatedRatio).toFixed(2)}%` : "--"}</b></span></div><div className="ticket-form modal-trade-form"><label>{t("trading:quantityContracts")}</label><input value={size} onChange={(event) => setSize(event.target.value)} onBlur={() => setSize(submitSize)} />{supportsClose && <><label>{t("trading:positionCloseMode")}</label><div className="segmented-row"><button type="button" className={closeMode === "limit" ? "active" : ""} onClick={() => setCloseMode("limit")}>{t("trading:limitAtCurrentPrice")}</button><button type="button" className={closeMode === "market" ? "active" : ""} onClick={() => setCloseMode("market")}>{t("trading:market")}</button></div></>}{!supportsClose && <><label>{t("trading:strategyOrderPrice")}</label><div className="segmented-row"><button type="button" className={orderMode === "market" ? "active" : ""} onClick={() => setOrderMode("market")}>{t("trading:market")}</button><button type="button" className={orderMode === "limit" ? "active" : ""} onClick={() => setOrderMode("limit")}>{t("trading:limit")}</button></div>{orderMode === "limit" && <input value={orderPrice} onChange={(event) => setOrderPrice(event.target.value)} />}</>}<button type="button" className={clsx("modal-submit", environment === "live" && "danger")} disabled={!account || !submitSize || Number(submitSize) <= 0} onClick={() => environment === "live" ? setConfirming(true) : submit(false)}>{environment === "live" ? t("trading:confirmLiveOperation") : title}</button></div></Shell>{confirming && <Confirm title={t("trading:confirmLiveActionTitle", { action: title })} message={`${intent.instId} · ${submitSize}`} confirmText={t("trading:confirmSubmit")} onCancel={() => setConfirming(false)} onConfirm={() => { setConfirming(false); submit(true); }} />}</>;
 }

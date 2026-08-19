@@ -62,7 +62,7 @@ pub(crate) async fn okx_sync_private_history(
             inst_id.as_deref(),
         )?
     {
-        if let Some(previous) = load_recent_private_sync_watermark(
+        if let Some(mut previous) = load_recent_private_sync_watermark(
             &conn,
             &account.id,
             &account.environment,
@@ -70,8 +70,10 @@ pub(crate) async fn okx_sync_private_history(
             "private-history",
             6 * 60 * 60_000,
         )? {
-            // The remote snapshot is still fresh, but its local projections may have
-            // been added or repaired since the last network sync.
+            // The remote snapshot is still fresh, but account bills or local
+            // projections may have repaired a fill since the last network sync.
+            previous.fills_upserted +=
+                backfill_trade_fills_from_account_bills(&mut conn, &account, inst_id.as_deref())?;
             rebuild_position_episodes_for_account(
                 &mut conn,
                 &account.id,
@@ -407,6 +409,12 @@ pub(crate) async fn okx_sync_private_history(
         result.archive_bills_upserted,
     )?;
 
+    // OKX can expose a trade bill before (or instead of) the same row in
+    // fills-history. Repair missing fills from trade-class account bills so a
+    // completed close cannot leave the local position episode open forever.
+    result.fills_upserted +=
+        backfill_trade_fills_from_account_bills(&mut conn, &account, inst_id.as_deref())?;
+
     let positions_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/account/positions-history",
         scope: "positions-history",
@@ -478,6 +486,94 @@ pub(crate) async fn okx_sync_private_history(
     )
     .map_err(|err| format!("历史持仓重建失败: {err}"))?;
     Ok(result)
+}
+
+fn normalized_trade_fill_from_account_bill(
+    mut row: serde_json::Value,
+) -> Option<serde_json::Value> {
+    if json_string(&row, "type").as_deref() != Some("2") {
+        return None;
+    }
+    let (side, pos_side) = match json_string(&row, "subType").as_deref() {
+        Some("3") => ("buy", "long"),
+        Some("4") => ("sell", "short"),
+        Some("5") => ("sell", "long"),
+        Some("6") => ("buy", "short"),
+        _ => return None,
+    };
+    let object = row.as_object_mut()?;
+    object.insert(
+        "side".to_string(),
+        serde_json::Value::String(side.to_string()),
+    );
+    object.insert(
+        "posSide".to_string(),
+        serde_json::Value::String(pos_side.to_string()),
+    );
+    for (fill_key, bill_key) in [
+        ("fillPx", "px"),
+        ("fillSz", "sz"),
+        ("fillPnl", "pnl"),
+        ("feeCcy", "ccy"),
+    ] {
+        if !object.contains_key(fill_key) {
+            if let Some(value) = object.get(bill_key).cloned() {
+                object.insert(fill_key.to_string(), value);
+            }
+        }
+    }
+    Some(row)
+}
+
+pub(crate) fn backfill_trade_fills_from_account_bills(
+    conn: &mut Connection,
+    account: &LocalAccount,
+    inst_id: Option<&str>,
+) -> Result<usize, String> {
+    let raw_rows = {
+        let mut sql = "SELECT bill.raw_json
+             FROM okx_account_bills bill
+             WHERE bill.account_id = ?1
+               AND bill.environment = ?2
+               AND bill.bill_type = '2'
+               AND bill.sub_type IN ('3', '4', '5', '6')
+               AND NOT EXISTS (
+                 SELECT 1 FROM okx_fills existing_fill
+                 WHERE existing_fill.account_id = bill.account_id
+                   AND existing_fill.environment = bill.environment
+                   AND existing_fill.bill_id = bill.bill_id
+               )"
+        .to_string();
+        if inst_id.is_some() {
+            sql.push_str(" AND bill.inst_id = ?3");
+        }
+        sql.push_str(" ORDER BY COALESCE(bill.okx_ts, bill.synced_at, 0) ASC, bill.bill_id ASC");
+        let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+        let mapper = |row: &rusqlite::Row<'_>| row.get::<_, String>(0);
+        if let Some(symbol) = inst_id {
+            statement
+                .query_map(params![account.id, account.environment, symbol], mapper)
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        } else {
+            statement
+                .query_map(params![account.id, account.environment], mapper)
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?
+        }
+    };
+    let fills = raw_rows
+        .into_iter()
+        .map(|raw| {
+            serde_json::from_str::<serde_json::Value>(&raw).map_err(|error| error.to_string())
+        })
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .filter_map(normalized_trade_fill_from_account_bill)
+        .collect::<Vec<_>>();
+    upsert_okx_history_fills(conn, account, "account-bills-fallback", &fills)
 }
 
 pub(crate) fn private_history_status(
@@ -999,4 +1095,130 @@ fn private_sync_required_endpoints_complete(
         }
     }
     Ok(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn trade_account_bill_normalizes_close_long_fill() {
+        let normalized = normalized_trade_fill_from_account_bill(json!({
+            "type": "2",
+            "subType": "5",
+            "billId": "bill-close-long",
+            "ordId": "order-close-long",
+            "tradeId": "trade-close-long",
+            "instId": "BTC-USDT-SWAP",
+            "instType": "SWAP",
+            "sz": "0.04",
+            "px": "68418.3",
+            "pnl": "0.05676",
+            "fee": "-0.005473464",
+            "ccy": "USDT",
+            "ts": "1700000000000"
+        }))
+        .expect("trade bill should normalize");
+
+        assert_eq!(json_string(&normalized, "side").as_deref(), Some("sell"));
+        assert_eq!(json_string(&normalized, "posSide").as_deref(), Some("long"));
+        assert_eq!(json_string(&normalized, "fillSz").as_deref(), Some("0.04"));
+        assert_eq!(
+            json_string(&normalized, "fillPx").as_deref(),
+            Some("68418.3")
+        );
+        assert_eq!(
+            json_string(&normalized, "fillPnl").as_deref(),
+            Some("0.05676")
+        );
+        assert_eq!(json_string(&normalized, "feeCcy").as_deref(), Some("USDT"));
+    }
+
+    #[test]
+    fn missing_fill_is_backfilled_from_trade_account_bill() {
+        let mut conn = Connection::open_in_memory().expect("open test database");
+        initialize_database_v1_with_conn(&conn).expect("initialize test schema");
+        let account = LocalAccount {
+            id: "account-placeholder".to_string(),
+            name: "Placeholder account".to_string(),
+            exchange: "okx".to_string(),
+            environment: "demo".to_string(),
+            okx_uid: String::new(),
+            okx_main_uid: String::new(),
+            api_key: "placeholder-api-key".to_string(),
+            secret_key: "placeholder-secret-key".to_string(),
+            passphrase: "placeholder-passphrase".to_string(),
+            permissions: Permissions {
+                read: true,
+                trade: false,
+                withdraw: false,
+            },
+        };
+        let bill = json!({
+            "type": "2",
+            "subType": "5",
+            "billId": "bill-close-long",
+            "ordId": "order-close-long",
+            "tradeId": "trade-close-long",
+            "instId": "BTC-USDT-SWAP",
+            "instType": "SWAP",
+            "sz": "0.04",
+            "px": "68418.3",
+            "pnl": "0.05676",
+            "fee": "-0.005473464",
+            "ccy": "USDT",
+            "ts": "1700000000000"
+        });
+        upsert_okx_account_bills(&mut conn, &account, "account-bills", &[bill])
+            .expect("store account bill");
+
+        let repaired = backfill_trade_fills_from_account_bills(&mut conn, &account, None)
+            .expect("backfill missing fill");
+        assert_eq!(repaired, 1);
+        let fill = conn
+            .query_row(
+                "SELECT side,pos_side,fill_sz,fill_px,fill_pnl,source_endpoint
+                 FROM okx_fills
+                 WHERE account_id=?1 AND environment=?2 AND bill_id='bill-close-long'",
+                params![account.id, account.environment],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                    ))
+                },
+            )
+            .expect("load repaired fill");
+        assert_eq!(
+            fill,
+            (
+                "sell".to_string(),
+                "long".to_string(),
+                "0.04".to_string(),
+                "68418.3".to_string(),
+                "0.05676".to_string(),
+                "account-bills-fallback".to_string(),
+            )
+        );
+        assert_eq!(
+            backfill_trade_fills_from_account_bills(&mut conn, &account, None)
+                .expect("repeat backfill"),
+            0,
+            "the repair must be idempotent"
+        );
+    }
+
+    #[test]
+    fn non_trade_account_bill_is_not_a_fill() {
+        assert!(normalized_trade_fill_from_account_bill(json!({
+            "type": "8",
+            "subType": "173",
+            "billId": "funding-bill"
+        }))
+        .is_none());
+    }
 }

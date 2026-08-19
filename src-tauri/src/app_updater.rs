@@ -15,12 +15,18 @@ use std::{
     io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command as StdCommand, Stdio as StdStdio},
-    sync::Mutex,
+    sync::{
+        atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
+    },
 };
 use tauri::{Emitter, Manager};
+use tauri_plugin_updater::UpdaterExt;
+use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
 
 const APP_UPDATE_EVENT: &str = "app:update-state";
+const APP_UPDATE_DOWNLOAD_EVENT: &str = "app:update-download";
 const GITHUB_LATEST_RELEASE_URL: &str =
     "https://api.github.com/repos/xiazhi88/Desic-Terminal/releases/latest";
 const BACKUP_FILE_MAGIC: &[u8; 8] = b"DESICUP1";
@@ -312,6 +318,114 @@ async fn check_installed_update(app: &tauri::AppHandle) -> Result<AppUpdateState
         backup_path: None,
         restart_required: false,
     })
+}
+
+fn updater_proxy_url_from(
+    config: &desic_storage_config::ProxyConfig,
+) -> Result<Option<Url>, String> {
+    if !config.enabled {
+        return Ok(None);
+    }
+    let scheme = match config.proxy_type.trim().to_ascii_uppercase().as_str() {
+        "HTTP" => "http",
+        "HTTPS" => "https",
+        "SOCKS5" => {
+            return Err("应用更新暂不支持 SOCKS5 代理，请切换为 HTTP/HTTPS 代理".to_string());
+        }
+        "NONE" => return Ok(None),
+        _ => return Err("应用更新代理类型无效".to_string()),
+    };
+    let mut url = Url::parse(&format!(
+        "{scheme}://{}:{}",
+        config.host.trim(),
+        config.port
+    ))
+    .map_err(|error| format!("应用更新代理地址无效: {error}"))?;
+    if let Some(username) = config
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.set_username(username)
+            .map_err(|_| "应用更新代理用户名无效".to_string())?;
+        url.set_password(Some(config.password.as_deref().unwrap_or("")))
+            .map_err(|_| "应用更新代理密码无效".to_string())?;
+    }
+    Ok(Some(url))
+}
+
+fn updater_proxy_url() -> Result<Option<Url>, String> {
+    let config = crate::storage_config::load_proxy_config()?;
+    updater_proxy_url_from(&config)
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "camelCase")]
+struct AppUpdateDownloadProgress {
+    downloaded: u64,
+    total: Option<u64>,
+    finished: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn app_update_install(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AppUpdateRuntime>,
+) -> Result<(), String> {
+    let mut builder = app.updater_builder();
+    if let Some(proxy) = updater_proxy_url()? {
+        builder = builder.proxy(proxy);
+    }
+    let updater = builder
+        .build()
+        .map_err(|error| format!("初始化更新器失败: {error}"))?;
+    let update = updater
+        .check()
+        .await
+        .map_err(|error| format!("更新检查请求失败: {error}"))?
+        .ok_or_else(|| "签名更新清单中已没有可用更新".to_string())?;
+    let downloaded = Arc::new(AtomicU64::new(0));
+    let downloaded_for_progress = downloaded.clone();
+    let app_for_progress = app.clone();
+    let app_for_finish = app.clone();
+    update
+        .download_and_install(
+            move |chunk, total| {
+                let downloaded = downloaded_for_progress
+                    .fetch_add(chunk as u64, Ordering::Relaxed)
+                    .saturating_add(chunk as u64);
+                let _ = app_for_progress.emit(
+                    APP_UPDATE_DOWNLOAD_EVENT,
+                    AppUpdateDownloadProgress {
+                        downloaded,
+                        total,
+                        finished: false,
+                    },
+                );
+            },
+            move || {
+                let _ = app_for_finish.emit(
+                    APP_UPDATE_DOWNLOAD_EVENT,
+                    AppUpdateDownloadProgress {
+                        downloaded: downloaded.load(Ordering::Relaxed),
+                        total: None,
+                        finished: true,
+                    },
+                );
+            },
+        )
+        .await
+        .map_err(|error| format!("下载或安装更新失败: {error}"))?;
+    let mut state = runtime
+        .state
+        .lock()
+        .map_err(|_| "update state lock poisoned".to_string())?
+        .clone();
+    state.status = "installed".to_string();
+    state.available = false;
+    store_state(&app, runtime.inner(), state)?;
+    Ok(())
 }
 
 #[tauri::command]
@@ -774,5 +888,37 @@ mod tests {
         let latest = Version::parse("0.1.0").unwrap();
         let current = Version::parse("0.1.0").unwrap();
         assert!(latest <= current);
+    }
+
+    #[test]
+    fn updater_proxy_preserves_http_credentials_without_exposing_them_in_logs() {
+        let config = desic_storage_config::ProxyConfig {
+            enabled: true,
+            proxy_type: "HTTP".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 7890,
+            username: Some("proxy user".to_string()),
+            password: Some("proxy/pass".to_string()),
+        };
+        let url = updater_proxy_url_from(&config).unwrap().unwrap();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("127.0.0.1"));
+        assert_eq!(url.port(), Some(7890));
+        assert_eq!(url.username(), "proxy%20user");
+        assert_eq!(url.password(), Some("proxy%2Fpass"));
+    }
+
+    #[test]
+    fn updater_proxy_rejects_socks5_until_plugin_supports_it() {
+        let config = desic_storage_config::ProxyConfig {
+            enabled: true,
+            proxy_type: "SOCKS5".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 1080,
+            username: None,
+            password: None,
+        };
+        let error = updater_proxy_url_from(&config).unwrap_err();
+        assert!(error.contains("SOCKS5"));
     }
 }

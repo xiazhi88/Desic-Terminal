@@ -120,6 +120,9 @@ export function buildSharedChartOrderLines({
   }
   for (const order of orders) {
     if (order.instId !== symbol || !isActiveChartPendingOrder(order)) continue;
+    const embeddedAlgo = Boolean(order.isAlgo || order.algoId || order.algoClOrdId);
+    const embeddedAlgoId = order.algoId || order.algoClOrdId;
+    if (embeddedAlgo && (!embeddedAlgoId || !pendingAlgoKeys.has(embeddedAlgoId))) continue;
     const id = order.ordId || order.clOrdId || order.algoId || order.algoClOrdId;
     if (!id) continue;
     const type: ChartOrderLine["type"] = order.isAlgo || order.ordType === "trigger" ? "trigger" : "limit";

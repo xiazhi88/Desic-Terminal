@@ -1708,6 +1708,12 @@ pub async fn okx_place_order(
             &response_pos_side,
             &operator,
         )?;
+        crate::market_ws::upsert_pending_order_in_snapshot(
+            &app,
+            runtime.inner(),
+            &account,
+            pending_order_from_algo_submission(&request, &body, &result, &side, &response_pos_side),
+        );
         audit_trade_event(
             &app,
             &account,
@@ -2154,6 +2160,21 @@ pub async fn okx_place_order(
         &response_pos_side,
         &operator,
     )?;
+    if matches!(ord_type, "limit" | "post_only") {
+        crate::market_ws::upsert_pending_order_in_snapshot(
+            &app,
+            runtime.inner(),
+            &account,
+            pending_order_from_order_submission(
+                &request,
+                &body,
+                &result,
+                &side,
+                &response_pos_side,
+                response_reduce_only,
+            ),
+        );
+    }
     audit_trade_event(
         &app,
         &account,
@@ -6257,6 +6278,128 @@ pub struct AlgoOrdersResponse {
     environment: String,
     orders: Vec<AlgoOrderSummary>,
     synced_at: i64,
+    pending_read_complete: bool,
+}
+
+fn pending_order_from_algo_summary(order: &AlgoOrderSummary) -> OkxPendingOrder {
+    let algo_id = if order.algo_id.trim().is_empty() {
+        order.ord_id.clone()
+    } else {
+        order.algo_id.clone()
+    };
+    let algo_cl_ord_id = if order.algo_cl_ord_id.trim().is_empty() {
+        order.cl_ord_id.clone()
+    } else {
+        order.algo_cl_ord_id.clone()
+    };
+    OkxPendingOrder {
+        inst_id: order.inst_id.clone(),
+        inst_type: order.inst_type.clone(),
+        ord_id: algo_id.clone(),
+        cl_ord_id: algo_cl_ord_id.clone(),
+        algo_id,
+        algo_cl_ord_id,
+        is_algo: true,
+        side: order.side.clone(),
+        pos_side: order.pos_side.clone(),
+        td_mode: order.td_mode.clone(),
+        ord_type: if order.ord_type.trim().is_empty() {
+            "trigger".to_string()
+        } else {
+            order.ord_type.clone()
+        },
+        px: if order.trigger_px.trim().is_empty() {
+            order.ord_px.clone()
+        } else {
+            order.trigger_px.clone()
+        },
+        trigger_px: order.trigger_px.clone(),
+        trigger_px_type: order.trigger_px_type.clone(),
+        ord_px: order.ord_px.clone(),
+        tp_trigger_px: order.tp_trigger_px.clone(),
+        tp_trigger_px_type: order.tp_trigger_px_type.clone(),
+        tp_ord_px: order.tp_ord_px.clone(),
+        sl_trigger_px: order.sl_trigger_px.clone(),
+        sl_trigger_px_type: order.sl_trigger_px_type.clone(),
+        sl_ord_px: String::new(),
+        sz: order.sz.clone(),
+        acc_fill_sz: order.actual_sz.clone(),
+        avg_px: String::new(),
+        state: order.state.clone(),
+        lever: String::new(),
+        reduce_only: order.reduce_only.clone(),
+        c_time: order.c_time.clone(),
+        u_time: order.u_time.clone(),
+    }
+}
+
+fn pending_order_from_algo_submission(
+    request: &PlaceOrderRequest,
+    body: &PlaceAlgoOrderBody,
+    result: &OkxAlgoOrderResult,
+    side: &str,
+    pos_side: &str,
+) -> OkxPendingOrder {
+    let trigger_px = body.trigger_px.clone().unwrap_or_default();
+    let ord_px = body.order_px.clone().unwrap_or_default();
+    OkxPendingOrder {
+        inst_id: request.inst_id.clone(),
+        inst_type: "SWAP".to_string(),
+        ord_id: result.algo_id.clone(),
+        cl_ord_id: result.algo_cl_ord_id.clone(),
+        algo_id: result.algo_id.clone(),
+        algo_cl_ord_id: result.algo_cl_ord_id.clone(),
+        is_algo: true,
+        side: side.to_string(),
+        pos_side: pos_side.to_string(),
+        td_mode: request.td_mode.clone(),
+        ord_type: body.ord_type.clone(),
+        px: if trigger_px.is_empty() {
+            ord_px.clone()
+        } else {
+            trigger_px.clone()
+        },
+        trigger_px,
+        trigger_px_type: body.trigger_px_type.clone().unwrap_or_default(),
+        ord_px,
+        sz: request.size.clone(),
+        state: "live".to_string(),
+        reduce_only: body
+            .reduce_only
+            .map(|value| value.to_string())
+            .unwrap_or_default(),
+        c_time: result.ts.clone(),
+        u_time: result.ts.clone(),
+        ..Default::default()
+    }
+}
+
+fn pending_order_from_order_submission(
+    request: &PlaceOrderRequest,
+    body: &PlaceOrderBody,
+    result: &OkxOrderResult,
+    side: &str,
+    pos_side: &str,
+    reduce_only: bool,
+) -> OkxPendingOrder {
+    OkxPendingOrder {
+        inst_id: request.inst_id.clone(),
+        inst_type: "SWAP".to_string(),
+        ord_id: result.ord_id.clone(),
+        cl_ord_id: result.cl_ord_id.clone(),
+        is_algo: false,
+        side: side.to_string(),
+        pos_side: pos_side.to_string(),
+        td_mode: request.td_mode.clone(),
+        ord_type: body.ord_type.clone(),
+        px: body.px.clone().unwrap_or_default(),
+        sz: request.size.clone(),
+        state: "live".to_string(),
+        reduce_only: reduce_only.to_string(),
+        c_time: result.ts.clone(),
+        u_time: result.ts.clone(),
+        ..Default::default()
+    }
 }
 
 fn normalized_algo_number(value: &Option<String>) -> Option<String> {
@@ -7884,11 +8027,13 @@ pub async fn okx_list_algo_orders(
     let account = load_local_account_secret(&app, request.account_id.as_deref())?;
     ensure_trade_account(&account, &request.environment).await?;
     let mut orders = Vec::new();
+    let mut pending_read_complete = true;
     for order_types in ALGO_ORDER_TYPE_GROUPS {
         let path = format!("/api/v5/trade/orders-algo-pending?instType=SWAP&ordType={order_types}");
         let pending = match okx_private_get::<AlgoOrderSummary>(&account, &path).await {
             Ok(pending) => pending,
             Err(error) if OPTIONAL_ALGO_ORDER_TYPE_GROUPS.contains(&order_types) => {
+                pending_read_complete = false;
                 eprintln!(
                     "okx_optional_algo_order_group_read_failed account={} ord_types={} error={error}",
                     account.id, order_types
@@ -7924,6 +8069,20 @@ pub async fn okx_list_algo_orders(
     if let Some(inst_id) = optional_non_empty(&request.inst_id) {
         orders.retain(|order| order.inst_id == inst_id);
     }
+    if pending_read_complete {
+        let active_algo_orders = orders
+            .iter()
+            .filter(|order| order.source_endpoint == "orders-algo-pending")
+            .map(pending_order_from_algo_summary)
+            .collect::<Vec<_>>();
+        crate::market_ws::reconcile_active_algo_orders_in_snapshot(
+            &app,
+            app.state::<MarketRuntime>().inner(),
+            &account,
+            &active_algo_orders,
+            request.inst_id.as_deref(),
+        );
+    }
     // Caching the summaries locally is a side effect: the orders above already
     // came from the exchange and are what the caller asked for. A busy write lock
     // (a long backtest holds one) used to fail the whole command with "database
@@ -7940,6 +8099,7 @@ pub async fn okx_list_algo_orders(
         environment: account.environment,
         orders,
         synced_at: now_ms(),
+        pending_read_complete,
     })
 }
 

@@ -105,6 +105,10 @@ export async function prepareAppUpdate() {
   return invokeDesktop<import("../types").AppUpdateBackup>("app_update_prepare");
 }
 
+export async function installAppUpdate() {
+  return invokeDesktop<void>("app_update_install");
+}
+
 export async function applySourceAppUpdate() {
   return invokeDesktop<import("../types").AppUpdateState>("app_update_apply_source");
 }

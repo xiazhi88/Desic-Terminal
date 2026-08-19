@@ -67,8 +67,8 @@ use crate::ai_automation::{
     ReviewSkillVersionInput,
 };
 use crate::app_updater::{
-    app_update_apply_source, app_update_check, app_update_prepare, app_update_restart_source,
-    app_update_status, AppUpdateRuntime,
+    app_update_apply_source, app_update_check, app_update_install, app_update_prepare,
+    app_update_restart_source, app_update_status, AppUpdateRuntime,
 };
 use crate::instrument_operations::{
     okx_active_instrument_operations, okx_execute_cancel_instrument_orders,
@@ -2346,6 +2346,12 @@ async fn import_account_bills_archive(
         "account-bills-history-archive-file",
         &swap_rows,
     )?;
+    let repaired_fills =
+        crate::private_history::backfill_trade_fills_from_account_bills(&mut conn, &account, None)?;
+    if repaired_fills > 0 {
+        rebuild_position_episodes_for_account(&mut conn, &account.id, &account.environment, None)
+            .map_err(|error| format!("历史持仓重建失败: {error}"))?;
+    }
     Ok(AccountBillsArchiveImportResult {
         account_id: account.id,
         environment: account.environment,
@@ -5301,6 +5307,10 @@ async fn okx_private_snapshot(
     let mut snapshot = fetch_private_account_snapshot(&account).await?;
     let runtime = app.state::<MarketRuntime>();
     filter_cancelled_pending_orders(runtime.inner(), &mut snapshot);
+    // REST is a periodic repair source, not a separate truth silo. Publish the
+    // repaired snapshot back to memory so subsequent AI reads stay fast and the
+    // UI/AI paths converge on the same account-scoped state.
+    crate::market_ws::update_private_snapshot(&app, runtime.inner(), snapshot.clone());
     Ok(snapshot)
 }
 
@@ -10355,14 +10365,22 @@ fn reconcile_official_position_history(
         load_latest_official_position_history(conn, account_id, environment, inst_id)?;
     let mut inserted = 0usize;
     for official in official_rows {
+        let closed_qty = official_quantity(&official.close_total_pos);
+        let official_is_closed = official.close_time > 0 || closed_qty != "0";
         let matched_episode = conn
             .query_row(
                 "SELECT id FROM position_episodes
                  WHERE account_id=?1 AND environment=?2 AND inst_id=?3 AND episode_side=?4
                    AND exchange_pos_id IS NULL
                    AND (?5 <= 0 OR ABS(open_time - ?5) <= 300000)
-                   AND (?6 <= 0 OR ABS(COALESCE(close_time,last_fill_time,open_time) - ?6) <= 300000)
-                 ORDER BY ABS(open_time - ?5) + ABS(COALESCE(close_time,last_fill_time,open_time) - ?6), id
+                   AND (
+                     status='open'
+                     OR (?6 <= 0 OR ABS(COALESCE(close_time,last_fill_time,open_time) - ?6) <= 300000)
+                   )
+                 ORDER BY CASE WHEN status='open' THEN 0 ELSE 1 END,
+                          ABS(open_time - ?5),
+                          ABS(COALESCE(close_time,last_fill_time,open_time) - ?6),
+                          id
                  LIMIT 1",
                 params![
                     account_id,
@@ -10378,22 +10396,55 @@ fn reconcile_official_position_history(
             .map_err(|err| err.to_string())?;
 
         if let Some(episode_id) = matched_episode {
-            conn.execute(
-                "UPDATE position_episodes
-                 SET exchange_pos_id=?1,
-                     last_okx_pos_id=?1,
-                     mgn_mode=COALESCE(NULLIF(?2,''),mgn_mode),
-                     notes=COALESCE(notes,'official_position_history_matched'),
-                     updated_at=?3
-                 WHERE id=?4",
-                params![official.pos_id, official.mgn_mode, now_ms(), episode_id],
-            )
+            if official_is_closed {
+                conn.execute(
+                    "UPDATE position_episodes
+                     SET exchange_pos_id=?1,
+                         last_okx_pos_id=?1,
+                         mgn_mode=COALESCE(NULLIF(?2,''),mgn_mode),
+                         status='closed',
+                         close_time=CASE WHEN ?3 > 0 THEN ?3 ELSE COALESCE(close_time,last_fill_time,open_time) END,
+                         closed_qty=?4,
+                         remaining_qty='0',
+                         avg_close_px=COALESCE(NULLIF(?5,''),avg_close_px),
+                         realized_pnl=COALESCE(NULLIF(?6,''),realized_pnl),
+                         fees=COALESCE(NULLIF(?7,''),fees),
+                         funding_fee=COALESCE(NULLIF(?8,''),funding_fee),
+                         liq_penalty=COALESCE(NULLIF(?9,''),liq_penalty),
+                         notes=COALESCE(notes,'official_position_history_matched'),
+                         updated_at=?10
+                     WHERE id=?11",
+                    params![
+                        official.pos_id,
+                        official.mgn_mode,
+                        official.close_time,
+                        closed_qty,
+                        official.close_avg_px,
+                        official.realized_pnl,
+                        official.fee,
+                        official.funding_fee,
+                        official.liq_penalty,
+                        now_ms(),
+                        episode_id,
+                    ],
+                )
+            } else {
+                conn.execute(
+                    "UPDATE position_episodes
+                     SET exchange_pos_id=?1,
+                         last_okx_pos_id=?1,
+                         mgn_mode=COALESCE(NULLIF(?2,''),mgn_mode),
+                         notes=COALESCE(notes,'official_position_history_matched'),
+                         updated_at=?3
+                     WHERE id=?4",
+                    params![official.pos_id, official.mgn_mode, now_ms(), episode_id],
+                )
+            }
             .map_err(|err| err.to_string())?;
             continue;
         }
 
         let open_qty = official_quantity(&official.open_max_pos);
-        let closed_qty = official_quantity(&official.close_total_pos);
         let max_qty = if open_qty == "0" {
             closed_qty.clone()
         } else {
@@ -11496,7 +11547,11 @@ fn load_historical_orders(
         ord_type, state, px, sz, acc_fill_sz, avg_px, pnl, fee, source_endpoint, operator, strategy_id,
         session_id, opportunity_id, agent_run_id, execution_key, okx_ctime, okx_utime, synced_at
         FROM okx_orders
-        WHERE account_id = ?1 AND environment = ?2"
+        WHERE account_id = ?1 AND environment = ?2
+          AND LOWER(COALESCE(state, '')) NOT IN (
+            'live', 'partially_filled', 'partially-filled', 'partially_effective',
+            'partially-effective', 'pending', 'new', 'active', 'submitted'
+          )"
         .to_string();
     if inst_id.is_some() {
         sql.push_str(" AND inst_id = ?3");
@@ -15438,6 +15493,66 @@ fn inject_ai_execution_context(input: &mut serde_json::Value, context: &AiToolEx
     }
 }
 
+fn ai_tool_is_account_scoped(canonical_name: &str) -> bool {
+    matches!(
+        canonical_name,
+        "account.readSnapshot"
+            | "account.readBalances"
+            | "account.readPositions"
+            | "account.readOpenOrders"
+            | "account.readOrderStatus"
+            | "account.readRisk"
+            | "account.readHistoricalOrders"
+            | "account.readHistoricalFills"
+            | "account.readBills"
+            | "account.readPositionEpisodes"
+            | "trade.evaluatePlan"
+            | "trade.precheck"
+            | "market.readDecisionContext"
+            | "tradeOpportunity.list"
+            | "tradeOpportunity.create"
+            | "trade.placeOrder"
+            | "trade.cancelOrder"
+            | "trade.amendOrder"
+            | "trade.setLeverage"
+            | "trade.setMarginMode"
+            | "trade.closePosition"
+    )
+}
+
+fn bind_ai_account_context(
+    canonical_name: &str,
+    input: &mut serde_json::Value,
+    context: &AiToolExecutionContext,
+) -> Result<(), String> {
+    if !ai_tool_is_account_scoped(canonical_name) {
+        return Ok(());
+    }
+    let Some(expected) = context
+        .account_context_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(());
+    };
+    let Some(object) = input.as_object_mut() else {
+        return Ok(());
+    };
+    if let Some(actual) = object
+        .get("accountId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        if actual != expected {
+            return Err(format!("工具账号与当前 UI 账号不一致：{actual}"));
+        }
+    }
+    object.insert("accountId".to_string(), json!(expected));
+    Ok(())
+}
+
 fn enforce_background_run_scope(
     canonical_name: &str,
     input: &mut serde_json::Value,
@@ -15468,31 +15583,7 @@ fn enforce_background_run_scope(
     let Some(object) = input.as_object_mut() else {
         return Ok(());
     };
-    let account_scoped = matches!(
-        canonical_name,
-        "account.readSnapshot"
-            | "account.readBalances"
-            | "account.readPositions"
-            | "account.readOpenOrders"
-            | "account.readOrderStatus"
-            | "account.readRisk"
-            | "account.readHistoricalOrders"
-            | "account.readHistoricalFills"
-            | "account.readBills"
-            | "account.readPositionEpisodes"
-            | "trade.evaluatePlan"
-            | "trade.precheck"
-            | "market.readDecisionContext"
-            | "tradeOpportunity.list"
-            | "tradeOpportunity.create"
-            | "trade.placeOrder"
-            | "trade.cancelOrder"
-            | "trade.amendOrder"
-            | "trade.setLeverage"
-            | "trade.setMarginMode"
-            | "trade.closePosition"
-    );
-    if account_scoped {
+    if ai_tool_is_account_scoped(canonical_name) {
         if let Some(expected) = run.account_id.as_deref() {
             if let Some(actual) = object
                 .get("accountId")
@@ -15968,6 +16059,7 @@ async fn execute_ai_tool(
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }
     inject_ai_execution_context(&mut input, context);
+    bind_ai_account_context(canonical_name, &mut input, context)?;
     ensure_ai_run_is_active(&app, context).await?;
     enforce_background_run_scope(canonical_name, &mut input, context)?;
     ensure_ai_trade_is_demo(&app, canonical_name, &input, context)?;
@@ -16136,7 +16228,7 @@ async fn execute_ai_tool(
         "account.readSnapshot" => {
             let request: PrivateSnapshotRequest =
                 serde_json::from_value(input).map_err(|err| err.to_string())?;
-            if let Some(snapshot) = ai_read_memory_account_snapshot(
+            if let Some(snapshot) = ai_read_fresh_memory_account_snapshot(
                 app.state::<MarketRuntime>().inner(),
                 request.account_id.as_deref(),
             ) {
@@ -16144,10 +16236,11 @@ async fn execute_ai_tool(
                 return Ok(ai_account_snapshot_tool_value(snapshot, "memory", age_ms));
             }
             let snapshot = okx_private_snapshot(app, request).await?;
+            let age_ms = now_ms().saturating_sub(snapshot.synced_at);
             Ok(ai_account_snapshot_tool_value(
                 snapshot,
                 "okx-private-rest",
-                0,
+                age_ms,
             ))
         }
         "account.readBalances"
@@ -17911,13 +18004,12 @@ async fn ai_read_account_part(
     tool_name: &str,
     request: PrivateSnapshotRequest,
 ) -> Result<serde_json::Value, String> {
-    let snapshot = if let Some(snapshot) = ai_read_memory_account_snapshot(
+    let snapshot = match ai_read_fresh_memory_account_snapshot(
         app.state::<MarketRuntime>().inner(),
         request.account_id.as_deref(),
     ) {
-        snapshot
-    } else {
-        okx_private_snapshot(app, request).await?
+        Some(snapshot) => snapshot,
+        None => okx_private_snapshot(app, request).await?,
     };
     let (usdt_equity, available_usdt, excluded_non_usdt_asset_count) =
         ai_usdt_balance_context(&snapshot);
@@ -19098,6 +19190,8 @@ fn emit_ai_ui_action(
     Ok(json!({ "id": id, "sent": true, "event": AI_CHART_ACTION_EVENT, "toolName": tool_name }))
 }
 
+const AI_MEMORY_PRIVATE_SNAPSHOT_MAX_AGE_MS: i64 = 15_000;
+
 fn ai_read_memory_account_snapshot(
     runtime: &MarketRuntime,
     account_id: Option<&str>,
@@ -19111,6 +19205,21 @@ fn ai_read_memory_account_snapshot(
             .cloned();
     }
     store.private_snapshot.clone()
+}
+
+fn ai_memory_snapshot_is_usable(snapshot: &PrivateAccountSnapshot, now: i64) -> bool {
+    snapshot.positions_complete
+        && snapshot.orders_complete
+        && snapshot.orders_error.is_none()
+        && now.saturating_sub(snapshot.synced_at) <= AI_MEMORY_PRIVATE_SNAPSHOT_MAX_AGE_MS
+}
+
+fn ai_read_fresh_memory_account_snapshot(
+    runtime: &MarketRuntime,
+    account_id: Option<&str>,
+) -> Option<PrivateAccountSnapshot> {
+    let snapshot = ai_read_memory_account_snapshot(runtime, account_id)?;
+    ai_memory_snapshot_is_usable(&snapshot, now_ms()).then_some(snapshot)
 }
 
 fn mark_memory_private_snapshot_incomplete(runtime: &MarketRuntime, account_id: &str, error: &str) {
@@ -23244,6 +23353,7 @@ pub fn run() {
             app_update_status,
             app_update_check,
             app_update_prepare,
+            app_update_install,
             app_update_apply_source,
             app_update_restart_source,
             ai_create_session,
@@ -23806,6 +23916,30 @@ mod tests {
         assert!(normalize_market_icon_base("../btc").is_err());
         assert!(normalize_market_icon_base("btc-usdt").is_err());
         assert!(normalize_market_icon_base("").is_err());
+    }
+
+    #[test]
+    fn ai_memory_snapshot_requires_complete_recent_private_data() {
+        let mut snapshot = PrivateAccountSnapshot {
+            account_id: "account".to_string(),
+            environment: "live".to_string(),
+            balances: Vec::new(),
+            positions: Vec::new(),
+            orders: Vec::new(),
+            positions_complete: true,
+            position_seq_id: None,
+            orders_complete: true,
+            orders_error: None,
+            synced_at: 10_000,
+        };
+        assert!(ai_memory_snapshot_is_usable(&snapshot, 24_999));
+        assert!(!ai_memory_snapshot_is_usable(&snapshot, 25_001));
+
+        snapshot.orders_complete = false;
+        assert!(!ai_memory_snapshot_is_usable(&snapshot, 10_001));
+        snapshot.orders_complete = true;
+        snapshot.orders_error = Some("private orders sync failed".to_string());
+        assert!(!ai_memory_snapshot_is_usable(&snapshot, 10_001));
     }
 
     #[test]
@@ -25936,6 +26070,62 @@ mod tests {
     }
 
     #[test]
+    fn official_position_history_closes_an_open_fill_episode_without_a_close_fill() {
+        let mut conn = test_conn();
+        let account_id = "acct-official-close";
+        let environment = "live";
+        let inst_id = "BTC-USDT-SWAP";
+        insert_test_fill(
+            &conn,
+            account_id,
+            environment,
+            inst_id,
+            TestFill {
+                bill_id: "open-only",
+                side: "buy",
+                pos_side: Some("long"),
+                sub_type: None,
+                px: "64000",
+                sz: "0.02",
+                pnl: "0",
+                fee: "-0.1",
+                operator: "user",
+                strategy_id: None,
+                session_id: None,
+                ts: 1_000,
+            },
+        );
+        conn.execute(
+            "INSERT INTO okx_position_history (
+              account_id, environment, pos_id, inst_id, inst_type, mgn_mode, pos_side, direction,
+              close_type, open_avg_px, close_avg_px, open_max_pos, close_total_pos, realized_pnl,
+              pnl, fee, funding_fee, liq_penalty, okx_ctime, okx_utime, raw_json, synced_at
+            ) VALUES (?1, ?2, 'pos-official-close', ?3, 'SWAP', 'cross', 'long', 'long',
+              '1', '64000', '64200', '0.02', '0.02', '3.2',
+              '3.0', '-0.1', '0.3', '0', 1000, 900000, '{}', 900001)",
+            params![account_id, environment, inst_id],
+        )
+        .expect("insert official close history");
+
+        rebuild_position_episodes_for_account(&mut conn, account_id, environment, Some(inst_id))
+            .expect("rebuild episode from official close history");
+        let episodes = load_position_episodes(&conn, account_id, environment, Some(inst_id), 10)
+            .expect("load reconciled episode");
+        assert_eq!(episodes.len(), 1);
+        assert_eq!(episodes[0].status, "closed");
+        assert_eq!(episodes[0].remaining_qty, "0");
+        assert_eq!(episodes[0].close_time, Some(900000));
+        let exchange_pos_id: Option<String> = conn
+            .query_row(
+                "SELECT exchange_pos_id FROM position_episodes WHERE id=?1",
+                [&episodes[0].id],
+                |row| row.get(0),
+            )
+            .expect("read reconciled exchange position id");
+        assert_eq!(exchange_pos_id.as_deref(), Some("pos-official-close"));
+    }
+
+    #[test]
     fn rebuild_position_episodes_links_matching_official_history_without_duplication() {
         let mut conn = test_conn();
         let account_id = "acct-match";
@@ -26793,6 +26983,19 @@ mod tests {
         assert_eq!(
             context.account_context_id.as_deref(),
             Some("ui-current-account")
+        );
+
+        let mut interactive_input = json!({});
+        bind_ai_account_context("account.readSnapshot", &mut interactive_input, &context)
+            .expect("bind interactive account context");
+        assert_eq!(
+            interactive_input.get("accountId").and_then(Value::as_str),
+            Some("ui-current-account")
+        );
+        let mut mismatched_input = json!({ "accountId": "other-account" });
+        assert!(
+            bind_ai_account_context("account.readSnapshot", &mut mismatched_input, &context)
+                .is_err()
         );
     }
 

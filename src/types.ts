@@ -219,6 +219,9 @@ export type PrivateAccountSnapshot = {
   balances: OkxBalance[];
   positions: OkxPosition[];
   orders: OkxPendingOrder[];
+  positionsComplete?: boolean;
+  ordersComplete?: boolean;
+  ordersError?: string | null;
   syncedAt: number;
 };
 
@@ -1380,6 +1383,7 @@ export type AlgoOrdersResponse = {
   environment: string;
   orders: OkxAlgoOrder[];
   syncedAt: number;
+  pendingReadComplete?: boolean;
 };
 
 export type TradePrecheckRequest = {

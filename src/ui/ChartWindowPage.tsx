@@ -41,6 +41,7 @@ import {
 } from "../lib/okx";
 import { fmtPrice } from "../lib/format";
 import { invokeOptional, isTauriRuntime, listenOptional } from "../lib/tauri";
+import { subscribeMarketEvents } from "../lib/marketEventBus";
 import { logger } from "../lib/logger";
 import { KlineChart, type ChartHistoryLoadOutcome } from "./KlineChart";
 import { i18n } from "../i18n/runtime";
@@ -57,21 +58,6 @@ import {
 const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
 const DEFAULT_TIMEFRAME = "30m";
 const PERIODS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D"];
-
-type TauriMarketEvent =
-  | { type: "ticker"; ticker: Ticker }
-  | { type: "orderBook"; instId?: string; book: OrderBook }
-  | { type: "trade"; instId?: string; trade: Trade }
-  | { type: "trades"; instId?: string; trades: Trade[] }
-  | { type: "renderBatch"; orderBooks: Record<string, OrderBook>; trades: Record<string, Trade[]> }
-  | { type: "candle"; instId?: string; bar?: string; candle: Candle }
-  | { type: "fundingRate"; funding: FundingRate }
-  | { type: "privateSnapshot"; snapshot: PrivateAccountSnapshot }
-  | { type: "privateOrder"; accountId: string; environment: string; order: OkxPendingOrder }
-  | { type: "status"; status: string }
-  | { type: "publicStatus"; status: string }
-  | { type: "privateStatus"; status: string }
-  | { type: "error"; message: string };
 
 function getWindowIdFromUrlOrLabel(label?: string | null) {
   const url = new URL(window.location.href);
@@ -493,7 +479,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
   useEffect(() => {
     let mounted = true;
     let cleanup: (() => void) | null = null;
-    void listenOptional<TauriMarketEvent>("market:event", (event) => {
+    cleanup = subscribeMarketEvents((event) => {
       if (!mounted) return;
       if (event.type === "ticker" && event.ticker.instId === symbol) setTicker(event.ticker);
       if (event.type === "orderBook" && event.instId === symbol) setOrderBook(event.book);
@@ -534,8 +520,6 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
           return { ...snapshot, orders: isActivePendingOrder(event.order) ? [event.order, ...orders] : orders, syncedAt: Date.now() };
         });
       }
-    }).then((unlisten) => {
-      cleanup = unlisten;
     });
     return () => {
       mounted = false;

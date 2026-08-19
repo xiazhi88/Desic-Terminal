@@ -1490,6 +1490,8 @@ function TradingTerminal({
   const [chartTradeSources, setChartTradeSources] = useState<ChartTradeSources | null>(null);
   const [historicalFillsStatus, setHistoricalFillsStatus] = useState("等待账号");
   const [algoOrders, setAlgoOrders] = useState<OkxAlgoOrder[]>([]);
+  const [algoOrdersPendingReadComplete, setAlgoOrdersPendingReadComplete] =
+    useState(false);
   const [algoOrdersStatus, setAlgoOrdersStatus] = useState("等待账号");
   const [accountBills, setAccountBills] = useState<AccountBillSummary[]>([]);
   const [accountBillsStatus, setAccountBillsStatus] = useState("等待账号");
@@ -1535,20 +1537,9 @@ function TradingTerminal({
     return () => media.removeEventListener("change", updateCompactTerminalLayout);
   }, []);
 
-
-  useEffect(() => {
-    const idleWindow = window as Window & {
-      requestIdleCallback?: (callback: () => void, options?: { timeout: number }) => number;
-      cancelIdleCallback?: (id: number) => void;
-    };
-    if (idleWindow.requestIdleCallback) {
-      const id = idleWindow.requestIdleCallback(() => void loadAiAutomationModule(), { timeout: 2_500 });
-      return () => idleWindow.cancelIdleCallback?.(id);
-    }
-    const timeoutId = window.setTimeout(() => void loadAiAutomationModule(), 1_200);
-    return () => window.clearTimeout(timeoutId);
-  }, []);
-  const [klineSync, setKlineSync] = useState<Record<string, KlineSyncReport>>({});
+  const [klineSync, setKlineSync] = useState<Record<string, KlineSyncReport>>(
+    {},
+  );
   const [accountManagerOpen, setAccountManagerOpen] = useState(false);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [notificationHistory, setNotificationHistory] = useState<AppNotification[]>(() => loadNotificationHistory());
@@ -2086,10 +2077,19 @@ function TradingTerminal({
     const now = Date.now();
     const cooldownMs = reason === "manual" || reason === "deep" || reason === "startup" || reason === "fill" ? 0 : reason === "reconnect" ? 5 * 60_000 : 3 * 60_000;
     const last = privateHistorySyncRef.current[key] ?? 0;
-    if (last < 0 || (cooldownMs > 0 && now - last < cooldownMs)) return;
-    privateHistorySyncRef.current[key] = -1;
+    if (last < 0) {
+      const inFlightStartedAt = -last;
+      if (now - inFlightStartedAt < 2 * 60_000) return;
+      logger.warn("private history sync watchdog released a stale in-flight lock", {
+        accountId: accountItem.id,
+        reason,
+        inFlightStartedAt
+      });
+    }
+    if (last > 0 && cooldownMs > 0 && now - last < cooldownMs) return;
+    privateHistorySyncRef.current[key] = -now;
     const maxPages = reason === "deep" ? 12 : reason === "startup" || reason === "reconnect" || reason === "fill" || reason === "periodic" ? 2 : 3;
-    void syncPrivateHistory({ accountId: accountItem.id, maxPages, force: reason !== "startup" })
+    void syncPrivateHistory({ accountId: accountItem.id, maxPages, force: true })
       .then((result) => {
         privateHistorySyncRef.current[key] = Date.now();
         if (!result) return;
@@ -3294,11 +3294,13 @@ function TradingTerminal({
   useEffect(() => {
     if (!account) {
       setAlgoOrders([]);
+      setAlgoOrdersPendingReadComplete(false);
       setAlgoOrdersStatus("未配置账号");
       return;
     }
     if (!account.permissions.read) {
       setAlgoOrders([]);
+      setAlgoOrdersPendingReadComplete(false);
       setAlgoOrdersStatus("未开启读取权限");
       return;
     }
@@ -3315,17 +3317,26 @@ function TradingTerminal({
         if (cancelled) return;
         if (response) {
           setAlgoOrders(response.orders);
-          setAlgoOrdersStatus(response.orders.length > 0 ? "已同步" : "暂无策略委托");
+          setAlgoOrdersPendingReadComplete(
+            response.pendingReadComplete !== false,
+          );
+          setAlgoOrdersStatus(
+            response.orders.length > 0 ? "已同步" : "暂无策略委托",
+          );
         } else {
           setAlgoOrders([]);
+          setAlgoOrdersPendingReadComplete(false);
           setAlgoOrdersStatus("仅 Tauri 可用");
         }
       } catch (error) {
         if (cancelled) return;
         const message = error instanceof Error ? error.message : String(error);
-        logger.error("failed to load algo orders", error, { accountId: account.id });
-        setAlgoOrders([]);
-        setAlgoOrdersStatus(message);
+        logger.error(
+          "failed to load algo orders; retaining last successful snapshot",
+          error,
+          { accountId: account.id },
+        );
+        setAlgoOrdersStatus(`同步失败，保留最近数据：${message}`);
       } finally {
         if (!cancelled) timer = window.setTimeout(refresh, 15_000);
       }
@@ -4244,225 +4255,394 @@ function TradingTerminal({
 
           <section className="center-panel" ref={centerPanelRef}>
             <div className="chart-toolbar">
-              <div className="periods">
-                {PRIMARY_CHART_TIMEFRAMES.map((period) => (
-                  <button className={period === bar ? "active" : ""} onClick={() => setBar(period)} key={period}>{period}</button>
-                ))}
-                {SECONDARY_CHART_TIMEFRAMES.includes(bar as typeof SECONDARY_CHART_TIMEFRAMES[number]) ? (
-                  <button className="active" onClick={() => setChartUtilitiesOpen(true)}>{bar}</button>
-                ) : null}
-                <div className="chart-utilities" ref={chartUtilitiesRef}>
+                <div className="periods">
+                  {PRIMARY_CHART_TIMEFRAMES.map((period) => (
+                    <button
+                      className={period === bar ? "active" : ""}
+                      onClick={() => setBar(period)}
+                      key={period}
+                    >
+                      {period}
+                    </button>
+                  ))}
+                  {SECONDARY_CHART_TIMEFRAMES.includes(
+                    bar as (typeof SECONDARY_CHART_TIMEFRAMES)[number],
+                  ) ? (
+                    <button
+                      className="active"
+                      onClick={() => setChartUtilitiesOpen(true)}
+                    >
+                      {bar}
+                    </button>
+                  ) : null}
+                  <div className="chart-utilities" ref={chartUtilitiesRef}>
+                    <button
+                      type="button"
+                      className={chartUtilitiesOpen ? "active" : ""}
+                      onClick={() => setChartUtilitiesOpen((open) => !open)}
+                      aria-expanded={chartUtilitiesOpen}
+                      title={uiText(
+                        "更多周期与视图工具",
+                        "More intervals and chart tools",
+                      )}
+                    >
+                      <SlidersHorizontal size={15} />
+                      <span>{uiText("更多", "More")}</span>
+                    </button>
+                    {chartUtilitiesOpen ? (
+                      <div
+                        className="chart-timeframe-menu"
+                        role="menu"
+                        aria-label={uiText("更多周期", "More intervals")}
+                      >
+                        {SECONDARY_CHART_TIMEFRAMES.map((period) => (
+                          <button
+                            key={period}
+                            type="button"
+                            className={period === bar ? "active" : ""}
+                            role="menuitem"
+                            onClick={() => {
+                              setBar(period);
+                              setChartUtilitiesOpen(false);
+                            }}
+                          >
+                            {period}
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </div>
+                <div className="chart-actions">
+                  <button
+                    onClick={openDetachedChart}
+                    title={t("chart:detachedChartWindow")}
+                  >
+                    <Maximize2 size={15} /> {t("chart:popout")}
+                  </button>
                   <button
                     type="button"
-                    className={chartUtilitiesOpen ? "active" : ""}
-                    onClick={() => setChartUtilitiesOpen((open) => !open)}
-                    aria-expanded={chartUtilitiesOpen}
-                    title={uiText("更多周期与视图工具", "More intervals and chart tools")}
+                    onClick={() =>
+                      setChartPresentation((current) =>
+                        current === "chart" ? "table" : "chart",
+                      )
+                    }
+                    aria-pressed={chartPresentation === "table"}
+                    title={
+                      chartPresentation === "chart"
+                        ? uiText(
+                            "切换为 K 线、指标与交易标签数据表",
+                            "Switch to the candle, indicator, and trade-label data table",
+                          )
+                        : uiText("返回 K 线图表", "Return to the chart")
+                    }
                   >
-                    <SlidersHorizontal size={15} />
-                    <span>{uiText("更多", "More")}</span>
+                    <TableProperties size={15} />{" "}
+                    {chartPresentation === "chart"
+                      ? t("chart:tableView")
+                      : t("chart:chart")}
                   </button>
-                  {chartUtilitiesOpen ? (
-                    <div className="chart-timeframe-menu" role="menu" aria-label={uiText("更多周期", "More intervals")}>
-                      {SECONDARY_CHART_TIMEFRAMES.map((period) => (
-                        <button key={period} type="button" className={period === bar ? "active" : ""} role="menuitem" onClick={() => { setBar(period); setChartUtilitiesOpen(false); }}>{period}</button>
-                      ))}
-                    </div>
-                  ) : null}
                 </div>
               </div>
-              <div className="chart-actions">
-                <button onClick={openDetachedChart} title={t("chart:detachedChartWindow")}><Maximize2 size={15} /> {t("chart:popout")}</button>
+              <div className="chart-stage">
+                <div
+                  className={clsx(
+                    "chart-kline-presentation",
+                    chartPresentation !== "chart" && "is-hidden",
+                  )}
+                  aria-hidden={chartPresentation !== "chart"}
+                >
+                  <ErrorBoundary label={t("chart:chart")}>
+                    <HotKlineChart
+                      tradeSources={chartTradeSources}
+                      symbol={symbol}
+                      timeframe={bar}
+                      orderLines={chartOrderLines}
+                      fills={chartFillMarkers}
+                      positions={visiblePrivateSnapshot?.positions ?? []}
+                      algoOrders={algoOrders}
+                      instrument={currentInstrument}
+                      onOrderLineEdit={(edit) =>
+                        setPendingOrderLineEdit({
+                          ...edit,
+                          price: Number(
+                            normalizeChartEditPrice(edit.price) || edit.price,
+                          ),
+                          triggerPrice:
+                            edit.triggerPrice === undefined
+                              ? undefined
+                              : Number(
+                                  normalizeChartEditPrice(edit.triggerPrice) ||
+                                    edit.triggerPrice,
+                                ),
+                          orderPrice:
+                            edit.orderPrice === undefined ||
+                            edit.orderPrice === null
+                              ? edit.orderPrice
+                              : Number(
+                                  normalizeChartEditPrice(edit.orderPrice) ||
+                                    edit.orderPrice,
+                                ),
+                        })
+                      }
+                      onOrderLineCancel={requestOrderLineCancel}
+                      onPositionLineTradeIntent={(intent) =>
+                        setPendingPositionLineIntent({
+                          ...intent,
+                          targetPrice: Number(
+                            normalizeChartEditPrice(intent.targetPrice) ||
+                              intent.targetPrice,
+                          ),
+                        })
+                      }
+                      onPositionLineCloseRequest={(intent) =>
+                        setPendingPositionLineIntent({
+                          ...intent,
+                          kind: "limit_close",
+                          targetPrice: Number(
+                            normalizeChartEditPrice(intent.currentPrice) ||
+                              intent.currentPrice,
+                          ),
+                          currentPrice: Number(
+                            normalizeChartEditPrice(intent.currentPrice) ||
+                              intent.currentPrice,
+                          ),
+                        })
+                      }
+                      onChartContextTrade={(intent) =>
+                        setChartQuickTrade({
+                          ...intent,
+                          price: Number(
+                            normalizeChartEditPrice(intent.price) ||
+                              intent.price,
+                          ),
+                        })
+                      }
+                      onRiskRewardTradeIntent={(intent) =>
+                        setPendingChartRiskRewardIntent({
+                          ...intent,
+                          entryPrice: Number(
+                            normalizeChartEditPrice(intent.entryPrice) ||
+                              intent.entryPrice,
+                          ),
+                          takeProfitPrice: Number(
+                            normalizeChartEditPrice(intent.takeProfitPrice) ||
+                              intent.takeProfitPrice,
+                          ),
+                          stopLossPrice: Number(
+                            normalizeChartEditPrice(intent.stopLossPrice) ||
+                              intent.stopLossPrice,
+                          ),
+                        })
+                      }
+                      onNeedMoreHistory={loadMoreHistory}
+                      onPriceAlert={({
+                        price,
+                        direction,
+                        last,
+                        source,
+                        name,
+                      }) =>
+                        pushNotification({
+                          kind: "warning",
+                          title:
+                            source === "script"
+                              ? uiText("脚本提醒触发", "Script alert triggered")
+                              : uiText("价格提醒触发", "Price alert triggered"),
+                          message: chineseUi
+                            ? `${name ? `${name}：` : ""}${symbol} 已${direction === "above" ? "上破" : direction === "below" ? "下破" : "穿越"} ${fmtPrice(price)}，最新价 ${fmtPrice(last)}。`
+                            : `${name ? `${name}: ` : ""}${symbol} ${direction === "above" ? "crossed above" : direction === "below" ? "crossed below" : "crossed"} ${fmtPrice(price)}. Last price ${fmtPrice(last)}.`,
+                        })
+                      }
+                      onCreateChartAlert={({ id, definition }) => {
+                        void saveChartAlert({
+                          id,
+                          workspaceId: "main-chart",
+                          status: "active",
+                          definition,
+                        }).catch((error) => {
+                          logger.warn("failed to persist chart alert", {
+                            error:
+                              error instanceof Error
+                                ? error.message
+                                : String(error),
+                            symbol,
+                          });
+                          pushNotification({
+                            kind: "warning",
+                            title: uiText(
+                              "提醒仅当前会话有效",
+                              "Alert is available only in this session",
+                            ),
+                            message: uiText(
+                              "该提醒未能保存到提醒中心。",
+                              "The alert could not be saved to Alert center.",
+                            ),
+                          });
+                        });
+                      }}
+                      onDeletePriceAlert={({ id }) => {
+                        void deleteChartAlert("main-chart", id).catch(
+                          () => undefined,
+                        );
+                      }}
+                    />
+                  </ErrorBoundary>
+                  {symbolSyncStatus[symbol] &&
+                    symbolSyncStatus[symbol] !== "已同步" && (
+                      <div className="kline-sync-badge">
+                        {symbolSyncStatus[symbol]}
+                      </div>
+                    )}
+                  {marketCandleLoadError?.symbol === symbol &&
+                    marketCandleLoadError.bar === bar && (
+                      <div
+                        className="chart-candle-load-error"
+                        role="alert"
+                        title={marketCandleLoadError.message}
+                      >
+                        <strong>{t("chart:candleDataUnavailable")}</strong>
+                        <span>{t("chart:candleDataUnavailableHint")}</span>
+                        <button type="button" onClick={retryMarketCandles}>
+                          <RefreshCw size={13} />
+                          {t("common:retry")}
+                        </button>
+                      </div>
+                    )}
+                  {historyLoading && (
+                    <div className="kline-history-badge">
+                      {t("chart:loadingEarlier")}
+                    </div>
+                  )}
+                  <div
+                    className="chart-resize-handle chart-resize-handle-right"
+                    role="separator"
+                    aria-label={uiText("调整 K 线图宽度", "Resize chart width")}
+                    aria-orientation="vertical"
+                    tabIndex={0}
+                    title={uiText(
+                      "拖拽调整 K 线图宽度，双击恢复默认",
+                      "Drag to resize chart width; double-click to restore the default",
+                    )}
+                    onPointerDown={(event) => startChartResize("width", event)}
+                    onPointerMove={moveChartResize}
+                    onPointerUp={finishChartResize}
+                    onPointerCancel={finishChartResize}
+                    onDoubleClick={() => resetChartResize("width")}
+                    onKeyDown={(event) => {
+                      if (
+                        event.key !== "ArrowLeft" &&
+                        event.key !== "ArrowRight"
+                      )
+                        return;
+                      event.preventDefault();
+                      nudgeChartResize(
+                        "width",
+                        event.key === "ArrowRight" ? 12 : -12,
+                      );
+                    }}
+                  />
+                  <div
+                    className="chart-resize-handle chart-resize-handle-bottom"
+                    role="separator"
+                    aria-label={uiText(
+                      "调整 K 线图高度",
+                      "Resize chart height",
+                    )}
+                    aria-orientation="horizontal"
+                    tabIndex={0}
+                    title={uiText(
+                      "拖拽调整 K 线图高度，双击恢复默认",
+                      "Drag to resize chart height; double-click to restore the default",
+                    )}
+                    onPointerDown={(event) => startChartResize("height", event)}
+                    onPointerMove={moveChartResize}
+                    onPointerUp={finishChartResize}
+                    onPointerCancel={finishChartResize}
+                    onDoubleClick={() => resetChartResize("height")}
+                    onKeyDown={(event) => {
+                      if (event.key !== "ArrowUp" && event.key !== "ArrowDown")
+                        return;
+                      event.preventDefault();
+                      nudgeChartResize(
+                        "height",
+                        event.key === "ArrowDown" ? 12 : -12,
+                      );
+                    }}
+                  />
+                </div>
+                {chartPresentation === "table" && (
+                  <HotChartDataTable
+                    symbol={symbol}
+                    timeframe={bar}
+                    orderLines={chartOrderLines}
+                    fills={chartFillMarkers}
+                    opportunities={chartTradeOpportunities}
+                  />
+                )}
+              </div>
+              <HotBottomPanel
+                activeTab={activeTab}
+                setActiveTab={setActiveTab}
+                flattenPositionsTargetRef={flattenPositionsTargetRef}
+                cancelOrdersTargetRef={cancelOrdersTargetRef}
+                account={account}
+                snapshot={visiblePrivateSnapshot}
+                episodes={positionEpisodes}
+                episodesStatus={episodesStatus}
+                historicalOrders={historicalOrders}
+                historicalOrdersStatus={historicalOrdersStatus}
+                historicalFills={historicalFills}
+                historicalFillsStatus={historicalFillsStatus}
+                algoOrders={algoOrders}
+                algoOrdersPendingReadComplete={algoOrdersPendingReadComplete}
+                algoOrdersStatus={algoOrdersStatus}
+                accountBills={accountBills}
+                accountBillsStatus={accountBillsStatus}
+                tradeAuditEvents={tradeAuditEvents}
+                tradeAuditStatus={tradeAuditStatus}
+                accountBillsArchiveStatus={accountBillsArchiveStatus}
+                accountBillsArchiveBusy={accountBillsArchiveBusy}
+                accountBillsArchiveImporting={accountBillsArchiveImporting}
+                assetMap={assetMap}
+                marketAssets={marketAssets}
+                onAccountBillsArchive={requestAccountBillsArchive}
+                onImportAccountBillsArchive={importPreviousAccountBillsArchive}
+                privateStatus={privateStatus}
+                tradeEnvironment={effectiveTradeEnvironment}
+                onNotify={pushNotification}
+                onRefreshAccount={refreshPrivateSnapshot}
+                onRefreshAlgoOrders={() =>
+                  setAlgoOrdersVersion((version) => version + 1)
+                }
+                onRemoveAlgoOrder={removeAlgoOrderLocally}
+                onDismissPendingOrder={dismissPendingOrderLocally}
+                onAmendPendingOrder={requestPendingOrderAmend}
+              />
+            </section>
+
+            <aside className="market-depth">
+              <div className="depth-header">
+                <strong>{t("trading:orderBook")}</strong>
                 <button
                   type="button"
-                  onClick={() => setChartPresentation((current) => current === "chart" ? "table" : "chart")}
-                  aria-pressed={chartPresentation === "table"}
-                  title={chartPresentation === "chart"
-                    ? uiText("切换为 K 线、指标与交易标签数据表", "Switch to the candle, indicator, and trade-label data table")
-                    : uiText("返回 K 线图表", "Return to the chart")}
+                  className="depth-expand"
+                  onClick={() => setDepthModalOpen(true)}
+                  title={uiText("展开完整盘口", "Open the full order book")}
+                  aria-label={uiText(
+                    "展开完整盘口",
+                    "Open the full order book",
+                  )}
                 >
-                  <TableProperties size={15} /> {chartPresentation === "chart" ? t("chart:tableView") : t("chart:chart")}
+                  <Maximize2 size={14} />
                 </button>
               </div>
-            </div>
-            <div className="chart-stage">
-              <div className={clsx("chart-kline-presentation", chartPresentation !== "chart" && "is-hidden")} aria-hidden={chartPresentation !== "chart"}>
-              <ErrorBoundary label={t("chart:chart")}>
-                <HotKlineChart
-                  tradeSources={chartTradeSources}
-                  symbol={symbol}
-                  timeframe={bar}
-                  orderLines={chartOrderLines}
-                  fills={chartFillMarkers}
-                  positions={visiblePrivateSnapshot?.positions ?? []}
-                  algoOrders={algoOrders}
-                  instrument={currentInstrument}
-                  onOrderLineEdit={(edit) => setPendingOrderLineEdit({
-                    ...edit,
-                    price: Number(normalizeChartEditPrice(edit.price) || edit.price),
-                    triggerPrice: edit.triggerPrice === undefined
-                      ? undefined
-                      : Number(normalizeChartEditPrice(edit.triggerPrice) || edit.triggerPrice),
-                    orderPrice: edit.orderPrice === undefined || edit.orderPrice === null
-                      ? edit.orderPrice
-                      : Number(normalizeChartEditPrice(edit.orderPrice) || edit.orderPrice)
-                  })}
-                  onOrderLineCancel={requestOrderLineCancel}
-                  onPositionLineTradeIntent={(intent) => setPendingPositionLineIntent({
-                    ...intent,
-                    targetPrice: Number(normalizeChartEditPrice(intent.targetPrice) || intent.targetPrice)
-                  })}
-                  onPositionLineCloseRequest={(intent) => setPendingPositionLineIntent({
-                    ...intent,
-                    kind: "limit_close",
-                    targetPrice: Number(normalizeChartEditPrice(intent.currentPrice) || intent.currentPrice),
-                    currentPrice: Number(normalizeChartEditPrice(intent.currentPrice) || intent.currentPrice)
-                  })}
-                  onChartContextTrade={(intent) => setChartQuickTrade({
-                    ...intent,
-                    price: Number(normalizeChartEditPrice(intent.price) || intent.price)
-                  })}
-                  onRiskRewardTradeIntent={(intent) => setPendingChartRiskRewardIntent({
-                    ...intent,
-                    entryPrice: Number(normalizeChartEditPrice(intent.entryPrice) || intent.entryPrice),
-                    takeProfitPrice: Number(normalizeChartEditPrice(intent.takeProfitPrice) || intent.takeProfitPrice),
-                    stopLossPrice: Number(normalizeChartEditPrice(intent.stopLossPrice) || intent.stopLossPrice)
-                  })}
-                  onNeedMoreHistory={loadMoreHistory}
-                  onPriceAlert={({ price, direction, last, source, name }) =>
-                    pushNotification({
-                      kind: "warning",
-                      title: source === "script" ? uiText("脚本提醒触发", "Script alert triggered") : uiText("价格提醒触发", "Price alert triggered"),
-                      message: chineseUi
-                        ? `${name ? `${name}：` : ""}${symbol} 已${direction === "above" ? "上破" : direction === "below" ? "下破" : "穿越"} ${fmtPrice(price)}，最新价 ${fmtPrice(last)}。`
-                        : `${name ? `${name}: ` : ""}${symbol} ${direction === "above" ? "crossed above" : direction === "below" ? "crossed below" : "crossed"} ${fmtPrice(price)}. Last price ${fmtPrice(last)}.`
-                    })
-                  }
-                  onCreateChartAlert={({ id, definition }) => {
-                    void saveChartAlert({
-                      id,
-                      workspaceId: "main-chart",
-                      status: "active",
-                      definition,
-                    }).catch((error) => {
-                      logger.warn("failed to persist chart alert", { error: error instanceof Error ? error.message : String(error), symbol });
-                      pushNotification({
-                        kind: "warning",
-                        title: uiText("提醒仅当前会话有效", "Alert is available only in this session"),
-                        message: uiText("该提醒未能保存到提醒中心。", "The alert could not be saved to Alert center.")
-                      });
-                    });
-                  }}
-                  onDeletePriceAlert={({ id }) => { void deleteChartAlert("main-chart", id).catch(() => undefined); }}
-                />
-              </ErrorBoundary>
-              {symbolSyncStatus[symbol] && symbolSyncStatus[symbol] !== "已同步" && (
-                <div className="kline-sync-badge">{symbolSyncStatus[symbol]}</div>
-              )}
-              {marketCandleLoadError?.symbol === symbol && marketCandleLoadError.bar === bar && (
-                <div className="chart-candle-load-error" role="alert" title={marketCandleLoadError.message}>
-                  <strong>{t("chart:candleDataUnavailable")}</strong>
-                  <span>{t("chart:candleDataUnavailableHint")}</span>
-                  <button type="button" onClick={retryMarketCandles}>
-                    <RefreshCw size={13} />
-                    {t("common:retry")}
-                  </button>
-                </div>
-              )}
-              {historyLoading && <div className="kline-history-badge">{t("chart:loadingEarlier")}</div>}
-              <div
-                className="chart-resize-handle chart-resize-handle-right"
-                role="separator"
-                aria-label={uiText("调整 K 线图宽度", "Resize chart width")}
-                aria-orientation="vertical"
-                tabIndex={0}
-                title={uiText("拖拽调整 K 线图宽度，双击恢复默认", "Drag to resize chart width; double-click to restore the default")}
-                onPointerDown={(event) => startChartResize("width", event)}
-                onPointerMove={moveChartResize}
-                onPointerUp={finishChartResize}
-                onPointerCancel={finishChartResize}
-                onDoubleClick={() => resetChartResize("width")}
-                onKeyDown={(event) => {
-                  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-                  event.preventDefault();
-                  nudgeChartResize("width", event.key === "ArrowRight" ? 12 : -12);
-                }}
+              <HotMarketDepth
+                onPriceSelect={(price) =>
+                  setTicketPriceFill({ symbol, price, nonce: Date.now() })
+                }
               />
-              <div
-                className="chart-resize-handle chart-resize-handle-bottom"
-                role="separator"
-                aria-label={uiText("调整 K 线图高度", "Resize chart height")}
-                aria-orientation="horizontal"
-                tabIndex={0}
-                title={uiText("拖拽调整 K 线图高度，双击恢复默认", "Drag to resize chart height; double-click to restore the default")}
-                onPointerDown={(event) => startChartResize("height", event)}
-                onPointerMove={moveChartResize}
-                onPointerUp={finishChartResize}
-                onPointerCancel={finishChartResize}
-                onDoubleClick={() => resetChartResize("height")}
-                onKeyDown={(event) => {
-                  if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
-                  event.preventDefault();
-                  nudgeChartResize("height", event.key === "ArrowDown" ? 12 : -12);
-                }}
-              />
-              </div>
-              {chartPresentation === "table" && (
-                <HotChartDataTable
-                  symbol={symbol}
-                  timeframe={bar}
-                  orderLines={chartOrderLines}
-                  fills={chartFillMarkers}
-                  opportunities={chartTradeOpportunities}
-                />
-              )}
-            </div>
-            <HotBottomPanel
-              activeTab={activeTab}
-              setActiveTab={setActiveTab}
-              flattenPositionsTargetRef={flattenPositionsTargetRef}
-              cancelOrdersTargetRef={cancelOrdersTargetRef}
-              account={account}
-              snapshot={visiblePrivateSnapshot}
-              episodes={positionEpisodes}
-              episodesStatus={episodesStatus}
-              historicalOrders={historicalOrders}
-              historicalOrdersStatus={historicalOrdersStatus}
-              historicalFills={historicalFills}
-              historicalFillsStatus={historicalFillsStatus}
-              algoOrders={algoOrders}
-              algoOrdersStatus={algoOrdersStatus}
-              accountBills={accountBills}
-              accountBillsStatus={accountBillsStatus}
-              tradeAuditEvents={tradeAuditEvents}
-              tradeAuditStatus={tradeAuditStatus}
-              accountBillsArchiveStatus={accountBillsArchiveStatus}
-              accountBillsArchiveBusy={accountBillsArchiveBusy}
-              accountBillsArchiveImporting={accountBillsArchiveImporting}
-              assetMap={assetMap}
-              marketAssets={marketAssets}
-              onAccountBillsArchive={requestAccountBillsArchive}
-              onImportAccountBillsArchive={importPreviousAccountBillsArchive}
-              privateStatus={privateStatus}
-              tradeEnvironment={effectiveTradeEnvironment}
-              onNotify={pushNotification}
-              onRefreshAccount={refreshPrivateSnapshot}
-              onRefreshAlgoOrders={() => setAlgoOrdersVersion((version) => version + 1)}
-              onRemoveAlgoOrder={removeAlgoOrderLocally}
-              onDismissPendingOrder={dismissPendingOrderLocally}
-              onAmendPendingOrder={requestPendingOrderAmend}
-            />
-          </section>
-
-          <aside className="market-depth">
-            <div className="depth-header">
-              <strong>{t("trading:orderBook")}</strong>
-              <button type="button" className="depth-expand" onClick={() => setDepthModalOpen(true)} title={uiText("展开完整盘口", "Open the full order book")} aria-label={uiText("展开完整盘口", "Open the full order book")}>
-                <Maximize2 size={14} />
-              </button>
-            </div>
-            <HotMarketDepth onPriceSelect={(price) => setTicketPriceFill({ symbol, price, nonce: Date.now() })} />
-          </aside>
+            </aside>
 
           <aside className="ticket">
             <HotOrderTicket
@@ -10539,8 +10719,25 @@ function findChartOrderLinePosition(
 
 function isActiveAlgoOrder(order: OkxAlgoOrder) {
   const state = String(order.state || "").toLowerCase();
-  if (["canceled", "cancelled", "effective", "order_failed", "failed", "filled", "triggered"].includes(state)) return false;
-  return order.sourceEndpoint === "orders-algo-pending" || state === "live" || state === "partially_effective";
+  if (
+    [
+      "canceled",
+      "cancelled",
+      "effective",
+      "order_failed",
+      "failed",
+      "filled",
+      "triggered",
+    ].includes(state)
+  )
+    return false;
+  if (order.sourceEndpoint === "orders-algo-history") return false;
+  return (
+    order.sourceEndpoint === "orders-algo-pending" ||
+    order.sourceEndpoint === "private-snapshot" ||
+    state === "live" ||
+    state === "partially_effective"
+  );
 }
 
 function isChartAlgoOrderLine(line: ChartOrderLine) {
@@ -13360,6 +13557,7 @@ function BottomPanel({
   historicalFills,
   historicalFillsStatus,
   algoOrders,
+  algoOrdersPendingReadComplete,
   algoOrdersStatus,
   accountBills,
   accountBillsStatus,
@@ -13395,6 +13593,7 @@ function BottomPanel({
   historicalFills: HistoricalFillSummary[];
   historicalFillsStatus: string;
   algoOrders: OkxAlgoOrder[];
+  algoOrdersPendingReadComplete: boolean;
   algoOrdersStatus: string;
   accountBills: AccountBillSummary[];
   accountBillsStatus: string;
@@ -13436,14 +13635,56 @@ function BottomPanel({
         : items.filter((item) => item.instId === instrumentFilter),
     [instrumentFilter]
   );
-  const mergedAlgoOrders = useMemo(
-    () => mergePendingAlgoOrders(algoOrders, snapshot?.orders ?? [], account?.id ?? "", tradeEnvironment),
-    [account?.id, algoOrders, snapshot?.orders, tradeEnvironment]
+  const algoOrdersReadIsAuthoritative =
+    algoOrdersPendingReadComplete &&
+    (algoOrdersStatus === "已同步" || algoOrdersStatus === "暂无策略委托");
+  const mergedAlgoOrders = useMemo(() => {
+    const snapshotOrders = snapshot?.orders ?? [];
+    if (!algoOrdersReadIsAuthoritative) {
+      return mergePendingAlgoOrders(
+        algoOrders,
+        snapshotOrders,
+        account?.id ?? "",
+        tradeEnvironment,
+      );
+    }
+    // A successful pending-order read is authoritative for current algo orders.
+    // Keep only a very recent local projection while OKX propagates a new submit.
+    const recentCutoff = Date.now() - 15_000;
+    const recentSnapshotOrders = snapshotOrders.filter((order) => {
+      if (!order.isAlgo && !order.algoId && !order.algoClOrdId) return false;
+      const timestamp = Number(order.uTime || order.cTime);
+      return Number.isFinite(timestamp) && timestamp >= recentCutoff;
+    });
+    return mergePendingAlgoOrders(
+      algoOrders,
+      recentSnapshotOrders,
+      account?.id ?? "",
+      tradeEnvironment,
+    );
+  }, [
+    account?.id,
+    algoOrders,
+    algoOrdersReadIsAuthoritative,
+    snapshot?.orders,
+    tradeEnvironment,
+  ]);
+  const filteredHistoricalFills = useMemo(
+    () => filterInstruments(historicalFills),
+    [filterInstruments, historicalFills],
   );
-  const filteredHistoricalFills = useMemo(() => filterInstruments(historicalFills), [filterInstruments, historicalFills]);
-  const filteredEpisodes = useMemo(() => filterInstruments(episodes), [episodes, filterInstruments]);
-  const filteredAccountBills = useMemo(() => filterInstruments(accountBills), [accountBills, filterInstruments]);
-  const filteredTradeAuditEvents = useMemo(() => filterInstruments(tradeAuditEvents), [filterInstruments, tradeAuditEvents]);
+  const filteredEpisodes = useMemo(
+    () => filterInstruments(episodes),
+    [episodes, filterInstruments],
+  );
+  const filteredAccountBills = useMemo(
+    () => filterInstruments(accountBills),
+    [accountBills, filterInstruments],
+  );
+  const filteredTradeAuditEvents = useMemo(
+    () => filterInstruments(tradeAuditEvents),
+    [filterInstruments, tradeAuditEvents],
+  );
   // Every instrument present in the loaded data, so the filter can only offer
   // choices that actually match something.
   const filterOptions = useMemo(() => {
@@ -14005,8 +14246,19 @@ function BottomPanel({
             {filteredEpisodes.map((episode) => (
               <div className="episode-row" key={episode.id}>
                 <div className="table-row episodes">
-                  <SymbolLabel symbol={episode.instId} marketAssets={marketAssets} secondary={episode.id} />
-                  <span className={clsx("cell-tone", toneBySide(undefined, episode.episodeSide))}>{formatPositionSide(episode.episodeSide, t)}</span>
+                  <SymbolLabel
+                    symbol={episode.instId}
+                    marketAssets={marketAssets}
+                    secondary={episode.id}
+                  />
+                  <span
+                    className={clsx(
+                      "cell-tone",
+                      toneBySide(undefined, episode.episodeSide),
+                    )}
+                  >
+                    {formatPositionSide(episode.episodeSide, t)}
+                  </span>
                   <span><b className={clsx("status-pill", toneByState(episode.status))}>{formatEpisodeStatus(episode.status, t)}</b></span>
                   <span>{formatDateTime(episode.openTime)}</span>
                   <span>{formatDateTime(episode.closeTime)}</span>
