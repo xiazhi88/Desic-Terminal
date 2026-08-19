@@ -768,7 +768,9 @@ pub(crate) async fn ai_skill_install_git(
 
     // 优先系统 git（支持私有仓库与 SSH 地址）。用户未安装 git 时自动
     // 降级为托管平台的源码包接口，GitHub/GitLab 公开仓库无需 git 即可安装。
-    match Command::new("git")
+    let mut command = Command::new("git");
+    hide_windows_command_window(&mut command);
+    match command
         .args(["clone", "--depth", "1", url])
         .arg(&target)
         .output()
@@ -1373,13 +1375,20 @@ fn ai_cli_candidates(program: &str) -> Vec<PathBuf> {
 }
 
 #[cfg(windows)]
-fn hide_ai_cli_command_window(command: &mut tokio::process::Command) {
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+
+#[cfg(windows)]
+fn hide_windows_command_window(command: &mut tokio::process::Command) {
     command.creation_flags(CREATE_NO_WINDOW);
 }
 
 #[cfg(not(windows))]
-fn hide_ai_cli_command_window(_command: &mut tokio::process::Command) {}
+fn hide_windows_command_window(_command: &mut tokio::process::Command) {}
+
+#[cfg(windows)]
+fn hide_windows_std_command_window(command: &mut std::process::Command) {
+    command.creation_flags(CREATE_NO_WINDOW);
+}
 
 async fn ai_cli_output(program: &std::path::Path, args: &[&str]) -> Option<std::process::Output> {
     let mut command = if cfg!(windows) {
@@ -1389,7 +1398,7 @@ async fn ai_cli_output(program: &std::path::Path, args: &[&str]) -> Option<std::
     } else {
         tokio::process::Command::new(program)
     };
-    hide_ai_cli_command_window(&mut command);
+    hide_windows_command_window(&mut command);
     command.args(args).kill_on_drop(true);
     tokio::time::timeout(std::time::Duration::from_secs(8), command.output())
         .await
@@ -2505,7 +2514,9 @@ fn harden_existing_sensitive_config_files() {
 #[cfg(windows)]
 pub(crate) fn harden_sensitive_file_permissions(path: &PathBuf) -> Result<(), String> {
     let user = std::env::var("USERNAME").map_err(|err| err.to_string())?;
-    let output = std::process::Command::new("icacls")
+    let mut command = std::process::Command::new("icacls");
+    hide_windows_std_command_window(&mut command);
+    let output = command
         .arg(path)
         .arg("/inheritance:r")
         .arg("/grant:r")

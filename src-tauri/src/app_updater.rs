@@ -1,4 +1,8 @@
 use super::*;
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+
 use aes_gcm::{
     aead::{AeadInPlace, KeyInit},
     Aes256Gcm, Nonce,
@@ -147,7 +151,17 @@ fn record_update_failure(
     store_state(app, runtime, failed)
 }
 
+#[cfg(windows)]
+fn hide_command_window(command: &mut StdCommand) {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NO_WINDOW);
+}
+
+#[cfg(not(windows))]
+fn hide_command_window(_command: &mut StdCommand) {}
+
 fn command_output(command: &mut StdCommand, label: &str) -> Result<String, String> {
+    hide_command_window(command);
     let output = command
         .output()
         .map_err(|error| format!("{label} could not start: {error}"))?;
@@ -200,7 +214,9 @@ fn check_source_update_blocking(current: String) -> Result<AppUpdateState, Strin
     )?
     .parse::<u32>()
     .unwrap_or(0);
-    let ancestor = StdCommand::new("git")
+    let mut ancestor_command = StdCommand::new("git");
+    hide_command_window(&mut ancestor_command);
+    let ancestor = ancestor_command
         .arg("-C")
         .arg(&root)
         .args(["merge-base", "--is-ancestor", "HEAD", "origin/main"])
@@ -717,7 +733,9 @@ pub(crate) fn app_update_restart_source(
             current.to_string_lossy().replace('\'', "''"),
             current.to_string_lossy().replace('\'', "''")
         );
-        StdCommand::new("powershell")
+        let mut command = StdCommand::new("powershell");
+        hide_command_window(&mut command);
+        command
             .args(["-NoProfile", "-NonInteractive", "-Command", &script])
             .stdin(StdStdio::null())
             .stdout(StdStdio::null())

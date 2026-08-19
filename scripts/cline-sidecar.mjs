@@ -17,6 +17,7 @@ import {
   registerDesicClaudeCliHandler
 } from "./claude-cli-adapter.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
+import { installWindowsHiddenChildProcessPolicy } from "./windows-child-process.mjs";
 import {
   PROFILE_MULTI_AGENT_STALL_TIMEOUT_MS,
   createProfileAgentStallWatchdog,
@@ -29,6 +30,7 @@ import {
 } from "./cline-profile-agents.mjs";
 import { annotateToolEvent, buildToolPolicies, createBeforeToolHook, describeToolPolicy, isSkillToolEnabled, normalizePermissionMode, toCanonicalToolName, toProviderToolName, toProviderToolReferences } from "./cline-tool-policy.mjs";
 
+installWindowsHiddenChildProcessPolicy();
 setMaxListeners(0);
 
 let activeSessionId = "unknown";
