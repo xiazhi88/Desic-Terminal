@@ -9,6 +9,12 @@
   <p>Market, charts, execution, intelligence, AI assistant, automation and systematic research share one real-time state and audit context.</p>
 
   <p>
+    <strong><a href="https://desicterminal.cn/">Official Website</a></strong>
+    · <a href="https://desicterminal.cn/#download">Download</a>
+    · <a href="https://github.com/xiazhi88/Desic-Terminal/releases">Releases</a>
+  </p>
+
+  <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
     <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" />
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
@@ -27,7 +33,7 @@
   </p>
 </div>
 
-![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)
+[![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)](https://desicterminal.cn/)
 
 ## Installation
 
@@ -59,10 +65,10 @@ See [GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases) for r
 | Workspace | Capabilities |
 | --- | --- |
 | **Live Trading** | OKX Public / Business / Private WebSocket, depth and trades, ticket, limit/market/algo orders, TP/SL, OCO, amend/cancel, position management |
-| **Pro Charts** | Multi-timeframe candles, 20+ indicators, layers and drawings, quick trading on chart, detached multi-chart windows, data table and CSV export |
+| **Pro Charts** | Multi-timeframe candles, 24 indicators, layers and drawings, quick trading on chart, detached multi-chart windows, data table and CSV export |
 | **AI Assistant** | Streaming reasoning, allowlisted tools, account and market evidence, trade opportunities, chart actions, safe DSL custom indicators, many providers and official CLI channels |
 | **AI Automation** | Profiles, typed wake conditions, bounded auto-execution, run audit, multi-agent orchestration, position reviews, Skill versioning and optimization suggestions |
-| **Systematic Strategy** | Zero-setup Python, template strategies, 129k-bar backtests, parameter tuning workbench, live Profiles and signal history |
+| **Systematic Strategy** | Zero-setup Python, template strategies, backtests over up to 366 days of 1-minute data, parameter tuning workbench, live Profiles and signal history |
 | **Market Intelligence** | News, event clustering, coin sentiment, economic calendar, OI, taker flows, crowding, funding, basis, Smart Money and system stress |
 | **Notifications & Recovery** | In-app notifications, Feishu bot, persisted execution state, unknown-outcome reconciliation, idempotent submission and startup recovery |
 

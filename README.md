@@ -9,6 +9,12 @@
   <p>行情、图表、交易、情报、AI 助手、自动化与策略研究共享同一份实时状态与审计上下文。</p>
 
   <p>
+    <strong><a href="https://desicterminal.cn/">官方网站</a></strong>
+    · <a href="https://desicterminal.cn/#download">官网下载</a>
+    · <a href="https://github.com/xiazhi88/Desic-Terminal/releases">版本发布</a>
+  </p>
+
+  <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
     <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" />
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
@@ -27,7 +33,7 @@
   </p>
 </div>
 
-![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)
+[![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)](https://desicterminal.cn/)
 
 ## 安装
 
@@ -59,10 +65,10 @@
 | 工作域 | 能力 |
 | --- | --- |
 | **实时交易** | OKX Public / Business / Private WebSocket、深度与逐笔、交易票、限价/市价/计划委托、止盈止损、OCO、改单撤单、持仓管理 |
-| **专业图表** | 多周期 K 线、20+ 主副图指标、图层与绘图、图表快速交易、多图表独立窗口、K 线数据表与 CSV 导出 |
+| **专业图表** | 多周期 K 线、24 个主副图指标、图层与绘图、图表快速交易、多图表独立窗口、K 线数据表与 CSV 导出 |
 | **AI 助手** | 流式推理、白名单工具、账户与市场证据读取、交易机会、图表动作、安全 DSL 自定义指标、多供应商与官方 CLI 通道 |
 | **AI 自动化** | Profile、类型化唤醒条件、受限自动执行、运行审计、多 Agent 编排、仓位复盘、Skill 版本与优化建议 |
-| **系统化策略** | 免安装 Python、模板策略、129k-bar 级回测、参数调优工作台、实盘 Profile 与信号历史 |
+| **系统化策略** | 免安装 Python、模板策略、最长 366 天 1 分钟级回测、参数调优工作台、实盘 Profile 与信号历史 |
 | **市场情报** | 新闻、事件聚类、币种情绪、经济日历、OI、主动流、拥挤度、资金费率、基差、Smart Money 与系统压力 |
 | **通知与恢复** | 应用内通知、飞书机器人、持久化执行状态、未知结果对账、幂等提交与启动恢复 |
 
