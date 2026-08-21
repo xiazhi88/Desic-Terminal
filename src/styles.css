@@ -1610,7 +1610,25 @@ button {
   font-weight: 550;
 }
 
+.symbol-label-selectable {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.symbol-label-selectable:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+  border-radius: 3px;
+}
+
 @media (hover: hover) and (pointer: fine) {
+  .symbol-label-selectable:hover .symbol-label-copy strong {
+    color: var(--accent);
+  }
 }
 
 .symbol-quote {

@@ -5,6 +5,7 @@ type MarketHotState = {
   ticker: Ticker | null;
   watchTickers: Record<string, Ticker>;
   candles: Candle[];
+  candleSeriesKey: string | null;
   book: OrderBook | null;
   trades: Trade[];
   fundingRate: FundingRate | null;
@@ -16,6 +17,7 @@ const initialState: MarketHotState = {
   ticker: null,
   watchTickers: {},
   candles: [],
+  candleSeriesKey: null,
   book: null,
   trades: [],
   fundingRate: null,
@@ -28,7 +30,7 @@ export const useMarketHotStore = create<MarketHotState>(() => initialState);
 let pendingTicker: Ticker | null | undefined;
 let pendingBook: OrderBook | null | undefined;
 let pendingFundingRate: FundingRate | null | undefined;
-let pendingCandle: Candle | undefined;
+let pendingCandle: { candle: Candle; seriesKey: string | null } | undefined;
 let pendingWatchTickers: Record<string, Ticker> = {};
 let pendingTrades: Trade[] = [];
 let pendingPublicStatuses: Record<string, PublicWsStatus> = {};
@@ -103,7 +105,9 @@ export function flushMarketFrame() {
     if (canonicalTicker) watchTickers[canonicalTicker.instId] = canonicalTicker;
     next.watchTickers = watchTickers;
   }
-  if (pendingCandle) next.candles = mergeMarketCandles(current.candles, [pendingCandle]);
+  if (pendingCandle && pendingCandle.seriesKey === current.candleSeriesKey) {
+    next.candles = mergeMarketCandles(current.candles, [pendingCandle.candle]);
+  }
   if (pendingTrades.length > 0) next.trades = mergedTrades;
   if (Object.keys(pendingPublicStatuses).length > 0) next.publicStreamStatuses = { ...current.publicStreamStatuses, ...pendingPublicStatuses };
   if (pendingBusinessLastMessageAt !== undefined) next.businessLastMessageAt = pendingBusinessLastMessageAt;
@@ -154,8 +158,8 @@ export function queueFundingRate(fundingRate: FundingRate) {
   schedulePublish();
 }
 
-export function queueCandle(candle: Candle) {
-  pendingCandle = candle;
+export function queueCandle(candle: Candle, seriesKey: string | null = null) {
+  pendingCandle = { candle, seriesKey };
   schedulePublish();
 }
 
@@ -199,8 +203,8 @@ export function hydrateMarketHotState(next: Partial<MarketHotState>) {
   });
 }
 
-export function replaceMarketCandles(candles: Candle[]) {
-  useMarketHotStore.setState({ candles });
+export function replaceMarketCandles(candles: Candle[], seriesKey: string | null = null) {
+  useMarketHotStore.setState({ candles, candleSeriesKey: seriesKey });
 }
 
 export function mergeMarketCandles(current: Candle[], incoming: Candle[]) {
@@ -262,8 +266,11 @@ export function applyLivePriceToLatestCandle(candles: Candle[], rawPrice: string
   return [...candles.slice(0, -1), next];
 }
 
-export function mergeIntoMarketCandles(incoming: Candle[]) {
-  useMarketHotStore.setState((current) => ({ candles: mergeMarketCandles(current.candles, incoming) }));
+export function mergeIntoMarketCandles(incoming: Candle[], seriesKey: string | null = null) {
+  useMarketHotStore.setState((current) => {
+    if (seriesKey !== current.candleSeriesKey) return current;
+    return { candles: mergeMarketCandles(current.candles, incoming) };
+  });
 }
 
 export function getMarketHotState() {

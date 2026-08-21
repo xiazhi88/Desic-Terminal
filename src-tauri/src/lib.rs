@@ -691,6 +691,8 @@ impl LocalCandleReadFlight {
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct HistoricalCandlesPage {
+    inst_id: String,
+    bar: String,
     candles: Vec<Candle>,
     earliest_time: Option<i64>,
     exhausted: bool,
@@ -4576,13 +4578,13 @@ async fn historical_candles_before(
     )
     .await?;
     if candles_cover_window(&local.candles, start_open, end_open, step) {
-        return Ok(historical_page(local.candles, false, "local"));
+        return Ok(historical_page(&inst_id, &bar, local.candles, false, "local"));
     }
     if local
         .exhausted_before_open
         .is_some_and(|oldest_open| end_open < oldest_open)
     {
-        return Ok(historical_page(local.candles, true, "local"));
+        return Ok(historical_page(&inst_id, &bar, local.candles, true, "local"));
     }
 
     let fetched = fetch_history_candles_page(&inst_id, &bar, start_open, end_open).await?;
@@ -4604,8 +4606,15 @@ async fn historical_candles_before(
         .await?;
     }
 
-    let refreshed =
-        read_historical_local_page(app, inst_id, bar, start_open, end_open, bounded_limit).await?;
+    let refreshed = read_historical_local_page(
+        app,
+        inst_id.clone(),
+        bar.clone(),
+        start_open,
+        end_open,
+        bounded_limit,
+    )
+    .await?;
     let source = if local.candles.is_empty() {
         if fetched_count == 0 {
             "local"
@@ -4618,6 +4627,8 @@ async fn historical_candles_before(
         "mixed"
     };
     Ok(historical_page(
+        &inst_id,
+        &bar,
         refreshed.candles,
         fetched_exhausted
             || refreshed
@@ -21123,8 +21134,16 @@ async fn write_historical_page(
     .map_err(|err| format!("历史 K 线本地写入任务失败: {}", err))?
 }
 
-fn historical_page(candles: Vec<Candle>, exhausted: bool, source: &str) -> HistoricalCandlesPage {
+fn historical_page(
+    inst_id: &str,
+    bar: &str,
+    candles: Vec<Candle>,
+    exhausted: bool,
+    source: &str,
+) -> HistoricalCandlesPage {
     HistoricalCandlesPage {
+        inst_id: inst_id.to_string(),
+        bar: bar.to_string(),
         earliest_time: candles.first().map(|candle| candle.time),
         candles,
         exhausted,

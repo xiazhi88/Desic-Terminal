@@ -423,6 +423,11 @@ export function DetachedChartPane({
     try {
       const page = await fetchHistoricalCandlesBefore(symbol, timeframe, firstTime, 300);
       if (seriesEpoch !== seriesEpochRef.current) return { status: "deferred" };
+      if (page.instId !== symbol || page.bar !== timeframe) {
+        const message = `历史 K 线响应身份不匹配：请求 ${symbol} ${timeframe}，收到 ${page.instId} ${page.bar}`;
+        logger.error(message, { paneId, symbol, timeframe, responseSymbol: page.instId, responseBar: page.bar, firstTime });
+        return { status: "failed", message };
+      }
       if (page.candles.length > 0) setCandles((current) => mergeCandles(page.candles, current));
       if (page.exhausted) {
         exhaustedHistoryRef.current.add(key);

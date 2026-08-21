@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import path from "node:path";
 
 const baseUrl = process.env.DESIC_PREVIEW_URL || "http://127.0.0.1:1420/terminal-preview";
-const accountPreviewUrl = process.env.DESIC_ACCOUNT_PREVIEW_URL || "http://127.0.0.1:1420/terminal-preview?accounts=demo";
+const accountPreviewUrl = process.env.DESIC_ACCOUNT_PREVIEW_URL || "http://127.0.0.1:1420/terminal-preview?accounts=demo&pendingOrder=1";
 const notificationSeed = [
   { id: "smoke-trade", kind: "trade", title: "委托已成交", message: "BTC-USDT-SWAP 做多成交 0.01 张", ageMs: 0 },
   { id: "smoke-error", kind: "error", title: "前端代码异常", message: "smoke searchable error item", ageMs: 1000 },
@@ -421,6 +421,36 @@ async function seedNotificationHistory(page) {
 async function seedMarketAssets(page) {
   await page.route("**/cache/market-assets/swap-instruments.json", async (route) => {
     await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(marketAssetsSeed) });
+  });
+  await page.route("https://openapi.okx.com/api/v5/**", async (route) => {
+    const url = new URL(route.request().url());
+    const instId = url.searchParams.get("instId") || "BTC-USDT-SWAP";
+    const price = instId.startsWith("ETH") ? "2400" : instId.startsWith("BTC") ? "65000" : "100";
+    const now = String(Date.now());
+    if (url.pathname === "/api/v5/public/time") {
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ code: "0", data: [{ ts: now }] }) });
+      return;
+    }
+    if (url.pathname === "/api/v5/market/ticker") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({
+          code: "0",
+          data: [{ instId, last: price, lastSz: "0.01", askPx: price, askSz: "1", bidPx: price, bidSz: "1", open24h: price, high24h: price, low24h: price, vol24h: "1", volCcy24h: price, ts: now }]
+        })
+      });
+      return;
+    }
+    if (url.pathname === "/api/v5/public/funding-rate") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ code: "0", data: [{ instType: "SWAP", instId, fundingRate: "0.0001", nextFundingRate: "", fundingTime: now, nextFundingTime: String(Number(now) + 28_800_000), method: "current_period", ts: now }] })
+      });
+      return;
+    }
+    await route.fallback();
   });
 }
 
@@ -851,6 +881,7 @@ async function verifyAccountModalWithPreviewAccounts(browser) {
   if (balanceIconState.rows < 1 || balanceIconState.labels !== balanceIconState.rows || balanceIconState.icons !== balanceIconState.rows) {
     throw new Error(`each balance row should display its cached coin icon: ${JSON.stringify(balanceIconState)}`);
   }
+  await verifyBottomPanelSymbolSwitch(page);
   await page.locator(".account-button").click();
   await page.waitForSelector(".modal-shell.account-modal", { timeout: 5_000 });
   const modalLayerState = await page.evaluate(() => {
@@ -1436,6 +1467,33 @@ async function verifyWatchlistCollapse(page) {
   if (await page.locator(".market-picker").count()) {
     throw new Error("market picker did not close on Escape");
   }
+}
+
+async function verifyBottomPanelSymbolSwitch(page) {
+  await page.locator(".bottom-tabs button", { hasText: "当前委托" }).click();
+  await page.getByRole("tab", { name: /计划委托/ }).click();
+  const ethButton = page.getByRole("button", { name: "切换到 ETH-USDT-SWAP" });
+  if (await ethButton.count() !== 1) {
+    throw new Error(`current order symbol should expose one ETH switch control, got ${await ethButton.count()}`);
+  }
+  await ethButton.click();
+  await page.waitForFunction(() => {
+    const text = document.querySelector(".ohlc-summary")?.textContent || "";
+    const value = Number(text.match(/最新\s*([\d,.]+)/)?.[1]?.replaceAll(",", ""));
+    return Number.isFinite(value) && value > 100 && value < 10_000;
+  });
+  await page.locator(".bottom-tabs button", { hasText: /^持仓/ }).first().click();
+  const btcButton = page.getByRole("button", { name: "切换到 BTC-USDT-SWAP" });
+  if (await btcButton.count() !== 1) {
+    throw new Error(`position symbol should expose one BTC switch control, got ${await btcButton.count()}`);
+  }
+  await btcButton.focus();
+  await page.keyboard.press("Enter");
+  await page.waitForFunction(() => {
+    const text = document.querySelector(".ohlc-summary")?.textContent || "";
+    const value = Number(text.match(/最新\s*([\d,.]+)/)?.[1]?.replaceAll(",", ""));
+    return Number.isFinite(value) && value > 10_000;
+  });
 }
 
 async function verifyChartSymbolSwitch(page) {

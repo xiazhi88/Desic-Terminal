@@ -136,22 +136,37 @@ export function SymbolLabel({
   symbol,
   marketAssets,
   secondary,
-  className
+  className,
+  onSelect,
+  selectLabel
 }: {
   symbol: string;
   marketAssets?: MarketAssetsSummary | null;
   secondary?: string | null;
   className?: string;
+  onSelect?: (symbol: string) => void;
+  selectLabel?: string;
 }) {
   const asset = marketAssets?.instruments.find((item) => item.instId === symbol);
   const base = asset?.baseCcy || symbolBase(symbol);
-  return (
-    <span className={["symbol-label", className].filter(Boolean).join(" ")}>
-      <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
-      <span className="symbol-label-copy">
-        <strong>{symbol || "--"}</strong>
-        {secondary ? <small>{secondary}</small> : null}
-      </span>
+  const content = <>
+    <SymbolIcon base={base} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
+    <span className="symbol-label-copy">
+      <strong>{symbol || "--"}</strong>
+      {secondary ? <small>{secondary}</small> : null}
     </span>
+  </>;
+  const classes = ["symbol-label", className].filter(Boolean).join(" ");
+  if (!onSelect || !symbol) return <span className={classes}>{content}</span>;
+  return (
+    <button
+      type="button"
+      className={`${classes} symbol-label-selectable`}
+      onClick={() => onSelect(symbol)}
+      title={selectLabel ?? `Switch to ${symbol}`}
+      aria-label={selectLabel ?? `Switch to ${symbol}`}
+    >
+      {content}
+    </button>
   );
 }

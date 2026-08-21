@@ -1256,9 +1256,12 @@ type HotKlineChartProps = Omit<Parameters<typeof KlineChart>[0], "ticker" | "can
   instrument?: OkxInstrumentSummary;
 };
 
+const EMPTY_HOT_CANDLES: Candle[] = [];
+
 function HotKlineChart({ positions, algoOrders, instrument, ...props }: HotKlineChartProps) {
   const { t } = useTranslation(["trading", "chart"]);
-  const candles = useMarketHotStore((state) => state.candles);
+  const seriesKey = `${props.symbol ?? DEFAULT_SYMBOL}\u0000${props.timeframe ?? "30m"}`;
+  const candles = useMarketHotStore((state) => state.candleSeriesKey === seriesKey ? state.candles : EMPTY_HOT_CANDLES);
   const tickerLast = useMarketHotStore((state) => state.ticker?.last ?? "");
   const liveCandles = useMemo(() => applyLivePriceToLatestCandle(candles, tickerLast), [candles, tickerLast]);
   const ticker = tickerLast ? getMarketHotState().ticker : null;
@@ -1267,7 +1270,8 @@ function HotKlineChart({ positions, algoOrders, instrument, ...props }: HotKline
 }
 
 function HotChartDataTable(props: Omit<Parameters<typeof ChartDataTable>[0], "candles">) {
-  const candles = useMarketHotStore((state) => state.candles);
+  const seriesKey = `${props.symbol}\u0000${props.timeframe}`;
+  const candles = useMarketHotStore((state) => state.candleSeriesKey === seriesKey ? state.candles : EMPTY_HOT_CANDLES);
   return <ChartDataTable {...props} candles={candles} />;
 }
 
@@ -2129,11 +2133,16 @@ function TradingTerminal({
       .then((summary) => {
         intelligenceBootstrapRef.current[key] = Date.now();
         const failed = summary.syncStates.filter((item) => item.status === "failed");
-        if (failed.length > 0) {
+        const degraded = summary.syncStates.filter((item) => item.status === "degraded");
+        if (failed.length > 0 || degraded.length > 0) {
           pushNotification({
             kind: "warning",
-            title: uiText("市场情报部分同步失败", "Market intelligence partially synchronized"),
-            message: failed[0]?.error || uiText(`${failed.length} 个采集任务将在后台重试。`, `${failed.length} collection task(s) will retry in the background.`)
+            title: failed.length > 0
+              ? uiText("市场情报部分同步失败", "Market intelligence partially synchronized")
+              : uiText("市场情报部分降级", "Market intelligence partially degraded"),
+            message: failed[0]?.error
+              || degraded[0]?.error
+              || uiText(`${failed.length + degraded.length} 个采集任务将在后台继续处理。`, `${failed.length + degraded.length} collection task(s) will continue in the background.`)
           });
           return;
         }
@@ -2415,13 +2424,13 @@ function TradingTerminal({
 
   useEffect(() => {
     if (!isTauriRuntime()) {
-      replaceMarketCandles(buildTerminalPreviewCandles(symbol, bar));
+      replaceMarketCandles(buildTerminalPreviewCandles(symbol, bar), `${symbol}\u0000${bar}`);
       return;
     }
     if (previewAccounts.length > 0) return;
     let cancelled = false;
     derivedCandleRefreshRef.current = 0;
-    replaceMarketCandles([]);
+    replaceMarketCandles([], `${symbol}\u0000${bar}`);
     setMarketCandleLoadError(null);
     const request = requestMarketCandles(bar);
     void request.promise
@@ -2430,7 +2439,7 @@ function TradingTerminal({
         if (items.length === 0) {
           throw new Error(`No ${bar} candle data returned for ${symbol}`);
         }
-        replaceMarketCandles(items);
+        replaceMarketCandles(items, `${symbol}\u0000${bar}`);
         setMarketCandleLoadError(null);
       })
       .catch((error) => {
@@ -2478,11 +2487,12 @@ function TradingTerminal({
         queueFundingRate(item);
       },
       onCandle: (candle) => {
+        if (symbolRef.current !== symbol) return;
         countRendererEvent(marketEventCountersRef, "candle");
         queueBusinessMessageAt(Date.now());
         const activeBar = barRef.current;
         if (activeBar === "1m") {
-          queueCandle(candle);
+          queueCandle(candle, `${symbol}\u0000${activeBar}`);
           return;
         }
         const requestKey = `${symbol}\u0000${activeBar}`;
@@ -2499,7 +2509,7 @@ function TradingTerminal({
         void request.promise
           .then((items) => {
             if (streamActive && barRef.current === activeBar && items.length > 0) {
-              mergeIntoMarketCandles(items);
+              mergeIntoMarketCandles(items, requestKey);
               setMarketCandleLoadError(null);
             }
           })
@@ -2579,7 +2589,7 @@ function TradingTerminal({
         void request.promise
           .then((items) => {
             if (mounted && items.length > 0) {
-              mergeIntoMarketCandles(items);
+              mergeIntoMarketCandles(items, `${symbol}\u0000${activeBar}`);
               setMarketCandleLoadError(null);
             }
           })
@@ -3654,11 +3664,16 @@ function TradingTerminal({
     const request = (async (): Promise<ChartHistoryLoadOutcome> => {
       try {
         const page = await fetchHistoricalCandlesBefore(requestSymbol, requestBar, firstTime, 300);
+        if (page.instId !== requestSymbol || page.bar !== requestBar) {
+          const message = `历史 K 线响应身份不匹配：请求 ${requestSymbol} ${requestBar}，收到 ${page.instId} ${page.bar}`;
+          logger.error(message, { requestSymbol, requestBar, responseSymbol: page.instId, responseBar: page.bar, firstTime });
+          return { status: "failed", message };
+        }
         logger.info("loaded earlier candles", { symbol: requestSymbol, bar: requestBar, firstTime, count: page.candles.length, exhausted: page.exhausted, source: page.source });
         if (page.candles.length > 0
           && symbolRef.current === requestSymbol
           && barRef.current === requestBar) {
-          mergeIntoMarketCandles(page.candles);
+          mergeIntoMarketCandles(page.candles, historyKey);
         }
         if (page.exhausted) {
           historyExhaustedRef.current.add(historyKey);
@@ -4618,6 +4633,7 @@ function TradingTerminal({
                 onRemoveAlgoOrder={removeAlgoOrderLocally}
                 onDismissPendingOrder={dismissPendingOrderLocally}
                 onAmendPendingOrder={requestPendingOrderAmend}
+                onSelectInstrument={setSymbol}
               />
             </section>
 
@@ -13578,7 +13594,8 @@ function BottomPanel({
   onRefreshAlgoOrders,
   onRemoveAlgoOrder,
   onDismissPendingOrder,
-  onAmendPendingOrder
+  onAmendPendingOrder,
+  onSelectInstrument
 }: {
   activeTab: string;
   setActiveTab: (tab: string) => void;
@@ -13615,6 +13632,7 @@ function BottomPanel({
   onRemoveAlgoOrder: (order: Pick<OkxAlgoOrder, "algoId" | "algoClOrdId" | "instId">) => void;
   onDismissPendingOrder: (order: Pick<OkxPendingOrder, "ordId" | "clOrdId" | "algoId" | "algoClOrdId">) => void;
   onAmendPendingOrder: (order: OkxPendingOrder) => void;
+  onSelectInstrument: (instId: string) => void;
 }) {
   const { t } = useTranslation(["trading", "common"]);
   const [selectedEpisode, setSelectedEpisode] = useState<PositionEpisode | null>(null);
@@ -13623,6 +13641,15 @@ function BottomPanel({
   const [amendingAlgo, setAmendingAlgo] = useState<OkxAlgoOrder | null>(null);
   const [confirmCancelAlgo, setConfirmCancelAlgo] = useState<OkxAlgoOrder | null>(null);
   const [ordersView, setOrdersView] = useState<PendingOrdersView>("limitMarket");
+  const selectInstrument = useCallback((instId: string) => {
+    const normalized = instId.trim().toUpperCase();
+    if (!normalized.endsWith("-SWAP")) return;
+    onSelectInstrument(normalized);
+  }, [onSelectInstrument]);
+  const symbolSelectLabel = useCallback(
+    (instId: string) => t("trading:switchToContract", { symbol: instId }),
+    [t],
+  );
   const [historicalOrdersView, setHistoricalOrdersView] = useState<PendingOrdersView>("limitMarket");
   // These tabs read the whole account, matching positions and open orders. The
   // filter narrows what is already loaded, so switching it never refetches.
@@ -13822,7 +13849,7 @@ function BottomPanel({
               const margin = position.imr || position.margin;
               return (
                 <div className="table-row positions" key={`${position.instId}-${position.posSide}-${position.posId || position.uTime}`}>
-                  <SymbolLabel symbol={position.instId} marketAssets={marketAssets} secondary={position.mgnMode || "cross"} />
+                  <SymbolLabel symbol={position.instId} marketAssets={marketAssets} secondary={position.mgnMode || "cross"} onSelect={selectInstrument} selectLabel={symbolSelectLabel(position.instId)} />
                   <span className={clsx("cell-tone", toneBySide(undefined, position.posSide))}>{formatPositionSide(position.posSide, t)}</span>
                   <span>{formatAmount(position.pos)}<small>{t("trading:contracts")}</small></span>
                   <span>{coinAmount === undefined ? "--" : formatAmount(String(coinAmount))}<small>{baseCcy}</small></span>
@@ -13872,7 +13899,7 @@ function BottomPanel({
                   const orderDisplay = orderPx ? formatAlgoExecPrice(orderPx, t) : "--";
                   return (
                     <div className="table-row orders" key={order.ordId || order.clOrdId || order.algoId || order.algoClOrdId}>
-                      <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode} />
+                      <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode} onSelect={selectInstrument} selectLabel={symbolSelectLabel(order.instId)} />
                       <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
                       <span>
                         {formatOrderType(order.ordType, t)}
@@ -14007,7 +14034,7 @@ function BottomPanel({
                     : "muted";
                   return (
                   <div className="table-row algo-orders" data-order-group={algoGroup} data-trigger-purpose={triggerPurpose ?? undefined} key={order.algoId || order.algoClOrdId || `${order.instId}-${order.cTime}`}>
-                    <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode || "--"} />
+                    <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.tdMode || "--"} onSelect={selectInstrument} selectLabel={symbolSelectLabel(order.instId)} />
                     <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
                     <span>{formatAlgoOrderType(order.ordType, t)}<small>{t("trading:notTriggered")}</small></span>
                     <span>{formatAmount(order.sz)}<small>{t("trading:filledAbbreviation")} {formatAmount(order.actualSz)}</small></span>
@@ -14099,7 +14126,7 @@ function BottomPanel({
                 </div>
                 {filteredSelectedHistoricalOrders.map((order) => (
                   <div className="table-row historical-orders" key={order.ordId || order.clOrdId || `${order.instId}-${order.syncedAt}`}>
-                    <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
+                    <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} onSelect={selectInstrument} selectLabel={symbolSelectLabel(order.instId)} />
                     <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side ?? "", order.posSide ?? "", t)}</span>
                     <span>{formatOrderType(order.ordType ?? "", t)}<small>{order.tdMode || "--"}</small></span>
                     <span>{fmtPrice(order.px ?? undefined)}<small>{t("trading:averageAbbreviation")} {fmtPrice(order.avgPx ?? undefined)}</small></span>
@@ -14134,7 +14161,7 @@ function BottomPanel({
                   const trailingCallbackLabel = order.callbackRatio ? t("trading:callbackRatio") : order.callbackSpread ? t("trading:callbackSpread") : "--";
                   return (
                     <div className="table-row historical-orders" data-order-group={group} key={order.algoId || order.algoClOrdId || `${order.instId}-${order.uTime}`}>
-                      <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} />
+                      <SymbolLabel symbol={order.instId} marketAssets={marketAssets} secondary={order.sourceEndpoint} onSelect={selectInstrument} selectLabel={symbolSelectLabel(order.instId)} />
                       <span className={clsx("cell-tone", toneBySide(order.side, order.posSide))}>{formatOrderSide(order.side, order.posSide, t)}</span>
                       <span>{formatAlgoOrderType(order.ordType, t)}<small>{order.tdMode || "--"}</small></span>
                       <span>{fmtPrice(primaryPrice)}<small>{primaryExecution ? `${t("trading:orderAbbreviation")} ${formatAlgoExecPrice(primaryExecution, t)}` : group === "trailing" ? t("trading:activationPrice") : formatTriggerPriceType(order.triggerPxType, t)}</small></span>
@@ -14159,7 +14186,7 @@ function BottomPanel({
             </div>
             {filteredHistoricalFills.map((fill) => (
               <div className="table-row historical-fills" key={fill.billId || `${fill.instId}-${fill.tradeId}-${fill.syncedAt}`}>
-                <SymbolLabel symbol={fill.instId} marketAssets={marketAssets} secondary={fill.sourceEndpoint} />
+                <SymbolLabel symbol={fill.instId} marketAssets={marketAssets} secondary={fill.sourceEndpoint} onSelect={selectInstrument} selectLabel={symbolSelectLabel(fill.instId)} />
                 <span className={clsx("cell-tone", toneBySide(fill.side, fill.posSide))}>
                   {formatOrderSide(fill.side ?? "", fill.posSide ?? "", t)}
                   <small>{formatFillSubType(fill.subType ?? "", t)}</small>
@@ -14201,7 +14228,7 @@ function BottomPanel({
             </div>
             {filteredAccountBills.map((bill) => (
               <div className="table-row account-bills" key={bill.billId}>
-                <span>{bill.instId || "--"}<small>{bill.sourceEndpoint}</small></span>
+                {bill.instId ? <SymbolLabel symbol={bill.instId} marketAssets={marketAssets} secondary={bill.sourceEndpoint} onSelect={selectInstrument} selectLabel={symbolSelectLabel(bill.instId)} /> : <span>--<small>{bill.sourceEndpoint}</small></span>}
                 <span>{formatBillType(bill.billType ?? "", t)}<small>{formatBillSubType(bill.subType ?? "", t)}</small></span>
                 <span>{bill.ccy || "--"}<small>{bill.mgnMode || "--"}</small></span>
                 <span className={clsx("cell-tone", toneByNumber(bill.balChg))}>{formatAmount(bill.balChg ?? undefined)}<small>{t("trading:positionAbbreviation")} {formatAmount(bill.posBalChg ?? undefined)}</small></span>
@@ -14225,7 +14252,7 @@ function BottomPanel({
               <div className="table-row trade-audit" key={event.id} title={event.error || event.okxMessage || event.id}>
                 <span>{formatDateTime(event.createdAt)}<small>{event.liveConfirmed ? t("trading:liveConfirmed") : t(event.environment === "live" ? "common:live" : "common:demo")}</small></span>
                 <span>{formatTradeAuditOperation(event.operation, t)}<small>{formatTradeAuditEvent(event.eventType, t)}</small></span>
-                <SymbolLabel symbol={event.instId} marketAssets={marketAssets} secondary={formatOrderType(event.orderType ?? "", t) || event.instType} />
+                <SymbolLabel symbol={event.instId} marketAssets={marketAssets} secondary={formatOrderType(event.orderType ?? "", t) || event.instType} onSelect={selectInstrument} selectLabel={symbolSelectLabel(event.instId)} />
                 <span className={clsx("cell-tone", toneBySide(event.side, event.posSide))}>{formatOrderSide(event.side ?? "", event.posSide ?? "", t)}<small>{event.tdMode || "--"}</small></span>
                 <span>{formatAmount(event.size ?? undefined)}<small>@ {fmtPrice(event.price ?? undefined)}</small></span>
                 <span>{event.orderId || "--"}<small>{event.clientOrderId || "--"}</small></span>
@@ -14250,6 +14277,8 @@ function BottomPanel({
                     symbol={episode.instId}
                     marketAssets={marketAssets}
                     secondary={episode.id}
+                    onSelect={selectInstrument}
+                    selectLabel={symbolSelectLabel(episode.instId)}
                   />
                   <span
                     className={clsx(

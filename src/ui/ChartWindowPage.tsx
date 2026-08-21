@@ -544,6 +544,11 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
     try {
       const page = await fetchHistoricalCandlesBefore(symbol, timeframe, firstTime, 300);
       if (seriesEpoch !== historySeriesEpochRef.current) return { status: "deferred" };
+      if (page.instId !== symbol || page.bar !== timeframe) {
+        const message = `历史 K 线响应身份不匹配：请求 ${symbol} ${timeframe}，收到 ${page.instId} ${page.bar}`;
+        logger.error(message, { symbol, timeframe, responseSymbol: page.instId, responseBar: page.bar, firstTime });
+        return { status: "failed", message };
+      }
       if (page.candles.length > 0) {
         setCandles((items) => mergeCandles(page.candles, items));
         logger.info("loaded earlier detached chart candles", { symbol, timeframe, firstTime, count: page.candles.length, exhausted: page.exhausted, source: page.source });

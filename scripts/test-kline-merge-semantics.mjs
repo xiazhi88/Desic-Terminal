@@ -1,6 +1,12 @@
 import assert from "node:assert/strict";
 import { ChartDataController, updateCandleIndexes } from "../src/lib/chartDataController.ts";
-import { MAX_RENDERED_CANDLES, mergeMarketCandles } from "../src/lib/marketHotStore.ts";
+import {
+  MAX_RENDERED_CANDLES,
+  getMarketHotState,
+  mergeIntoMarketCandles,
+  mergeMarketCandles,
+  replaceMarketCandles,
+} from "../src/lib/marketHotStore.ts";
 
 function candle(time, confirm = false, close = time) {
   return { time, open: close, high: close + 1, low: close - 1, close, volume: 1, confirm };
@@ -44,6 +50,22 @@ assert.deepEqual(controller.getCandles(key).map((item) => item.time), [0, 1, 2, 
 
 const repeated = controller.ingestRealtime(key, [candle(3, false, 33), candle(3, false, 33)]);
 assert.equal(repeated.type, "noChange", "duplicate realtime update is ignored");
+
+const btcKey = "BTC-USDT-SWAP\u00001m";
+const trumpKey = "TRUMP-USDT-SWAP\u00001m";
+replaceMarketCandles([candle(10, true, 10)], btcKey);
+mergeIntoMarketCandles([candle(9, true, 9)], trumpKey);
+assert.deepEqual(
+  getMarketHotState().candles.map((item) => item.time),
+  [10],
+  "late history from another symbol is rejected"
+);
+mergeIntoMarketCandles([candle(9, true, 9)], btcKey);
+assert.deepEqual(
+  getMarketHotState().candles.map((item) => item.time),
+  [9, 10],
+  "history for the active symbol is merged"
+);
 
 function assertIndexes(indexed, candles, label) {
   assert.equal(indexed.map.size, candles.length, `${label}: map size`);

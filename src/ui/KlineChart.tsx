@@ -500,6 +500,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const drawingDragPendingPointRef = useRef<MeasurePoint | null>(null);
   const riskRewardCreateGestureRef = useRef<RiskRewardCreateGesture | null>(null);
   const onNeedMoreHistoryRef = useRef<Props["onNeedMoreHistory"]>(onNeedMoreHistory);
+  // Keep the history callback current during the render that changes symbol/timeframe.
+  // An effect update leaves a small window where a drag can invoke the previous bar.
+  onNeedMoreHistoryRef.current = onNeedMoreHistory;
   /// Read by the data-render effect to frame a new replay page. Kept in a ref so
   /// moving the cursor does not re-run that effect, which rebuilds indicators.
   const replayCursorTimeRef = useRef<number | null>(null);
@@ -1090,10 +1093,6 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     if (reviewVariant) return;
     saveDrawingLines(symbol, drawingLines);
   }, [drawingLines, reviewVariant, symbol]);
-
-  useEffect(() => {
-    onNeedMoreHistoryRef.current = onNeedMoreHistory;
-  }, [onNeedMoreHistory]);
 
   const replayCursorTime = synchronizedCrosshairPosition?.time ?? synchronizedCrosshairTime ?? null;
   replayCursorTimeRef.current = typeof replayCursorTime === "number" ? replayCursorTime : null;

@@ -779,6 +779,8 @@ export async function fetchCandles(instId: string, bar: string, limit = 300): Pr
 export type HistoricalCandlesSource = "local" | "history" | "mixed";
 
 export interface HistoricalCandlesPage {
+  instId: string;
+  bar: string;
   candles: Candle[];
   earliestTime: number | null;
   exhausted: boolean;
@@ -800,7 +802,7 @@ export async function fetchHistoricalCandlesBefore(instId: string, bar: string, 
     bar,
     beforeTime,
     limit: boundedLimit
-  }) ?? { candles: [], earliestTime: null, exhausted: false, source: "local" };
+  }) ?? { instId, bar, candles: [], earliestTime: null, exhausted: false, source: "local" };
 }
 
 export async function syncKlineIntegrity(

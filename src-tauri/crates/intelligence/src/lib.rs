@@ -3393,7 +3393,7 @@ pub fn set_sync_state(
     rows_written: u64,
 ) -> Result<(), String> {
     let (succeeded, failed) = match status {
-        "success" => (Some(now), None),
+        "success" | "degraded" => (Some(now), None),
         "failed" => (None, Some(now)),
         _ => (None, None),
     };

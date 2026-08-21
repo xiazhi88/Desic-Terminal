@@ -14,7 +14,7 @@ use desic_intelligence::{
     SentimentQuery, SmartMoneyQuery, DERIVATIVES_SOURCE, DERIVATIVES_VERSION,
     LINEAR_SIGNAL_LIMITATION,
 };
-use reqwest::header::ACCEPT_LANGUAGE;
+use reqwest::header::{ACCEPT_LANGUAGE, RETRY_AFTER};
 use std::sync::{
     atomic::{AtomicI64, AtomicU64},
     LazyLock,
@@ -60,9 +60,21 @@ const MAX_TOOL_ITEMS: usize = 100;
 const MAX_TOOL_TEXT: usize = 12_000;
 const INTELLIGENCE_REST_MAX_ATTEMPTS: u32 = 3;
 const INTELLIGENCE_REST_RETRY_BASE_MS: u64 = 250;
+// Agent Trade Kit treats journal/smartmoney endpoints as heavier than normal market data and
+// caps each tool at 5 RPS. The terminal applies that account-wide, then serializes the expensive
+// per-symbol history endpoint further to avoid a watchlist burst exhausting an unknown server quota.
+const SMART_MONEY_REQUEST_INTERVAL: Duration = Duration::from_millis(200);
+const SMART_MONEY_HISTORY_INTERVAL: Duration = Duration::from_secs(1);
+const SMART_MONEY_RATE_LIMIT_RETRY_DELAYS: [Duration; 2] =
+    [Duration::from_secs(5), Duration::from_secs(15)];
+const MAX_SMART_MONEY_HISTORY_BACKFILL_SYMBOLS: usize = 5;
 static FETCH_LOG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+static SMART_MONEY_HISTORY_CURSOR: AtomicU64 = AtomicU64::new(0);
 static PUBLIC_STATS_LAST_REQUEST: LazyLock<AsyncMutex<Option<Instant>>> =
     LazyLock::new(|| AsyncMutex::new(None));
+static SMART_MONEY_REQUEST_SCHEDULES: LazyLock<
+    AsyncMutex<HashMap<String, SmartMoneyRequestSchedule>>,
+> = LazyLock::new(|| AsyncMutex::new(HashMap::new()));
 static OI_STREAM_CACHE: LazyLock<std::sync::Mutex<HashMap<String, (i64, Value)>>> =
     LazyLock::new(|| std::sync::Mutex::new(HashMap::new()));
 static FUNDING_STREAM_CACHE: LazyLock<std::sync::Mutex<HashMap<String, (i64, String)>>> =
@@ -625,6 +637,144 @@ fn csv_values(values: Option<&Vec<String>>) -> Option<String> {
     }
 }
 
+#[derive(Default)]
+struct SmartMoneyRequestSchedule {
+    next_request_at: Option<Instant>,
+    next_history_at: Option<Instant>,
+    cooldown_until: Option<Instant>,
+}
+
+impl SmartMoneyRequestSchedule {
+    fn reserve(&mut self, now: Instant, history: bool) -> Duration {
+        let mut scheduled_at = now;
+        for candidate in [self.next_request_at, self.cooldown_until] {
+            if let Some(candidate) = candidate {
+                scheduled_at = scheduled_at.max(candidate);
+            }
+        }
+        if history {
+            if let Some(next_history_at) = self.next_history_at {
+                scheduled_at = scheduled_at.max(next_history_at);
+            }
+            self.next_history_at = Some(scheduled_at + SMART_MONEY_HISTORY_INTERVAL);
+        }
+        self.next_request_at = Some(scheduled_at + SMART_MONEY_REQUEST_INTERVAL);
+        scheduled_at.saturating_duration_since(now)
+    }
+
+    fn apply_rate_limit(&mut self, now: Instant, cooldown: Duration) {
+        let until = now + cooldown;
+        self.cooldown_until = Some(
+            self.cooldown_until
+                .map_or(until, |current| current.max(until)),
+        );
+    }
+}
+
+fn is_smart_money_path(path: &str) -> bool {
+    let endpoint = path.split('?').next().unwrap_or(path);
+    endpoint == SMART_OVERVIEW_PATH || endpoint == SMART_SIGNAL_HISTORY_PATH
+}
+
+fn is_smart_money_history_path(path: &str) -> bool {
+    path.split('?').next().unwrap_or(path) == SMART_SIGNAL_HISTORY_PATH
+}
+
+async fn wait_for_smart_money_request_slot(account_id: &str, path: &str) {
+    if !is_smart_money_path(path) {
+        return;
+    }
+    loop {
+        let delay = {
+            let mut schedules = SMART_MONEY_REQUEST_SCHEDULES.lock().await;
+            schedules
+                .entry(account_id.to_string())
+                .or_default()
+                .reserve(Instant::now(), is_smart_money_history_path(path))
+        };
+        if !delay.is_zero() {
+            sleep(delay).await;
+        }
+        let cooldown_delay = {
+            let schedules = SMART_MONEY_REQUEST_SCHEDULES.lock().await;
+            schedules
+                .get(account_id)
+                .and_then(|schedule| schedule.cooldown_until)
+                .map(|until| until.saturating_duration_since(Instant::now()))
+                .filter(|delay| !delay.is_zero())
+        };
+        if let Some(delay) = cooldown_delay {
+            sleep(delay).await;
+            continue;
+        }
+        return;
+    }
+}
+
+async fn register_smart_money_rate_limit(account_id: &str, cooldown: Duration) {
+    let mut schedules = SMART_MONEY_REQUEST_SCHEDULES.lock().await;
+    schedules
+        .entry(account_id.to_string())
+        .or_default()
+        .apply_rate_limit(Instant::now(), cooldown);
+}
+
+fn retry_after_delay(value: Option<&str>) -> Option<Duration> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(Duration::from_secs)
+}
+
+fn smart_money_rate_limit_retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
+    retry_after.unwrap_or_else(|| {
+        SMART_MONEY_RATE_LIMIT_RETRY_DELAYS
+            [(attempt as usize).min(SMART_MONEY_RATE_LIMIT_RETRY_DELAYS.len().saturating_sub(1))]
+    })
+}
+
+fn log_smart_money_rate_limit(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+    path: &str,
+    code: &str,
+    retry_delay: Duration,
+) {
+    let Ok(conn) = open_intelligence_database(app) else {
+        return;
+    };
+    let endpoint = path.split('?').next().unwrap_or(path);
+    let log_id = format!(
+        "intelligence-rate-limit-{}-{}",
+        now_ms(),
+        FETCH_LOG_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    );
+    let _ = conn.execute(
+        "INSERT INTO intelligence_fetch_log(id,key,account_id,endpoint,status,okx_code,error,response_json,created_at)
+         VALUES(?1,?2,?3,?4,'rate_limited',?5,?6,NULL,?7)",
+        params![
+            &log_id,
+            endpoint,
+            &account.id,
+            endpoint,
+            code,
+            format!("Smart Money rate limited; retry_after_ms={}", retry_delay.as_millis()),
+            now_ms(),
+        ],
+    );
+}
+
+fn smart_money_history_error_allows_local_fallback(error: &str) -> bool {
+    let normalized = error.to_ascii_lowercase();
+    error.contains("HTTP 5")
+        || normalized.contains("timed out")
+        || normalized.contains("timeout")
+        || normalized.contains("http 429")
+        || normalized.contains("50011")
+        || normalized.contains("too many requests")
+}
+
 async fn intelligence_private_get(
     app: &tauri::AppHandle,
     account: &LocalAccount,
@@ -640,6 +790,7 @@ async fn intelligence_private_get(
     let mut last_error = None;
     let mut timestamp_retry_used = false;
     for attempt in 0..INTELLIGENCE_REST_MAX_ATTEMPTS {
+        wait_for_smart_money_request_slot(&account.id, path).await;
         let observed_generation = OKX_CLOCK_SYNC_GENERATION.load(Ordering::Acquire);
         let timestamp = okx_rest_timestamp()?;
         let mut headers = okx_private_headers(account, &timestamp, "GET", path, "")?;
@@ -664,6 +815,12 @@ async fn intelligence_private_get(
             }
         };
         let status = response.status();
+        let retry_after = retry_after_delay(
+            response
+                .headers()
+                .get(RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+        );
         let text = match response.text().await {
             Ok(text) => text,
             Err(error) => {
@@ -695,7 +852,22 @@ async fn intelligence_private_get(
                 ),
                 &account.passphrase,
             );
-            let error = format!("OKX Intelligence HTTP {status}: {sanitized}");
+            let mut error = format!("OKX Intelligence HTTP {status}: {sanitized}");
+            if status.as_u16() == 429 && is_smart_money_path(path) {
+                let retry_delay = smart_money_rate_limit_retry_delay(attempt, retry_after);
+                register_smart_money_rate_limit(&account.id, retry_delay).await;
+                log_smart_money_rate_limit(app, account, path, "429", retry_delay);
+                error.push_str(&format!(
+                    "（Smart Money 已进入共享冷却 {} 秒）",
+                    retry_delay.as_secs()
+                ));
+                if attempt + 1 < INTELLIGENCE_REST_MAX_ATTEMPTS {
+                    last_error = Some(error);
+                    sleep(retry_delay).await;
+                    continue;
+                }
+                return Err(error);
+            }
             if intelligence_http_status_retryable(status.as_u16())
                 && attempt + 1 < INTELLIGENCE_REST_MAX_ATTEMPTS
             {
@@ -708,8 +880,23 @@ async fn intelligence_private_get(
         let envelope = serde_json::from_str::<RawOkxEnvelope>(&text)
             .map_err(|error| format!("OKX Intelligence decode failed({path}): {error}"))?;
         if envelope.code != "0" && envelope.code != "1" {
-            let error =
+            let mut error =
                 classified_okx_error("okx_intelligence_get", path, &envelope.code, &envelope.msg);
+            if envelope.code == "50011" && is_smart_money_path(path) {
+                let retry_delay = smart_money_rate_limit_retry_delay(attempt, None);
+                register_smart_money_rate_limit(&account.id, retry_delay).await;
+                log_smart_money_rate_limit(app, account, path, &envelope.code, retry_delay);
+                error.push_str(&format!(
+                    "（Smart Money 已进入共享冷却 {} 秒）",
+                    retry_delay.as_secs()
+                ));
+                if attempt + 1 < INTELLIGENCE_REST_MAX_ATTEMPTS {
+                    last_error = Some(error);
+                    sleep(retry_delay).await;
+                    continue;
+                }
+                return Err(error);
+            }
             if okx_public_code_retryable(&envelope.code, &envelope.msg)
                 && attempt + 1 < INTELLIGENCE_REST_MAX_ATTEMPTS
             {
@@ -1841,9 +2028,7 @@ pub(crate) async fn intelligence_smart_query(
         Ok(envelope) => envelope,
         Err(error)
             if query.operation.starts_with("signalTrend")
-                && (error.contains("HTTP 5")
-                    || error.to_ascii_lowercase().contains("timed out")
-                    || error.to_ascii_lowercase().contains("timeout")) =>
+                && smart_money_history_error_allows_local_fallback(&error) =>
         {
             let items = query_smart_local(&conn, &query)?;
             if items.is_empty() {
@@ -3075,6 +3260,16 @@ fn active_derivative_symbols(
     app: &tauri::AppHandle,
     runtime: &IntelligenceRuntime,
 ) -> Result<Vec<String>, String> {
+    Ok(active_derivative_symbols_ranked(app, runtime)?
+        .into_iter()
+        .map(|(symbol, _)| symbol)
+        .collect())
+}
+
+fn active_derivative_symbols_ranked(
+    app: &tauri::AppHandle,
+    runtime: &IntelligenceRuntime,
+) -> Result<Vec<(String, u8)>, String> {
     let mut symbols = HashMap::<String, u8>::new();
     let now = now_ms();
     if let Ok(mut active) = runtime.active_instruments.lock() {
@@ -3132,7 +3327,47 @@ fn active_derivative_symbols(
         })
         .collect::<Vec<_>>();
     symbols.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
-    Ok(symbols.into_iter().map(|(symbol, _)| symbol).collect())
+    Ok(symbols)
+}
+
+fn select_smart_money_history_symbols(
+    ranked_symbols: &[(String, u8)],
+    limit: usize,
+) -> Vec<String> {
+    if ranked_symbols.len() <= limit {
+        return ranked_symbols
+            .iter()
+            .map(|(symbol, _)| symbol.clone())
+            .collect();
+    }
+    let mut groups = HashMap::<u8, Vec<String>>::new();
+    for (symbol, priority) in ranked_symbols {
+        groups.entry(*priority).or_default().push(symbol.clone());
+    }
+    let mut priorities = groups.keys().copied().collect::<Vec<_>>();
+    priorities.sort_unstable_by(|left, right| right.cmp(left));
+    // Reserve one slot for each lower-priority group. This keeps active positions
+    // ahead of passive Profile symbols without claiming that deferred symbols will
+    // be backfilled later while repeatedly starving them.
+    let mut selected = Vec::with_capacity(limit);
+    for (index, priority) in priorities.iter().copied().take(limit).enumerate() {
+        let Some(group) = groups.get(&priority) else {
+            continue;
+        };
+        let remaining = limit.saturating_sub(selected.len());
+        if remaining == 0 {
+            break;
+        }
+        let lower_priority_groups = priorities.len().saturating_sub(index + 1);
+        let quota = remaining
+            .saturating_sub(lower_priority_groups)
+            .max(1)
+            .min(group.len());
+        let offset =
+            SMART_MONEY_HISTORY_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % group.len();
+        selected.extend(group.iter().cycle().skip(offset).take(quota).cloned());
+    }
+    selected
 }
 
 async fn sync_derivative_symbols(
@@ -3204,6 +3439,7 @@ async fn sync_scope(
     let conn = open_intelligence_database(app)?;
     let started = now_ms();
     set_sync_state(&conn, scope, "running", started, None, None, 0)?;
+    let mut degraded_reason: Option<String> = None;
     let result: Result<u64, String> = match scope {
         "news" => fetch_news(
             app,
@@ -3328,7 +3564,21 @@ async fn sync_scope(
                 .clone()
                 .filter(|value| value.len() == 10)
                 .unwrap_or(smart_data_version_from_ms(&started.to_string())?);
-            for inst_id in active_derivative_symbols(app, runtime)? {
+            let ranked_active_symbols = active_derivative_symbols_ranked(app, runtime)?;
+            let backfill_symbols = select_smart_money_history_symbols(
+                &ranked_active_symbols,
+                MAX_SMART_MONEY_HISTORY_BACKFILL_SYMBOLS,
+            );
+            let deferred_history_count = ranked_active_symbols
+                .len()
+                .saturating_sub(backfill_symbols.len());
+            if deferred_history_count > 0 {
+                history_errors.push(format!(
+                    "{} 个低优先级交易对已排队，下一轮继续补采",
+                    deferred_history_count
+                ));
+            }
+            for inst_id in backfill_symbols {
                 let inst_ccy = inst_id
                     .split('-')
                     .next()
@@ -3363,18 +3613,26 @@ async fn sync_scope(
                 )
                 .await
                 {
-                    Ok(response) => rows = rows.saturating_add(response.items.len() as u64),
+                    Ok(response) => {
+                        rows = rows.saturating_add(response.items.len() as u64);
+                        if response
+                            .limitations
+                            .iter()
+                            .any(|limitation| limitation.contains("历史接口暂时不可用"))
+                        {
+                            history_errors.push(format!("{inst_id}: 已使用本地历史回退"));
+                        }
+                    }
                     Err(error) => history_errors.push(format!("{inst_id}: {error}")),
                 }
             }
-            if history_errors.is_empty() {
-                Ok(rows)
-            } else {
-                Err(format!(
-                    "Smart Money 当前概览已更新，但小时历史补采失败：{}",
+            if !history_errors.is_empty() {
+                degraded_reason = Some(format!(
+                    "Smart Money 当前概览已更新，小时历史补采部分降级：{}",
                     history_errors.join("；")
-                ))
+                ));
             }
+            Ok(rows)
         }
         "leaderboard" => intelligence_smart_query(
             app.clone(),
@@ -3424,10 +3682,18 @@ async fn sync_scope(
         Ok(rows) => set_sync_state(
             &conn,
             scope,
-            "success",
+            if degraded_reason.is_some() {
+                "degraded"
+            } else {
+                "success"
+            },
             finished,
-            Some(success_next),
-            None,
+            Some(if degraded_reason.is_some() {
+                retry_next
+            } else {
+                success_next
+            }),
+            degraded_reason.as_deref(),
             *rows,
         )?,
         Err(error) => set_sync_state(
@@ -4441,6 +4707,80 @@ mod tests {
         assert!(!intelligence_http_status_retryable(403));
         assert_eq!(intelligence_rest_retry_delay(0), Duration::from_millis(250));
         assert_eq!(intelligence_rest_retry_delay(1), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn smart_money_schedule_serializes_history_and_respects_cooldown() {
+        let now = Instant::now();
+        let mut schedule = SmartMoneyRequestSchedule::default();
+        assert_eq!(schedule.reserve(now, true), Duration::ZERO);
+        assert!(schedule.reserve(now, true) >= SMART_MONEY_HISTORY_INTERVAL);
+        schedule.apply_rate_limit(now, Duration::from_secs(15));
+        assert!(schedule.reserve(now, false) >= Duration::from_secs(15));
+    }
+
+    #[test]
+    fn smart_money_rate_limit_uses_retry_after_and_long_backoff() {
+        assert_eq!(retry_after_delay(Some("12")), Some(Duration::from_secs(12)));
+        assert_eq!(retry_after_delay(Some("invalid")), None);
+        assert_eq!(
+            smart_money_rate_limit_retry_delay(0, None),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            smart_money_rate_limit_retry_delay(1, None),
+            Duration::from_secs(15)
+        );
+        assert_eq!(
+            smart_money_rate_limit_retry_delay(1, Some(Duration::from_secs(42))),
+            Duration::from_secs(42)
+        );
+        assert!(smart_money_history_error_allows_local_fallback(
+            "OKX Intelligence HTTP 429: Too Many Requests"
+        ));
+        assert!(smart_money_history_error_allows_local_fallback(
+            "OKX error 50011: Too Many Requests"
+        ));
+        assert!(!smart_money_history_error_allows_local_fallback(
+            "OKX Intelligence HTTP 400: invalid parameter"
+        ));
+    }
+
+    #[test]
+    fn smart_money_history_selection_rotates_within_same_priority() {
+        let ranked = vec![
+            ("BTC-USDT-SWAP".to_string(), 2),
+            ("ETH-USDT-SWAP".to_string(), 2),
+            ("SOL-USDT-SWAP".to_string(), 2),
+        ];
+        let first = select_smart_money_history_symbols(&ranked, 2);
+        let second = select_smart_money_history_symbols(&ranked, 2);
+        assert_eq!(first.len(), 2);
+        assert_eq!(second.len(), 2);
+        assert_ne!(first, second);
+    }
+
+    #[test]
+    fn smart_money_history_selection_reserves_a_slot_for_lower_priority_symbols() {
+        let ranked = vec![
+            ("BTC-USDT-SWAP".to_string(), 4),
+            ("ETH-USDT-SWAP".to_string(), 4),
+            ("SOL-USDT-SWAP".to_string(), 4),
+            ("XRP-USDT-SWAP".to_string(), 4),
+            ("DOGE-USDT-SWAP".to_string(), 4),
+            ("ADA-USDT-SWAP".to_string(), 4),
+            ("AVAX-USDT-SWAP".to_string(), 1),
+        ];
+        let selected = select_smart_money_history_symbols(&ranked, 5);
+        assert_eq!(selected.len(), 5);
+        assert!(selected.contains(&"AVAX-USDT-SWAP".to_string()));
+        assert_eq!(
+            selected
+                .iter()
+                .filter(|symbol| *symbol != "AVAX-USDT-SWAP")
+                .count(),
+            4
+        );
     }
 
     #[test]
