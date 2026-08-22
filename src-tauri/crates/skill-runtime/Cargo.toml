@@ -1,10 +1,11 @@
 [package]
-name = "desic-storage-config"
+name = "desic-skill-runtime"
 version = "0.1.0"
 license = "MIT"
 edition = "2021"
 
 [dependencies]
-desic-skill-runtime = { path = "../skill-runtime" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+toml = "0.8"

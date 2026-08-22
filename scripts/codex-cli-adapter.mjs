@@ -381,6 +381,24 @@ export function normalizeCodexUsage(usage = {}) {
   };
 }
 
+const CODEX_REASONING_EFFORTS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+
+/// Converts Desic's reasoning tier into a value Codex CLI can deserialize.
+///
+/// This value is sent both as the turn effort and as a thread/start config
+/// override. The latter is important: config overrides are applied before Codex
+/// deserializes `model_reasoning_effort`, so a stale or app-specific value in the
+/// user's config cannot prevent the session from starting. CODEX_HOME itself is
+/// preserved so OAuth refresh, API-key auth, and OS-keyring storage keep working.
+export function codexReasoningEffort(value) {
+  const normalized = String(value || "").trim();
+  return CODEX_REASONING_EFFORTS.has(normalized) ? normalized : "medium";
+}
+
+export function codexReasoningOverrides(value) {
+  return { model_reasoning_effort: codexReasoningEffort(value) };
+}
+
 export function codexIsolationOverrides(openAgent = false) {
   if (openAgent) {
     return {
@@ -480,6 +498,10 @@ export async function createIsolatedCodexCli(cliPath) {
     await writeFile(wrapperPath, CODEX_WRAPPER_SOURCE, { encoding: "utf8", mode: 0o700 });
     return {
       path: wrapperPath,
+      // Keep the caller's CODEX_HOME untouched. It can contain OAuth tokens,
+      // rotating refresh tokens, API-key auth, or an OS-keyring selection. The
+      // wrapper isolates the executable; Desic-owned config values are supplied
+      // through thread/start overrides instead of copying credential state.
       env: { DESIC_CODEX_CLI_PATH: resolveWindowsCodexCliPath(cliPath) },
       cleanup: () => rm(directory, { force: true, recursive: true })
     };
@@ -678,7 +700,7 @@ function codexAppServerSettings(config, bridge, serverConfig, isolatedCli) {
     env: isolatedCli.env,
     approvalPolicy: "never",
     sandboxPolicy: bridge.openAgent ? "workspace-write" : "read-only",
-    effort: bridge.reasoningEffort,
+    effort: codexReasoningEffort(bridge.reasoningEffort),
     summary: "auto",
     logger: process.env.DESIC_AI_EVENT_DEBUG === "1" ? console : false,
     verbose: process.env.DESIC_AI_EVENT_DEBUG === "1",
@@ -697,6 +719,7 @@ function codexAppServerSettings(config, bridge, serverConfig, isolatedCli) {
     configOverrides: {
       ...codexIsolationOverrides(bridge.openAgent === true),
       ...codexProviderOverrides(bridge.providerRoute, { defaultRetryPolicy: true }),
+      ...codexReasoningOverrides(bridge.reasoningEffort),
       // Codex owns provider-executed MCP calls. Only the tools already filtered by
       // Desic policy are exposed on this authenticated, per-run loopback server.
       [`mcp_servers.${bridge.bridgeId}.default_tools_approval_mode`]: "approve"

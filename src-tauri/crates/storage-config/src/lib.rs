@@ -148,6 +148,8 @@ pub struct AiConfig {
     pub enabled_skills: Vec<String>,
     #[serde(default = "default_ai_skill_definitions")]
     pub skill_definitions: Vec<AiSkillDefinition>,
+    #[serde(default)]
+    pub skill_runtime_trust: HashMap<String, bool>,
     #[serde(default = "default_ai_open_agent")]
     pub open_agent: bool,
     #[serde(default)]
@@ -181,6 +183,8 @@ pub struct AiSkillDefinition {
     pub content: String,
     #[serde(default)]
     pub builtin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bundle: Option<desic_skill_runtime::SkillBundleSummary>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -200,6 +204,7 @@ pub struct AiConfigSummary {
     pub custom_rules: String,
     pub enabled_skills: Vec<String>,
     pub skill_definitions: Vec<AiSkillDefinition>,
+    pub skill_runtime_trust: HashMap<String, bool>,
     pub open_agent: bool,
     pub workspace_roots: Vec<String>,
 }
@@ -342,8 +347,8 @@ pub fn migrate_default_ai_system_prompt(value: String) -> String {
 fn default_ai_enabled_skills() -> Vec<String> {
     vec![
         "trading-philosophy".to_string(),
-        "okx-news-intelligence".to_string(),
-        "okx-smart-money-analysis".to_string(),
+        "okx-market-intelligence".to_string(),
+        "desic-trade-operations".to_string(),
     ]
 }
 
@@ -358,6 +363,7 @@ pub fn default_ai_skill_definitions() -> Vec<AiSkillDefinition> {
             rules: skill.rules.clone(),
             content: skill.content.join("\n"),
             builtin: skill.builtin,
+            bundle: None,
         })
         .collect()
 }
@@ -520,6 +526,9 @@ mod tests {
             "trade.precheck returns blocked=false, describe the account as feasible",
             "trade.evaluatePlan is a deterministic local calculation",
             "finalDecision.accountAssessment quotes the corresponding blocker verbatim",
+            "empty ordinary-order tpTriggerPx/slTriggerPx fields",
+            "not_found are expected pending_fill states",
+            "Do not cancel an unfilled parent order solely",
         ] {
             assert!(
                 fixed.content.contains(expected),
@@ -611,16 +620,16 @@ mod tests {
             enabled,
             vec![
                 "trading-philosophy",
-                "okx-news-intelligence",
-                "okx-smart-money-analysis"
+                "okx-market-intelligence",
+                "desic-trade-operations"
             ]
         );
         let definitions = default_ai_skill_definitions();
         for id in [
             "desic-core-operations",
             "trading-philosophy",
-            "okx-news-intelligence",
-            "okx-smart-money-analysis",
+            "okx-market-intelligence",
+            "desic-trade-operations",
         ] {
             let skill = definitions
                 .iter()
@@ -634,10 +643,9 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0x2975_3acf_b147_e510_u64),
+            ("desic-core-operations", 0x773a_d6fc_a37c_821c_u64),
             ("trading-philosophy", 0xebdb_a0a9_c0fd_658d_u64),
-            ("okx-news-intelligence", 0x790c_faa6_cc57_d766_u64),
-            ("okx-smart-money-analysis", 0x18d3_b51e_1a97_ffe3_u64),
+            ("okx-market-intelligence", 0xe56e_8dff_915f_7377_u64),
         ];
 
         for (id, fingerprint) in expected {

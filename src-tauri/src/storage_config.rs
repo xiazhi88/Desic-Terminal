@@ -71,13 +71,15 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
 
     if let Some(existing) = RUNTIME_PATHS.get() {
         if existing == &paths {
+            ensure_builtin_skill_bundles()?;
             return Ok(());
         }
         return Err("应用运行目录已经使用其它路径初始化".to_string());
     }
     RUNTIME_PATHS
         .set(paths)
-        .map_err(|_| "应用运行目录初始化失败".to_string())
+        .map_err(|_| "应用运行目录初始化失败".to_string())?;
+    ensure_builtin_skill_bundles()
 }
 
 fn migrate_legacy_app_identifier_dir(destination: &std::path::Path) -> Result<(), String> {
@@ -337,6 +339,22 @@ pub(crate) fn ai_save_config(
         .find(|model| model.id == active_model_id)
         .cloned()
         .ok_or_else(|| "当前 AI 模型配置不存在".to_string())?;
+    let skill_definitions = merge_ai_skill_definitions(
+        update
+            .skill_definitions
+            .or_else(|| {
+                existing
+                    .as_ref()
+                    .map(|config| config.skill_definitions.clone())
+            })
+            .unwrap_or_default(),
+    );
+    let skill_definitions = prepare_ai_skill_bundle_definitions(skill_definitions, existing.as_ref())?;
+    let mut skill_runtime_trust = existing
+        .as_ref()
+        .map(|config| config.skill_runtime_trust.clone())
+        .unwrap_or_default();
+    revoke_runtime_trust_for_changed_bundles(existing.as_ref(), &skill_definitions, &mut skill_runtime_trust);
     let config = AiConfig {
         provider: Some(active_model.provider.clone()),
         model: active_model.model.clone(),
@@ -365,16 +383,8 @@ pub(crate) fn ai_save_config(
                 })
                 .unwrap_or_default(),
         ),
-        skill_definitions: merge_ai_skill_definitions(
-            update
-                .skill_definitions
-                .or_else(|| {
-                    existing
-                        .as_ref()
-                        .map(|config| config.skill_definitions.clone())
-                })
-                .unwrap_or_default(),
-        ),
+        skill_definitions,
+        skill_runtime_trust,
         open_agent: update
             .open_agent
             .or_else(|| existing.as_ref().map(|config| config.open_agent))
@@ -405,6 +415,68 @@ pub(crate) fn ai_save_config(
     drop(_config_write_guard);
     crate::ai_automation::sync_ai_skill_versions(&app)
         .map_err(|error| format!("AI 配置已保存，但 Skill 版本同步失败：{}", error))?;
+    let summary = ai_config_summary_from(config);
+    let _ = app.emit("ai:config-updated", summary.clone());
+    Ok(summary)
+}
+
+/// Reads one Codex-style agent TOML file and returns a bounded Agent Template
+/// draft for human review. This never writes configuration, never adopts
+/// sandbox/MCP/tool settings, and never changes Profile permissions.
+#[tauri::command]
+pub(crate) fn ai_agent_template_preview_codex(
+    path: String,
+    agent_name: Option<String>,
+) -> Result<desic_skill_runtime::CodexTemplatePreview, String> {
+    let path = PathBuf::from(path.trim());
+    if !path.is_absolute() {
+        return Err("Codex agent 定义路径必须是绝对路径".to_string());
+    }
+    let metadata = fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err("Codex agent 定义必须是普通文件".to_string());
+    }
+    if metadata.len() > 256 * 1024 {
+        return Err("Codex agent 定义超过 256 KiB 预览上限".to_string());
+    }
+    let content = fs::read_to_string(&path)
+        .map_err(|_| "Codex agent 定义必须是 UTF-8 文本".to_string())?;
+    desic_skill_runtime::preview_codex_agent_template(&content, agent_name.as_deref())
+}
+
+#[tauri::command]
+pub(crate) fn ai_skill_set_runtime_trust(
+    app: tauri::AppHandle,
+    skill_id: String,
+    trusted: bool,
+) -> Result<AiConfigSummary, String> {
+    let skill_id = skill_id.trim();
+    if skill_id.is_empty() || skill_id.len() > 120 {
+        return Err("Skill ID 无效".to_string());
+    }
+    let _config_write_guard = lock_ai_config_writes()?;
+    let mut config = load_ai_config_locked(&app)?;
+    let skill = config
+        .skill_definitions
+        .iter()
+        .find(|item| item.id == skill_id)
+        .ok_or_else(|| format!("找不到 Skill {}", skill_id))?;
+    if trusted {
+        let runtime = skill
+            .bundle
+            .as_ref()
+            .and_then(|bundle| bundle.manifest.runtime.as_ref())
+            .ok_or_else(|| "只有声明 runtime 的完整 Skill bundle 可以被授予执行信任".to_string())?;
+        if !matches!(runtime.kind.as_str(), "node" | "python") {
+            return Err("当前只支持 Node 或 Python Skill runtime".to_string());
+        }
+    }
+    if trusted {
+        config.skill_runtime_trust.insert(skill_id.to_string(), true);
+    } else {
+        config.skill_runtime_trust.remove(skill_id);
+    }
+    save_ai_config(&app, &config)?;
     let summary = ai_config_summary_from(config);
     let _ = app.emit("ai:config-updated", summary.clone());
     Ok(summary)
@@ -479,11 +551,14 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
             continue;
         }
         let dir = root.join(sanitize_skill_dir_name(id));
-        fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-        write_file_atomically(
-            &dir.join("SKILL.md"),
-            render_skill_markdown(id, skill, None).as_bytes(),
-        )?;
+        // Resource files are a complete immutable snapshot. Clear an older
+        // materialization first so a removed reference never leaks forward.
+        if dir.exists() {
+            fs::remove_dir_all(&dir).map_err(|err| {
+                format!("清理旧 Skill 目录 {} 失败：{}", dir.display(), err)
+            })?;
+        }
+        materialize_cline_skill_directory(&dir, id, skill, None)?;
     }
     Ok(())
 }
@@ -508,6 +583,212 @@ fn render_skill_markdown(
         skill.rules.trim(),
         skill.content.trim(),
     )
+}
+
+fn skill_bundle_store_dir(
+    skill_id: &str,
+    bundle: &desic_skill_runtime::SkillBundleSummary,
+) -> Result<PathBuf, String> {
+    let hash = bundle.bundle_hash.trim().to_ascii_lowercase();
+    if hash.len() != 64 || !hash.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(format!("Skill bundle hash 无效：{}", bundle.bundle_hash));
+    }
+    Ok(runtime_work_dir()
+        .join("skills")
+        .join("bundles")
+        .join(sanitize_skill_dir_name(skill_id))
+        .join(hash))
+}
+
+fn validate_skill_bundle_summary(
+    bundle: &desic_skill_runtime::SkillBundleSummary,
+) -> Result<(), String> {
+    let expected = desic_skill_runtime::build_bundle_summary(
+        bundle.files.clone(),
+        bundle.source.clone(),
+        bundle.manifest.clone(),
+    )?;
+    if expected.bundle_hash != bundle.bundle_hash {
+        return Err("Skill bundle 文件清单与 bundleHash 不一致".to_string());
+    }
+    Ok(())
+}
+
+pub(crate) fn sha256_bytes(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn materialize_skill_bundle_resources(
+    skill: &desic_storage_config::AiSkillDefinition,
+    target_dir: &Path,
+) -> Result<(), String> {
+    let Some(bundle) = skill.bundle.as_ref() else {
+        return Ok(());
+    };
+    validate_skill_bundle_summary(bundle)?;
+    let source_root = skill_bundle_store_dir(&skill.id, bundle)?;
+    let canonical_root = source_root
+        .canonicalize()
+        .map_err(|err| format!("Skill bundle 存储目录不可用：{}", err))?;
+    for file in &bundle.files {
+        if file.path == "SKILL.md" {
+            continue;
+        }
+        let relative = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
+        let source = canonical_root.join(&relative);
+        let resolved = source.canonicalize().map_err(|_| {
+            format!(
+                "Skill bundle 缺少受锁定的资源：{}",
+                relative.replace('\\', "/")
+            )
+        })?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err("Skill bundle 资源路径超出存储目录".to_string());
+        }
+        let metadata = fs::metadata(&resolved).map_err(|err| err.to_string())?;
+        if !metadata.is_file() || metadata.len() != file.bytes {
+            return Err(format!("Skill bundle 资源与清单不匹配：{}", relative));
+        }
+        let bytes = fs::read(&resolved).map_err(|err| err.to_string())?;
+        if sha256_bytes(&bytes) != file.sha256.to_ascii_lowercase() {
+            return Err(format!("Skill bundle 资源哈希不匹配：{}", relative));
+        }
+        let destination = target_dir.join(&relative);
+        if let Some(parent) = destination.parent() {
+            fs::create_dir_all(parent).map_err(|err| {
+                format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err)
+            })?;
+        }
+        write_file_atomically(&destination, &bytes)?;
+    }
+    Ok(())
+}
+
+fn materialize_cline_skill_directory(
+    directory: &Path,
+    id: &str,
+    skill: &desic_storage_config::AiSkillDefinition,
+    locked_version: Option<u32>,
+) -> Result<(), String> {
+    fs::create_dir_all(directory).map_err(|err| err.to_string())?;
+    write_file_atomically(
+        &directory.join("SKILL.md"),
+        render_skill_markdown(id, skill, locked_version).as_bytes(),
+    )?;
+    materialize_skill_bundle_resources(skill, directory)
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedSkillEntrypoint {
+    pub skill_id: String,
+    pub bundle_hash: String,
+    pub bundle_root: PathBuf,
+    pub script_path: PathBuf,
+    pub runtime: desic_skill_runtime::SkillRuntimeSpec,
+    pub entrypoint: desic_skill_runtime::SkillEntrypoint,
+    pub files: Vec<desic_skill_runtime::SkillBundleFile>,
+    pub capabilities: desic_skill_runtime::SkillCapabilities,
+}
+
+fn verify_skill_bundle_store(
+    skill_id: &str,
+    bundle: &desic_skill_runtime::SkillBundleSummary,
+) -> Result<PathBuf, String> {
+    validate_skill_bundle_summary(bundle)?;
+    let root = skill_bundle_store_dir(skill_id, bundle)?;
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|err| format!("Skill bundle 存储目录不可用：{}", err))?;
+    for file in &bundle.files {
+        let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
+        let resolved = canonical_root.join(&path).canonicalize().map_err(|_| {
+            format!("Skill bundle 缺少受锁定的文件：{}", path.replace('\\', "/"))
+        })?;
+        if !resolved.starts_with(&canonical_root) {
+            return Err("Skill bundle 文件路径超出存储目录".to_string());
+        }
+        let metadata = fs::metadata(&resolved).map_err(|err| err.to_string())?;
+        if !metadata.is_file() || metadata.len() != file.bytes {
+            return Err(format!("Skill bundle 文件与清单不匹配：{}", path));
+        }
+        let bytes = fs::read(&resolved).map_err(|err| err.to_string())?;
+        if sha256_bytes(&bytes) != file.sha256.to_ascii_lowercase() {
+            return Err(format!("Skill bundle 文件哈希不匹配：{}", path));
+        }
+    }
+    Ok(canonical_root)
+}
+
+pub(crate) fn resolve_active_skill_entrypoint(
+    app: &tauri::AppHandle,
+    skill_id: &str,
+    entrypoint_name: &str,
+    active_skill_ids: &std::collections::HashSet<String>,
+) -> Result<ResolvedSkillEntrypoint, String> {
+    let skill_id = skill_id.trim();
+    let entrypoint_name = entrypoint_name.trim();
+    if skill_id.is_empty() || skill_id.len() > 120 || entrypoint_name.is_empty() || entrypoint_name.len() > 64 {
+        return Err("Skill entrypoint 请求格式无效".to_string());
+    }
+    if !active_skill_ids.contains(skill_id) {
+        return Err(format!("Skill {} 未在当前 Agent 会话中启用", skill_id));
+    }
+    let config = load_ai_config(app)?;
+    if !config
+        .skill_runtime_trust
+        .get(skill_id)
+        .copied()
+        .unwrap_or(false)
+    {
+        return Err(format!("Skill {} 尚未获授脚本执行信任", skill_id));
+    }
+    let definition = config
+        .skill_definitions
+        .iter()
+        .find(|item| item.id == skill_id)
+        .ok_or_else(|| format!("找不到已启用的 Skill {}", skill_id))?;
+    let bundle = definition
+        .bundle
+        .as_ref()
+        .ok_or_else(|| format!("Skill {} 没有可执行 bundle", skill_id))?;
+    let runtime = bundle
+        .manifest
+        .runtime
+        .as_ref()
+        .ok_or_else(|| format!("Skill {} 未声明 runtime", skill_id))?
+        .clone();
+    if !matches!(runtime.kind.as_str(), "node" | "python") {
+        return Err(format!("Skill {} 的 runtime 暂不支持执行", skill_id));
+    }
+    let entrypoint = runtime
+        .entrypoints
+        .iter()
+        .find(|item| item.name == entrypoint_name)
+        .cloned()
+        .ok_or_else(|| format!("Skill {} 未声明 entrypoint {}", skill_id, entrypoint_name))?;
+    if !bundle.files.iter().any(|file| file.path == entrypoint.script) {
+        return Err(format!("Skill entrypoint 脚本不在 bundle 清单中：{}", entrypoint.script));
+    }
+    let bundle_root = verify_skill_bundle_store(skill_id, bundle)?;
+    let script_path = bundle_root
+        .join(desic_skill_runtime::validate_bundle_relative_path(&entrypoint.script)?)
+        .canonicalize()
+        .map_err(|_| format!("Skill entrypoint 脚本不存在：{}", entrypoint.script))?;
+    if !script_path.starts_with(&bundle_root) || !script_path.is_file() {
+        return Err("Skill entrypoint 脚本不在受信任 bundle 内".to_string());
+    }
+    Ok(ResolvedSkillEntrypoint {
+        skill_id: skill_id.to_string(),
+        bundle_hash: bundle.bundle_hash.clone(),
+        bundle_root,
+        script_path,
+        runtime,
+        entrypoint,
+        files: bundle.files.clone(),
+        capabilities: bundle.manifest.capabilities.clone(),
+    })
 }
 
 /// The per-run workspace root handed to the sidecar for one background Run.
@@ -550,10 +831,12 @@ pub(crate) fn sync_run_scoped_skill_files(
             continue;
         }
         let dir = root.join(sanitize_skill_dir_name(id));
-        fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
-        let content =
-            render_skill_markdown(id, skill, locked_versions.get(id).copied().or(Some(1)));
-        write_file_atomically(&dir.join("SKILL.md"), content.as_bytes())?;
+        materialize_cline_skill_directory(
+            &dir,
+            id,
+            skill,
+            locked_versions.get(id).copied().or(Some(1)),
+        )?;
         names.push(id.to_string());
     }
     Ok(names)
@@ -638,16 +921,132 @@ fn parse_imported_skill(markdown: &str, fallback: &str) -> Result<AiSkillDefinit
         rules: String::new(),
         content,
         builtin: false,
+        bundle: None,
     })
 }
 
-fn read_imported_skill_markdown(source: &Path) -> Result<String, String> {
-    if source.is_dir() {
-        let path = source.join("SKILL.md");
-        return fs::read_to_string(&path)
-            .map_err(|err| format!("读取 {} 失败：{}", path.display(), err));
+#[derive(Debug, Clone)]
+struct ImportedSkillFile {
+    path: String,
+    bytes: Vec<u8>,
+}
+
+#[derive(Debug, Clone)]
+struct ImportedSkillBundle {
+    files: Vec<ImportedSkillFile>,
+    source: desic_skill_runtime::SkillBundleSource,
+}
+
+fn ignored_imported_skill_path(path: &str) -> bool {
+    path.split('/').any(|part| {
+        part == ".git" || part == "node_modules" || (part.starts_with('.') && part != ".")
+    })
+}
+
+fn collect_imported_directory_files(
+    root: &Path,
+    relative: &Path,
+    files: &mut Vec<ImportedSkillFile>,
+) -> Result<(), String> {
+    let directory = root.join(relative);
+    let mut entries = fs::read_dir(&directory)
+        .map_err(|err| format!("读取 Skill 目录 {} 失败：{}", directory.display(), err))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| "Skill bundle 文件名必须是 UTF-8".to_string())?;
+        let child_relative = relative.join(&name);
+        let child_display = child_relative.to_string_lossy().replace('\\', "/");
+        // Hidden metadata, dependency trees, and Git state are not portable
+        // Skill resources and must not affect an immutable bundle hash.
+        if ignored_imported_skill_path(&child_display) {
+            continue;
+        }
+        let file_type = entry.file_type().map_err(|err| err.to_string())?;
+        if file_type.is_symlink() {
+            return Err(format!("Skill bundle 不接受符号链接：{}", child_relative.display()));
+        }
+        if file_type.is_dir() {
+            collect_imported_directory_files(root, &child_relative, files)?;
+            continue;
+        }
+        if !file_type.is_file() {
+            return Err(format!("Skill bundle 只接受普通文件：{}", child_relative.display()));
+        }
+        let path = child_relative.to_string_lossy().replace('\\', "/");
+        let path = desic_skill_runtime::validate_bundle_relative_path(&path)?;
+        let metadata = entry.metadata().map_err(|err| err.to_string())?;
+        if metadata.len() > desic_skill_runtime::MAX_SKILL_BUNDLE_FILE_BYTES {
+            return Err(format!("Skill bundle 文件超过大小上限：{}", path));
+        }
+        files.push(ImportedSkillFile {
+            path,
+            bytes: fs::read(entry.path()).map_err(|err| err.to_string())?,
+        });
     }
-    if source
+    Ok(())
+}
+
+fn normalize_imported_skill_files(
+    mut files: Vec<ImportedSkillFile>,
+) -> Result<Vec<ImportedSkillFile>, String> {
+    if files.is_empty() || files.len() > desic_skill_runtime::MAX_SKILL_BUNDLE_FILES {
+        return Err(format!(
+            "Skill bundle 文件数量必须为 1-{}",
+            desic_skill_runtime::MAX_SKILL_BUNDLE_FILES
+        ));
+    }
+    if !files.iter().any(|file| file.path == "SKILL.md") {
+        let roots = files
+            .iter()
+            .filter_map(|file| file.path.split_once('/').map(|(root, _)| root))
+            .collect::<std::collections::HashSet<_>>();
+        if roots.len() == 1 {
+            let prefix = format!("{}/", roots.into_iter().next().unwrap_or_default());
+            for file in &mut files {
+                if let Some(path) = file.path.strip_prefix(&prefix) {
+                    file.path = path.to_string();
+                }
+            }
+        }
+    }
+    let mut total = 0_u64;
+    let mut paths = std::collections::HashSet::new();
+    for file in &mut files {
+        file.path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
+        if !paths.insert(file.path.clone()) {
+            return Err(format!("Skill bundle 包含重复文件：{}", file.path));
+        }
+        if file.bytes.len() as u64 > desic_skill_runtime::MAX_SKILL_BUNDLE_FILE_BYTES {
+            return Err(format!("Skill bundle 文件超过大小上限：{}", file.path));
+        }
+        total = total
+            .checked_add(file.bytes.len() as u64)
+            .ok_or_else(|| "Skill bundle 总大小溢出".to_string())?;
+    }
+    if total > desic_skill_runtime::MAX_SKILL_BUNDLE_TOTAL_BYTES {
+        return Err("Skill bundle 总大小超过上限".to_string());
+    }
+    if !paths.contains("SKILL.md") {
+        return Err("Skill bundle 中必须包含根目录 SKILL.md".to_string());
+    }
+    files.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(files)
+}
+
+fn read_imported_skill_bundle(
+    source: &Path,
+    origin: desic_skill_runtime::SkillBundleSource,
+) -> Result<ImportedSkillBundle, String> {
+    let files = if source.is_dir() {
+        let mut files = Vec::new();
+        collect_imported_directory_files(source, Path::new(""), &mut files)?;
+        files
+    } else if source
         .extension()
         .and_then(|value| value.to_str())
         .is_some_and(|value| value.eq_ignore_ascii_case("zip"))
@@ -655,28 +1054,329 @@ fn read_imported_skill_markdown(source: &Path) -> Result<String, String> {
         let file = fs::File::open(source).map_err(|err| format!("打开 Skill ZIP 失败：{err}"))?;
         let mut archive =
             ZipArchive::new(file).map_err(|err| format!("读取 Skill ZIP 失败：{err}"))?;
+        if archive.len() > desic_skill_runtime::MAX_SKILL_BUNDLE_FILES {
+            return Err(format!(
+                "Skill ZIP 文件数量超过 {}",
+                desic_skill_runtime::MAX_SKILL_BUNDLE_FILES
+            ));
+        }
+        let mut files = Vec::new();
         for index in 0..archive.len() {
             let mut entry = archive.by_index(index).map_err(|err| err.to_string())?;
-            let name = entry.name().replace('\\', "/");
-            if name.ends_with("SKILL.md") && !name.contains("../") {
-                let mut contents = String::new();
-                entry
-                    .read_to_string(&mut contents)
-                    .map_err(|err| err.to_string())?;
-                return Ok(contents);
+            if entry.is_dir() {
+                continue;
             }
+            let path = entry.name().replace('\\', "/");
+            if ignored_imported_skill_path(&path) {
+                continue;
+            }
+            let path = desic_skill_runtime::validate_bundle_relative_path(&path)?;
+            if entry.size() > desic_skill_runtime::MAX_SKILL_BUNDLE_FILE_BYTES {
+                return Err(format!("Skill ZIP 文件超过大小上限：{}", path));
+            }
+            let mut bytes = Vec::with_capacity(entry.size() as usize);
+            entry.read_to_end(&mut bytes).map_err(|err| err.to_string())?;
+            files.push(ImportedSkillFile { path, bytes });
         }
-        return Err("ZIP 中未找到 SKILL.md".to_string());
-    }
-    Err("Skill 来源必须是包含 SKILL.md 的目录或 ZIP 文件".to_string())
+        files
+    } else {
+        return Err("Skill 来源必须是包含 SKILL.md 的目录或 ZIP 文件".to_string());
+    };
+    Ok(ImportedSkillBundle {
+        files: normalize_imported_skill_files(files)?,
+        source: origin,
+    })
 }
 
-fn persist_imported_skill(
+fn imported_bundle_definition(
+    bundle: &ImportedSkillBundle,
+    fallback: &str,
+) -> Result<AiSkillDefinition, String> {
+    let markdown = bundle
+        .files
+        .iter()
+        .find(|file| file.path == "SKILL.md")
+        .ok_or_else(|| "Skill bundle 缺少 SKILL.md".to_string())?;
+    let markdown = std::str::from_utf8(&markdown.bytes)
+        .map_err(|_| "SKILL.md 必须是 UTF-8 文本".to_string())?;
+    let mut definition = parse_imported_skill(markdown, fallback)?;
+    let manifest = match bundle.files.iter().find(|file| file.path == "desic-skill.json") {
+        Some(file) => desic_skill_runtime::parse_runtime_manifest(
+            std::str::from_utf8(&file.bytes)
+                .map_err(|_| "desic-skill.json 必须是 UTF-8 文本".to_string())?,
+        )?,
+        None => desic_skill_runtime::SkillRuntimeManifest::default(),
+    };
+    let files = bundle
+        .files
+        .iter()
+        .map(|file| desic_skill_runtime::SkillBundleFile {
+            path: file.path.clone(),
+            sha256: sha256_bytes(&file.bytes),
+            bytes: file.bytes.len() as u64,
+        })
+        .collect();
+    definition.bundle = Some(desic_skill_runtime::build_bundle_summary(
+        files,
+        bundle.source.clone(),
+        manifest,
+    )?);
+    Ok(definition)
+}
+
+fn persist_imported_bundle_files(
+    definition: &AiSkillDefinition,
+    bundle: &ImportedSkillBundle,
+) -> Result<(), String> {
+    let summary = definition
+        .bundle
+        .as_ref()
+        .ok_or_else(|| "Skill bundle 缺少文件清单".to_string())?;
+    validate_skill_bundle_summary(summary)?;
+    let target = skill_bundle_store_dir(&definition.id, summary)?;
+    if target.exists() {
+        return Ok(());
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| "Skill bundle 存储目录无效".to_string())?;
+    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    let staging = parent.join(format!(".{}-{}.staging", summary.bundle_hash, now_ms()));
+    if staging.exists() {
+        fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
+    }
+    fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
+    let result = (|| {
+        for file in &bundle.files {
+            let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
+            let destination = staging.join(path);
+            if let Some(parent) = destination.parent() {
+                fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+            }
+            write_file_atomically(&destination, &file.bytes)?;
+        }
+        fs::rename(&staging, &target).map_err(|err| {
+            format!("固化 Skill bundle 到 {} 失败：{}", target.display(), err)
+        })
+    })();
+    if result.is_err() {
+        let _ = fs::remove_dir_all(&staging);
+    }
+    result
+}
+
+fn builtin_skill_reference_files(id: &str) -> &'static [(&'static str, &'static str)] {
+    match id {
+        "desic-trade-operations" => &[
+            ("references/trade-opportunity-workflow.md", "# Trade Opportunity Workflow\n\nDescribe the opportunity with symbol, direction, thesis, evidence timestamps, invalidation, sizing intent, and an explicit no-action path. A trade opportunity is analysis output, not an order.\n"),
+            ("references/order-protection-reconciliation.md", "# Order and Protection Reconciliation\n\nBefore and after any permitted action, compare intended state with observed order, fill, position, and protection state. Treat unknown, partial, stale, or conflicting state as a reason to stop and re-check.\n"),
+            ("references/perpetual-risk-fields.md", "# Perpetual Risk Fields\n\nKeep leverage, margin mode, mark price, maintenance margin, liquidation estimate, available balance, position size, and protection state distinct. Never infer an exchange liquidation result from an incomplete snapshot.\n"),
+            ("references/risk-gates.md", "# Risk Gates\n\nRisk review may narrow, delay, or reject an action. It must identify the blocking fact, its observation time, and the smallest safe next step. Missing account or market evidence is not permission to guess.\n"),
+            ("references/position-lifecycle.md", "# Position Lifecycle\n\nTrack intended, submitted, partially filled, open, reducing, protected, closed, cancelled, and unknown states separately. Reconcile fills and remaining quantity before issuing another position instruction.\n"),
+            ("references/exit-and-protection.md", "# Exit and Protection\n\nA partial close does not remove protection for the remaining quantity. A full close clears protection only after the fill is confirmed. Do not duplicate, reverse, or amend an order from an unverified state.\n"),
+            ("references/evidence-quality.md", "# Evidence Quality\n\nLabel each observation with source and time. Separate direct observations, derived calculations, hypotheses, and unknowns. Do not use a newer snapshot to rewrite an earlier calculation without describing the change.\n"),
+            ("references/market-coverage.md", "# Market Coverage\n\nCheck instrument, timeframe, freshness, missing fields, and source coverage before drawing a conclusion. News, Smart Money, order flow, and derivative data remain separate evidence categories unless their relationship is explicitly supported.\n"),
+        ],
+        "okx-market-intelligence" => &[
+            ("references/news-and-events.md", "# News and Events\n\nIdentify source, publication time, fetch time, event/article IDs, reaction window, related assets, importance, factual summary, possible impact, validation conditions, and risks.\n"),
+            ("references/smart-money-evidence.md", "# Smart Money Evidence\n\nResolve the trader pool, then combine performance, positions, orders, positioning, taker flow, crowding, funding, basis, liquidation samples, and systemic stress. State sample, horizon, coverage, data version, counterexamples, and limitations.\n"),
+        ],
+        _ => &[],
+    }
+}
+
+pub(crate) fn ensure_builtin_skill_bundles() -> Result<(), String> {
+    const BUILTIN_BUNDLE_IDS: [&str; 2] = [
+        "desic-trade-operations",
+        "okx-market-intelligence",
+    ];
+    let defaults = desic_storage_config::default_ai_skill_definitions();
+    for id in BUILTIN_BUNDLE_IDS {
+        let Some(skill) = defaults.iter().find(|skill| skill.id == id) else {
+            return Err(format!("内置 Skill 定义缺失：{id}"));
+        };
+        let mut files = vec![ImportedSkillFile {
+            path: "SKILL.md".to_string(),
+            bytes: render_skill_markdown(id, skill, None).into_bytes(),
+        }];
+        files.extend(builtin_skill_reference_files(id).iter().map(|(path, content)| ImportedSkillFile {
+            path: (*path).to_string(),
+            bytes: content.as_bytes().to_vec(),
+        }));
+        let bundle = ImportedSkillBundle {
+            files: files.clone(),
+            source: desic_skill_runtime::SkillBundleSource {
+                kind: "builtin".to_string(),
+                reference: Some(format!("desic://builtin/{id}")),
+                revision: None,
+                subpath: None,
+            },
+        };
+        let summary = desic_skill_runtime::build_bundle_summary(
+            files
+                .iter()
+                .map(|file| desic_skill_runtime::SkillBundleFile {
+                    path: file.path.clone(),
+                    sha256: sha256_bytes(&file.bytes),
+                    bytes: file.bytes.len() as u64,
+                })
+                .collect(),
+            bundle.source.clone(),
+            desic_skill_runtime::SkillRuntimeManifest::default(),
+        )?;
+        let mut definition = skill.clone();
+        definition.bundle = Some(summary);
+        persist_imported_bundle_files(&definition, &bundle)?;
+    }
+    Ok(())
+}
+
+fn skill_definition_text_matches(
+    left: &AiSkillDefinition,
+    right: &AiSkillDefinition,
+) -> bool {
+    left.id == right.id
+        && left.name == right.name
+        && left.description == right.description
+        && left.rules == right.rules
+        && left.content == right.content
+        && left.builtin == right.builtin
+}
+
+fn rebuild_skill_bundle_after_definition_edit(
+    definition: &AiSkillDefinition,
+) -> Result<AiSkillDefinition, String> {
+    let previous = definition
+        .bundle
+        .as_ref()
+        .ok_or_else(|| "Skill bundle 缺少文件清单".to_string())?;
+    validate_skill_bundle_summary(previous)?;
+    let source_root = skill_bundle_store_dir(&definition.id, previous)?;
+    let canonical_root = source_root
+        .canonicalize()
+        .map_err(|err| format!("无法读取原 Skill bundle：{}", err))?;
+    let mut files = Vec::with_capacity(previous.files.len());
+    for file in &previous.files {
+        let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
+        let bytes = if path == "SKILL.md" {
+            render_skill_markdown(&definition.id, definition, None).into_bytes()
+        } else {
+            let resolved = canonical_root.join(&path).canonicalize().map_err(|_| {
+                format!("原 Skill bundle 缺少资源：{}", path.replace('\\', "/"))
+            })?;
+            if !resolved.starts_with(&canonical_root) {
+                return Err("原 Skill bundle 资源路径超出存储目录".to_string());
+            }
+            let bytes = fs::read(&resolved).map_err(|err| err.to_string())?;
+            if bytes.len() as u64 != file.bytes || sha256_bytes(&bytes) != file.sha256 {
+                return Err(format!("原 Skill bundle 资源已损坏：{}", path));
+            }
+            bytes
+        };
+        files.push(ImportedSkillFile { path, bytes });
+    }
+    let mut rebuilt = definition.clone();
+    let bundle = ImportedSkillBundle {
+        files,
+        source: desic_skill_runtime::SkillBundleSource {
+            kind: "edited".to_string(),
+            reference: Some(previous.bundle_hash.clone()),
+            revision: None,
+            subpath: None,
+        },
+    };
+    let manifest = previous.manifest.clone();
+    let file_summaries = bundle
+        .files
+        .iter()
+        .map(|file| desic_skill_runtime::SkillBundleFile {
+            path: file.path.clone(),
+            sha256: sha256_bytes(&file.bytes),
+            bytes: file.bytes.len() as u64,
+        })
+        .collect();
+    rebuilt.bundle = Some(desic_skill_runtime::build_bundle_summary(
+        file_summaries,
+        bundle.source.clone(),
+        manifest,
+    )?);
+    persist_imported_bundle_files(&rebuilt, &bundle)?;
+    Ok(rebuilt)
+}
+
+pub(crate) fn revoke_runtime_trust_for_changed_bundles(
+    existing: Option<&AiConfig>,
+    definitions: &[AiSkillDefinition],
+    trust: &mut HashMap<String, bool>,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    for definition in definitions {
+        let previous_hash = existing
+            .skill_definitions
+            .iter()
+            .find(|item| item.id == definition.id)
+            .and_then(|item| item.bundle.as_ref().map(|bundle| bundle.bundle_hash.as_str()));
+        let next_hash = definition
+            .bundle
+            .as_ref()
+            .map(|bundle| bundle.bundle_hash.as_str());
+        if previous_hash != next_hash {
+            trust.remove(&definition.id);
+        }
+    }
+}
+
+pub(crate) fn prepare_ai_skill_bundle_definitions(
+    definitions: Vec<AiSkillDefinition>,
+    existing: Option<&AiConfig>,
+) -> Result<Vec<AiSkillDefinition>, String> {
+    definitions
+        .into_iter()
+        .map(|definition| {
+            let Some(bundle) = definition.bundle.as_ref() else {
+                return Ok(definition);
+            };
+            validate_skill_bundle_summary(bundle)?;
+            let stored = skill_bundle_store_dir(&definition.id, bundle)?;
+            if !stored.is_dir() {
+                return Err(format!(
+                    "Skill {} 引用的 bundle 不在本机存储中，请重新导入来源",
+                    definition.id
+                ));
+            }
+            let should_fork = existing
+                .and_then(|config| {
+                    config
+                        .skill_definitions
+                        .iter()
+                        .find(|item| item.id == definition.id)
+                })
+                .and_then(|previous| previous.bundle.as_ref().map(|item| (previous, item)))
+                .is_some_and(|(previous, previous_bundle)| {
+                    previous_bundle.bundle_hash == bundle.bundle_hash
+                        && !skill_definition_text_matches(previous, &definition)
+                });
+            if should_fork {
+                rebuild_skill_bundle_after_definition_edit(&definition)
+            } else {
+                Ok(definition)
+            }
+        })
+        .collect()
+}
+
+fn persist_imported_skill_bundle(
     app: &tauri::AppHandle,
-    skill: AiSkillDefinition,
+    bundle: ImportedSkillBundle,
+    fallback: &str,
 ) -> Result<AiConfigSummary, String> {
+    let skill = imported_bundle_definition(&bundle, fallback)?;
+    persist_imported_bundle_files(&skill, &bundle)?;
     let _guard = lock_ai_config_writes()?;
     let mut config = load_ai_config_locked(app)?;
+    let previous_config = config.clone();
     if let Some(existing) = config
         .skill_definitions
         .iter_mut()
@@ -689,6 +1389,11 @@ fn persist_imported_skill(
     config.enabled_skills.push(skill.id.clone());
     config.enabled_skills = normalize_ai_enabled_skills(config.enabled_skills);
     config.skill_definitions = merge_ai_skill_definitions(config.skill_definitions);
+    revoke_runtime_trust_for_changed_bundles(
+        Some(&previous_config),
+        &config.skill_definitions,
+        &mut config.skill_runtime_trust,
+    );
     validate_ai_config(&config)?;
     save_ai_config(app, &config)?;
     sync_cline_skill_files_from_config(&config)?;
@@ -710,10 +1415,19 @@ pub(crate) fn ai_skill_import(
     }
     let fallback = source
         .file_stem()
+        .or_else(|| source.file_name())
         .and_then(|value| value.to_str())
         .unwrap_or("imported-skill");
-    let markdown = read_imported_skill_markdown(&source)?;
-    persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
+    let bundle = read_imported_skill_bundle(
+        &source,
+        desic_skill_runtime::SkillBundleSource {
+            kind: "local".to_string(),
+            reference: source.file_name().and_then(|value| value.to_str()).map(str::to_string),
+            revision: None,
+            subpath: None,
+        },
+    )?;
+    persist_imported_skill_bundle(&app, bundle, fallback)
 }
 
 #[tauri::command]
@@ -748,11 +1462,30 @@ pub(crate) fn ai_skill_pick_source(
 pub(crate) async fn ai_skill_install_git(
     app: tauri::AppHandle,
     url: String,
+    reference: Option<String>,
+    subpath: Option<String>,
 ) -> Result<AiConfigSummary, String> {
-    let url = url.trim();
+    let url = url.trim().to_string();
     if !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("git@")) {
         return Err("Git 地址只支持 http(s):// 或 git@ 主机格式".to_string());
     }
+    let reference = reference
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    if reference
+        .as_deref()
+        .is_some_and(|value| value.len() > 200 || value.chars().any(char::is_control))
+    {
+        return Err("Git ref 格式无效".to_string());
+    }
+    let subpath = subpath
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(desic_skill_runtime::validate_bundle_relative_path)
+        .transpose()?;
     let repo = url
         .rsplit('/')
         .next()
@@ -766,37 +1499,71 @@ pub(crate) async fn ai_skill_install_git(
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
 
-    // 优先系统 git（支持私有仓库与 SSH 地址）。用户未安装 git 时自动
-    // 降级为托管平台的源码包接口，GitHub/GitLab 公开仓库无需 git 即可安装。
+    // Prefer system Git because it supports private repositories and SSH. The
+    // archive fallback is deliberately limited to an unpinned public source.
     let mut command = Command::new("git");
     hide_windows_command_window(&mut command);
-    match command
-        .args(["clone", "--depth", "1", url])
-        .arg(&target)
-        .output()
-        .await
-    {
-        Ok(output) if output.status.success() => {}
+    command.arg("clone").arg("--depth").arg("1");
+    if let Some(reference) = reference.as_deref() {
+        command.arg("--branch").arg(reference);
+    }
+    let clone_result = command.arg(&url).arg(&target).output().await;
+    let resolved_revision = match clone_result {
+        Ok(output) if output.status.success() => {
+            let mut revision_command = Command::new("git");
+            hide_windows_command_window(&mut revision_command);
+            revision_command
+                .args(["-C"])
+                .arg(&target)
+                .args(["rev-parse", "HEAD"])
+                .output()
+                .await
+                .ok()
+                .filter(|output| output.status.success())
+                .and_then(|output| String::from_utf8(output.stdout).ok())
+                .map(|value| value.trim().to_string())
+                .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        }
         Ok(output) => {
-            // git 可用但克隆失败（认证、网络或仓库问题）：保留 git 的原始诊断。
             return Err(format!(
                 "Git 安装失败：{}",
                 String::from_utf8_lossy(&output.stderr).trim()
             ));
         }
-        Err(_) => {
-            // 系统没有 git：走 HTTP 源码包下载。
-            let _ = fs::remove_dir_all(&target);
-            download_skill_source_archive(url, &target).await?;
+        Err(_) if reference.is_some() => {
+            return Err("未检测到 Git，无法按指定 ref 导入。请安装 Git 后重试。".to_string());
         }
-    }
+        Err(_) => {
+            let _ = fs::remove_dir_all(&target);
+            download_skill_source_archive(&url, &target).await?;
+            None
+        }
+    };
 
-    let markdown = read_imported_skill_markdown(&target)?;
-    let fallback = target
+    let bundle_root = subpath
+        .as_deref()
+        .map(|value| target.join(value))
+        .unwrap_or_else(|| target.clone());
+    if !bundle_root.is_dir() {
+        return Err(format!(
+            "Git Skill 子目录不存在：{}",
+            subpath.as_deref().unwrap_or(".")
+        ));
+    }
+    let fallback = bundle_root
         .file_name()
         .and_then(|value| value.to_str())
         .unwrap_or("imported-skill");
-    persist_imported_skill(&app, parse_imported_skill(&markdown, fallback)?)
+    let bundle = read_imported_skill_bundle(
+        &bundle_root,
+        desic_skill_runtime::SkillBundleSource {
+            kind: "git".to_string(),
+            reference: Some(url),
+            revision: resolved_revision,
+            subpath,
+        },
+    )?;
+    persist_imported_skill_bundle(&app, bundle, fallback)
 }
 
 /// 无 Git 时按顺序尝试的源码包下载地址。
@@ -2593,6 +3360,7 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
         custom_rules: config.custom_rules,
         enabled_skills: config.enabled_skills,
         skill_definitions: merge_ai_skill_definitions(config.skill_definitions),
+        skill_runtime_trust: config.skill_runtime_trust,
         open_agent: config.open_agent,
         workspace_roots: config.workspace_roots,
     }
@@ -2613,6 +3381,7 @@ fn unconfigured_ai_config_summary() -> AiConfigSummary {
         custom_rules: String::new(),
         enabled_skills: normalize_ai_enabled_skills(Vec::new()),
         skill_definitions: desic_storage_config::default_ai_skill_definitions(),
+        skill_runtime_trust: HashMap::new(),
         open_agent: true,
         workspace_roots: Vec::new(),
     })
@@ -2655,14 +3424,9 @@ fn merge_ai_skill_definitions(
     let protected_skill_ids = [
         "desic-core-operations",
         "trading-philosophy",
-        "okx-news-intelligence",
-        "okx-smart-money-analysis",
+        "okx-market-intelligence",
+        "desic-trade-operations",
     ];
-    let has_legacy_renamed_trading_skill = items.iter().any(|skill| {
-        skill.builtin
-            && skill.id.trim() != "desic-core-operations"
-            && skill.id.trim() != "trading-philosophy"
-    });
     let mut merged = desic_storage_config::default_ai_skill_definitions();
     for mut item in items {
         item.id = item.id.trim().to_string();
@@ -2670,9 +3434,6 @@ fn merge_ai_skill_definitions(
             continue;
         }
         if item.id == "desic-core-operations" {
-            continue;
-        }
-        if has_legacy_renamed_trading_skill && item.builtin && item.id == "trading-philosophy" {
             continue;
         }
         if item.id == "trading-philosophy"
@@ -2693,10 +3454,28 @@ fn merge_ai_skill_definitions(
             // User-edited built-in Skills have a different fingerprint and stay authoritative.
             continue;
         }
+        let legacy_alias = matches!(
+            item.id.as_str(),
+            "okx-news-intelligence"
+                | "okx-smart-money-analysis"
+                | "desic-perpetual-risk"
+                | "desic-position-management"
+                | "desic-market-analysis"
+        );
+        item.id = canonical_skill_id(&item.id).to_string();
         item.name = item.id.clone();
         item.builtin = protected_skill_ids.contains(&item.id.as_str());
         if let Some(existing) = merged.iter_mut().find(|skill| skill.id == item.id) {
-            *existing = item;
+            if legacy_alias {
+                existing.description = format!("{} {}", existing.description, item.description);
+                existing.rules = format!("{}\n\nMigrated legacy guidance:\n{}", existing.rules, item.rules);
+                if !item.content.is_empty() {
+                    existing.content.push_str("\n\nMigrated legacy guidance:\n");
+                    existing.content.push_str(&item.content);
+                }
+            } else {
+                *existing = item;
+            }
         } else {
             merged.push(item);
         }
@@ -2717,14 +3496,22 @@ fn skill_text_fingerprint(skill: &desic_storage_config::AiSkillDefinition) -> u6
     hash
 }
 
+fn canonical_skill_id(id: &str) -> &str {
+    match id.trim() {
+        "okx-news-intelligence" | "okx-smart-money-analysis" => "okx-market-intelligence",
+        "desic-perpetual-risk" | "desic-position-management" | "desic-market-analysis" => "desic-trade-operations",
+        value => value,
+    }
+}
+
 fn normalize_ai_enabled_skills(items: Vec<String>) -> Vec<String> {
     let mut result = vec![
         "trading-philosophy".to_string(),
-        "okx-news-intelligence".to_string(),
-        "okx-smart-money-analysis".to_string(),
+        "okx-market-intelligence".to_string(),
+        "desic-trade-operations".to_string(),
     ];
     for item in items {
-        let id = item.trim();
+        let id = canonical_skill_id(&item);
         if id.is_empty()
             || id == "desic-core-operations"
             || result.iter().any(|existing| existing == id)
@@ -3066,6 +3853,8 @@ pub(crate) fn normalize_ai_reasoning_depth(value: Option<&str>) -> String {
         "low" => "low".to_string(),
         "high" => "high".to_string(),
         "xhigh" => "xhigh".to_string(),
+        // Compatibility for local configs written by the short-lived pre-release tier.
+        "ultra" => "xhigh".to_string(),
         _ => "medium".to_string(),
     }
 }
@@ -3242,6 +4031,7 @@ mod tests {
             rules: "rules".to_string(),
             content: content.to_string(),
             builtin: true,
+                bundle: None,
         };
         let run_a = format!("run-a-{}", now_ms());
         let run_b = format!("run-b-{}", now_ms());
@@ -3291,6 +4081,212 @@ mod tests {
         assert!(!run_scoped_workspace_root(&run_b).expect("root").exists());
     }
 
+    fn imported_test_bundle(
+        id: &str,
+        body: &str,
+        resource_path: &str,
+        resource_bytes: &[u8],
+    ) -> desic_storage_config::AiSkillDefinition {
+        let bundle = ImportedSkillBundle {
+            files: vec![
+                ImportedSkillFile {
+                    path: "SKILL.md".to_string(),
+                    bytes: body.as_bytes().to_vec(),
+                },
+                ImportedSkillFile {
+                    path: resource_path.to_string(),
+                    bytes: resource_bytes.to_vec(),
+                },
+            ],
+            source: desic_skill_runtime::SkillBundleSource {
+                kind: "test".to_string(),
+                reference: None,
+                revision: None,
+                subpath: None,
+            },
+        };
+        let definition = imported_bundle_definition(&bundle, id).expect("bundle definition");
+        persist_imported_bundle_files(&definition, &bundle).expect("bundle store");
+        definition
+    }
+
+    #[test]
+    fn version_locked_runs_materialize_their_own_bundle_resources() {
+        let id = format!("resource-snapshot-{}", now_ms());
+        let run_a = format!("resource-a-{}", now_ms());
+        let run_b = format!("resource-b-{}", now_ms());
+        let version_a = imported_test_bundle(&id, "BODY A", "references/report.json", b"{\"version\":3}");
+        let version_b = imported_test_bundle(&id, "BODY B", "references/report.json", b"{\"version\":7}");
+        assert_ne!(
+            version_a
+                .bundle
+                .as_ref()
+                .expect("bundle A")
+                .bundle_hash,
+            version_b
+                .bundle
+                .as_ref()
+                .expect("bundle B")
+                .bundle_hash
+        );
+
+        sync_run_scoped_skill_files(
+            &run_a,
+            &[version_a.clone()],
+            &std::collections::HashMap::from([(id.clone(), 3_u32)]),
+        )
+        .expect("run A snapshot");
+        sync_run_scoped_skill_files(
+            &run_b,
+            &[version_b.clone()],
+            &std::collections::HashMap::from([(id.clone(), 7_u32)]),
+        )
+        .expect("run B snapshot");
+
+        let resource = |run_id: &str| {
+            fs::read_to_string(
+                run_scoped_workspace_root(run_id)
+                    .expect("run root")
+                    .join(".cline")
+                    .join("skills")
+                    .join(&id)
+                    .join("references")
+                    .join("report.json"),
+            )
+            .expect("versioned resource")
+        };
+        assert_eq!(resource(&run_a), "{\"version\":3}");
+        assert_eq!(resource(&run_b), "{\"version\":7}");
+
+        cleanup_run_scoped_workspace(&run_a);
+        cleanup_run_scoped_workspace(&run_b);
+        for definition in [version_a, version_b] {
+            let bundle = definition.bundle.expect("bundle summary");
+            let path = skill_bundle_store_dir(&definition.id, &bundle).expect("bundle path");
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn editing_a_bundle_skill_forks_the_full_immutable_snapshot() {
+        let id = format!("bundle-edit-{}", now_ms());
+        let original = imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
+        let mut edited = original.clone();
+        edited.content = "UPDATED".to_string();
+        let config = config_with_skills(vec![original.clone()], vec![id.clone()]);
+        let prepared = prepare_ai_skill_bundle_definitions(vec![edited], Some(&config))
+            .expect("prepare edited bundle")
+            .into_iter()
+            .next()
+            .expect("edited definition");
+        let original_hash = &original.bundle.as_ref().expect("original bundle").bundle_hash;
+        let prepared_bundle = prepared.bundle.as_ref().expect("prepared bundle");
+        assert_ne!(&prepared_bundle.bundle_hash, original_hash);
+        assert_eq!(prepared_bundle.source.kind, "edited");
+        assert_eq!(prepared_bundle.source.reference.as_deref(), Some(original_hash.as_str()));
+        let resource_path = skill_bundle_store_dir(&prepared.id, prepared_bundle)
+            .expect("prepared path")
+            .join("references")
+            .join("data.json");
+        assert_eq!(fs::read_to_string(resource_path).expect("preserved resource"), "{\"source\":1}");
+
+        for definition in [original, prepared] {
+            let bundle = definition.bundle.expect("bundle summary");
+            let path = skill_bundle_store_dir(&definition.id, &bundle).expect("bundle path");
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn runtime_trust_is_revoked_when_bundle_changes() {
+        let id = format!("bundle-trust-{}", now_ms());
+        let original = imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
+        let replacement = imported_test_bundle(&id, "REPLACEMENT", "references/data.json", b"{\"source\":2}");
+        let mut existing = config_with_skills(vec![original.clone()], vec![id.clone()]);
+        existing.skill_runtime_trust.insert(id.clone(), true);
+        let mut trust = existing.skill_runtime_trust.clone();
+        revoke_runtime_trust_for_changed_bundles(Some(&existing), &[replacement.clone()], &mut trust);
+        assert!(!trust.contains_key(&id));
+
+        for definition in [original, replacement] {
+            let bundle = definition.bundle.expect("bundle summary");
+            let path = skill_bundle_store_dir(&definition.id, &bundle).expect("bundle path");
+            let _ = fs::remove_dir_all(path);
+        }
+    }
+
+    #[test]
+    fn imported_bundle_paths_reject_traversal_after_normalization() {
+        let error = normalize_imported_skill_files(vec![
+            ImportedSkillFile {
+                path: "SKILL.md".to_string(),
+                bytes: b"body".to_vec(),
+            },
+            ImportedSkillFile {
+                path: "references/../../outside.txt".to_string(),
+                bytes: b"not allowed".to_vec(),
+            },
+        ])
+        .expect_err("traversal must be rejected");
+        assert!(error.contains("路径"));
+    }
+
+    #[test]
+    fn directory_import_preserves_full_bundle_and_skips_checkout_metadata() {
+        let root = std::env::temp_dir().join(format!(
+            "desic-skill-bundle-import-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(root.join("references")).expect("reference directory");
+        fs::create_dir_all(root.join("scripts")).expect("script directory");
+        fs::create_dir_all(root.join(".git")).expect("git directory");
+        fs::write(
+            root.join("SKILL.md"),
+            "---\nname: test-bundle\ndescription: test\n---\n\nBody",
+        )
+        .expect("skill body");
+        fs::write(root.join("references").join("protocol.md"), "reference")
+            .expect("reference");
+        fs::write(root.join("scripts").join("normalize.mjs"), "process.stdout.write('{}')")
+            .expect("script");
+        fs::write(root.join("assets.bin"), [0_u8, 255, 1]).expect("binary asset");
+        fs::write(root.join(".gitignore"), "target/").expect("gitignore");
+        fs::write(root.join(".git").join("config"), "ignored").expect("git metadata");
+
+        let bundle = read_imported_skill_bundle(
+            &root,
+            desic_skill_runtime::SkillBundleSource {
+                kind: "test".to_string(),
+                reference: None,
+                revision: None,
+                subpath: None,
+            },
+        )
+        .expect("read full bundle");
+        let paths = bundle
+            .files
+            .iter()
+            .map(|file| file.path.as_str())
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(paths.len(), 4);
+        assert!(paths.contains("SKILL.md"));
+        assert!(paths.contains("references/protocol.md"));
+        assert!(paths.contains("scripts/normalize.mjs"));
+        assert!(paths.contains("assets.bin"));
+        assert!(!paths.iter().any(|path| path.starts_with(".git")));
+        assert_eq!(
+            bundle
+                .files
+                .iter()
+                .find(|file| file.path == "assets.bin")
+                .expect("asset")
+                .bytes,
+            [0_u8, 255, 1]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     /// Saving AI config prunes disabled Skills from the interactive directory.
     /// That sweep must not reach into a running Run's private workspace.
     #[test]
@@ -3305,6 +4301,7 @@ mod tests {
                 rules: "r".to_string(),
                 content: "c".to_string(),
                 builtin: true,
+                bundle: None,
             }],
             &std::collections::HashMap::new(),
         )
@@ -3342,6 +4339,7 @@ mod tests {
                 rules: String::new(),
                 content: "# Systematic strategy authoring\n\nSee `docs/actions.md`.".to_string(),
                 builtin: true,
+                bundle: None,
             },
             resources: vec![AiSkillResource {
                 path: "docs/actions.md".to_string(),
@@ -3393,7 +4391,7 @@ mod tests {
         assert!(read_cline_skill_resource("", "docs/actions.md", &loaded, None).is_err());
         // Not loaded this turn.
         assert!(
-            read_cline_skill_resource("okx-news-intelligence", "docs/x.md", &loaded, None).is_err()
+            read_cline_skill_resource("okx-market-intelligence", "docs/x.md", &loaded, None).is_err()
         );
         assert!(read_cline_skill_resource("../../etc", "passwd", &loaded, None).is_err());
         // Loaded, but the payload is a traversal: rejected before any filesystem
@@ -3516,6 +4514,7 @@ wire_api = "responses"
             rules: String::new(),
             content: content.to_string(),
             builtin: false,
+            bundle: None,
         }
     }
 
@@ -3546,8 +4545,23 @@ wire_api = "responses"
             custom_rules: String::new(),
             enabled_skills,
             skill_definitions,
+            skill_runtime_trust: HashMap::new(),
             open_agent: true,
             workspace_roots: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn focused_builtin_skill_bundles_include_reference_documents() {
+        for (id, expected_count) in [
+            ("desic-trade-operations", 8),
+            ("okx-market-intelligence", 2),
+        ] {
+            let files = builtin_skill_reference_files(id);
+            assert_eq!(files.len(), expected_count, "{id} should expose focused references");
+            assert!(files.iter().all(|(path, content)| {
+                path.starts_with("references/") && !content.trim().is_empty()
+            }));
         }
     }
 
@@ -3844,8 +4858,8 @@ wire_api = "responses"
             enabled,
             vec![
                 "trading-philosophy",
-                "okx-news-intelligence",
-                "okx-smart-money-analysis",
+                "okx-market-intelligence",
+                "desic-trade-operations",
                 "custom-research",
             ]
         );
@@ -3991,6 +5005,7 @@ VI. Review and evolve
             rules: "Treat trading as decision-making under uncertainty, not a prediction contest. The AI may select timeframes, indicators, structure, order flow, and intelligence evidence, but must not treat any school, indicator, parameter, reward-to-risk ratio, or risk percentage as universally correct. Explain why each method was selected, separate facts, inferences, assumptions, and conditions, actively seek disconfirming evidence, and update conclusions when evidence changes. Wait or abstain when there is no explainable edge, risk cannot be defined, execution conditions are invalid, or critical data is missing. Never promise profits or infer participant intent solely from OI, funding, one order-book snapshot, or one signal.".to_string(),
             content: STALE_ENGLISH_PHILOSOPHY_CONTENT.to_string(),
             builtin: true,
+                bundle: None,
         };
         assert_eq!(skill_text_fingerprint(&stale), 0x77f1_451b_c3b4_4a7c);
 
@@ -4019,6 +5034,7 @@ VI. Review and evolve
             rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
             content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
             builtin: true,
+                bundle: None,
         };
         assert_eq!(skill_text_fingerprint(&stale), 0x701f_74f8_3aa4_b270);
 
@@ -4043,6 +5059,7 @@ VI. Review and evolve
             rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
             content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
             builtin: true,
+                bundle: None,
         };
         edited.content.push_str("\n19. 只做亚洲时段的突破。");
 
@@ -4069,6 +5086,7 @@ VI. Review and evolve
                 rules: rules.to_string(),
                 content: content.to_string(),
                 builtin: true,
+                bundle: None,
             }
         };
         let news = stale(
@@ -4087,7 +5105,7 @@ VI. Review and evolve
         assert_eq!(skill_text_fingerprint(&smart), 0x4fb7_3ba6_e18f_2e12);
 
         let merged = merge_ai_skill_definitions(vec![news, smart]);
-        for id in ["okx-news-intelligence", "okx-smart-money-analysis"] {
+        for id in ["okx-market-intelligence"] {
             let skill = merged
                 .iter()
                 .find(|skill| skill.id == id)
@@ -4111,14 +5129,15 @@ VI. Review and evolve
             rules: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_RULES.to_string(),
             content: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_CONTENT.to_string(),
             builtin: true,
+                bundle: None,
         };
         edited.content.push_str("\n11. 只看中文财经源。");
 
         let merged = merge_ai_skill_definitions(vec![edited]);
         let news = merged
             .iter()
-            .find(|skill| skill.id == "okx-news-intelligence")
-            .expect("merged news skill");
+            .find(|skill| skill.id == "okx-market-intelligence")
+            .expect("merged market intelligence skill");
         assert!(news.content.contains("只看中文财经源。"));
         assert!(news.description.contains("user asks"));
     }

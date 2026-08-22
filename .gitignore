@@ -27,6 +27,10 @@ outputs/
 output/
 artifacts/
 coverage/
+/skills/
+/scripts/systematic/bench-python-throughput.mjs
+/scripts/systematic/capture-lab-tabs.mjs
+/scripts/systematic/measure-lab-layout.mjs
 src-tauri/binaries/
 src-tauri/resources/ai-sidecar/*
 !src-tauri/resources/ai-sidecar/.gitkeep

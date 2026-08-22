@@ -542,8 +542,8 @@ function accountEnvironmentScopeKey(account: AccountEnvironmentScope) {
 const REQUIRED_AI_SKILL_IDS = [
   "desic-core-operations",
   "trading-philosophy",
-  "okx-news-intelligence",
-  "okx-smart-money-analysis"
+  "okx-market-intelligence",
+  "desic-trade-operations"
 ] as const;
 const REQUIRED_AI_SKILL_ID_SET = new Set<string>(REQUIRED_AI_SKILL_IDS);
 
@@ -555,11 +555,18 @@ function aiSkillConstraintLabel(skillId: string, t?: UiTranslation): string {
 }
 
 function withRequiredAiSkills(skills: string[] | undefined): string[] {
+  const migrated = (skills ?? [])
+    .filter((id) => id !== "desic-core-operations")
+    .map((id) => id === "okx-news-intelligence" || id === "okx-smart-money-analysis"
+      ? "okx-market-intelligence"
+      : id === "desic-perpetual-risk" || id === "desic-position-management" || id === "desic-market-analysis"
+        ? "desic-trade-operations"
+        : id);
   return [...new Set([
     "trading-philosophy",
-    "okx-news-intelligence",
-    "okx-smart-money-analysis",
-    ...(skills ?? []).filter((id) => id !== "desic-core-operations")
+    "okx-market-intelligence",
+    "desic-trade-operations",
+    ...migrated
   ])];
 }
 
@@ -584,7 +591,29 @@ function normalizeAutomationTab(tab: string | null | undefined): AiAutomationTab
 }
 
 function normalizeAiSkillDefinitions(definitions: AiSkillDefinition[]): AiSkillDefinition[] {
-  return definitions;
+  const merged = new Map<string, AiSkillDefinition>();
+  for (const definition of definitions) {
+    const id = definition.id === "okx-news-intelligence" || definition.id === "okx-smart-money-analysis"
+      ? "okx-market-intelligence"
+      : definition.id === "desic-perpetual-risk" || definition.id === "desic-position-management" || definition.id === "desic-market-analysis"
+        ? "desic-trade-operations"
+        : definition.id;
+    const migrated = id === definition.id
+      ? definition
+      : { ...definition, id, name: id };
+    const existing = merged.get(id);
+    if (!existing) {
+      merged.set(id, migrated);
+      continue;
+    }
+    merged.set(id, {
+      ...existing,
+      description: `${existing.description} ${migrated.description}`.trim(),
+      rules: `${existing.rules}\n\nMigrated legacy guidance:\n${migrated.rules}`.trim(),
+      content: `${existing.content}\n\nMigrated legacy guidance:\n${migrated.content}`.trim()
+    });
+  }
+  return [...merged.values()];
 }
 
 export function App() {
@@ -6353,13 +6382,15 @@ function PromptSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
 
 function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void }) {
   const { t } = useTranslation(["settings", "common"]);
-  const { draft, setDraft, status, busy, save, applySummary } = useAiConfigDraft(onNotify);
+  const { summary, draft, setDraft, status, busy, save, applySummary } = useAiConfigDraft(onNotify);
   const confirmPrompt = useConfirmPrompt();
   const [skillDialogOpen, setSkillDialogOpen] = useState(false);
   const [skillDialogMode, setSkillDialogMode] = useState<"custom" | "local" | "git">("custom");
   const [customSkill, setCustomSkill] = useState({ id: "", description: "", rules: "", content: "" });
   const [skillSource, setSkillSource] = useState("");
   const [gitSource, setGitSource] = useState("");
+  const [gitReference, setGitReference] = useState("");
+  const [gitSubpath, setGitSubpath] = useState("");
   const [importBusy, setImportBusy] = useState<"path" | "git" | null>(null);
   const [editingSkillId, setEditingSkillId] = useState<string | null>(null);
   const [viewedVersionId, setViewedVersionId] = useState<string>("current");
@@ -6435,6 +6466,25 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
       )
     }));
   }, [setDraft]);
+
+  const setSkillRuntimeTrust = useCallback(async (skillId: string, trusted: boolean) => {
+    setVersionBusy(`trust:${skillId}`);
+    try {
+      const next = await invokeDesktop<AiConfigSummary>("ai_skill_set_runtime_trust", { skillId, trusted });
+      if (!next) throw new Error(t("settings:skillExecutionTrustUpdateFailed"));
+      applySummary(next);
+      onNotify({
+        kind: "success",
+        title: trusted ? t("settings:skillExecutionTrustGranted") : t("settings:skillExecutionTrustRevoked"),
+        message: skillId
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      onNotify({ kind: "error", title: t("settings:skillExecutionTrustUpdateFailed"), message });
+    } finally {
+      setVersionBusy(null);
+    }
+  }, [applySummary, onNotify, t]);
 
   const resetTradingPhilosophy = useCallback(() => {
     const baseline = AI_SKILL_OPTIONS.find((skill) => skill.id === "trading-philosophy");
@@ -6533,10 +6583,16 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
     if (!gitSource.trim()) return;
     setImportBusy("git");
     try {
-      const next = await invokeDesktop<AiConfigSummary>("ai_skill_install_git", { url: gitSource.trim() });
+      const next = await invokeDesktop<AiConfigSummary>("ai_skill_install_git", {
+        url: gitSource.trim(),
+        reference: gitReference.trim() || null,
+        subpath: gitSubpath.trim() || null
+      });
       if (!next) throw new Error("安装后未返回 AI 配置");
       applySummary(next);
       setGitSource("");
+      setGitReference("");
+      setGitSubpath("");
       const imported = next.skillDefinitions.find((skill) => !skills.some((current) => current.id === skill.id));
       if (imported) selectSkill(imported.id);
       setSkillDialogOpen(false);
@@ -6547,7 +6603,7 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
     } finally {
       setImportBusy(null);
     }
-  }, [applySummary, gitSource, onNotify, refreshSkillVersions, selectSkill, skills]);
+  }, [applySummary, gitReference, gitSource, gitSubpath, onNotify, refreshSkillVersions, selectSkill, skills]);
 
   const pickSkillSource = useCallback(async (kind: "directory" | "zip") => {
     try {
@@ -6632,7 +6688,7 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
                   <span>
                     <strong>{skill.id || t("settings:unnamedSkill")}{aiSkillConstraintLabel(skill.id, t) ? ` · ${aiSkillConstraintLabel(skill.id, t)}` : ""}</strong>
                     <small>{skill.description || t("settings:noDescription")}</small>
-                    <em>{latest ? t("settings:latestVersion", { version: latest.version }) : t("settings:notPublished")} · {t("settings:versionCount", { count: versions.length })}</em>
+                    <em>{latest ? t("settings:latestVersion", { version: latest.version }) : t("settings:notPublished")} · {t("settings:versionCount", { count: versions.length })}{skill.bundle ? ` · Bundle ${skill.bundle.bundleHash.slice(0, 8)}` : ""}</em>
                   </span>
                 </label>
                 <button type="button" onClick={() => selectSkill(skill.id)}>{t("settings:view")}</button>
@@ -6664,6 +6720,17 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
               <span>{t("settings:profilesUsingSkill", { count: usingProfiles.length })}</span>
               <small>{usingProfiles.length > 0 ? usingProfiles.map((profile) => profile.skillVersionModes?.[editingSkill.id] === "pinned" ? `${profile.name} · ${t("settings:pinnedVersion", { version: profile.skillVersions?.[editingSkill.id] })}` : `${profile.name} · ${t("settings:followLatestVersion")}`).join(", ") : t("settings:noProfileReferences")}</small>
             </div>
+            {!readOnly && ["node", "python"].includes(editingSkill.bundle?.manifest.runtime?.kind ?? "") ? (
+              <label className="settings-toggle-field">
+                <span>{t("settings:skillExecutionTrust")}</span>
+                <input
+                  type="checkbox"
+                  checked={Boolean(summary?.skillRuntimeTrust?.[editingSkill.id])}
+                  disabled={Boolean(versionBusy)}
+                  onChange={(event) => void setSkillRuntimeTrust(editingSkill.id, event.target.checked)}
+                />
+              </label>
+            ) : null}
             <label><span>{t("common:name")}</span><input value={displayedSkill.id} disabled={readOnly || fixedSkillIds.has(editingSkill.id)} onChange={(event) => renameSkill(editingSkill.id, event.target.value)} /></label>
             <label><span>{t("common:description")}</span><input value={displayedSkill.description} disabled={readOnly || editingSkill.id === "desic-core-operations"} onChange={(event) => updateSkill(editingSkill.id, { description: event.target.value })} /></label>
             <label><span>{t("settings:rules")}</span><textarea value={displayedSkill.rules} disabled={readOnly || editingSkill.id === "desic-core-operations"} onChange={(event) => updateSkill(editingSkill.id, { rules: event.target.value })} /></label>
@@ -6710,8 +6777,10 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
               </div>
             ) : (
               <div className="skill-source-form skill-source-form--single">
-                <div className="skill-source-hint"><GitBranch size={18} /><div><strong>从 Git 安装</strong><span>仓库根目录必须包含 SKILL.md；支持 HTTPS 和 SSH 地址。</span></div></div>
+                <div className="skill-source-hint"><GitBranch size={18} /><div><strong>从 Git 安装</strong><span>支持 HTTPS、SSH、固定 ref 和 Skill 子目录。</span></div></div>
                 <label><span>Git 仓库地址</span><input autoFocus value={gitSource} placeholder="https://github.com/owner/skill.git" onChange={(event) => setGitSource(event.target.value)} /></label>
+                <label><span>Ref（可选）</span><input value={gitReference} placeholder="tag、branch 或 commit" onChange={(event) => setGitReference(event.target.value)} /></label>
+                <label><span>Skill 子目录（可选）</span><input value={gitSubpath} placeholder="skills/my-skill" onChange={(event) => setGitSubpath(event.target.value)} /></label>
               </div>
             )}
             <div className="modal-actions skill-source-modal__actions">
@@ -9198,6 +9267,7 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
           customRules: "",
           enabledSkills: ["market-analysis", "risk-review"],
           skillDefinitions: AI_SKILL_OPTIONS,
+          skillRuntimeTrust: {},
           openAgent: true,
           workspaceRoots: []
         }
@@ -9305,7 +9375,6 @@ function AiDock({ preview, onOpenSettings, onOpenStrategy, accountId }: { previe
 
   useEffect(() => {
     messagesRef.current = messages;
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [messages]);
 
   useEffect(() => {

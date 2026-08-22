@@ -881,8 +881,7 @@ export function IntelligencePage({ accounts, marketAssets, selectedAccountId, se
       const automation = await invokeDesktop<AiAutomationOverview>("ai_automation_overview");
       setBriefingProfiles((automation?.profiles ?? []).filter((profile) =>
         profile.enabled
-        && profile.skillIds.includes("okx-news-intelligence")
-        && profile.skillIds.includes("okx-smart-money-analysis")
+        && profile.skillIds.includes("okx-market-intelligence")
       ));
     } catch (error) {
       logger.warn("briefing profiles load failed", { error: error instanceof Error ? error.message : String(error) });

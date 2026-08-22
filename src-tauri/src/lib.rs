@@ -45,6 +45,7 @@ mod instrument_operations;
 mod intelligence;
 mod market_ws;
 mod private_history;
+mod skill_runtime;
 mod storage_config;
 mod systematic;
 mod trade_commands;
@@ -102,8 +103,10 @@ use crate::private_history::{
     private_history_status as private_history_status_impl,
 };
 use crate::storage_config::{
-    ai_config_summary, ai_local_auth_status, ai_save_config, ai_sidecar_proxy_url, ai_skill_import,
-    ai_skill_install_git, ai_skill_pick_source, ai_test_connection, export_diagnostics,
+    ai_agent_template_preview_codex, ai_config_summary, ai_local_auth_status, ai_save_config,
+    ai_sidecar_proxy_url, ai_skill_import,
+    ai_skill_install_git, ai_skill_pick_source, ai_skill_set_runtime_trust, ai_test_connection,
+    export_diagnostics,
     frontend_log, initialize_runtime_paths, load_accounts_config, load_ai_config,
     load_notification_webhook, load_proxy_config, load_watchlist_config, migrate_sensitive_config,
     proxy_authorization_header, proxy_config_summary, reqwest_client, runtime_cache_root,
@@ -9357,12 +9360,13 @@ fn upsert_okx_history_orders(
         else {
             continue;
         };
+        let attribution = order_attribution(&tx, account, Some(&ord_id))?;
         tx.execute(
             "INSERT INTO okx_orders (
               account_id, environment, ord_id, cl_ord_id, inst_id, inst_type, side, pos_side, td_mode, ord_type,
               state, px, sz, acc_fill_sz, avg_px, pnl, fee, source_endpoint, operator, strategy_id,
-              session_id, okx_ctime, okx_utime, raw_json, synced_at
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, 'user', NULL, NULL, ?19, ?20, ?21, ?22)
+              session_id, opportunity_id, agent_run_id, execution_key, okx_ctime, okx_utime, raw_json, synced_at
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)
             ON CONFLICT(account_id, environment, ord_id) DO UPDATE SET
               cl_ord_id=COALESCE(excluded.cl_ord_id, okx_orders.cl_ord_id),
               inst_id=excluded.inst_id,
@@ -9381,11 +9385,15 @@ fn upsert_okx_history_orders(
               source_endpoint=excluded.source_endpoint,
               operator=CASE
                 WHEN okx_orders.operator IS NULL OR okx_orders.operator = '' OR okx_orders.operator = 'unknown'
+                  OR (okx_orders.operator = 'user' AND excluded.operator IN ('ai','strategy','system'))
                 THEN excluded.operator
                 ELSE okx_orders.operator
               END,
               strategy_id=COALESCE(okx_orders.strategy_id, excluded.strategy_id),
               session_id=COALESCE(okx_orders.session_id, excluded.session_id),
+              opportunity_id=COALESCE(okx_orders.opportunity_id, excluded.opportunity_id),
+              agent_run_id=COALESCE(okx_orders.agent_run_id, excluded.agent_run_id),
+              execution_key=COALESCE(okx_orders.execution_key, excluded.execution_key),
               okx_ctime=excluded.okx_ctime,
               okx_utime=excluded.okx_utime,
               raw_json=excluded.raw_json,
@@ -9409,6 +9417,12 @@ fn upsert_okx_history_orders(
                 json_string(row, "pnl"),
                 json_string(row, "fee"),
                 source_endpoint,
+                attribution.0,
+                attribution.1,
+                attribution.2,
+                attribution.3,
+                attribution.4,
+                attribution.5,
                 json_i64(row, "cTime"),
                 json_i64(row, "uTime"),
                 &stored_row,
@@ -9934,6 +9948,7 @@ fn upsert_okx_history_fills(
               source_endpoint=excluded.source_endpoint,
               operator=CASE
                 WHEN okx_fills.operator IS NULL OR okx_fills.operator = '' OR okx_fills.operator = 'unknown'
+                  OR (okx_fills.operator = 'user' AND excluded.operator IN ('ai','strategy','system'))
                 THEN excluded.operator
                 ELSE okx_fills.operator
               END,
@@ -9984,6 +9999,30 @@ fn upsert_okx_history_fills(
             session_id.clone(),
             synced_at,
         )?;
+        tx.execute(
+            "UPDATE trade_audit_events
+             SET operator=?4,
+                 strategy_id=COALESCE(strategy_id,?5),
+                 session_id=COALESCE(session_id,?6),
+                 opportunity_id=COALESCE(opportunity_id,?7),
+                 agent_run_id=COALESCE(agent_run_id,?8),
+                 execution_key=COALESCE(execution_key,?9)
+             WHERE id=?1 AND account_id=?2 AND environment=?3
+               AND (operator IS NULL OR operator='' OR operator='unknown'
+                 OR (operator='user' AND ?4 IN ('ai','strategy','system')))",
+            params![
+                format!("fill-{}-{}-{}", account.id, account.environment, bill_id),
+                account.id,
+                account.environment,
+                operator,
+                strategy_id,
+                session_id,
+                opportunity_id,
+                agent_run_id,
+                execution_key,
+            ],
+        )
+        .map_err(|err| err.to_string())?;
         count += 1;
     }
     tx.commit().map_err(|err| err.to_string())?;
@@ -15018,6 +15057,9 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
 
 fn profile_agent_scope_allows_tool(scope: &str, canonical: &str) -> bool {
     match scope {
+        "all" => ["market", "derivatives", "intelligence", "account", "history"]
+            .iter()
+            .any(|scope| profile_agent_scope_allows_tool(scope, canonical)),
         "market" => matches!(
             canonical,
             "market.readTicker"
@@ -15112,14 +15154,14 @@ fn normalize_declared_agent_scopes(scopes: &[String]) -> Result<HashSet<String>,
         let scope = scope.trim().to_ascii_lowercase();
         if !matches!(
             scope.as_str(),
-            "market" | "derivatives" | "intelligence" | "account" | "history"
+            "all" | "market" | "derivatives" | "intelligence" | "account" | "history"
         ) {
             return Err(format!("delegated agent 声明了未知数据范围：{scope}"));
         }
         normalized.insert(scope);
     }
     if normalized.is_empty() {
-        return Err("delegated background agent 缺少数据范围".to_string());
+        normalized.insert("all".to_string());
     }
     Ok(normalized)
 }
@@ -15152,10 +15194,10 @@ fn authorize_background_delegated_agent(
                 .multi_agents
                 .iter()
                 .find(|agent| agent.enabled && agent.id == configured_agent_id)
-                .map(|agent| agent.scopes.iter().cloned().collect::<HashSet<_>>())
+                .map(|agent| normalize_declared_agent_scopes(&agent.scopes))
                 .ok_or_else(|| {
                     format!("configuredAgentId 不属于当前 Profile 快照：{configured_agent_id}")
-                })?,
+                })??,
             desic_agent_automation::MULTI_AGENT_AUTO_MODE => {
                 auto_profile_agent_scopes(configured_agent_id)
                     .map(|scopes| scopes.iter().map(|scope| (*scope).to_string()).collect())
@@ -15188,6 +15230,19 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     let is_main = context.agent_role == "main"
         && context.parent_agent_id.is_none()
         && context.configured_agent_id.is_none();
+    if canonical == "skill.run" {
+        if !is_main {
+            return Err("skill.run 仅允许交互式主 Agent 调用".to_string());
+        }
+        if context
+            .run_context
+            .as_ref()
+            .is_some_and(BackgroundRunContext::is_background)
+        {
+            return Err("skill.run 不允许在后台 Profile Run 中调用".to_string());
+        }
+        return Ok(());
+    }
     authorize_background_delegated_agent(canonical, context, is_main)?;
     if context
         .run_context
@@ -15205,17 +15260,10 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
         ));
     }
     let mode = desic_agent_automation::normalize_permission_mode(Some(&context.permission_mode));
-    if canonical.starts_with("intelligence.news.")
-        && !context.active_skill_ids.contains("okx-news-intelligence")
+    if (canonical.starts_with("intelligence.news.") || canonical.starts_with("intelligence.smartMoney."))
+        && !context.active_skill_ids.contains("okx-market-intelligence")
     {
-        return Err("未启用 okx-news-intelligence Skill，拒绝新闻情报工具".to_string());
-    }
-    if canonical.starts_with("intelligence.smartMoney.")
-        && !context
-            .active_skill_ids
-            .contains("okx-smart-money-analysis")
-    {
-        return Err("未启用 okx-smart-money-analysis Skill，拒绝聪明钱工具".to_string());
+        return Err("未启用 okx-market-intelligence Skill，拒绝 OKX 情报工具".to_string());
     }
     if canonical == "market.readDecisionContext"
         && (!is_main
@@ -16007,6 +16055,12 @@ async fn execute_ai_tool(
     let canonical_name = canonical_ai_tool_name(tool_name);
     authorize_ai_tool(canonical_name, context)?;
     let session_id = context.session_id.as_str();
+    if canonical_name == "skill.run" {
+        ensure_ai_run_is_active(&app, context).await?;
+        let request = serde_json::from_value::<skill_runtime::AiSkillRunRequest>(input)
+            .map_err(|error| format!("skill.run 参数无效：{}", error))?;
+        return skill_runtime::run_active_skill_entrypoint(&app, &context.active_skill_ids, request).await;
+    }
     // A resource read for any Skill other than the strategy-authoring bundle is
     // an ordinary read against this turn's active Skills, so it must not be
     // routed through the strategy-editor session path.
@@ -19542,7 +19596,9 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
         conn.execute_batch("BEGIN IMMEDIATE")
             .map_err(|err| err.to_string())?;
         let result = (|| {
+            validate_database_v1(conn)?;
             ensure_trade_opportunity_exit_columns(conn)?;
+            repair_triggered_order_attribution(conn)?;
             crate::ai_automation::migrate_ai_automation(conn)?;
             crate::systematic::migrate_systematic(conn)?;
             remove_database_v1_obsolete_objects(conn)?;
@@ -20408,7 +20464,219 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
         [],
     );
     instrument_operations::migrate_instrument_operations(conn)?;
+    repair_triggered_order_attribution(conn)?;
     Ok(())
+}
+
+fn repair_triggered_order_attribution(conn: &Connection) -> Result<usize, String> {
+    type LinkedAttribution = (
+        String,
+        String,
+        String,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+
+    let linked = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT parent.account_id,parent.environment,child.ord_id,
+                        CASE
+                          WHEN parent.operator IN ('ai','strategy','system') THEN parent.operator
+                          WHEN opportunity.origin_type IN ('ai','strategy','system') THEN opportunity.origin_type
+                          ELSE parent.operator
+                        END,
+                        parent.strategy_id,parent.session_id,parent.opportunity_id,parent.agent_run_id,parent.execution_key
+                 FROM okx_orders child
+                 JOIN okx_orders parent
+                   ON parent.account_id=child.account_id
+                  AND parent.environment=child.environment
+                  AND parent.ord_id<>child.ord_id
+                  AND (
+                    (json_valid(child.raw_json)
+                      AND CAST(json_extract(child.raw_json,'$.algoId') AS TEXT)=parent.ord_id)
+                    OR (json_valid(parent.raw_json)
+                      AND CAST(json_extract(parent.raw_json,'$.ordId') AS TEXT)=child.ord_id)
+                  )
+                 LEFT JOIN trade_opportunities opportunity ON opportunity.id=parent.opportunity_id
+                 WHERE parent.operator IN ('ai','strategy','system')
+                    OR opportunity.origin_type IN ('ai','strategy','system')
+                    OR parent.opportunity_id IS NOT NULL
+                    OR parent.agent_run_id IS NOT NULL
+                 ORDER BY parent.synced_at DESC",
+            )
+            .map_err(|err| err.to_string())?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                    row.get(7)?,
+                    row.get(8)?,
+                ))
+            })
+            .map_err(|err| err.to_string())?
+            .collect::<Result<Vec<LinkedAttribution>, _>>()
+            .map_err(|err| err.to_string())?;
+        rows
+    };
+
+    let mut repaired = 0usize;
+    let mut scopes = HashSet::<(String, String)>::new();
+    for (
+        account_id,
+        environment,
+        child_order_id,
+        operator,
+        strategy_id,
+        session_id,
+        opportunity_id,
+        agent_run_id,
+        execution_key,
+    ) in linked
+    {
+        repaired += conn
+            .execute(
+                "UPDATE okx_orders
+                 SET operator=?4,
+                     strategy_id=COALESCE(strategy_id,?5),
+                     session_id=COALESCE(session_id,?6),
+                     opportunity_id=COALESCE(opportunity_id,?7),
+                     agent_run_id=COALESCE(agent_run_id,?8),
+                     execution_key=COALESCE(execution_key,?9)
+                 WHERE account_id=?1 AND environment=?2 AND ord_id=?3
+                   AND (operator IS NULL OR operator='' OR operator IN ('unknown','user')
+                     OR opportunity_id IS NULL OR agent_run_id IS NULL)",
+                params![
+                    account_id,
+                    environment,
+                    child_order_id,
+                    operator,
+                    strategy_id,
+                    session_id,
+                    opportunity_id,
+                    agent_run_id,
+                    execution_key,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        repaired += conn
+            .execute(
+                "UPDATE okx_fills
+                 SET operator=?4,
+                     strategy_id=COALESCE(strategy_id,?5),
+                     session_id=COALESCE(session_id,?6),
+                     opportunity_id=COALESCE(opportunity_id,?7),
+                     agent_run_id=COALESCE(agent_run_id,?8),
+                     execution_key=COALESCE(execution_key,?9)
+                 WHERE account_id=?1 AND environment=?2 AND ord_id=?3
+                   AND (operator IS NULL OR operator='' OR operator IN ('unknown','user')
+                     OR opportunity_id IS NULL OR agent_run_id IS NULL)",
+                params![
+                    account_id,
+                    environment,
+                    child_order_id,
+                    operator,
+                    strategy_id,
+                    session_id,
+                    opportunity_id,
+                    agent_run_id,
+                    execution_key,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        repaired += conn
+            .execute(
+                "UPDATE trade_audit_events
+                 SET operator=?4,
+                     strategy_id=COALESCE(strategy_id,?5),
+                     session_id=COALESCE(session_id,?6),
+                     opportunity_id=COALESCE(opportunity_id,?7),
+                     agent_run_id=COALESCE(agent_run_id,?8),
+                     execution_key=COALESCE(execution_key,?9)
+                 WHERE account_id=?1 AND environment=?2 AND order_id=?3
+                   AND (operator IS NULL OR operator='' OR operator IN ('unknown','user')
+                     OR opportunity_id IS NULL OR agent_run_id IS NULL)",
+                params![
+                    account_id,
+                    environment,
+                    child_order_id,
+                    operator,
+                    strategy_id,
+                    session_id,
+                    opportunity_id,
+                    agent_run_id,
+                    execution_key,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        repaired += conn
+            .execute(
+                "UPDATE position_episode_events
+                 SET origin=?4,
+                     strategy_id=COALESCE(strategy_id,?5),
+                     opportunity_id=COALESCE(opportunity_id,?6),
+                     agent_run_id=COALESCE(agent_run_id,?7)
+                 WHERE ord_id=?3 AND episode_id IN (
+                   SELECT id FROM position_episodes WHERE account_id=?1 AND environment=?2
+                 )",
+                params![
+                    account_id,
+                    environment,
+                    child_order_id,
+                    operator,
+                    strategy_id,
+                    opportunity_id,
+                    agent_run_id,
+                ],
+            )
+            .map_err(|err| err.to_string())?;
+        scopes.insert((account_id, environment));
+    }
+
+    for (account_id, environment) in scopes {
+        conn.execute(
+            "UPDATE position_episodes AS episode
+             SET primary_origin=(
+                   SELECT CASE
+                     WHEN COUNT(DISTINCT event.origin)>1 THEN 'mixed'
+                     ELSE MIN(event.origin)
+                   END
+                   FROM position_episode_events event
+                   WHERE event.episode_id=episode.id AND event.origin<>''
+                     AND event.event_type IN ('OPEN','ADD','REDUCE','CLOSE')
+                 ),
+                 opportunity_id=COALESCE(opportunity_id,(
+                   SELECT event.opportunity_id FROM position_episode_events event
+                   WHERE event.episode_id=episode.id AND event.opportunity_id IS NOT NULL
+                   ORDER BY event.event_time LIMIT 1
+                 )),
+                 agent_run_id=COALESCE(agent_run_id,(
+                   SELECT event.agent_run_id FROM position_episode_events event
+                   WHERE event.episode_id=episode.id AND event.agent_run_id IS NOT NULL
+                   ORDER BY event.event_time LIMIT 1
+                 ))
+             WHERE account_id=?1 AND environment=?2
+               AND EXISTS (
+                 SELECT 1 FROM position_episode_events event
+                 WHERE event.episode_id=episode.id
+                   AND event.event_type IN ('OPEN','ADD','REDUCE','CLOSE')
+               )",
+            params![account_id, environment],
+        )
+        .map_err(|err| err.to_string())?;
+        sync_position_episode_opportunity_links(conn, &account_id, &environment, None)?;
+    }
+    Ok(repaired)
 }
 
 fn storage_table_counts(conn: &Connection) -> Result<HashMap<String, i64>, String> {
@@ -23334,6 +23602,8 @@ pub fn run() {
             ai_save_config,
             ai_skill_import,
             ai_skill_install_git,
+            ai_skill_set_runtime_trust,
+            ai_agent_template_preview_codex,
             ai_skill_pick_source,
             ai_test_connection,
             ai_automation_summary,
@@ -24699,6 +24969,59 @@ mod tests {
         let conn = Connection::open_in_memory().expect("open test sqlite");
         migrate_database(&conn).expect("migrate test sqlite");
         conn
+    }
+
+    #[test]
+    fn triggered_child_orders_inherit_parent_ai_attribution() {
+        let conn = test_conn();
+        conn.execute(
+            "INSERT INTO okx_orders(
+               account_id,environment,ord_id,cl_ord_id,inst_id,inst_type,source_endpoint,operator,
+               opportunity_id,agent_run_id,execution_key,raw_json,synced_at
+             ) VALUES('account','demo','algo-parent','algo-client','BTC-USDT-SWAP','SWAP','orders-algo-history','ai',
+               'opp-ai','run-ai','opportunity:opp-ai:primary',?1,10)",
+            [json!({ "algoId": "algo-parent", "ordId": "child-order" }).to_string()],
+        )
+        .expect("insert attributed parent algo order");
+        conn.execute(
+            "INSERT INTO okx_orders(
+               account_id,environment,ord_id,cl_ord_id,inst_id,inst_type,source_endpoint,operator,raw_json,synced_at
+             ) VALUES('account','demo','child-order','exchange-child','BTC-USDT-SWAP','SWAP','orders-history','user',?1,11)",
+            [json!({ "algoId": "algo-parent", "ordId": "child-order" }).to_string()],
+        )
+        .expect("insert triggered child order");
+        conn.execute(
+            "INSERT INTO okx_fills(
+               account_id,environment,bill_id,ord_id,inst_id,inst_type,source_endpoint,operator,raw_json,synced_at
+             ) VALUES('account','demo','bill-child','child-order','BTC-USDT-SWAP','SWAP','fills-history','user','{}',12)",
+            [],
+        )
+        .expect("insert misattributed child fill");
+
+        let account = account_config_test_account("account", "Test", "placeholder-api-key");
+        let attribution = order_attribution(&conn, &account, Some("child-order"))
+            .expect("resolve parent attribution");
+        assert_eq!(attribution.0, "ai");
+        assert_eq!(attribution.3.as_deref(), Some("opp-ai"));
+        assert_eq!(attribution.4.as_deref(), Some("run-ai"));
+
+        assert!(repair_triggered_order_attribution(&conn).expect("repair attribution") >= 2);
+        let repaired = conn
+            .query_row(
+                "SELECT operator,opportunity_id,agent_run_id FROM okx_fills WHERE bill_id='bill-child'",
+                [],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, Option<String>>(1)?,
+                        row.get::<_, Option<String>>(2)?,
+                    ))
+                },
+            )
+            .expect("read repaired fill");
+        assert_eq!(repaired.0, "ai");
+        assert_eq!(repaired.1.as_deref(), Some("opp-ai"));
+        assert_eq!(repaired.2.as_deref(), Some("run-ai"));
     }
 
     fn sqlite_object_exists(conn: &Connection, object_type: &str, name: &str) -> bool {
@@ -27053,7 +27376,7 @@ mod tests {
     }
 
     #[test]
-    fn delegated_background_agents_are_bound_to_frozen_scope_allowlists() {
+    fn delegated_background_agents_follow_profile_tool_contract() {
         let market_agent = desic_agent_automation::AiProfileSubAgent {
             id: "market".to_string(),
             name: "市场".to_string(),
@@ -27082,6 +27405,29 @@ mod tests {
         ));
         assert!(authorize_ai_tool("market.readTicker", &custom).is_ok());
         assert!(authorize_ai_tool("account.readRisk", &custom).is_err());
+
+        let open_agent = desic_agent_automation::AiProfileSubAgent {
+            id: "open".to_string(),
+            name: "开放职责".to_string(),
+            role: "custom".to_string(),
+            responsibility: "用户定义职责".to_string(),
+            scopes: Vec::new(),
+            required: true,
+            enabled: true,
+        };
+        let mut open = test_ai_tool_context("advisor", "subagent", true);
+        open.configured_agent_id = Some("open".to_string());
+        open.configured_agent_scopes = Vec::new();
+        open.active_skill_ids.insert("okx-market-intelligence".to_string());
+        open.run_context = Some(test_background_run_context(
+            Some("account-test"),
+            "custom",
+            vec![open_agent],
+        ));
+        assert!(authorize_ai_tool("market.readTicker", &open).is_ok());
+        assert!(authorize_ai_tool("account.readRisk", &open).is_ok());
+        assert!(authorize_ai_tool("intelligence.news.search", &open).is_ok());
+        assert!(authorize_ai_tool("trade.placeOrder", &open).is_err());
 
         let mut auto_risk = test_ai_tool_context("advisor", "subagent", true);
         auto_risk.configured_agent_id = Some("auto-account-risk".to_string());

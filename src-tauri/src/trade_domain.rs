@@ -535,7 +535,32 @@ pub(crate) fn order_attribution(
          FROM okx_orders
          WHERE account_id = ?1
            AND environment = ?2
-           AND (ord_id = ?3 OR cl_ord_id = ?3)
+           AND (
+             ord_id = ?3
+             OR cl_ord_id = ?3
+             OR (json_valid(raw_json) AND CAST(json_extract(raw_json, '$.ordId') AS TEXT) = ?3)
+             OR ord_id = (
+               SELECT CAST(json_extract(child.raw_json, '$.algoId') AS TEXT)
+               FROM okx_orders child
+               WHERE child.account_id = ?1 AND child.environment = ?2 AND child.ord_id = ?3
+                 AND json_valid(child.raw_json)
+               LIMIT 1
+             )
+           )
+         ORDER BY CASE
+           WHEN ord_id <> ?3 AND (
+             (json_valid(raw_json) AND CAST(json_extract(raw_json, '$.ordId') AS TEXT) = ?3)
+             OR ord_id = (
+               SELECT CAST(json_extract(child.raw_json, '$.algoId') AS TEXT)
+               FROM okx_orders child
+               WHERE child.account_id = ?1 AND child.environment = ?2 AND child.ord_id = ?3
+                 AND json_valid(child.raw_json)
+               LIMIT 1
+             )
+           ) THEN 0
+           WHEN opportunity_id IS NOT NULL OR agent_run_id IS NOT NULL THEN 1
+           ELSE 2
+         END, synced_at DESC
          LIMIT 1",
         params![account.id, account.environment, order_id],
         |row| {

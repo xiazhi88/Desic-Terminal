@@ -54,6 +54,7 @@ import type {
   AccountSummary,
   AiAgentProfile,
   AiAgentScheme,
+  AiAgentTemplatePhase,
   AiAutomationCounts,
   AiAutomationEvent,
   AiAutomationOverview,
@@ -86,6 +87,7 @@ import { AgentCollaborationTrace } from "./AgentCollaborationTrace";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
 import {
+  AGENT_TEMPLATE_INSTRUCTION_LIMIT,
   AUTO_AGENT_LIMIT,
   CUSTOM_AGENT_LIMIT,
   createBuiltinAgentSchemes,
@@ -537,6 +539,20 @@ function normalizeAgentScheme(value: unknown): AiAgentScheme | null {
     description: valueString(scheme.description),
     builtin: Boolean(scheme.builtin),
     agents: normalizeSubAgents(scheme.agents),
+    instructions: valueString(scheme.instructions).slice(0, AGENT_TEMPLATE_INSTRUCTION_LIMIT),
+    skillIds: (Array.isArray(scheme.skillIds) ? scheme.skillIds : [])
+      .map((skillId) => valueString(skillId))
+      .filter(Boolean),
+    // Template-level phase is retained only for legacy persistence compatibility.
+    phase: (["primary", "review", "final"] as const).includes(valueString(scheme.phase) as AiAgentTemplatePhase)
+      ? (valueString(scheme.phase) as AiAgentTemplatePhase)
+      : "primary",
+    model: valueString(scheme.model) || null,
+    reasoningDepth: (["none", "minimal", "low", "medium", "high", "xhigh"] as const).includes(
+      valueString(scheme.reasoningDepth) as AiReasoningDepth
+    )
+      ? (valueString(scheme.reasoningDepth) as AiReasoningDepth)
+      : "medium",
     createdAt: Number(scheme.createdAt) || 0,
     updatedAt: Number(scheme.updatedAt) || 0
   };
@@ -545,10 +561,11 @@ function normalizeAgentScheme(value: unknown): AiAgentScheme | null {
 const REQUIRED_PROFILE_SKILL_IDS = [
   "desic-core-operations",
   "trading-philosophy",
-  "okx-news-intelligence",
-  "okx-smart-money-analysis"
+  "okx-market-intelligence",
+  "desic-trade-operations"
 ] as const;
 const REQUIRED_PROFILE_SKILL_ID_SET = new Set<string>(REQUIRED_PROFILE_SKILL_IDS);
+const PROFILE_SYMBOL_LIMIT = 3;
 
 function withRequiredProfileSkills(skillIds: string[] | undefined): string[] {
   return [...new Set([...REQUIRED_PROFILE_SKILL_IDS, ...(skillIds ?? []).map((skillId) => skillId.trim()).filter(Boolean)])];
@@ -1004,7 +1021,9 @@ function ProfileEditor({
     () => new Set((watchlist ?? []).map((item) => item.trim().toUpperCase()).filter(Boolean)),
     [watchlist]
   );
+  const symbolLimitReached = draft.symbols.length >= PROFILE_SYMBOL_LIMIT;
   const symbolOptions = useMemo(() => {
+    if (symbolLimitReached) return [];
     const query = symbolQuery.trim().toUpperCase();
     const selected = new Set(draft.symbols);
     return (marketAssets?.instruments ?? [])
@@ -1012,10 +1031,10 @@ function ProfileEditor({
       .filter((item) => !selected.has(item.instId))
       .filter((item) => !query || item.instId.includes(query) || item.baseCcy.includes(query))
       .slice(0, 8);
-  }, [draft.symbols, marketAssets?.instruments, symbolQuery, watchlistSymbols]);
+  }, [draft.symbols, marketAssets?.instruments, symbolLimitReached, symbolQuery, watchlistSymbols]);
   const addProfileSymbol = (symbol: string) => {
     const normalized = symbol.trim().toUpperCase();
-    if (!normalized) return;
+    if (!normalized || symbolLimitReached) return;
     // Typing a symbol by hand must not bypass the restriction.
     if (watchlistSymbols.size > 0 && !watchlistSymbols.has(normalized)) return;
     onChange({ symbols: Array.from(new Set([...draft.symbols, normalized])) });
@@ -1165,6 +1184,7 @@ function ProfileEditor({
           <span>
             {t("automation:profileWatchSymbols")}
             <small>{t("automation:profileWatchSymbolsWatchlistOnly")}</small>
+            <small>{t("automation:profileWatchSymbolsLimit", { count: PROFILE_SYMBOL_LIMIT })} · {draft.symbols.length}/{PROFILE_SYMBOL_LIMIT}</small>
           </span>
           <div className="automation-symbol-chips">
             {draft.symbols.map((symbol) => {
@@ -1191,10 +1211,13 @@ function ProfileEditor({
               <Search size={13} />
               <input
                 value={symbolQuery}
-                placeholder={t("automation:profileAddSymbol")}
+                disabled={symbolLimitReached}
+                placeholder={symbolLimitReached ? t("automation:profileWatchSymbolsLimitReached", { count: PROFILE_SYMBOL_LIMIT }) : t("automation:profileAddSymbol")}
                 aria-label={t("automation:profileAddWatchedSymbol")}
-                aria-expanded={symbolPickerOpen}
-                onFocus={() => setSymbolPickerOpen(true)}
+                aria-expanded={symbolPickerOpen && !symbolLimitReached}
+                onFocus={() => {
+                  if (!symbolLimitReached) setSymbolPickerOpen(true);
+                }}
                 onChange={(event) => {
                   setSymbolQuery(event.target.value.toUpperCase());
                   setSymbolPickerOpen(true);
@@ -1846,6 +1869,7 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
   const tradeCount = steps.filter((step) => runActionKind(step) === "trade").length;
   const notificationCount = steps.filter((step) => runActionKind(step) === "notification").length;
   const skills = isRecord(detail.skillVersions) ? Object.entries(detail.skillVersions) : [];
+  const templateSnapshot = isRecord(detail.templateSnapshot) ? detail.templateSnapshot : null;
   const cacheHitRate = formatRunCacheHitRate(detail.run.tokenUsage);
   const decisionTrace = useMemo(() => latestDecisionContextTrace(detail.toolEvents), [detail.toolEvents]);
   const finalDecision = isRecord(detail.finalDecision) ? detail.finalDecision : null;
@@ -1879,6 +1903,7 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
           <span>Skills</span>
           {skills.length > 0 ? skills.map(([name, version]) => <b key={name}>{name} · v{String(version)}</b>) : <em>{automationText("runNoPinnedVersions", "No pinned versions", "未锁定版本")}</em>}
         </div>
+        {templateSnapshot ? <div className="automation-run-template-chip"><span>{automationText("runTemplate", "Template", "模板")}</span><b>{typeof templateSnapshot.name === "string" ? templateSnapshot.name : "--"}</b></div> : null}
         {detail.run.tokenUsage ? (
           <div className="automation-run-token-breakdown">
             <span>{detail.run.tokenUsage.modelName || detail.run.tokenUsage.model}</span>
@@ -1952,6 +1977,10 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
       <details className="automation-run-collapsible">
         <summary>{automationText("runConfigSnapshot", "Run configuration snapshot", "运行配置快照")}</summary>
         <pre>{JSON.stringify(detail.profileSnapshot, null, 2)}</pre>
+      {templateSnapshot ? <details className="automation-run-collapsible">
+        <summary>{automationText("runTemplateSnapshot", "Frozen Agent Template snapshot", "已冻结的 Agent 模板快照")}</summary>
+        <pre>{JSON.stringify(templateSnapshot, null, 2)}</pre>
+      </details> : null}
       </details>
     </div>
   );
@@ -4336,6 +4365,11 @@ function AiAutomationPanelComponent({
       onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationModelRequired") });
       return;
     }
+    const normalizedSymbols = Array.from(new Set(profileDraft.symbols.map((item) => item.trim().toUpperCase()).filter(Boolean)));
+    if (normalizedSymbols.length > PROFILE_SYMBOL_LIMIT) {
+      onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationSymbolLimitExceeded", { count: PROFILE_SYMBOL_LIMIT }) });
+      return;
+    }
     // Renaming onto an existing name is rejected rather than silently renumbered:
     // the user typed this name deliberately, so they decide how to resolve it.
     const duplicate = (summary?.profiles ?? []).find(
@@ -4385,7 +4419,7 @@ function AiAutomationPanelComponent({
       mode: normalizePermissionMode(profileDraft.mode),
       targetLeverage: Math.max(1, Math.min(125, Math.round(profileDraft.targetLeverage) || 20)),
       maxSingleTradeMarginPct: Math.max(1, Math.min(100, Math.round(profileDraft.maxSingleTradeMarginPct) || 30)),
-      symbols: Array.from(new Set(profileDraft.symbols.map((item) => item.trim().toUpperCase()).filter(Boolean))),
+      symbols: normalizedSymbols,
       skillIds: withRequiredProfileSkills(profileDraft.skillIds),
       skillVersions: profileDraft.skillVersions ?? {},
       skillVersionModes: profileDraft.skillVersionModes ?? {},
@@ -4985,10 +5019,15 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
     multiAgentMaxAgents: 4,
     symbols: ["BTC-USDT-SWAP"]
   },
+  templateSnapshot: {
+    id: "builtin-perpetual-decision-desk",
+    name: "永续合约决策台",
+    instructions: "先并行取证，再由主 Agent 汇总。",
+    capturedAt: Date.UTC(2026, 6, 23, 8, 30, 0)
+  },
   skillVersions: {
     "trading-philosophy": 3,
-    "okx-news-intelligence": 2,
-    "okx-smart-money-analysis": 2
+    "okx-market-intelligence": 2
   },
   assistantText: "正在汇总四路证据。",
   reasoning: "先并行建立市场结构、情报资金与账户风险证据，再由反方审查检查冲突，最后由主 Agent 单点汇总。",
@@ -5245,6 +5284,11 @@ export function AutomationPreview() {
       description: draft.description,
       builtin: false,
       agents: draft.agents.map((agent) => ({ ...agent, scopes: [...agent.scopes] })),
+      instructions: draft.instructions,
+      skillIds: [],
+      phase: "primary",
+      model: null,
+      reasoningDepth: "medium",
       createdAt: now,
       updatedAt: now
     };

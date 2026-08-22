@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFile } from "node:child_process";
-import { chmod, copyFile, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, copyFile, cp, mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,7 @@ function platformArchive() {
     return {
       fileName: `node-v${nodeVersion}-darwin-${targetArch}.tar.gz`,
       nodeRelativePath: path.join(`node-v${nodeVersion}-darwin-${targetArch}`, "bin", "node"),
+      npmRootRelativePath: path.join(`node-v${nodeVersion}-darwin-${targetArch}`, "lib", "node_modules", "npm"),
       outputName: "node"
     };
   }
@@ -37,6 +38,7 @@ function platformArchive() {
     return {
       fileName: `node-v${nodeVersion}-win-${targetArch}.zip`,
       nodeRelativePath: path.join(`node-v${nodeVersion}-win-${targetArch}`, "node.exe"),
+      npmRootRelativePath: path.join(`node-v${nodeVersion}-win-${targetArch}`, "node_modules", "npm"),
       outputName: "node.exe"
     };
   }
@@ -90,6 +92,7 @@ async function ensureNodeRuntime() {
   const versionRoot = path.join(cacheRoot, nodeVersion, `${targetPlatform}-${targetArch}`);
   const archivePath = path.join(versionRoot, archive.fileName);
   const extractedNode = path.join(versionRoot, "extracted", archive.nodeRelativePath);
+  const extractedNpmRoot = path.join(versionRoot, "extracted", archive.npmRootRelativePath);
   await mkdir(versionRoot, { recursive: true });
 
   const shasumsPath = path.join(versionRoot, "SHASUMS256.txt");
@@ -110,13 +113,16 @@ async function ensureNodeRuntime() {
   const actual = await sha256(archivePath);
   if (actual !== expected) throw new Error(`Node.js checksum mismatch for ${archive.fileName}`);
 
-  if (!(await exists(extractedNode))) {
+  if (!(await exists(extractedNode)) || !(await exists(extractedNpmRoot))) {
     const extractRoot = path.join(versionRoot, "extracted");
     await rm(extractRoot, { recursive: true, force: true });
     await mkdir(extractRoot, { recursive: true });
     await execFileAsync("tar", ["-xf", archivePath, "-C", extractRoot]);
   }
-  return { source: extractedNode, outputName: archive.outputName };
+  if (!(await exists(path.join(extractedNpmRoot, "bin", "npm-cli.js")))) {
+    throw new Error(`bundled Node archive is missing npm-cli.js: ${extractedNpmRoot}`);
+  }
+  return { source: extractedNode, npmRoot: extractedNpmRoot, outputName: archive.outputName };
 }
 
 async function exists(filePath) {
@@ -149,10 +155,13 @@ async function main() {
   });
 
   const nodeOutput = path.join(runtimeDir, runtime.outputName);
+  const npmOutput = path.join(runtimeDir, "npm");
   await copyFile(runtime.source, nodeOutput);
   if (targetPlatform !== "win32") await chmod(nodeOutput, 0o755);
-  await writeFile(path.join(outputRoot, "manifest.json"), `${JSON.stringify({ nodeVersion, platform: targetPlatform, arch: targetArch }, null, 2)}\n`);
-  process.stdout.write(`[sidecar] prepared Node ${nodeVersion} for ${targetPlatform}-${targetArch}\n`);
+  await cp(runtime.npmRoot, npmOutput, { recursive: true, force: true, dereference: false });
+  const npmPackage = JSON.parse(await readFile(path.join(runtime.npmRoot, "package.json"), "utf8"));
+  await writeFile(path.join(outputRoot, "manifest.json"), `${JSON.stringify({ nodeVersion, npmVersion: npmPackage.version, platform: targetPlatform, arch: targetArch }, null, 2)}\n`);
+  process.stdout.write(`[sidecar] prepared Node ${nodeVersion} and npm ${npmPackage.version} for ${targetPlatform}-${targetArch}\n`);
 }
 
 main().catch((error) => {

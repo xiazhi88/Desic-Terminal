@@ -134,8 +134,8 @@ Skill 是注入模型上下文的**规则规格**。Profile 保存的是不可�
 | --- | --- |
 | `desic-core-operations` | 工具、权限、交易机会、合约单位与执行规范 |
 | `trading-philosophy` | 证据、市场状态、失效条件、风险与复盘原则 |
-| `okx-news-intelligence` | 新闻、事件、情绪、宏观与市场反应 |
-| `okx-smart-money-analysis` | Smart Money、OI、主动流、拥挤度、资金费率与基差 |
+| `okx-market-intelligence` | 新闻、事件、情绪、宏观、Smart Money、OI、主动流、拥挤度、资金费率与基差 |
+| `desic-trade-operations` | 交易机会、市场证据、永续风险、仓位生命周期、保护与执行核对 |
 
 **自定义 Skill**（设置 → Skill 管理）
 

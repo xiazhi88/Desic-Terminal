@@ -1156,7 +1156,7 @@ async function verifySettingsConfigurationPage(page) {
   await page.locator(".settings-page-tabs button", { hasText: "Skills" }).click();
   await page.waitForSelector(".skills-settings-pane", { timeout: 5_000 });
   const skillState = await page.evaluate(() => {
-    const required = ["desic-core-operations", "trading-philosophy", "okx-news-intelligence", "okx-smart-money-analysis"];
+    const required = ["desic-core-operations", "trading-philosophy", "okx-market-intelligence", "desic-trade-operations"];
     return required.map((id) => {
       const item = Array.from(document.querySelectorAll(".skill-option")).find((node) => node.textContent?.includes(id));
       const checkbox = item?.querySelector("input[type='checkbox']");

@@ -90,7 +90,8 @@ export const LOCAL_SIDE_EFFECT_TOOLS = new Set([
   "strategy.saveVersion",
   "strategy.rollbackVersion",
   "strategy.backtest",
-  "strategy.optimize"
+  "strategy.optimize",
+  "skill.run"
 ]);
 
 export const OPPORTUNITY_READ_TOOLS = new Set([
@@ -172,8 +173,7 @@ export const READ_TOOLS = ANALYSIS_TOOLS;
 
 export function requiredSkillForTool(name) {
   const canonicalName = toCanonicalToolName(name);
-  if (canonicalName.startsWith("intelligence.news.")) return "okx-news-intelligence";
-  if (canonicalName.startsWith("intelligence.smartMoney.")) return "okx-smart-money-analysis";
+  if (canonicalName.startsWith("intelligence.news.") || canonicalName.startsWith("intelligence.smartMoney.")) return "okx-market-intelligence";
   return null;
 }
 
@@ -274,6 +274,12 @@ export function resolveToolPolicy(name, config = {}) {
   if (openAgent && !knownTool) {
     return enabledPolicy("auto-approved:cline-native-tool");
   }
+  if (canonicalName === "skill.run") {
+    if (role !== "main") return disabledPolicy("disabled:skill-run-main-interactive-only");
+    if (boolConfig(config.backgroundRun, false)) return disabledPolicy("disabled:skill-run-interactive-only");
+    return enabledPolicy("auto-approved:main-interactive-skill-run");
+  }
+
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
       (canonicalName.startsWith("strategy.") || canonicalName === "skill.readResource")

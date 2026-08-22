@@ -134,8 +134,8 @@ Skills are **rule specs** injected into the model context. A Profile stores immu
 | --- | --- |
 | `desic-core-operations` | Tools, permissions, opportunities, contract units and execution rules |
 | `trading-philosophy` | Evidence, market regimes, invalidation conditions, risk and review principles |
-| `okx-news-intelligence` | News, events, sentiment, macro and market reactions |
-| `okx-smart-money-analysis` | Smart Money, OI, taker flows, crowding, funding and basis |
+| `okx-market-intelligence` | News, events, sentiment, macro, Smart Money, OI, taker flows, crowding, funding and basis |
+| `desic-trade-operations` | Trade opportunities, market evidence, perpetual risk, position lifecycle, protection and execution reconciliation |
 
 **Custom Skills** (Settings → Skills)
 

@@ -94,6 +94,8 @@ const PROFILE_AGENT_SCOPE_TOOLS = Object.freeze({
   ]
 });
 
+const PROFILE_AGENT_ALL_TOOLS = Object.freeze([...new Set(Object.values(PROFILE_AGENT_SCOPE_TOOLS).flat())]);
+
 const AUTO_PROFILE_AGENTS = Object.freeze([
   {
     id: "auto-market-structure",
@@ -140,7 +142,7 @@ const AUTO_PROFILE_AGENTS = Object.freeze([
     scopes: ["intelligence"],
     required: false,
     enabled: true,
-    requiresSkill: "okx-news-intelligence"
+    requiresSkill: "okx-market-intelligence"
   },
   {
     id: "auto-smart-money",
@@ -150,7 +152,7 @@ const AUTO_PROFILE_AGENTS = Object.freeze([
     scopes: ["intelligence", "derivatives"],
     required: false,
     enabled: true,
-    requiresSkill: "okx-smart-money-analysis"
+    requiresSkill: "okx-market-intelligence"
   },
   {
     id: "auto-historical-analogy",
@@ -190,7 +192,7 @@ function normalizeProfileAgent(value, index) {
   const scopes = stringList(value.scopes)
     .map((scope) => scope.toLowerCase())
     .filter((scope, scopeIndex, items) => PROFILE_AGENT_SCOPE_TOOLS[scope] && items.indexOf(scope) === scopeIndex);
-  if (!id || !name || !responsibility || scopes.length === 0 || value.enabled === false) return null;
+  if (!id || !name || !responsibility || value.enabled === false) return null;
   return {
     id,
     name,
@@ -203,8 +205,10 @@ function normalizeProfileAgent(value, index) {
 }
 
 export function profileAgentToolAllowlist(scopes) {
+  const declaredScopes = stringList(scopes);
+  if (declaredScopes.length === 0) return [...PROFILE_AGENT_ALL_TOOLS];
   const tools = new Set();
-  for (const scope of scopes) {
+  for (const scope of declaredScopes) {
     for (const name of PROFILE_AGENT_SCOPE_TOOLS[scope] || []) tools.add(name);
   }
   return Array.from(tools);

@@ -140,6 +140,10 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.create"
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.saveVersion", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.backtest", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "strategy.optimize", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", backgroundRun: false }, "skill.run", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main", backgroundRun: true }, "skill.run", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "subagent" }, "skill.run", disabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "team" }, "skill.run", disabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.create", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.backtest", enabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" }, "strategy.getBacktestResult", enabled);
@@ -151,14 +155,14 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "research.webSear
 expectTrue("overloaded stream disconnect is retryable", isTransientAiNetworkError("stream disconnected before completion: Our servers are currently overloaded"));
 expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "trade.placeOrder", disabled);
 expectEqual("news tools hidden without skill", isSkillToolEnabled("intelligence.news.list", []), false);
-expectEqual("news tools exposed with skill", isSkillToolEnabled("intelligence.news.list", ["okx-news-intelligence"]), true);
+expectEqual("news tools exposed with skill", isSkillToolEnabled("intelligence.news.list", ["okx-market-intelligence"]), true);
 expectEqual("smart money tools hidden without skill", isSkillToolEnabled("intelligence.smartMoney.readSignalTrendByFilter", []), false);
-expectEqual("smart money tools exposed with skill", isSkillToolEnabled("intelligence.smartMoney.readSignalTrendByFilter", ["okx-smart-money-analysis"]), true);
+expectEqual("smart money tools exposed with skill", isSkillToolEnabled("intelligence.smartMoney.readSignalTrendByFilter", ["okx-market-intelligence"]), true);
 expectEqual("news event tools hidden without skill", isSkillToolEnabled("intelligence.news.listEvents", []), false);
-expectEqual("news event tools exposed with skill", isSkillToolEnabled("intelligence.news.readEvent", ["okx-news-intelligence"]), true);
+expectEqual("news event tools exposed with skill", isSkillToolEnabled("intelligence.news.readEvent", ["okx-market-intelligence"]), true);
 expectEqual("derivatives evidence hidden without smart skill", isSkillToolEnabled("intelligence.smartMoney.readFundingBasis", []), false);
-expectEqual("derivatives evidence exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readFundingBasis", ["okx-smart-money-analysis"]), true);
-expectEqual("derivative decision context exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readDerivativeDecisionContext", ["okx-smart-money-analysis"]), true);
+expectEqual("derivatives evidence exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readFundingBasis", ["okx-market-intelligence"]), true);
+expectEqual("derivative decision context exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readDerivativeDecisionContext", ["okx-market-intelligence"]), true);
 
 const briefingAdvisorPolicies = buildToolPolicies({ permissionMode: "advisor", agentRole: "main", backgroundRun: true });
 expectEqual("briefing advisor can finish run", briefingAdvisorPolicies["background.finishRun"]?.enabled, true);

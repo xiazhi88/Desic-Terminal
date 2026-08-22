@@ -22,7 +22,7 @@
         "II. Trade opportunities",
         "4. Casual conversation or pure market analysis does not require a trade opportunity. When an actionable trade plan is formed, including a limit or trigger order suitable for placement in advance, call tradeOpportunity.create to save it.",
         "5. Advisor mode cannot create trade opportunities or change leverage. A background Profile main Agent in copilot or limited_auto mode may call trade.setLeverage after precheck confirms that current leverage differs from the Profile target. Otherwise, copilot may only create, revise, and reuse opportunities. limited_auto must create opportunities through tradeOpportunity.create and let the backend approve and execute them according to Profile permissions. Neither mode may directly place, cancel, amend, or close orders, and delegated Agents may not change leverage.",
-        "6. A trade opportunity must include the instrument, direction, size in contracts, margin mode, order type, price or trigger condition, leverage, take-profit and stop-loss, invalidation conditions, rationale, and risk disclosure. A current price that has not reached the planned entry is not a reason to abandon creation: use ordinary limit orders in advance for pullback longs or rebound shorts, and trigger orders for breakout longs or breakdown shorts. When the entry thesis does not require a future price-crossing trigger and fill probability remains reasonable, prefer a resting non-marketable ordinary limit order because maker fees can be lower. Never claim that a limit order guarantees maker treatment: a marketable limit can still pay taker fees, and a resting order can miss the trade or suffer adverse selection. Use trigger or market execution when confirmation, urgency, liquidity, or exit safety outweighs the possible fee saving. Wait for future evidence only when the plan still depends on new candles, OI, or other combined evidence.",
+        "6. A trade opportunity must include the instrument, direction, size in contracts, margin mode, order type, price or trigger condition, leverage, take-profit and stop-loss, invalidation conditions, rationale, and risk disclosure. A current price that has not reached the planned entry is not a reason to abandon creation: use ordinary limit orders in advance for pullback longs or rebound shorts, and trigger orders for breakout longs or breakdown shorts. When the entry thesis does not require a future price-crossing trigger and fill probability remains reasonable, prefer a resting non-marketable ordinary limit order because maker fees can be lower. Never claim that a limit order guarantees maker treatment: a marketable limit can still pay taker fees, and a resting order can miss the trade or suffer adverse selection. Use trigger or market execution when confirmation, urgency, liquidity, or exit safety outweighs the possible fee saving. For an ordinary limit or market opening order with takeProfit or stopLoss, the terminal submits those exits as attached `attachAlgoOrds`. Before the parent order receives any fill, empty ordinary-order tpTriggerPx/slTriggerPx fields and an attached algo lookup by attachAlgoClOrdId returning not_found are expected pending_fill states, not proof that protection failed. Do not cancel an unfilled parent order solely for either observation. After any actual fill, reconcile the attached protection against the filled quantity; if it cannot then be confirmed, create or replace suitable protective exits or reduce/close the exposure according to the risk workflow. Wait for future evidence only when the plan still depends on new candles, OI, or other combined evidence.",
         "7. Before creating an opportunity, read account balance, positions, and open orders when possible, then call trade.precheck with the concrete direction, entry, target, stop, size, leverage, and order type. Use its feeRateSource, breakEvenPrice, estimatedNetProfitAtTarget, feeDragPctOfGrossProfit, netRewardRiskRatio, available balance, estimated margin, and risk warnings. Never present gross target profit as the expected net payoff.",
         "",
         "III. Perpetual-contract trading policy",
@@ -94,10 +94,10 @@
       "builtin": true
     },
     {
-      "id": "okx-news-intelligence",
-      "name": "okx-news-intelligence",
-      "description": "Use whenever news, event timelines, regulation, market reactions, anomalies, market sentiment, the economic calendar, or a daily market briefing are part of the work. This covers a direct question, self-directed market analysis, and scheduled background scans alike: load it because the evidence is needed, not because someone asked for it. It uses Desic Terminal's native read-only intelligence tools for event clusters, News, Sentiment, Calendar, and local market reactions.",
-      "rules": "Use only controlled intelligence.news.* tools. Read local events and history first, then refresh when data is stale. Every conclusion must identify source, publication time, fetch time, local event/article IDs, market-reaction window, and coverage, while separating facts, inferences, and risks. Interpret multi-asset reactions per instrument; btc_market_proxy may only be described as a BTC market proxy. News, sentiment, and anomalies are trading evidence and must not directly trigger an order.",
+      "id": "okx-market-intelligence",
+      "name": "okx-market-intelligence",
+      "description": "Use whenever news, macro events, market reactions, sentiment, Smart Money, trader consensus, OI, taker flow, crowding, funding, basis, liquidation samples, or systemic stress are part of the work. It uses Desic Terminal's native read-only OKX intelligence tools and must be loaded for both direct questions and self-directed analysis.",
+      "rules": "Use only controlled intelligence.news.* and intelligence.smartMoney.* tools. Read local events and history first, then refresh when data is stale. Every conclusion must identify source, publication time, fetch time, local event/article or data IDs, market-reaction window, coverage, and counterexamples, while separating facts, inferences, and risks. Smart Money and derivatives evidence are not copy-trading instructions and must not directly trigger an order.",
       "content": [
         "I. Select tools",
         "1. Use intelligence.news.list for the latest, important, or asset-specific news; use intelligence.news.search for keyword or sentiment filters.",
@@ -111,31 +111,27 @@
         "7. For macro impact analysis, read the economic calendar, event articles, target-asset sentiment, and local market reactions together. Never predict direction from an event name alone.",
         "8. Output must include sources, publication times, local event and article IDs, reaction windows, related assets, importance, factual summary, possible impact, validation conditions, and risks.",
         "9. When data returns stale=true, truncated=true, insufficient coverage, or non-empty limitations, disclose it explicitly. Do not interpret missing results as proof that an event does not exist.",
-        "10. News, sentiment, anomalies, and macro data are not trade instructions. After forming a trade plan, still read instrument specifications and account information and follow the tradeOpportunity and trade.precheck workflow."
+        "10. News, sentiment, anomalies, and macro data are not trade instructions. After forming a trade plan, still read instrument specifications and account information and follow the tradeOpportunity and trade.precheck workflow.",
+        "11. Use intelligence.smartMoney.listTradersByFilter or searchTrader to resolve the relevant trader pool, then combine performance, current positions, orders, positioning, taker flow, crowding, funding, basis, liquidation samples, and systemic stress as appropriate.",
+        "12. Do not base a conclusion on one ranking, one trader, or one point in time. State filter pool, horizon, sample size, coverage, data version, stale or truncated fields, counterexamples, and limitations.",
+        "13. Aggregated signals cover only USDT/USDS linear contracts; notional values use average entry price. OI-price combinations are positioning-state inferences, not proof of new longs, new shorts, covering, or stops.",
+        "14. Platform liquidation samples are not total market liquidations, net taker flow is not tick-by-tick CVD, and Smart Money evidence is not a copy-trading instruction."
       ],
       "builtin": true
     },
     {
-      "id": "okx-smart-money-analysis",
-      "name": "okx-smart-money-analysis",
-      "description": "Use whenever Smart Money, trader consensus, OI, net taker flow, crowding, funding, basis, liquidation samples, or systemic stress are part of the work. This covers a direct question, self-directed market analysis, and scheduled background scans alike: load it because the evidence is needed, not because someone asked for it. It uses Desic Terminal's native read-only tools to analyze OKX Smart Money and public trading data.",
-      "rules": "Use only controlled intelligence.smartMoney.* tools. A single-trader analysis must read performance, current positions, and orders in parallel. Derivatives analysis must combine price/OI, net taker flow, crowding, funding, and basis. Aggregated signals cover only USDT/USDS linear contracts, and notional value uses average entry price. Smart Money and derivatives inferences are evidence and must not directly place orders.",
+      "id": "desic-trade-operations",
+      "name": "desic-trade-operations",
+      "description": "Trade opportunity construction, market evidence, perpetual risk, position lifecycle, protection, and controlled execution workflow.",
+      "rules": "Use for trade planning, perpetual risk, position management, market evidence, and execution reconciliation. Never bypass Profile permissions, backend prechecks, or fixed core policy.",
       "content": [
-        "I. Select tools",
-        "1. Use intelligence.smartMoney.listTradersByFilter for ranked filtering and intelligence.smartMoney.searchTrader to resolve a display name.",
-        "2. When authorId is known, build a complete profile by calling readPerformanceByTrader, readTraderPositions, and readTraderOrderHistory in parallel. Use readTraderPositionHistory for historical realized profit and loss.",
-        "3. Use readSignalOverviewByFilter for current multi-asset consensus in a performance pool and readSignalOverviewByTrader for a specified trader set.",
-        "4. Use readSignalTrendByFilter or readSignalTrendByTrader for a single asset's historical trend.",
-        "5. Use readMarketPositioning/readPositionChanges for positioning state, readTakerFlow for aggressive flow, and readCrowdingComparison/readConsensusDivergence for divergence between general and elite accounts.",
-        "6. Use readFundingBasis for funding and basis. Use only readLiquidationSamples for liquidations and explicitly call them platform event samples. Use readSystemStress for insurance funds, price limits, and ADL.",
-        "",
-        "II. Analysis workflow",
-        "7. Do not base a conclusion on one ranking, one trader, or one point in time. At minimum, examine sample size, horizon, win rate, drawdown, current positions, and historical execution.",
-        "8. Aggregated signals cover only USDT/USDS linear contracts. Read the trader's current positions when complete position details are needed.",
-        "9. longNotional, shortNotional, and weighted ratios are calculated from trader average entry prices. Read market ticker/candles in parallel when comparing current profit/loss or price displacement.",
-        "10. Describe OI-price combinations only as positioning-state inferences. Net taker flow is not tick-by-tick CVD. Platform liquidation event samples must not be described as total market liquidations.",
-        "11. Output must state the filter pool, window, coverage, data version, directional consensus, counterexamples, limitations, and risks. Disclose stale, truncated, and limitations explicitly.",
-        "12. Smart Money and derivatives evidence is not a copy-trading or trading instruction. After forming a plan, continue through tradeOpportunity and trade.precheck."
+        "Create a structured trade opportunity only when an actionable plan exists.",
+        "Include instrument, direction, size, margin mode, order type, entry, exits, invalidation, rationale, and risk disclosure.",
+        "After any fill, reconcile attached protection and use the account tools to confirm actual order state.",
+        "Read local ticker, candles, order book, trades, funding, open interest, instrument, account, and protection evidence before forming a plan; label source, time, coverage, stale, and missing fields.",
+        "Keep leverage, margin mode, liquidation estimate, available balance, position size, and protection state distinct; never infer safety from one metric.",
+        "Distinguish no position, pending entry, partial fill, open exposure, reducing, protected, closed, cancelled, and unknown states. Reconcile positions with ordinary and algo exits before changing exposure.",
+        "A partial close retains protection for the remaining quantity. A full close clears protection only after the fill is confirmed. Use explicit invalidation and reduce-or-close logic when protection cannot be confirmed."
       ],
       "builtin": true
     }

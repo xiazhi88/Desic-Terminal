@@ -3,7 +3,6 @@ import { useConfirmPrompt } from "./ConfirmPrompt";
 import {
   Bot,
   Check,
-  CheckCircle2,
   ChevronDown,
   CircleAlert,
   CircleDashed,
@@ -21,7 +20,11 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useTranslation } from "react-i18next";
-import type { AiAgentProfile, AiAgentScheme, AiProfileSubAgent } from "../types";
+import type {
+  AiAgentProfile,
+  AiAgentScheme,
+  AiProfileSubAgent
+} from "../types";
 import { TerminalSelect } from "./TerminalSelect";
 
 type CollaborationPatch = Partial<Pick<
@@ -33,7 +36,10 @@ export type AiAgentSchemeDraft = {
   name: string;
   description: string;
   agents: AiProfileSubAgent[];
+  instructions: string;
 };
+
+export const AGENT_TEMPLATE_INSTRUCTION_LIMIT = 4000;
 
 type ProfileCollaborationEditorProps = {
   mode: AiAgentProfile["multiAgentMode"];
@@ -57,8 +63,6 @@ const BUILTIN_AGENT_TRANSLATION_SUFFIX: Record<string, string> = {
   "account-risk": "AccountRisk",
   "contrarian-review": "ContrarianReview"
 };
-
-const AGENT_SCOPES = ["market", "derivatives", "intelligence", "account", "history"] as const;
 
 const PERPETUAL_DECISION_TEMPLATE: AiProfileSubAgent[] = [
   {
@@ -121,6 +125,11 @@ export function createBuiltinAgentSchemes(): AiAgentScheme[] {
     description: "市场、情报与账户并行取证，反方审查后由主 Agent 汇总决策。",
     builtin: true,
     agents: createPerpetualDecisionTeam(),
+    instructions: "",
+    skillIds: [],
+    phase: "primary",
+    model: null,
+    reasoningDepth: "medium",
     createdAt: 0,
     updatedAt: 0
   }];
@@ -151,6 +160,7 @@ export function ProfileCollaborationEditor({
   const [savingScheme, setSavingScheme] = useState(false);
   const [schemeName, setSchemeName] = useState("");
   const [schemeDescription, setSchemeDescription] = useState("");
+  const [schemeInstructions, setSchemeInstructions] = useState("");
   const enabledAgents = useMemo(() => agents.filter((agent) => agent.enabled).length, [agents]);
   const safeMaxAgents = clampMaxAgents(maxAgents, mode);
   const selectedScheme = useMemo(
@@ -236,6 +246,7 @@ export function ProfileCollaborationEditor({
       multiAgentSchemeId: scheme.id,
       multiAgents: next
     });
+    setSchemeInstructions(scheme.instructions ?? "");
     setExpandedAgentId(null);
     setSavingScheme(false);
   };
@@ -246,13 +257,15 @@ export function ProfileCollaborationEditor({
     const saved = await onSaveScheme({
       name,
       description: schemeDescription.trim(),
-      agents: cloneAgents(agents)
+      agents: cloneAgents(agents),
+      instructions: schemeInstructions.trim().slice(0, AGENT_TEMPLATE_INSTRUCTION_LIMIT)
     });
     if (!saved) return;
     onChange({ multiAgentSchemeId: saved.id });
     setSavingScheme(false);
     setSchemeName("");
     setSchemeDescription("");
+    setSchemeInstructions("");
   };
 
   const deleteCurrentScheme = () => {
@@ -329,16 +342,41 @@ export function ProfileCollaborationEditor({
               {selectedScheme ? schemeDisplayDescription(selectedScheme) || t("collaborationSchemeNotSaved") : t("collaborationSchemeNotSaved")}
             </span>
             <div className="automation-scheme-actions">
-              <button type="button" title={t("collaborationSaveScheme")} aria-label={t("collaborationSaveScheme")} disabled={schemeBusy || agents.length < 2} onClick={() => setSavingScheme(true)}><Save size={13} /></button>
+              <button type="button" className="save-template" disabled={schemeBusy || agents.length === 0} onClick={() => setSavingScheme(true)}><Save size={13} /><span>{t("collaborationSaveScheme")}</span></button>
               <button type="button" title={t("collaborationDeleteScheme")} aria-label={t("collaborationDeleteScheme")} disabled={schemeBusy || !selectedScheme || selectedScheme.builtin} onClick={() => void deleteCurrentScheme()}><Trash2 size={13} /></button>
             </div>
           </div>
           {savingScheme ? (
-            <div className="automation-scheme-save-row">
-              <label><span>{t("collaborationSchemeName")}</span><input autoFocus maxLength={60} value={schemeName} placeholder={t("collaborationSchemeNamePlaceholder")} onChange={(event) => setSchemeName(event.target.value)} /></label>
-              <label className="wide"><span>{t("collaborationSchemeDescription")}</span><input maxLength={200} value={schemeDescription} placeholder={t("collaborationSchemeDescriptionPlaceholder")} onChange={(event) => setSchemeDescription(event.target.value)} /></label>
-              <button type="button" className="confirm" title={t("collaborationConfirmSave")} aria-label={t("collaborationConfirmSaveScheme")} disabled={schemeBusy || !schemeName.trim() || enabledAgents < 2} onClick={() => void saveCurrentScheme()}><Check size={14} /></button>
-              <button type="button" title={t("collaborationCancel")} aria-label={t("collaborationCancelSaveScheme")} disabled={schemeBusy} onClick={() => setSavingScheme(false)}><X size={14} /></button>
+            <div className="automation-scheme-editor">
+              <div className="automation-scheme-editor-heading">
+                <div>
+                  <strong>{t("collaborationTemplateEditorTitle")}</strong>
+                  <span>{t("collaborationTemplateSecurityNote")}</span>
+                </div>
+              </div>
+              <div className="automation-scheme-editor-grid">
+                <label><span>{t("collaborationSchemeName")}</span><input autoFocus maxLength={60} value={schemeName} placeholder={t("collaborationSchemeNamePlaceholder")} onChange={(event) => setSchemeName(event.target.value)} /></label>
+                <label><span>{t("collaborationSchemeDescription")}</span><input maxLength={200} value={schemeDescription} placeholder={t("collaborationSchemeDescriptionPlaceholder")} onChange={(event) => setSchemeDescription(event.target.value)} /></label>
+                <label className="instructions">
+                  <span>{t("collaborationTemplateInstructions")}</span>
+                  <textarea
+                    maxLength={AGENT_TEMPLATE_INSTRUCTION_LIMIT}
+                    value={schemeInstructions}
+                    placeholder={t("collaborationTemplateInstructionsPlaceholder")}
+                    onChange={(event) => setSchemeInstructions(event.target.value)}
+                  />
+                  <small>{schemeInstructions.length.toLocaleString()} / {AGENT_TEMPLATE_INSTRUCTION_LIMIT.toLocaleString()}</small>
+                </label>
+              </div>
+              <div className="automation-scheme-editor-footer">
+                <span className={clsx("automation-scheme-requirement", enabledAgents < 2 && "blocking")}>
+                  {enabledAgents < 2
+                    ? t("collaborationSchemeRequiresAgents")
+                    : t("collaborationTemplateAgentCount", { count: enabledAgents })}
+                </span>
+                <button type="button" disabled={schemeBusy} onClick={() => setSavingScheme(false)}><X size={14} />{t("collaborationCancel")}</button>
+                <button type="button" className="confirm" disabled={schemeBusy || !schemeName.trim() || enabledAgents < 2} onClick={() => void saveCurrentScheme()}><Check size={14} />{t("collaborationConfirmSave")}</button>
+              </div>
             </div>
           ) : null}
         </div>
@@ -422,27 +460,9 @@ export function ProfileCollaborationEditor({
                             <label><span>{t("collaborationAgentRole")}</span><input value={displayAgent.role} maxLength={60} onChange={(event) => updateAgent(agent.id, { role: event.target.value })} /></label>
                             <label className="wide"><span>{t("collaborationAgentResponsibility")}</span><textarea value={displayAgent.responsibility} maxLength={500} rows={3} onChange={(event) => updateAgent(agent.id, { responsibility: event.target.value })} /></label>
                           </div>
-                          <fieldset className="automation-agent-scopes">
-                            <legend>{t("collaborationDataScopes")}</legend>
-                            <div>
-                              {AGENT_SCOPES.map((scope) => {
-                                const selected = agent.scopes.includes(scope);
-                                return (
-                                  <button
-                                    type="button"
-                                    className={selected ? "selected" : ""}
-                                    aria-pressed={selected}
-                                    key={scope}
-                                    onClick={() => updateAgent(agent.id, {
-                                      scopes: selected ? agent.scopes.filter((item) => item !== scope) : [...agent.scopes, scope]
-                                    })}
-                                  >
-                                    {selected ? <CheckCircle2 size={11} /> : <CircleDashed size={11} />}{t(`collaborationScope${scope.charAt(0).toUpperCase()}${scope.slice(1)}`)}
-                                  </button>
-                                );
-                              })}
-                            </div>
-                          </fieldset>
+                          <div className="automation-agent-scope-legacy">
+                            <div className="automation-agent-scope-note">{t("collaborationDataScopesAuto")}</div>
+                          </div>
                           <div className="automation-agent-editor-actions">
                             <label><input type="checkbox" checked={agent.enabled} onChange={(event) => updateAgent(agent.id, { enabled: event.target.checked, required: event.target.checked ? agent.required : false })} /><span>{t("collaborationEnableAgent")}</span></label>
                             <label><input type="checkbox" checked={agent.required} disabled={!agent.enabled} onChange={(event) => updateAgent(agent.id, { required: event.target.checked })} /><span>{t("collaborationMustReturn")}</span></label>

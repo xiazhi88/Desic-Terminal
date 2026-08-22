@@ -688,6 +688,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "desic-skill-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "toml 0.8.2",
+]
+
+[[package]]
 name = "desic-smoke-tools"
 version = "0.1.0"
 dependencies = [
@@ -710,6 +720,7 @@ dependencies = [
 name = "desic-storage-config"
 version = "0.1.0"
 dependencies = [
+ "desic-skill-runtime",
  "serde",
  "serde_json",
 ]
@@ -736,6 +747,7 @@ dependencies = [
  "desic-chart-dsl",
  "desic-intelligence",
  "desic-private-history",
+ "desic-skill-runtime",
  "desic-storage-config",
  "desic-systematic",
  "desic-trade-domain",

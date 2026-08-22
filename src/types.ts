@@ -1703,6 +1703,7 @@ export type AiConfigSummary = {
   customRules: string;
   enabledSkills: string[];
   skillDefinitions: AiSkillDefinition[];
+  skillRuntimeTrust: Record<string, boolean>;
   openAgent: boolean;
   workspaceRoots: string[];
 };
@@ -1759,6 +1760,50 @@ export type AiPermissionMode = "advisor" | "copilot" | "limited_auto";
 
 export type AiLegacyPermissionMode = "readonly" | "approval" | "full";
 
+export type AiSkillCapabilities = {
+  workspaceRead?: boolean;
+  workspaceWrite?: boolean;
+  network?: boolean;
+};
+
+export type AiSkillEntrypoint = {
+  name: string;
+  script: string;
+  timeoutSeconds: number;
+  inputSchema?: Record<string, unknown> | null;
+  outputSchema?: Record<string, unknown> | null;
+};
+
+export type AiSkillRuntimeManifest = {
+  schemaVersion: number;
+  runtime?: {
+    kind: "node" | "python" | "shell" | string;
+    dependencyMode: "locked" | "allow-unlocked" | string;
+    entrypoints: AiSkillEntrypoint[];
+    backgroundSafe: boolean;
+  } | null;
+  capabilities: AiSkillCapabilities;
+};
+
+export type AiSkillBundleFile = {
+  path: string;
+  sha256: string;
+  bytes: number;
+};
+
+export type AiSkillBundleSummary = {
+  schemaVersion: number;
+  bundleHash: string;
+  files: AiSkillBundleFile[];
+  source: {
+    kind: string;
+    reference?: string | null;
+    revision?: string | null;
+    subpath?: string | null;
+  };
+  manifest: AiSkillRuntimeManifest;
+};
+
 export type AiSkillDefinition = {
   id: string;
   name: string;
@@ -1766,6 +1811,7 @@ export type AiSkillDefinition = {
   rules: string;
   content: string;
   builtin?: boolean;
+  bundle?: AiSkillBundleSummary | null;
 };
 
 export type AiConfigUpdate = {
@@ -1804,12 +1850,30 @@ export type AiProfileSubAgent = {
   enabled: boolean;
 };
 
+export type AiAgentTemplatePhase = "primary" | "review" | "final";
+
+export type AiCodexTemplatePreview = {
+  name: string;
+  description: string;
+  instructions: string;
+  skillIds: string[];
+  phase: AiAgentTemplatePhase;
+  model?: string | null;
+  rejectedFields: string[];
+  notes: string[];
+};
+
 export type AiAgentScheme = {
   id: string;
   name: string;
   description: string;
   builtin: boolean;
   agents: AiProfileSubAgent[];
+  instructions: string;
+  skillIds: string[];
+  phase: AiAgentTemplatePhase;
+  model?: string | null;
+  reasoningDepth: AiReasoningDepth;
   createdAt: number;
   updatedAt: number;
 };
@@ -1936,6 +2000,7 @@ export type AiAutomationRunDetail = {
   run: AiAutomationRun;
   trigger: unknown;
   profileSnapshot: unknown;
+  templateSnapshot?: unknown;
   skillVersions: unknown;
   assistantText?: string | null;
   reasoning?: string | null;

@@ -87,6 +87,9 @@ function validateConfig(config) {
   if (config.get("model_providers.PrivateGateway.requires_openai_auth") !== true) {
     throw new Error("mock Codex did not receive the Provider authentication mode");
   }
+  if (config.get("model_reasoning_effort") !== "low") {
+    throw new Error("mock Codex did not receive Desic's reasoning config override");
+  }
   const mcpApprovalEntry = [...config.entries()].find(([key]) => (
     /^mcp_servers\.[^.]+\.default_tools_approval_mode$/.test(key)
   ));

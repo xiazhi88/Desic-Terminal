@@ -6,7 +6,10 @@ import {
   codexProviderMetadataError,
   codexIsolationOverrides,
   codexProviderOverrides,
+  codexReasoningEffort,
+  codexReasoningOverrides,
   createCodexBridgeTool,
+  createIsolatedCodexCli,
   mapCodexProviderPart,
   normalizeCodexAppServerEvent,
   normalizeCodexUsage,
@@ -265,5 +268,24 @@ assert.equal(first.value.success, false);
 assert.match(first.value.error, /Codex CLI/);
 cleanupCodexToolBridges("codex-adapter-test");
 assert.equal(updateCodexToolBridgeActivity("codex-adapter-test", () => {}), 0);
+
+// Desic's selected tier is sent as a thread/start config override before Codex
+// deserializes the personal model_reasoning_effort value.
+assert.equal(codexReasoningEffort("xhigh"), "xhigh");
+assert.equal(codexReasoningEffort("invalid"), "medium");
+assert.deepEqual(codexReasoningOverrides("xhigh"), {
+  model_reasoning_effort: "xhigh"
+});
+
+// CODEX_HOME must remain inherited from the parent process. auth.json is an
+// opaque Codex credential store that may hold API-key auth or OAuth access and
+// rotating refresh tokens; OS-keyring mode may not use auth.json at all.
+const isolatedCli = await createIsolatedCodexCli("/usr/local/bin/codex");
+try {
+  assert.equal(isolatedCli.env.CODEX_HOME, undefined);
+  assert.equal(isolatedCli.env.DESIC_CODEX_CLI_PATH, "/usr/local/bin/codex");
+} finally {
+  await isolatedCli.cleanup();
+}
 
 console.log("codex cli adapter tests passed");

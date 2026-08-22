@@ -3021,9 +3021,44 @@ fn systematic_strategy_authoring_skill() -> AiSkillBundle {
             rules: String::new(),
             content: SYSTEMATIC_STRATEGY_AI_SKILL_BODY.to_string(),
             builtin: true,
+            // This built-in ships real resource files, so it is the compatibility
+            // case for bundle metadata: text-only content plus resources and no
+            // executable runtime.
+            bundle: Some(systematic_strategy_authoring_bundle_summary()),
         },
         resources: systematic_strategy_authoring_skill_resources(),
     }
+}
+
+/// Describes the built-in strategy Skill as a text-and-resource bundle.
+///
+/// It intentionally declares no `runtime`, so it can never receive execution
+/// trust. The summary exists so versioned Runs and the Skills UI treat this
+/// built-in with the same bundle semantics as an imported one.
+fn systematic_strategy_authoring_bundle_summary() -> desic_skill_runtime::SkillBundleSummary {
+    let mut files = vec![desic_skill_runtime::SkillBundleFile {
+        path: "SKILL.md".to_string(),
+        sha256: crate::storage_config::sha256_bytes(SYSTEMATIC_STRATEGY_AI_SKILL_BODY.as_bytes()),
+        bytes: SYSTEMATIC_STRATEGY_AI_SKILL_BODY.len() as u64,
+    }];
+    for resource in systematic_strategy_authoring_skill_resources() {
+        files.push(desic_skill_runtime::SkillBundleFile {
+            path: resource.path.clone(),
+            sha256: crate::storage_config::sha256_bytes(resource.contents.as_bytes()),
+            bytes: resource.contents.len() as u64,
+        });
+    }
+    desic_skill_runtime::build_bundle_summary(
+        files,
+        desic_skill_runtime::SkillBundleSource {
+            kind: "builtin".to_string(),
+            reference: Some(SYSTEMATIC_STRATEGY_AI_SKILL_ID.to_string()),
+            revision: None,
+            subpath: None,
+        },
+        desic_skill_runtime::SkillRuntimeManifest::default(),
+    )
+    .expect("built-in strategy Skill bundle summary is valid")
 }
 
 /// The on-demand documents exposed to `skill.readResource` for this Skill.
@@ -14422,6 +14457,22 @@ mod tests {
         // skill by name, so a prose name would make it unloadable.
         assert_eq!(skill.name, SYSTEMATIC_STRATEGY_AI_SKILL_ID);
         assert!(skill.description.starts_with("Use when"));
+
+        // Bundle compatibility case: real resources are described as bundle files,
+        // but the built-in declares no runtime, so it can never be executed.
+        let summary = skill.bundle.as_ref().expect("built-in bundle summary");
+        assert!(summary.manifest.runtime.is_none());
+        assert_eq!(summary.source.kind, "builtin");
+        assert!(summary.files.iter().any(|file| file.path == "SKILL.md"));
+        assert!(summary
+            .files
+            .iter()
+            .any(|file| file.path == "docs/pre-write-audit.md"));
+        assert!(summary
+            .files
+            .iter()
+            .any(|file| file.path == "templates/ema-trend.py"));
+        assert!(summary.files.iter().all(|file| file.sha256.len() == 64 && file.bytes > 0));
 
         // The body carries its own Markdown structure; the legacy generated
         // 规则/内容 sections must not come back.

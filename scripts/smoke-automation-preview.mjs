@@ -99,8 +99,8 @@ async function verifyConfig(page, scenario) {
 
   await page.getByRole("button", { name: "保存当前团队为方案" }).click();
   await page.getByLabel("方案名称").fill(`视觉回归方案 ${scenario.label}`);
-  await page.getByLabel("说明").fill("验证方案保存、选择与快照关联");
-  await page.getByRole("button", { name: "确认保存方案" }).click();
+  await page.getByLabel("说明", { exact: true }).fill("验证方案保存、选择与快照关联");
+  await page.getByRole("button", { name: "确认保存" }).click();
   await page.waitForFunction(() => {
     const select = document.querySelector('.automation-scheme-picker [role="combobox"][aria-label="Agent 方案"]');
     return select instanceof HTMLButtonElement && (select.dataset.value || "").startsWith("preview-scheme-");
@@ -149,8 +149,11 @@ async function verifyConfig(page, scenario) {
   if (await editor.locator("input").count() < 4 || await editor.locator("textarea").count() !== 1) {
     throw new Error(`${scenario.label}/config-editor: inline Agent fields are incomplete`);
   }
-  if (await editor.locator(".automation-agent-scopes button").count() !== 5) {
-    throw new Error(`${scenario.label}/config-editor: data scope controls are incomplete`);
+  if (await editor.locator(".automation-agent-scopes button").count() !== 0) {
+    throw new Error(`${scenario.label}/config-editor: user data scope controls should be absent`);
+  }
+  if (await editor.locator(".automation-agent-scope-note").count() !== 1) {
+    throw new Error(`${scenario.label}/config-editor: Profile data inheritance note is missing`);
   }
   assertInsideViewport(await editor.boundingBox(), scenario, `${scenario.label}/config editor`);
 

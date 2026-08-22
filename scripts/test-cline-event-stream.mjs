@@ -548,6 +548,20 @@ const adaptedGrokBody = JSON.parse(capturedClaudeRequests.at(-1).init.body);
 assert.equal(adaptedGrokBody.thinking, undefined);
 assert.equal(adaptedGrokBody.reasoning_effort, "high");
 
+// A Claude model exposing xhigh keeps it; one that does not falls back to "max".
+const claudeXhighFetch = createProviderFetch({ provider: "anthropic", model: "claude-opus-5" }, "xhigh", captureFetch);
+await claudeXhighFetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  body: JSON.stringify({ model: "claude-opus-5" })
+});
+assert.equal(JSON.parse(capturedClaudeRequests.at(-1).init.body).output_config.effort, "xhigh");
+const claudeXhighMaxFetch = createProviderFetch({ provider: "anthropic", model: "claude-sonnet-4-6" }, "xhigh", captureFetch);
+await claudeXhighMaxFetch("https://api.anthropic.com/v1/messages", {
+  method: "POST",
+  body: JSON.stringify({ model: "claude-sonnet-4-6" })
+});
+assert.equal(JSON.parse(capturedClaudeRequests.at(-1).init.body).output_config.effort, "max");
+
 const kimiFetch = createProviderFetch({ provider: "moonshot", model: "kimi-k2.6" }, "medium", captureFetch);
 await kimiFetch("https://api.moonshot.cn/v1/chat/completions", {
   method: "POST",
