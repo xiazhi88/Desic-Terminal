@@ -736,7 +736,7 @@ dependencies = [
 
 [[package]]
 name = "desic-terminal"
-version = "0.1.32"
+version = "0.1.33"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",

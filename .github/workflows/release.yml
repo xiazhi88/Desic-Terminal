@@ -102,18 +102,22 @@ jobs:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__
           releaseBody: |
-            ## Desic Terminal v0.1.32
+            ## Desic Terminal v0.1.33
 
-            ### 交易与图表
-            - 修复快速切换交易对、周期或加载更早 K 线时，旧请求可能写入当前图表的问题；主图、独立图和多窗格图现在都会校验历史响应所属合约与周期。
-            - 底部持仓、当前委托、历史委托、历史成交、资金流水、交易审计和历史持仓中的合约名称可直接点击，快速切换主交易图表；支持键盘操作和本地化提示。
+            ### AI Skills 与安全执行
+            - 新增不可变 Skill Bundle：支持目录和 Git 来源导入、文件级 SHA-256 校验、版本快照及变更后自动撤销执行信任。
+            - 可执行 Skill 使用受限 Node/Python 运行时、锁定依赖和有界 JSON 输入输出；仅交互式主 Agent 可在用户显式信任后调用 `skill.run`，后台 Profile 和子 Agent 始终禁止执行。
+            - 将新闻与 Smart Money 能力整合为 `okx-market-intelligence`，将市场分析、永续风险、仓位管理和交易机会工作流整合为 `desic-trade-operations`；旧 Skill ID 会自动迁移并保留用户修改。
 
-            ### 市场情报与 Smart Money
-            - Smart Money 请求按账户协调限流：普通请求不超过 5 RPS，历史补采串行执行，并在 OKX 429 / 50011 限流时遵循 Retry-After 或进入共享退避。
-            - 当前概览成功而部分小时历史补采不可用时，任务会标记为“部分降级”并保留已取得的数据；低优先级合约在后续轮次轮转补采，本地历史可作为限流或暂时不可用时的回退来源。
+            ### Agent Template 与 Profile
+            - Agent Template 现在聚焦名称、说明、补充指令和 Agent 编排；模型、Skills、账户、环境、关注品种和风险限制继续由 Profile 管理。
+            - 排队中的 Agent Run 会冻结 Template 指令快照；自定义子 Agent 自动继承 Profile 允许的只读与预检工具，但不能下单或执行 Skill Runtime。
+            - 每个 Profile 最多关注 3 个交易对，前端与后端同时校验；思考深度移除 Ultra，最高档恢复为极高（xhigh）。
 
-            ### 稳定性
-            - 增加 K 线身份隔离、历史补页匹配和底部合约切换的自动化回归覆盖。
+            ### 交易归因与兼容性
+            - 修复 OKX 条件单触发后的子订单和成交被错误标记为“用户”的问题；系统会沿父级 Algo Order 恢复 AI opportunity、Agent Run 和执行来源。
+            - 启动迁移会幂等修复已有订单、成交、审计和持仓周期归因；用户与 AI 共同参与的持仓显示为“混合”，资金费不再干扰操作方判断。
+            - 强化 V1 数据库启动校验顺序，损坏或不完整结构会在数据回填前失败关闭。
           generateReleaseNotes: false
           releaseDraft: false
           prerelease: false
