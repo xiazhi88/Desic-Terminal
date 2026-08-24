@@ -10630,10 +10630,6 @@ button {
   background: rgba(246, 70, 93, 0.08);
 }
 
-.account-detected-environment strong.pending svg {
-  animation: spin 1.2s linear infinite;
-}
-
 .account-detected-environment small,
 .automation-derived-environment small {
   color: var(--weak);
