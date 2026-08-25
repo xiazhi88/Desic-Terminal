@@ -27,6 +27,7 @@
     <a href="#installation">Installation</a> ·
     <a href="#documentation">Documentation</a> ·
     <a href="#core-capabilities">Capabilities</a> ·
+    <a href="#market-radar">Market Radar</a> ·
     <a href="#safety-and-execution-principles">Safety</a> ·
     <a href="#development">Development</a> ·
     <a href="#community-and-support">Community</a>
@@ -68,9 +69,24 @@ See [GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases) for r
 | **Pro Charts** | Multi-timeframe candles, 24 indicators, layers and drawings, quick trading on chart, detached multi-chart windows, data table and CSV export |
 | **AI Assistant** | Streaming reasoning, allowlisted tools, account and market evidence, trade opportunities, chart actions, safe DSL custom indicators, many providers and official CLI channels |
 | **AI Automation** | Profiles, typed wake conditions, bounded auto-execution, run audit, multi-agent orchestration, position reviews, Skill versioning and optimization suggestions |
+| **Market Radar** | All-market composite ranking, category strength and breadth, rank changes, score attribution, saved filters, research alerts and point-in-time validation |
 | **Systematic Strategy** | Zero-setup Python, template strategies, backtests over up to 366 days of 1-minute data, parameter tuning workbench, live Profiles and signal history |
 | **Market Intelligence** | News, event clustering, coin sentiment, economic calendar, OI, taker flows, crowding, funding, basis, Smart Money and system stress |
 | **Notifications & Recovery** | In-app notifications, Feishu bot, persisted execution state, unknown-outcome reconciliation, idempotent submission and startup recovery |
+
+## Market Radar
+
+Market Radar independently scans every live OKX USDT perpetual, outside the watchlist boundary. It combines daily relative strength, realized volatility, activity, trend quality, liquidity and the current market snapshot into an explainable research priority, while preserving both the saved global rank and the rank recomputed within a selected scope.
+
+[![Real Desic Terminal Market Radar interface](docs/assets/readme/market-radar.png)](docs/assets/readme/market-radar.png)
+
+- **All-market research baseline:** up to 400 UTC daily bars for every live USDT perpetual, plus 90 days of hourly history for the current top 100 by turnover. Preparation starts in the background with the app and does not depend on opening the Radar tab.
+- **Reproducible research workflow:** category ranking, deterministic natural-language filters, multi-market comparison, breadth, 1-hour/1-day/7-day rank changes, score-change attribution and 1/5/20-day point-in-time validation.
+- **Stock perpetual identity:** official NASDAQ Trader Symbol Directory names and exchanges, with cached Simplified and Traditional Chinese entity labels for Chinese interfaces.
+- **AI-native evidence:** the built-in `market-radar-research` Skill and read-only `radar.*` tools query persisted SQLite snapshots directly. Broad current-market analysis starts with breadth and the default composite ranking, independent of the current tab or visible rows.
+
+> [!NOTE]
+> Radar scores prioritize what to research next. They are not return forecasts, trading signals, strategy entries or order commands. Radar AI tools cannot modify filters, alerts, strategies, accounts or orders.
 
 ### Permissions are not prompts
 

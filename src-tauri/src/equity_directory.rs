@@ -6,6 +6,11 @@ const EQUITY_DIRECTORY_MAX_BYTES: usize = 2 * 1_024 * 1_024;
 const NASDAQ_LISTED_URL: &str = "https://www.nasdaqtrader.com/dynamic/SymDir/nasdaqlisted.txt";
 const OTHER_LISTED_URL: &str = "https://www.nasdaqtrader.com/dynamic/SymDir/otherlisted.txt";
 const EQUITY_DIRECTORY_SOURCE: &str = "NASDAQ Trader Symbol Directory";
+const DESIC_HTTP_USER_AGENT: &str = concat!(
+    "DesicTerminal/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/xiazhi88/Desic-Terminal)"
+);
 
 static EQUITY_DIRECTORY_REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
@@ -156,10 +161,7 @@ async fn fetch_equity_directory_text(
 ) -> Result<String, String> {
     let response = client
         .get(url)
-        .header(
-            reqwest::header::USER_AGENT,
-            "DesicTerminal/0.1.33 (+https://github.com/xiazhi88/Desic-Terminal)",
-        )
+        .header(reqwest::header::USER_AGENT, DESIC_HTTP_USER_AGENT)
         .send()
         .await
         .map_err(|error| format!("{url}: {error}"))?;

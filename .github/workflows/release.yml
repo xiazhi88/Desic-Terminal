@@ -102,22 +102,23 @@ jobs:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__
           releaseBody: |
-            ## Desic Terminal v0.1.33
+            ## Desic Terminal v0.1.34
 
-            ### AI Skills 与安全执行
-            - 新增不可变 Skill Bundle：支持目录和 Git 来源导入、文件级 SHA-256 校验、版本快照及变更后自动撤销执行信任。
-            - 可执行 Skill 使用受限 Node/Python 运行时、锁定依赖和有界 JSON 输入输出；仅交互式主 Agent 可在用户显式信任后调用 `skill.run`，后台 Profile 和子 Agent 始终禁止执行。
-            - 将新闻与 Smart Money 能力整合为 `okx-market-intelligence`，将市场分析、永续风险、仓位管理和交易机会工作流整合为 `desic-trade-operations`；旧 Skill ID 会自动迁移并保留用户修改。
+            ### 市场雷达
+            - 新增独立的全市场研究工作台，覆盖全部 live OKX USDT 永续，提供综合、强势、异动、活跃、稳健、新上线和股票永续等排名视图。
+            - 综合日线相对强度、20 日波动率、成交活跃度、趋势质量与点差，展示全市场排名、筛选范围排名、评分证据和排名变化；评分只用于研究优先级，不是交易信号。
+            - 支持自然语言确定性筛选、保存方案、多标的比较、市场宽度、研究提醒、1 小时/1 日/7 日历史变化、评分变化归因及 1/5/20 日点时验证。
+            - 股票永续接入 NASDAQ Trader Symbol Directory，并补充简体/繁体中文证券名称和上市交易所。
 
-            ### Agent Template 与 Profile
-            - Agent Template 现在聚焦名称、说明、补充指令和 Agent 编排；模型、Skills、账户、环境、关注品种和风险限制继续由 Profile 管理。
-            - 排队中的 Agent Run 会冻结 Template 指令快照；自定义子 Agent 自动继承 Profile 允许的只读与预检工具，但不能下单或执行 Skill Runtime。
-            - 每个 Profile 最多关注 3 个交易对，前端与后端同时校验；思考深度移除 Ultra，最高档恢复为极高（xhigh）。
+            ### AI 只读研究
+            - 新增内置 `market-radar-research` Skill，以及排名、单标的证据、市场比较、宽度、排名历史、验证报告和保存筛选等 7 个只读 `radar.*` 工具。
+            - 宽泛的当前市场分析会加载 Radar Skill，并先读取市场宽度和默认综合排名；实时证据与历史快照分别报告时间戳。
+            - Radar 工具直接读取 SQLite 快照，不能修改筛选、提醒、策略、账户或订单；Profile 的全市场发现也不会扩大后续交易授权范围。
 
-            ### 交易归因与兼容性
-            - 修复 OKX 条件单触发后的子订单和成交被错误标记为“用户”的问题；系统会沿父级 Algo Order 恢复 AI opportunity、Agent Run 和执行来源。
-            - 启动迁移会幂等修复已有订单、成交、审计和持仓周期归因；用户与 AI 共同参与的持仓显示为“混合”，资金费不再干扰操作方判断。
-            - 强化 V1 数据库启动校验顺序，损坏或不完整结构会在数据回填前失败关闭。
+            ### Factors 与数据可靠性
+            - Factors 重构为跨市场排名与验证引擎；普通策略研究继续由单合约 Python 策略负责择时、仓位、回测与实盘，公式表达式保留在市场雷达高级层。
+            - 市场雷达历史准备改为应用级后台任务，无需打开 Radar 页面；UTC 小时快照可在小时内替换，保留 90 天，并保存原始趋势质量和 20 日波动率以精确复现筛选。
+            - 修复严格 Radar DTO 被通用执行上下文污染、可选参数占位符和最新快照时间兼容问题；同时移除交易环境待检测状态的误导性旋转图标。
           generateReleaseNotes: false
           releaseDraft: false
           prerelease: false

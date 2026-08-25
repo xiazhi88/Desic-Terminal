@@ -6,6 +6,11 @@ const EQUITY_LOCALIZATION_MISS_TTL_MS: i64 = 24 * 60 * 60 * 1_000;
 const EQUITY_LOCALIZATION_MAX_BYTES: usize = 2 * 1_024 * 1_024;
 const EQUITY_LOCALIZATION_SOURCE: &str = "Wikidata";
 const WIKIDATA_SPARQL_URL: &str = "https://query.wikidata.org/sparql";
+const DESIC_HTTP_USER_AGENT: &str = concat!(
+    "DesicTerminal/",
+    env!("CARGO_PKG_VERSION"),
+    " (+https://github.com/xiazhi88/Desic-Terminal)"
+);
 
 static EQUITY_LOCALIZATION_REFRESH_LOCK: OnceLock<AsyncMutex<()>> = OnceLock::new();
 
@@ -177,10 +182,7 @@ async fn fetch_wikidata_localizations(
     let query = wikidata_query(requested);
     let response = reqwest_client()?
         .post(WIKIDATA_SPARQL_URL)
-        .header(
-            reqwest::header::USER_AGENT,
-            "DesicTerminal/0.1.33 (+https://github.com/xiazhi88/Desic-Terminal)",
-        )
+        .header(reqwest::header::USER_AGENT, DESIC_HTTP_USER_AGENT)
         .header(reqwest::header::ACCEPT, "application/sparql-results+json")
         .header(reqwest::header::CONTENT_TYPE, "application/sparql-query")
         .timeout(Duration::from_secs(15))
