@@ -34,6 +34,7 @@ import {
   Settings,
   ShieldCheck,
   ShieldAlert,
+  ShieldQuestion,
   SlidersHorizontal,
   Square,
   TableProperties,
@@ -8697,7 +8698,7 @@ function AccountSettingsPane({
                   {t(accounts.find((item) => item.id === draft.id)?.environment === "live" ? "common:live" : "common:demo")}
                 </strong>
               ) : (
-                <strong className="pending"><Loader2 size={14} />{t("settings:detectWhenSaving")}</strong>
+                <strong className="pending"><ShieldQuestion size={14} />{t("settings:detectWhenSaving")}</strong>
               )}
               <small>{t("settings:environmentAutoDetectionHelp")}</small>
             </div>
