@@ -708,6 +708,17 @@ function multiAgentVetoBlocksTool(name, options = {}) {
     && name === "tradeOpportunity.create";
 }
 
+function normalizeProviderToolInput(name, input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return input;
+  const value = { ...input };
+  if (name === "radar.readRanking"
+    && typeof value.savedFilterId === "string"
+    && value.savedFilterId.trim() === ".invalid?") {
+    delete value.savedFilterId;
+  }
+  return value;
+}
+
 function bindProfileAccountInput(name, input, options = {}) {
   const value = input && typeof input === "object" && !Array.isArray(input) ? { ...input } : {};
   const accountId = String(options.agentProfileAccountId || "").trim();
@@ -775,8 +786,12 @@ function buildSystemPrompt(config, permissionMode) {
   const multiAgentEnabled = ["auto", "custom"].includes(String(config.multiAgentMode || "").trim().toLowerCase());
   const confirmedBy = multiAgentEnabled ? "本轮多 Agent 讨论" : "本轮主 Agent 分析";
   const rerunWorkflow = multiAgentEnabled ? "重新运行多 Agent" : "重新运行当前 Profile";
+  const marketRadarRoutingRule = stringListConfig(config.enabledSkills).includes("market-radar-research")
+    ? "未指定单一品种的宽泛当前市场分析、市场概况、盘面强弱或市场怎么样等任务，必须先用 skills 加载 market-radar-research，再至少调用 radar.readBreadth 和 radar.readRanking 读取最新持久化快照。若问题强调实时变化，再补充实时行情或市场情报工具，并明确区分小时 Radar 快照与实时观察。单一品种问题不强制调用全市场 Radar。"
+    : "";
   const runRules = [
     modeRule,
+    marketRadarRoutingRule,
     "后台 Run 只有形成字段完整、准备通过 tradeOpportunity.create 提交的可执行候选时，主 Agent 才调用 market.readDecisionContext 获取当场行情、账户状态、预检和相对本轮初始快照的客观差异。若结论是 wait 或 abandon 且本轮没有新交易候选，不调用 market.readDecisionContext，直接通过 background.finishRun 结束；不得使用 size=0、缺失 price 或其它占位参数伪造候选。open/close 的 size 必须大于 0，limit/trigger 必须提供 price。上下文 60 秒有效且不可跨 Run、账户、环境、标的或候选参数复用；revise 后必须使用修改后的完整候选参数重新调用。",
     "tradeOpportunity.create 在 copilot 中只保存交易机会；advisor 不能创建机会；limited_auto 由后端按 Profile 权限自动批准并执行。后台运行采用两阶段事务：先把完整候选提交给 market.readDecisionContext；确认复核结果后，只调用 tradeOpportunity.create 提交系统冻结的最后一份候选，不要再次抄写候选参数或 decisionContextId。开仓/平仓 orderType=limit 或 trigger 必须在复核候选中提供 price；撤单/改单使用 intent=cancel/amend 并提供目标订单 ID。",
     "后台 Run 不调用 tradeOpportunity.reuse 或 tradeOpportunity.revise。遇到重复机会时仍调用 tradeOpportunity.create，并只提交 conflict.existingOpportunityId、duplicateResolution 和 duplicateResolutionReason。exact 冲突可直接 reuse；similar 冲突若要 reuse，必须先读取原机会，再用原机会的完整参数重新调用 market.readDecisionContext。若要 revise，则用修改后的完整候选重新复核后提交 duplicateResolution=revise。",
@@ -1495,6 +1510,90 @@ const READ_FUNDING_RATE_SCHEMA = {
   }
 };
 
+const RADAR_AS_OF_PROPERTY = {
+  type: "integer",
+  minimum: 0,
+  description: "Optional 13-digit Unix epoch milliseconds for a point-in-time query. Omit this property to read the latest persisted snapshot. Compatibility value 0 is also accepted and normalized to the latest snapshot."
+};
+
+const RADAR_RANKING_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    rankingBasis: {
+      type: "string",
+      enum: ["composite", "change24h", "turnover24h", "activity", "liquidityContribution", "lowVolatilityContribution", "trendQualityContribution", "spreadBpsAsc"]
+    },
+    category: {
+      type: "string",
+      enum: ["all", "crypto", "stock", "commodity", "fx", "bond", "1", "3", "4", "5", "6"],
+      description: "Optional market category. Omit it or use all for the complete cross-market universe."
+    },
+    savedFilterId: {
+      type: ["string", "null"],
+      pattern: "^[A-Za-z0-9][A-Za-z0-9_-]{0,79}$",
+      default: null,
+      description: "Optional exact id returned by radar.listSavedFilters. Send null or omit this property for the all-market universe; do not synthesize a placeholder string."
+    },
+    asOf: RADAR_AS_OF_PROPERTY,
+    limit: { type: "integer", minimum: 1, maximum: 100 }
+  },
+  required: []
+};
+
+const RADAR_INSTRUMENT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    instId: { type: "string", description: "OKX USDT perpetual instrument id, for example BTC-USDT-SWAP." },
+    asOf: RADAR_AS_OF_PROPERTY
+  },
+  required: ["instId"]
+};
+
+const RADAR_COMPARE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    instIds: {
+      type: "array",
+      minItems: 2,
+      maxItems: 4,
+      uniqueItems: true,
+      items: { type: "string" }
+    },
+    asOf: RADAR_AS_OF_PROPERTY
+  },
+  required: ["instIds"]
+};
+
+const RADAR_HISTORY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    instId: { type: "string" },
+    lookbackDays: { type: "integer", minimum: 1, maximum: 90 },
+    limit: { type: "integer", minimum: 1, maximum: 200 }
+  },
+  required: ["instId"]
+};
+
+const RADAR_VALIDATION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    lookbackDays: { type: "integer", minimum: 20, maximum: 90 }
+  },
+  required: []
+};
+
+const EMPTY_OBJECT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {},
+  required: []
+};
+
 const READ_ACCOUNT_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -2141,17 +2240,18 @@ function createDesicTools(sessionId, options = {}) {
       description: `${toProviderToolReferences(description)}\nCallable tool name: ${providerName}. Use this exact name.`,
       inputSchema: modelInputSchema,
       execute: async (input, context) => {
-        const validation = validateToolInput(modelInputSchema, input);
+        const normalizedInput = normalizeProviderToolInput(name, input);
+        const validation = validateToolInput(modelInputSchema, normalizedInput);
         if (!validation.valid) {
           return toProviderToolReferenceValue(invalidToolArgumentsResult(name, validation.issues));
         }
         let scopedInput;
         if (backgroundOpportunityCommit) {
-          const prepared = prepareBackgroundOpportunityCommit(decisionWorkflow, input);
+          const prepared = prepareBackgroundOpportunityCommit(decisionWorkflow, normalizedInput);
           if (prepared.result) return toProviderToolReferenceValue(prepared.result);
           scopedInput = prepared.input;
         } else {
-          scopedInput = bindProfileAccountInput(name, input, policyConfig);
+          scopedInput = bindProfileAccountInput(name, normalizedInput, policyConfig);
         }
         const result = await executeDesicTool(sessionId, name, scopedInput, policyConfig, context);
         if (name === "market.readDecisionContext") {
@@ -2169,6 +2269,7 @@ function createDesicTools(sessionId, options = {}) {
   const activeSkillIds = stringListConfig(options.activeSkillIds);
   const intelligenceEnabled = isSkillToolEnabled("intelligence.news.list", activeSkillIds)
     && isSkillToolEnabled("intelligence.smartMoney.listTradersByFilter", activeSkillIds);
+  const radarEnabled = isSkillToolEnabled("radar.readRanking", activeSkillIds);
   const profileLeverageEnabled = boolConfig(options.backgroundRun, false)
     && ["copilot", "limited_auto"].includes(normalizePermissionMode(options.permissionMode));
 
@@ -2182,6 +2283,13 @@ function createDesicTools(sessionId, options = {}) {
     tool("market.readDecisionContext", "Create a unique 60-second final decision context only for a complete, executable candidate that is about to be submitted through background tradeOpportunity.create. It reads the latest ticker, order book, recent trades, current candle, account state, leverage and open orders, reruns trade.precheck, and returns objective differences from the Run's initial snapshot. It never tells you whether to trade and is never shared or cached across calls. Do not call it for wait/abandon when there is no new candidate; never pass size=0 or omit price for limit/trigger. Call it again after any candidate change.", DECISION_CONTEXT_SCHEMA),
     tool("market.scanWatchlist", "Scan watchlist or specified OKX swap instruments with ticker, funding, order-book pressure and candle summaries.", MARKET_SCAN_SCHEMA),
     tool("market.readIndicators", "Calculate indicators from local OKX candles. Example input: {\"instId\":\"BTC-USDT-SWAP\",\"bar\":\"1H\",\"limit\":240,\"indicators\":[\"ema20\",\"ema50\",\"rsi14\",\"bb20\",\"atr14\",\"macd\",\"vwap\"]}. The numeric suffix is the lookback period from 1 to 500. Unsuffixed defaults are sma20, ema21, rsi14, boll20 and atr14. MACD, VWAP and Volume Profile currently use fixed internal parameters.", READ_INDICATORS_SCHEMA),
+    radarEnabled ? tool("radar.readRanking", "Read one persisted Market Radar cross-market ranking. Call this with radar.readBreadth for broad current-market analysis or market-overview work that does not name one instrument. For the latest all-market ranking, omit asOf and category, and send savedFilterId as null or omit it. Use savedFilterId only with an exact id returned by radar.listSavedFilters; do not synthesize a placeholder string. globalRank is the saved all-market composite rank; scopeRank is recomputed for the requested category, saved deterministic filter and rankingBasis. This is low-frequency research priority, not a trading signal.", RADAR_RANKING_SCHEMA) : null,
+    radarEnabled ? tool("radar.readInstrumentEvidence", "Read one instrument from the latest or point-in-time Market Radar snapshot, including weighted component contributions and 1h/24h/7d global-rank changes. Positive rank deltas mean improvement.", RADAR_INSTRUMENT_SCHEMA) : null,
+    radarEnabled ? tool("radar.compareMarkets", "Compare 2 to 4 instruments against the same persisted Market Radar snapshot. Do not compare values from different snapshotAt timestamps as if contemporaneous.", RADAR_COMPARE_SCHEMA) : null,
+    radarEnabled ? tool("radar.readBreadth", "Default first evidence call for broad current-market analysis, market overview, market condition or participation-strength questions that do not name one instrument. Read all-market and category breadth from the latest persisted Market Radar snapshot, including advancing share, history coverage, median change, median composite score and category strength rank.", EMPTY_OBJECT_SCHEMA) : null,
+    radarEnabled ? tool("radar.readRankHistory", "Read an instrument's persisted hourly Market Radar rank and score history for up to 90 days. Rows are returned newest first and include modelVersion for reproducibility.", RADAR_HISTORY_SCHEMA) : null,
+    radarEnabled ? tool("radar.readValidationReport", "Read the point-in-time Market Radar effectiveness report using only saved historical universes and later confirmed daily candles. Inspect status, snapshotDates, observations, modelVersions and limitations before interpreting IC or quantile spreads.", RADAR_VALIDATION_SCHEMA) : null,
+    radarEnabled ? tool("radar.listSavedFilters", "List persisted deterministic Market Radar filter definitions. This tool is read-only and cannot create, update or delete filters.", EMPTY_OBJECT_SCHEMA) : null,
     tool("account.readSnapshot", "Read the configured OKX balances, positions and open orders. For USDT perpetual risk, use balanceSemantics.usdtEquity/availableUsdt; other currency quantities are informational and explicitly excluded.", READ_ACCOUNT_SCHEMA),
     tool("account.readBalances", "Read configured OKX balances. For USDT perpetual risk, use usdtEquity/availableUsdt and never add raw quantities from different currencies.", READ_ACCOUNT_SCHEMA),
     tool("account.readPositions", "Read configured OKX account positions only.", READ_ACCOUNT_SCHEMA),
@@ -4035,6 +4143,7 @@ export {
   mapCoreEvent,
   mapToolResult,
   multiAgentVetoBlocksTool,
+  normalizeProviderToolInput,
   canResumeClineConversation,
   canRehydrateClineConversation,
   clineConversationFingerprint,

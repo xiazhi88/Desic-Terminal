@@ -41,8 +41,12 @@ mod ai_stream_checkpoint;
 mod app_updater;
 mod chart_alerts;
 mod chart_consumers;
+mod equity_directory;
+mod equity_localization;
 mod instrument_operations;
 mod intelligence;
+mod market_radar;
+mod market_radar_workspace;
 mod market_ws;
 mod private_history;
 mod skill_runtime;
@@ -71,6 +75,8 @@ use crate::app_updater::{
     app_update_apply_source, app_update_check, app_update_install, app_update_prepare,
     app_update_restart_source, app_update_status, AppUpdateRuntime,
 };
+use crate::equity_directory::equity_security_directory;
+use crate::equity_localization::equity_security_localizations;
 use crate::instrument_operations::{
     okx_active_instrument_operations, okx_execute_cancel_instrument_orders,
     okx_execute_flatten_instrument_positions, okx_instrument_operation,
@@ -92,6 +98,15 @@ use crate::intelligence::{
     intelligence_sync_status, intelligence_track_trader, start_intelligence_collector,
     IntelligenceRuntime,
 };
+use crate::market_radar::{
+    market_radar_directory_stream_start, market_radar_history_start, market_radar_history_status,
+    market_radar_research_scores,
+};
+use crate::market_radar_workspace::{
+    market_radar_alert_rules, market_radar_delete_alert_rule, market_radar_delete_filter,
+    market_radar_record_snapshot, market_radar_save_alert_rule, market_radar_save_filter,
+    market_radar_saved_filters, market_radar_validation_report,
+};
 use crate::market_ws::{
     connect_okx_ws, filter_cancelled_pending_orders, market_health_blockers,
     private_login_succeeded, private_ws_login_payload, reconcile_private_streams,
@@ -104,28 +119,31 @@ use crate::private_history::{
 };
 use crate::storage_config::{
     ai_agent_template_preview_codex, ai_config_summary, ai_local_auth_status, ai_save_config,
-    ai_sidecar_proxy_url, ai_skill_import,
-    ai_skill_install_git, ai_skill_pick_source, ai_skill_set_runtime_trust, ai_test_connection,
-    export_diagnostics,
-    frontend_log, initialize_runtime_paths, load_accounts_config, load_ai_config,
-    load_notification_webhook, load_proxy_config, load_watchlist_config, migrate_sensitive_config,
-    proxy_authorization_header, proxy_config_summary, reqwest_client, runtime_cache_root,
-    runtime_work_dir, save_accounts_config, save_notification_webhook, save_proxy_config,
-    save_ui_preferences, save_watchlist_config, storage_maintenance, storage_status,
-    test_proxy_config, ui_preferences_summary,
+    ai_sidecar_proxy_url, ai_skill_import, ai_skill_install_git, ai_skill_pick_source,
+    ai_skill_set_runtime_trust, ai_test_connection, export_diagnostics, frontend_log,
+    initialize_runtime_paths, load_accounts_config, load_ai_config, load_notification_webhook,
+    load_proxy_config, load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
+    proxy_config_summary, reqwest_client, runtime_cache_root, runtime_work_dir,
+    save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
+    save_watchlist_config, storage_maintenance, storage_status, test_proxy_config,
+    ui_preferences_summary,
 };
 use crate::systematic::{
     start_systematic_worker, systematic_backtest_cancel, systematic_backtest_defaults,
     systematic_backtest_delete, systematic_backtest_detail, systematic_backtest_start,
     systematic_backtests_page, systematic_capture_universe_snapshot,
-    systematic_factor_create_default, systematic_factor_evaluate, systematic_factor_save,
-    systematic_optimization_cancel, systematic_optimization_start, systematic_overview,
-    systematic_profile_delete, systematic_profile_save, systematic_profile_set_enabled,
-    systematic_profile_signals, systematic_python_prepare_environment,
-    systematic_python_run_sample, systematic_strategy_ai_cancel_session,
-    systematic_strategy_ai_execute_tool, systematic_strategy_ai_send_message,
-    systematic_strategy_ai_tool_respond, systematic_strategy_create_python,
-    systematic_strategy_delete, systematic_strategy_save_python,
+    systematic_factor_builder_catalogue, systematic_factor_compose_expression,
+    systematic_factor_create_default, systematic_factor_delete, systematic_factor_evaluate,
+    systematic_factor_evaluation_cancel, systematic_factor_evaluation_list,
+    systematic_factor_evaluation_start, systematic_factor_preview, systematic_factor_repair_cancel,
+    systematic_factor_repair_data, systematic_factor_save, systematic_instrument_registry_snapshot,
+    systematic_instrument_registry_summary, systematic_optimization_cancel,
+    systematic_optimization_start, systematic_overview, systematic_profile_delete,
+    systematic_profile_save, systematic_profile_set_enabled, systematic_profile_signals,
+    systematic_python_prepare_environment, systematic_python_run_sample,
+    systematic_strategy_ai_cancel_session, systematic_strategy_ai_execute_tool,
+    systematic_strategy_ai_send_message, systematic_strategy_ai_tool_respond,
+    systematic_strategy_create_python, systematic_strategy_delete, systematic_strategy_save_python,
     systematic_strategy_version_detail, systematic_strategy_versions, SystematicRuntime,
 };
 use crate::trade_commands::{
@@ -164,7 +182,7 @@ use desic_storage_config::{
 const REST_BASE: &str = "https://www.okx.com";
 const OKX_ICON_BASE: &str = "https://static.okx.com/cdn/oksupport/asset/currency/icon";
 const MARKET_ICON_DOWNLOAD_CONCURRENCY: usize = 6;
-const MARKET_ASSETS_CACHE_VERSION: u32 = 3;
+const MARKET_ASSETS_CACHE_VERSION: u32 = 4;
 const PUBLIC_WS: &str = "wss://ws.okx.com:8443/ws/v5/public";
 const BUSINESS_WS: &str = "wss://ws.okx.com:8443/ws/v5/business";
 const PRIVATE_WS: &str = "wss://ws.okx.com:8443/ws/v5/private";
@@ -3232,6 +3250,14 @@ struct OkxInstrument {
     lever: String,
     #[serde(default)]
     state: String,
+    #[serde(default)]
+    inst_category: String,
+    #[serde(default)]
+    group_id: String,
+    #[serde(default)]
+    list_time: String,
+    #[serde(default)]
+    exp_time: String,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -3255,12 +3281,20 @@ struct OkxInstrumentSummary {
     max_mkt_sz: String,
     lever: String,
     state: String,
+    #[serde(default)]
+    inst_category: String,
+    #[serde(default)]
+    group_id: String,
+    #[serde(default, deserialize_with = "deserialize_string_from_value_or_default")]
+    list_time: String,
+    #[serde(default, deserialize_with = "deserialize_string_from_value_or_default")]
+    exp_time: String,
     icon_path: Option<String>,
     icon_cached: bool,
     updated_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct MarketAssetsSummary {
     #[serde(default = "default_market_assets_cache_version")]
@@ -3897,6 +3931,12 @@ async fn okx_ticker(inst_id: String) -> Result<Ticker, String> {
         .into_iter()
         .next()
         .ok_or_else(|| "OKX ticker response missing data".to_string())
+}
+
+#[tauri::command]
+async fn okx_market_tickers() -> Result<Vec<Ticker>, String> {
+    let envelope: OkxEnvelope<Ticker> = get_json("/api/v5/market/tickers?instType=SWAP").await?;
+    Ok(envelope.data)
 }
 
 #[tauri::command]
@@ -4581,13 +4621,25 @@ async fn historical_candles_before(
     )
     .await?;
     if candles_cover_window(&local.candles, start_open, end_open, step) {
-        return Ok(historical_page(&inst_id, &bar, local.candles, false, "local"));
+        return Ok(historical_page(
+            &inst_id,
+            &bar,
+            local.candles,
+            false,
+            "local",
+        ));
     }
     if local
         .exhausted_before_open
         .is_some_and(|oldest_open| end_open < oldest_open)
     {
-        return Ok(historical_page(&inst_id, &bar, local.candles, true, "local"));
+        return Ok(historical_page(
+            &inst_id,
+            &bar,
+            local.candles,
+            true,
+            "local",
+        ));
     }
 
     let fetched = fetch_history_candles_page(&inst_id, &bar, start_open, end_open).await?;
@@ -8807,8 +8859,15 @@ fn bar_ms(bar: &str) -> Option<i64> {
         "4H" => Some(4 * 60 * 60_000),
         "6H" => Some(6 * 60 * 60_000),
         "12H" => Some(12 * 60 * 60_000),
-        "1D" => Some(24 * 60 * 60_000),
+        "1D" | "1Dutc" | "1Dutc-forward" => Some(24 * 60 * 60_000),
         _ => None,
+    }
+}
+
+fn okx_candle_bar(interval: &str) -> (&str, bool) {
+    match interval {
+        "1Dutc-forward" => ("1Dutc", true),
+        value => (value, false),
     }
 }
 
@@ -8822,7 +8881,7 @@ fn retention_days(bar: &str) -> i64 {
         "1H" => 60,
         "2H" => 120,
         "4H" | "6H" => 365,
-        "12H" | "1D" => 730,
+        "12H" | "1D" | "1Dutc" | "1Dutc-forward" => 730,
         _ => 7,
     }
 }
@@ -9053,6 +9112,27 @@ async fn sync_kline_window(
     start_open: i64,
     end_open: i64,
 ) -> Result<KlineSyncReport, String> {
+    sync_kline_window_internal(app, symbol, interval, start_open, end_open, true).await
+}
+
+async fn sync_kline_window_quiet(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    start_open: i64,
+    end_open: i64,
+) -> Result<KlineSyncReport, String> {
+    sync_kline_window_internal(app, symbol, interval, start_open, end_open, false).await
+}
+
+async fn sync_kline_window_internal(
+    app: &tauri::AppHandle,
+    symbol: &str,
+    interval: &str,
+    start_open: i64,
+    end_open: i64,
+    publish: bool,
+) -> Result<KlineSyncReport, String> {
     let step = bar_ms(interval).ok_or_else(|| format!("unsupported interval {}", interval))?;
     let start_open = align_open_time(start_open, interval, step);
     let end_open = align_open_time(end_open, interval, step);
@@ -9082,7 +9162,9 @@ async fn sync_kline_window(
         message: "扫描本地 K 线完整性".to_string(),
         progress_detail: None,
     };
-    emit_kline_sync(app, &report);
+    if publish {
+        emit_kline_sync(app, &report);
+    }
 
     let strict_confirm_before = end_open - step;
     let initial_scan = scan_kline_window(
@@ -9115,7 +9197,9 @@ async fn sync_kline_window(
                     "发现 {} 条异常 K 线，开始重新拉取覆盖",
                     invalid_open_times.len()
                 );
-                emit_kline_sync(app, &report);
+                if publish {
+                    emit_kline_sync(app, &report);
+                }
                 for (from, to) in missing_ranges(&invalid_open_times, step) {
                     let repair_from = from.saturating_sub(step);
                     let repair_to = to + step;
@@ -9126,6 +9210,7 @@ async fn sync_kline_window(
                         interval,
                         repair_from,
                         repair_to,
+                        publish,
                     )
                     .await?;
                     report.fetched += raw.len();
@@ -9175,15 +9260,22 @@ async fn sync_kline_window(
                 format!("K 线无缺口，但发现 {} 条异常数据", report.invalid)
             };
         }
-        return persist_kline_sync_report(app, report).await;
+        return if publish {
+            persist_kline_sync_report(app, report).await
+        } else {
+            Ok(report)
+        };
     }
 
     report.status = "backfilling".to_string();
     report.message = format!("发现 {} 根缺失 K 线，开始补齐", missing.len());
-    emit_kline_sync(app, &report);
+    if publish {
+        emit_kline_sync(app, &report);
+    }
 
     for (from, to) in missing_ranges(&missing, step) {
-        let raw = fetch_repair_candles(app, &mut report, symbol, interval, from, to).await?;
+        let raw =
+            fetch_repair_candles(app, &mut report, symbol, interval, from, to, publish).await?;
         for candle in &raw {
             report.invalid_reasons.extend(validate_raw_candle(
                 interval,
@@ -9196,7 +9288,9 @@ async fn sync_kline_window(
         report.fetched += raw.len();
         report.inserted += write_kline_candles(app, symbol, interval, raw, "history").await?;
         report.message = format!("补齐中：已写入 {} 根", report.inserted);
-        emit_kline_sync(app, &report);
+        if publish {
+            emit_kline_sync(app, &report);
+        }
     }
 
     let stale_unconfirmed = stale_unconfirmed_reason_open_times(&report.invalid_reasons);
@@ -9242,7 +9336,11 @@ async fn sync_kline_window(
     } else {
         format!("仍有 {} 根 K 线缺失，等待下次补齐", remaining)
     };
-    persist_kline_sync_report(app, report).await
+    if publish {
+        persist_kline_sync_report(app, report).await
+    } else {
+        Ok(report)
+    }
 }
 
 fn kline_open_offset_ms(bar: &str, step_ms: i64) -> i64 {
@@ -15028,6 +15126,7 @@ struct AiToolExecutionContext {
 fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
     let canonical = canonical_ai_tool_name(name);
     (canonical.starts_with("market.") && canonical != "market.readDecisionContext")
+        || canonical.starts_with("radar.")
         || canonical.starts_with("account.")
         || canonical.starts_with("intelligence.")
         || canonical == "trade.evaluatePlan"
@@ -15057,9 +15156,15 @@ fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
 
 fn profile_agent_scope_allows_tool(scope: &str, canonical: &str) -> bool {
     match scope {
-        "all" => ["market", "derivatives", "intelligence", "account", "history"]
-            .iter()
-            .any(|scope| profile_agent_scope_allows_tool(scope, canonical)),
+        "all" => [
+            "market",
+            "derivatives",
+            "intelligence",
+            "account",
+            "history",
+        ]
+        .iter()
+        .any(|scope| profile_agent_scope_allows_tool(scope, canonical)),
         "market" => matches!(
             canonical,
             "market.readTicker"
@@ -15070,6 +15175,13 @@ fn profile_agent_scope_allows_tool(scope: &str, canonical: &str) -> bool {
                 | "market.readFundingRate"
                 | "market.scanWatchlist"
                 | "market.readIndicators"
+                | "radar.readRanking"
+                | "radar.readInstrumentEvidence"
+                | "radar.compareMarkets"
+                | "radar.readBreadth"
+                | "radar.readRankHistory"
+                | "radar.readValidationReport"
+                | "radar.listSavedFilters"
         ),
         "derivatives" => matches!(
             canonical,
@@ -15260,10 +15372,16 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
         ));
     }
     let mode = desic_agent_automation::normalize_permission_mode(Some(&context.permission_mode));
-    if (canonical.starts_with("intelligence.news.") || canonical.starts_with("intelligence.smartMoney."))
+    if (canonical.starts_with("intelligence.news.")
+        || canonical.starts_with("intelligence.smartMoney."))
         && !context.active_skill_ids.contains("okx-market-intelligence")
     {
         return Err("未启用 okx-market-intelligence Skill，拒绝 OKX 情报工具".to_string());
+    }
+    if canonical.starts_with("radar.")
+        && !context.active_skill_ids.contains("market-radar-research")
+    {
+        return Err("未启用 market-radar-research Skill，拒绝 Market Radar 工具".to_string());
     }
     if canonical == "market.readDecisionContext"
         && (!is_main
@@ -15288,6 +15406,13 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             | "market.scanWatchlist"
             | "market.readIndicators"
             | "market.readDecisionContext"
+            | "radar.readRanking"
+            | "radar.readInstrumentEvidence"
+            | "radar.compareMarkets"
+            | "radar.readBreadth"
+            | "radar.readRankHistory"
+            | "radar.readValidationReport"
+            | "radar.listSavedFilters"
             | "account.readSnapshot"
             | "account.readBalances"
             | "account.readPositions"
@@ -15702,7 +15827,10 @@ fn enforce_background_run_scope(
     }
 
     if !run.symbols.is_empty() {
-        if canonical_name == "market.scanWatchlist" {
+        if matches!(
+            canonical_name,
+            "market.scanWatchlist" | "radar.compareMarkets"
+        ) {
             if let Some(requested) = object.get("instIds").and_then(Value::as_array) {
                 for value in requested.iter().filter_map(Value::as_str) {
                     if !run.symbols.iter().any(|allowed| allowed == value) {
@@ -15710,7 +15838,9 @@ fn enforce_background_run_scope(
                     }
                 }
             }
-            object.insert("instIds".to_string(), json!(run.symbols));
+            if canonical_name == "market.scanWatchlist" {
+                object.insert("instIds".to_string(), json!(run.symbols));
+            }
         }
         if let Some(inst_id) = object
             .get("instId")
@@ -16059,7 +16189,12 @@ async fn execute_ai_tool(
         ensure_ai_run_is_active(&app, context).await?;
         let request = serde_json::from_value::<skill_runtime::AiSkillRunRequest>(input)
             .map_err(|error| format!("skill.run 参数无效：{}", error))?;
-        return skill_runtime::run_active_skill_entrypoint(&app, &context.active_skill_ids, request).await;
+        return skill_runtime::run_active_skill_entrypoint(
+            &app,
+            &context.active_skill_ids,
+            request,
+        )
+        .await;
     }
     // A resource read for any Skill other than the strategy-authoring bundle is
     // an ordinary read against this turn's active Skills, so it must not be
@@ -16122,6 +16257,18 @@ async fn execute_ai_tool(
             );
         }
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
+    }
+    // Radar DTOs reject unknown model fields; keep trusted execution metadata in
+    // the authorization context instead of mixing it into the domain input.
+    if canonical_name.starts_with("radar.") {
+        ensure_ai_run_is_active(&app, context).await?;
+        enforce_background_run_scope(canonical_name, &mut input, context)?;
+        return crate::market_radar_workspace::execute_market_radar_ai_tool(
+            app.clone(),
+            canonical_name,
+            input,
+        )
+        .await;
     }
     inject_ai_execution_context(&mut input, context);
     bind_ai_account_context(canonical_name, &mut input, context)?;
@@ -19601,6 +19748,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
             repair_triggered_order_attribution(conn)?;
             crate::ai_automation::migrate_ai_automation(conn)?;
             crate::systematic::migrate_systematic(conn)?;
+            crate::market_radar_workspace::migrate_market_radar_workspace(conn)?;
             remove_database_v1_obsolete_objects(conn)?;
             scrub_private_exchange_storage(conn)?;
             validate_database_v1(conn)
@@ -21750,6 +21898,20 @@ fn validate_raw_candle(
     reasons
 }
 
+static OKX_HISTORY_CANDLES_REQUEST_GATE: OnceLock<AsyncMutex<Instant>> = OnceLock::new();
+
+async fn wait_for_history_candles_request_budget() {
+    let gate = OKX_HISTORY_CANDLES_REQUEST_GATE
+        .get_or_init(|| AsyncMutex::new(Instant::now() - Duration::from_millis(110)));
+    let mut previous = gate.lock().await;
+    let elapsed = previous.elapsed();
+    let spacing = Duration::from_millis(110);
+    if elapsed < spacing {
+        sleep(spacing - elapsed).await;
+    }
+    *previous = Instant::now();
+}
+
 async fn fetch_history_candles(
     symbol: &str,
     interval: &str,
@@ -21774,13 +21936,21 @@ async fn fetch_history_candles_page(
     let lower_bound = from_open;
     let mut exhausted = false;
 
+    let (request_bar, forward_adjusted) = okx_candle_bar(interval);
     for _ in 0..160 {
+        let adjustment = if forward_adjusted {
+            "&adjust=forward"
+        } else {
+            ""
+        };
         let path = format!(
-            "/api/v5/market/history-candles?instId={}&bar={}&after={}&limit=300",
+            "/api/v5/market/history-candles?instId={}&bar={}&after={}&limit=300{}",
             url_encode(symbol),
-            url_encode(interval),
-            after
+            url_encode(request_bar),
+            after,
+            adjustment
         );
+        wait_for_history_candles_request_budget().await;
         let envelope: OkxEnvelope<Vec<String>> = get_json(&path).await?;
         if envelope.data.is_empty() {
             exhausted = true;
@@ -21817,10 +21987,17 @@ async fn fetch_recent_market_candles(
     from_open: i64,
     to_open: i64,
 ) -> Result<Vec<RawCandle>, String> {
+    let (request_bar, forward_adjusted) = okx_candle_bar(interval);
+    let adjustment = if forward_adjusted {
+        "&adjust=forward"
+    } else {
+        ""
+    };
     let path = format!(
-        "/api/v5/market/candles?instId={}&bar={}&limit=300",
+        "/api/v5/market/candles?instId={}&bar={}&limit=300{}",
         url_encode(symbol),
-        url_encode(interval)
+        url_encode(request_bar),
+        adjustment
     );
     let envelope: OkxEnvelope<Vec<String>> = get_json(&path).await?;
     let mut rows = envelope
@@ -21840,6 +22017,7 @@ async fn fetch_repair_candles(
     interval: &str,
     from_open: i64,
     to_open: i64,
+    publish: bool,
 ) -> Result<Vec<RawCandle>, String> {
     let mut rows: HashMap<i64, RawCandle> = HashMap::new();
     if interval == "1m" {
@@ -21854,7 +22032,9 @@ async fn fetch_repair_candles(
         "正在通过 OKX REST 补齐 {} {} K线数据",
         symbol, interval
     ));
-    emit_kline_sync(app, report);
+    if publish {
+        emit_kline_sync(app, report);
+    }
     for raw in fetch_history_candles(symbol, interval, from_open, to_open).await? {
         rows.insert(raw.open_time_ms, raw);
     }
@@ -23153,12 +23333,13 @@ fn instrument_summary_from(
     icon_cached: bool,
     updated_at: i64,
 ) -> OkxInstrumentSummary {
+    let base_ccy = instrument_base_ccy(&instrument);
     OkxInstrumentSummary {
         inst_id: instrument.inst_id,
         inst_id_code: instrument.inst_id_code,
         inst_type: instrument.inst_type,
         inst_family: instrument.inst_family,
-        base_ccy: instrument.base_ccy,
+        base_ccy,
         quote_ccy: instrument.quote_ccy,
         settle_ccy: instrument.settle_ccy,
         ct_val: instrument.ct_val,
@@ -23171,6 +23352,10 @@ fn instrument_summary_from(
         max_mkt_sz: instrument.max_mkt_sz,
         lever: instrument.lever,
         state: instrument.state,
+        inst_category: instrument.inst_category,
+        group_id: instrument.group_id,
+        list_time: instrument.list_time,
+        exp_time: instrument.exp_time,
         icon_path,
         icon_cached,
         updated_at,
@@ -23197,6 +23382,10 @@ fn instrument_from_summary(summary: OkxInstrumentSummary) -> OkxInstrument {
         max_lmt_amt: String::new(),
         lever: summary.lever,
         state: summary.state,
+        inst_category: summary.inst_category,
+        group_id: summary.group_id,
+        list_time: summary.list_time,
+        exp_time: summary.exp_time,
     }
 }
 
@@ -23693,6 +23882,17 @@ pub fn run() {
             systematic_factor_create_default,
             systematic_factor_save,
             systematic_factor_evaluate,
+            systematic_factor_preview,
+            systematic_factor_delete,
+            systematic_factor_repair_data,
+            systematic_factor_repair_cancel,
+            systematic_instrument_registry_snapshot,
+            systematic_instrument_registry_summary,
+            systematic_factor_evaluation_start,
+            systematic_factor_evaluation_cancel,
+            systematic_factor_evaluation_list,
+            systematic_factor_builder_catalogue,
+            systematic_factor_compose_expression,
             systematic_python_prepare_environment,
             systematic_python_run_sample,
             systematic_strategy_create_python,
@@ -23722,7 +23922,22 @@ pub fn run() {
             load_market_assets_cache,
             save_market_assets_cache,
             ensure_instruments_cache,
+            equity_security_directory,
+            equity_security_localizations,
             okx_ticker,
+            okx_market_tickers,
+            market_radar_directory_stream_start,
+            market_radar_history_start,
+            market_radar_history_status,
+            market_radar_research_scores,
+            market_radar_record_snapshot,
+            market_radar_saved_filters,
+            market_radar_save_filter,
+            market_radar_delete_filter,
+            market_radar_alert_rules,
+            market_radar_save_alert_rule,
+            market_radar_delete_alert_rule,
+            market_radar_validation_report,
             okx_candles,
             okx_funding_rate,
             init_local_storage,
@@ -27234,6 +27449,14 @@ mod tests {
     fn rust_ai_tool_authorization_is_default_deny_and_role_aware() {
         let advisor = test_ai_tool_context("advisor", "main", false);
         assert!(authorize_ai_tool("market.readTicker", &advisor).is_ok());
+        assert!(authorize_ai_tool("radar.readRanking", &advisor).is_err());
+        let mut radar_advisor = advisor.clone();
+        radar_advisor
+            .active_skill_ids
+            .insert("market-radar-research".to_string());
+        assert!(authorize_ai_tool("radar.readRanking", &radar_advisor).is_ok());
+        assert!(authorize_ai_tool("radar.readValidationReport", &radar_advisor).is_ok());
+        assert!(authorize_ai_tool("radar.createAlert", &radar_advisor).is_err());
         assert!(authorize_ai_tool("tradeOpportunity.create", &advisor).is_err());
         assert!(authorize_ai_tool("future.sdk.tool", &advisor).is_err());
         let mut indicator_only = test_ai_tool_context("advisor", "main", false);
@@ -27301,8 +27524,12 @@ mod tests {
         assert!(authorize_ai_tool("tradeOpportunity.create", &limited).is_ok());
         assert!(authorize_ai_tool("trade.placeOrder", &limited).is_err());
 
-        let subagent = test_ai_tool_context("limited_auto", "subagent", true);
+        let mut subagent = test_ai_tool_context("limited_auto", "subagent", true);
+        subagent
+            .active_skill_ids
+            .insert("market-radar-research".to_string());
         assert!(authorize_ai_tool("account.readPositions", &subagent).is_ok());
+        assert!(authorize_ai_tool("radar.readInstrumentEvidence", &subagent).is_ok());
         assert!(authorize_ai_tool("tradeOpportunity.create", &subagent).is_err());
         assert!(authorize_ai_tool("notification.feishu.send", &subagent).is_err());
         assert!(authorize_ai_tool("trade.placeOrder", &subagent).is_err());
@@ -27398,13 +27625,25 @@ mod tests {
         let mut custom = test_ai_tool_context("advisor", "subagent", true);
         custom.configured_agent_id = Some("market".to_string());
         custom.configured_agent_scopes = vec!["market".to_string()];
+        custom
+            .active_skill_ids
+            .insert("market-radar-research".to_string());
         custom.run_context = Some(test_background_run_context(
             Some("account-test"),
             "custom",
             vec![market_agent, risk_agent],
         ));
         assert!(authorize_ai_tool("market.readTicker", &custom).is_ok());
+        assert!(authorize_ai_tool("radar.readRanking", &custom).is_ok());
+        assert!(authorize_ai_tool("radar.compareMarkets", &custom).is_ok());
         assert!(authorize_ai_tool("account.readRisk", &custom).is_err());
+        let mut out_of_scope = json!({
+            "instIds": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"]
+        });
+        assert!(
+            enforce_background_run_scope("radar.compareMarkets", &mut out_of_scope, &custom,)
+                .is_err()
+        );
 
         let open_agent = desic_agent_automation::AiProfileSubAgent {
             id: "open".to_string(),
@@ -27418,7 +27657,8 @@ mod tests {
         let mut open = test_ai_tool_context("advisor", "subagent", true);
         open.configured_agent_id = Some("open".to_string());
         open.configured_agent_scopes = Vec::new();
-        open.active_skill_ids.insert("okx-market-intelligence".to_string());
+        open.active_skill_ids
+            .insert("okx-market-intelligence".to_string());
         open.run_context = Some(test_background_run_context(
             Some("account-test"),
             "custom",

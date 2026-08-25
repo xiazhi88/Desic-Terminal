@@ -5473,7 +5473,7 @@ function copy(chinese: boolean) {
   if (chinese) {
     return {
       title: "策略研究", workflow: "策略研究工作流", confirmedBars: "仅使用已确认 K 线", refresh: "刷新",
-      strategy: "策略", backtest: "回测", review: "结果与回放", forward: "前向模拟", profiles: "Profiles", allProfiles: "全部 Profiles", profileFilter: "Profile", openProfile: "打开 Profile",
+      strategy: "策略", factors: "因子", backtest: "回测", review: "结果与回放", forward: "前向模拟", profiles: "Profiles", allProfiles: "全部 Profiles", profileFilter: "Profile", openProfile: "打开 Profile",
       python: "Python", myStrategies: "我的策略", newStrategy: "新建 Python 策略", searchStrategies: "搜索策略", noStrategyMatches: "未找到匹配的策略", searchContract: "搜索合约", noMatchingContract: "没有匹配的合约",
       noStrategies: "还没有策略", noStrategiesDetail: "新建策略后，在每根已收线 K 线上定义动作。",
       pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimeCreatingVenv: "正在创建本地 Python 环境…", runtimeInstallingDeps: "正在安装策略依赖", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
@@ -5521,7 +5521,7 @@ function copy(chinese: boolean) {
   }
   return {
     title: "Strategy Research", workflow: "Strategy research workflow", confirmedBars: "confirmed bars only", refresh: "Refresh",
-    strategy: "Strategy", backtest: "Backtest", review: "Results & replay", forward: "Forward simulation", profiles: "Profiles", allProfiles: "All Profiles", profileFilter: "Profile", openProfile: "Open Profile",
+    strategy: "Strategy", factors: "Factors", backtest: "Backtest", review: "Results & replay", forward: "Forward simulation", profiles: "Profiles", allProfiles: "All Profiles", profileFilter: "Profile", openProfile: "Open Profile",
     python: "Python", myStrategies: "My strategies", newStrategy: "New Python strategy", searchStrategies: "Search strategies", noStrategyMatches: "No matching strategy", searchContract: "Search contract", noMatchingContract: "No matching contract",
     noStrategies: "No strategy yet", noStrategiesDetail: "Create one to define an action on each confirmed bar.",
     pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimeCreatingVenv: "Creating the local Python environment…", runtimeInstallingDeps: "Installing strategy dependencies", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",

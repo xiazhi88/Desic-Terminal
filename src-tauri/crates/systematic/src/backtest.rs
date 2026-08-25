@@ -1,4 +1,8 @@
-use std::{collections::{BTreeMap, VecDeque}, sync::Arc, time::Instant};
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::Arc,
+    time::Instant,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -142,7 +146,9 @@ impl PositionSizing {
             if !value.is_finite() || value <= 0.0 || value > maximum {
                 let unit = match self.mode {
                     PositionSizingMode::FixedUsdt => "a finite positive USDT amount",
-                    PositionSizingMode::EquityPercent => "a finite percentage above zero and at most 100",
+                    PositionSizingMode::EquityPercent => {
+                        "a finite percentage above zero and at most 100"
+                    }
                 };
                 return Err(SystematicError::invalid_argument(field, unit));
             }
@@ -208,7 +214,8 @@ pub fn resolve_position_sizing(
             "must be a finite non-negative contract count",
         ));
     }
-    let (entry_budget_usdt, same_side_total_budget_usdt) = sizing.budgets_for_equity(equity_usdt)?;
+    let (entry_budget_usdt, same_side_total_budget_usdt) =
+        sizing.budgets_for_equity(equity_usdt)?;
     let margin_per_contract = contract.contract_value * execution_price / leverage;
     let current_same_side_margin_usdt = current_same_side_contracts * margin_per_contract;
     let remaining_total_budget = same_side_total_budget_usdt - current_same_side_margin_usdt;
@@ -219,8 +226,8 @@ pub fn resolve_position_sizing(
     }
     let allowed_margin = entry_budget_usdt.min(remaining_total_budget);
     let raw_contracts = allowed_margin / margin_per_contract;
-    let contracts = ((raw_contracts / contract.lot_size) + STEP_ALIGNMENT_EPSILON).floor()
-        * contract.lot_size;
+    let contracts =
+        ((raw_contracts / contract.lot_size) + STEP_ALIGNMENT_EPSILON).floor() * contract.lot_size;
     if !contracts.is_finite() || contracts + STEP_ALIGNMENT_EPSILON < contract.min_size {
         let minimum_margin = contract.min_size * margin_per_contract;
         return Err(SystematicError::InvalidState {
@@ -999,7 +1006,8 @@ impl BacktestEngine {
                         // other consumer only reads the tail bar.
                         for index in current_index..end {
                             let bar = &strategy_bars[index];
-                            let include_ledger = index == current_index || !incremental_ledger_batch;
+                            let include_ledger =
+                                index == current_index || !incremental_ledger_batch;
                             snapshots.push(StrategyContextSnapshot {
                                 market: CurrentDataSnapshot {
                                     inst_id: inst_id.to_string(),
@@ -1009,15 +1017,28 @@ impl BacktestEngine {
                                     features: BTreeMap::new(),
                                 },
                                 portfolio: virtual_portfolio(request, state, bar.close),
-                                fills: if include_ledger { state.fills.clone() } else { Vec::new() },
-                                closed_trades: if include_ledger { state.closed_trades.clone() } else { Vec::new() },
-                                funding_payments: if include_ledger { state.funding_payments.clone() } else { Vec::new() },
+                                fills: if include_ledger {
+                                    state.fills.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                closed_trades: if include_ledger {
+                                    state.closed_trades.clone()
+                                } else {
+                                    Vec::new()
+                                },
+                                funding_payments: if include_ledger {
+                                    state.funding_payments.clone()
+                                } else {
+                                    Vec::new()
+                                },
                             });
                         }
                         let outputs = strategy.on_bar_batch(&snapshots)?;
                         if outputs.is_empty() || outputs.len() > snapshots.len() {
                             return Err(SystematicError::InvalidState {
-                                reason: "strategy batch returned an invalid output count".to_string(),
+                                reason: "strategy batch returned an invalid output count"
+                                    .to_string(),
                             });
                         }
                         let mut first_action_index = None;
@@ -1148,8 +1169,8 @@ impl BacktestEngine {
                 )?;
                 let callback_started = Instant::now();
                 let callback = on_bar(&context, &state)?;
-                strategy_callback_us = strategy_callback_us
-                    .saturating_add(elapsed_micros(callback_started));
+                strategy_callback_us =
+                    strategy_callback_us.saturating_add(elapsed_micros(callback_started));
                 strategy_callback_count = strategy_callback_count.saturating_add(1);
                 let decision = callback.decision;
                 decision.validate_for(&context)?;
@@ -1514,7 +1535,9 @@ fn decision_for_action(
             diagnostics,
         ),
         StrategyAction::CancelOrder { reason, .. } => Ok(StrategyDecision::NoAction {
-            reason: Some(format!("{reason}: order cancellation is handled by the stateful order queue")),
+            reason: Some(format!(
+                "{reason}: order cancellation is handled by the stateful order queue"
+            )),
         }),
     }
 }
@@ -1818,7 +1841,9 @@ fn apply_pending_strategy_actions_at_open(
                     position.take_profit = None;
                 }
             }
-            StrategyAction::CancelOrder { order_id, reason, .. } => {
+            StrategyAction::CancelOrder {
+                order_id, reason, ..
+            } => {
                 if let Some(index) = state
                     .open_orders
                     .iter()
@@ -1923,7 +1948,8 @@ fn apply_open_limit_orders(
             continue;
         }
         remaining_volume = (remaining_volume - filled).max(0.0);
-        order.summary.filled_quantity = (order.summary.filled_quantity + filled).min(order.summary.quantity);
+        order.summary.filled_quantity =
+            (order.summary.filled_quantity + filled).min(order.summary.quantity);
         order.summary.updated_at_ms = bar.close_time_ms;
         if order.summary.quantity - order.summary.filled_quantity <= STEP_ALIGNMENT_EPSILON {
             order.summary.status = PaperOrderStatus::Filled;
@@ -1966,7 +1992,11 @@ fn apply_strategy_action_fill(
             diagnostics,
             ..
         } => {
-            if state.position.as_ref().is_some_and(|position| position.side() == TradeSide::Short) {
+            if state
+                .position
+                .as_ref()
+                .is_some_and(|position| position.side() == TradeSide::Short)
+            {
                 return Ok(0.0);
             }
             let intent = PaperIntent {
@@ -1988,10 +2018,18 @@ fn apply_strategy_action_fill(
                 quantity,
                 time_ms,
                 raw_price,
-                if is_limit { FillReason::LimitEntry } else { FillReason::TargetIncrease },
+                if is_limit {
+                    FillReason::LimitEntry
+                } else {
+                    FillReason::TargetIncrease
+                },
                 entry_slippage,
             )?;
-            Ok(if state.fills.len() > fill_count_before { quantity } else { 0.0 })
+            Ok(if state.fills.len() > fill_count_before {
+                quantity
+            } else {
+                0.0
+            })
         }
         StrategyAction::OpenShort {
             stop_loss,
@@ -2000,7 +2038,11 @@ fn apply_strategy_action_fill(
             diagnostics,
             ..
         } => {
-            if state.position.as_ref().is_some_and(|position| position.side() == TradeSide::Long) {
+            if state
+                .position
+                .as_ref()
+                .is_some_and(|position| position.side() == TradeSide::Long)
+            {
                 return Ok(0.0);
             }
             let intent = PaperIntent {
@@ -2022,10 +2064,18 @@ fn apply_strategy_action_fill(
                 -quantity,
                 time_ms,
                 raw_price,
-                if is_limit { FillReason::LimitEntry } else { FillReason::TargetIncrease },
+                if is_limit {
+                    FillReason::LimitEntry
+                } else {
+                    FillReason::TargetIncrease
+                },
                 entry_slippage,
             )?;
-            Ok(if state.fills.len() > fill_count_before { quantity } else { 0.0 })
+            Ok(if state.fills.len() > fill_count_before {
+                quantity
+            } else {
+                0.0
+            })
         }
         StrategyAction::CloseLong { .. } => {
             let available = state
@@ -2044,7 +2094,11 @@ fn apply_strategy_action_fill(
                 filled,
                 time_ms,
                 raw_price,
-                if is_limit { FillReason::LimitExit } else { FillReason::TargetDecrease },
+                if is_limit {
+                    FillReason::LimitExit
+                } else {
+                    FillReason::TargetDecrease
+                },
                 exit_slippage,
             )?;
             Ok(filled)
@@ -2066,7 +2120,11 @@ fn apply_strategy_action_fill(
                 filled,
                 time_ms,
                 raw_price,
-                if is_limit { FillReason::LimitExit } else { FillReason::TargetDecrease },
+                if is_limit {
+                    FillReason::LimitExit
+                } else {
+                    FillReason::TargetDecrease
+                },
                 exit_slippage,
             )?;
             Ok(filled)
@@ -3431,10 +3489,7 @@ mod tests {
         assert_eq!(result.report.replay_snapshots.len(), 1);
         // Snapshots are stamped with the bar close; the entry filled at this
         // bar's open, so the first recorded transition is its close.
-        assert_eq!(
-            result.report.replay_snapshots[0].time_ms,
-            3 * ONE_MINUTE_MS
-        );
+        assert_eq!(result.report.replay_snapshots[0].time_ms, 3 * ONE_MINUTE_MS);
         assert!(result.report.replay_snapshots[0].position.is_some());
         // Held for all three evaluation bars.
         assert_eq!(
@@ -3648,7 +3703,13 @@ mod tests {
         let data = (0..6)
             .map(|index| {
                 let price = 100.0 + index as f64;
-                bar(index * ONE_MINUTE_MS, price, price + 1.0, price - 1.0, price)
+                bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 1.0,
+                    price - 1.0,
+                    price,
+                )
             })
             .collect();
         let mut strategy = BatchedNoActionStrategy {
@@ -3715,7 +3776,13 @@ mod tests {
         let data = (0..7)
             .map(|index| {
                 let price = 100.0 + index as f64;
-                bar(index * ONE_MINUTE_MS, price, price + 1.0, price - 1.0, price)
+                bar(
+                    index * ONE_MINUTE_MS,
+                    price,
+                    price + 1.0,
+                    price - 1.0,
+                    price,
+                )
             })
             .collect();
         let mut strategy = AdaptiveNoActionBatchStrategy {
@@ -3936,7 +4003,10 @@ mod tests {
         assert_eq!(report.fills.len(), 1);
         assert_eq!(report.fills[0].reason, FillReason::LimitEntry);
         assert_eq!(report.fills[0].fill_price, 101.0);
-        assert!(report.order_events.iter().any(|event| event.status == PaperOrderStatus::Open));
+        assert!(report
+            .order_events
+            .iter()
+            .any(|event| event.status == PaperOrderStatus::Open));
         assert!(report
             .order_events
             .iter()
@@ -4615,7 +4685,10 @@ mod tests {
             data.len()
         );
         assert!(
-            report.replay_snapshots.windows(2).all(|pair| pair[0].time_ms < pair[1].time_ms),
+            report
+                .replay_snapshots
+                .windows(2)
+                .all(|pair| pair[0].time_ms < pair[1].time_ms),
             "snapshot rows must stay strictly chronological for boundary lookup"
         );
 
@@ -4637,11 +4710,7 @@ mod tests {
         }
 
         let expected_exposure = exposed_bars as f64 / report.equity_curve.len() as f64 * 100.0;
-        let reported = report
-            .statistics
-            .as_ref()
-            .expect("statistics")
-            .exposure_pct;
+        let reported = report.statistics.as_ref().expect("statistics").exposure_pct;
         assert!(
             (reported - expected_exposure).abs() < 1e-9,
             "exposure_pct {reported} disagrees with the reconstructed {expected_exposure}"
@@ -4713,12 +4782,8 @@ mod tests {
         let mut strategy = PositionAwareBatchStrategy {
             saw_position_in_batch: false,
         };
-        BacktestEngine::run_stateful(
-            &request(data),
-            &mut strategy,
-            &CancellationToken::default(),
-        )
-        .expect("position-aware batched run");
+        BacktestEngine::run_stateful(&request(data), &mut strategy, &CancellationToken::default())
+            .expect("position-aware batched run");
 
         assert!(
             !strategy.saw_position_in_batch,

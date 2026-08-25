@@ -1,3 +1,4 @@
+import { resolve } from "node:path";
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
 
@@ -28,7 +29,12 @@ export default defineConfig(({ command }) => ({
   },
   server: {
     port: 1420,
-    strictPort: false
+    strictPort: false,
+    watch: {
+      // This application-owned venv is created at runtime. Watching it keeps
+      // Windows handles open while Python finalizes the staged environment.
+      ignored: [resolve(process.cwd(), "systematic-python")]
+    }
   },
   envPrefix: ["VITE_", "TAURI_"],
   build: {

@@ -670,6 +670,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desic-factor-dsl"
+version = "0.1.0"
+dependencies = [
+ "desic-chart-dsl",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "desic-intelligence"
 version = "0.1.0"
 dependencies = [
@@ -678,6 +687,10 @@ dependencies = [
  "serde_json",
  "sha2",
 ]
+
+[[package]]
+name = "desic-market-radar"
+version = "0.1.0"
 
 [[package]]
 name = "desic-private-history"
@@ -729,6 +742,7 @@ dependencies = [
 name = "desic-systematic"
 version = "0.1.0"
 dependencies = [
+ "desic-factor-dsl",
  "serde",
  "serde_json",
  "sha2",
@@ -745,7 +759,9 @@ dependencies = [
  "csv",
  "desic-agent-automation",
  "desic-chart-dsl",
+ "desic-factor-dsl",
  "desic-intelligence",
+ "desic-market-radar",
  "desic-private-history",
  "desic-skill-runtime",
  "desic-storage-config",

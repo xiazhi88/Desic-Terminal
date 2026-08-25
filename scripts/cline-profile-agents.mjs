@@ -35,7 +35,14 @@ const PROFILE_AGENT_SCOPE_TOOLS = Object.freeze({
     "market.readCandles",
     "market.readFundingRate",
     "market.scanWatchlist",
-    "market.readIndicators"
+    "market.readIndicators",
+    "radar.readRanking",
+    "radar.readInstrumentEvidence",
+    "radar.compareMarkets",
+    "radar.readBreadth",
+    "radar.readRankHistory",
+    "radar.readValidationReport",
+    "radar.listSavedFilters"
   ],
   derivatives: [
     "market.readFundingRate",

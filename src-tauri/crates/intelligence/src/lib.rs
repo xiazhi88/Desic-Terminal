@@ -2347,9 +2347,8 @@ pub fn rebuild_news_events(conn: &Connection, now: i64) -> Result<u64, String> {
         if let Some(index) = match_index {
             let cluster = &mut clusters[index];
             cluster.last_at = cluster.last_at.max(published_at);
-            cluster.latest_article_first_seen_at = cluster
-                .latest_article_first_seen_at
-                .max(first_seen_at);
+            cluster.latest_article_first_seen_at =
+                cluster.latest_article_first_seen_at.max(first_seen_at);
             cluster.coins.extend(coins);
             if !platform.is_empty() {
                 cluster.sources.insert(platform);
@@ -2490,7 +2489,11 @@ fn ensure_news_read_state(conn: &Connection, now: i64) -> Result<(), String> {
     Ok(())
 }
 
-fn unread_news_counts(conn: &Connection, events_read_at: i64, articles_read_at: i64) -> Result<(u64, u64), String> {
+fn unread_news_counts(
+    conn: &Connection,
+    events_read_at: i64,
+    articles_read_at: i64,
+) -> Result<(u64, u64), String> {
     let unread_articles = conn
         .query_row(
             "SELECT COUNT(*) FROM intelligence_news_articles WHERE first_seen_at>?1",
@@ -2528,7 +2531,8 @@ pub fn query_news_read_state(conn: &Connection, now: i64) -> Result<NewsReadStat
             |row| row.get::<_, i64>(0),
         )
         .map_err(|error| error.to_string())?;
-    let (unread_events, unread_articles) = unread_news_counts(conn, events_read_at, articles_read_at)?;
+    let (unread_events, unread_articles) =
+        unread_news_counts(conn, events_read_at, articles_read_at)?;
     Ok(NewsReadState {
         events_read_at,
         articles_read_at,
@@ -2543,7 +2547,9 @@ pub fn mark_news_read(conn: &Connection, stream: &str, now: i64) -> Result<NewsR
         return Err("新闻阅读流无效".to_string());
     }
     ensure_news_read_state(conn, now)?;
-    let tx = conn.unchecked_transaction().map_err(|error| error.to_string())?;
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
     if stream == "all" || stream == "events" {
         tx.execute(
             "UPDATE intelligence_news_read_state SET last_read_at=?1,updated_at=?1 WHERE stream='events'",
@@ -2562,7 +2568,13 @@ pub fn mark_news_read(conn: &Connection, stream: &str, now: i64) -> Result<NewsR
     query_news_read_state(conn, now)
 }
 
-fn decorate_news_item(mut value: Value, id: &str, language: Option<&str>, first_seen_at: i64, unread: bool) -> Value {
+fn decorate_news_item(
+    mut value: Value,
+    id: &str,
+    language: Option<&str>,
+    first_seen_at: i64,
+    unread: bool,
+) -> Value {
     if let Some(object) = value.as_object_mut() {
         object.insert("id".to_string(), json!(id));
         if let Some(language) = language {
@@ -2579,7 +2591,12 @@ pub fn query_news_feed_local(
     query: &NewsFeedQuery,
     now: i64,
 ) -> Result<NewsFeedPage, String> {
-    let mode = query.mode.as_deref().unwrap_or("events").trim().to_ascii_lowercase();
+    let mode = query
+        .mode
+        .as_deref()
+        .unwrap_or("events")
+        .trim()
+        .to_ascii_lowercase();
     if !matches!(mode.as_str(), "events" | "articles") {
         return Err("新闻展示模式无效".to_string());
     }
@@ -2617,7 +2634,12 @@ pub fn query_news_feed_local(
             .prepare(&format!("SELECT e.raw_json FROM intelligence_news_events e {filter} ORDER BY e.last_published_at DESC,e.id DESC LIMIT ?7 OFFSET ?8"))
             .map_err(|error| error.to_string())?;
         let values = stmt
-            .query_map(params![keyword, coin, importance, start_time, end_time, language, page_size, offset], |row| row.get::<_, String>(0))
+            .query_map(
+                params![
+                    keyword, coin, importance, start_time, end_time, language, page_size, offset
+                ],
+                |row| row.get::<_, String>(0),
+            )
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
@@ -2625,7 +2647,8 @@ pub fn query_news_feed_local(
             .into_iter()
             .filter_map(|raw| serde_json::from_str::<Value>(&raw).ok())
             .map(|value| {
-                let first_seen = value_i64(&value, &["latestArticleFirstSeenAt"]).unwrap_or_default();
+                let first_seen =
+                    value_i64(&value, &["latestArticleFirstSeenAt"]).unwrap_or_default();
                 let unread = first_seen > read_state.events_read_at;
                 let id = value_string(&value, &["id"]).unwrap_or_default();
                 decorate_news_item(value, &id, None, first_seen, unread)
@@ -2651,21 +2674,47 @@ pub fn query_news_feed_local(
             .prepare(&format!("SELECT a.raw_json,a.id,a.language,a.first_seen_at FROM intelligence_news_articles a {filter} ORDER BY COALESCE(a.published_at,a.first_seen_at) DESC,a.id DESC LIMIT ?7 OFFSET ?8"))
             .map_err(|error| error.to_string())?;
         let rows = stmt
-            .query_map(params![keyword, coin, importance, start_time, end_time, language, page_size, offset], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?, row.get::<_, i64>(3)?))
-            })
+            .query_map(
+                params![
+                    keyword, coin, importance, start_time, end_time, language, page_size, offset
+                ],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                },
+            )
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?
             .into_iter()
-            .filter_map(|(raw, id, language, first_seen)| serde_json::from_str::<Value>(&raw).ok().map(|value| (value, id, language, first_seen)))
-            .map(|(value, id, language, first_seen)| decorate_news_item(value, &id, Some(&language), first_seen, first_seen > read_state.articles_read_at))
+            .filter_map(|(raw, id, language, first_seen)| {
+                serde_json::from_str::<Value>(&raw)
+                    .ok()
+                    .map(|value| (value, id, language, first_seen))
+            })
+            .map(|(value, id, language, first_seen)| {
+                decorate_news_item(
+                    value,
+                    &id,
+                    Some(&language),
+                    first_seen,
+                    first_seen > read_state.articles_read_at,
+                )
+            })
             .collect::<Vec<_>>();
         (total, rows)
     };
     let total_pages = ((total + page_size as u64 - 1) / page_size as u64).max(1) as u32;
     let page = requested_page.min(i64::from(total_pages)) as u32;
-    let unread_count = if mode == "events" { read_state.unread_events } else { read_state.unread_articles };
+    let unread_count = if mode == "events" {
+        read_state.unread_events
+    } else {
+        read_state.unread_articles
+    };
     Ok(NewsFeedPage {
         mode,
         items: std::mem::take(&mut rows),

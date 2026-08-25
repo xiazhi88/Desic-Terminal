@@ -348,6 +348,7 @@ fn default_ai_enabled_skills() -> Vec<String> {
     vec![
         "trading-philosophy".to_string(),
         "okx-market-intelligence".to_string(),
+        "market-radar-research".to_string(),
         "desic-trade-operations".to_string(),
     ]
 }
@@ -621,6 +622,7 @@ mod tests {
             vec![
                 "trading-philosophy",
                 "okx-market-intelligence",
+                "market-radar-research",
                 "desic-trade-operations"
             ]
         );
@@ -629,6 +631,7 @@ mod tests {
             "desic-core-operations",
             "trading-philosophy",
             "okx-market-intelligence",
+            "market-radar-research",
             "desic-trade-operations",
         ] {
             let skill = definitions
@@ -646,6 +649,7 @@ mod tests {
             ("desic-core-operations", 0x773a_d6fc_a37c_821c_u64),
             ("trading-philosophy", 0xebdb_a0a9_c0fd_658d_u64),
             ("okx-market-intelligence", 0xe56e_8dff_915f_7377_u64),
+            ("market-radar-research", 0x8fca_9f53_9f40_54ae_u64),
         ];
 
         for (id, fingerprint) in expected {

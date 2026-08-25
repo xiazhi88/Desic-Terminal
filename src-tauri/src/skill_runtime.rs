@@ -4,13 +4,13 @@ use crate::storage_config::{
 use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tauri::Manager;
 use std::{
     collections::HashSet,
     fs,
     path::{Path, PathBuf},
     sync::OnceLock,
 };
+use tauri::Manager;
 use tokio::{
     io::AsyncWriteExt,
     process::Command,
@@ -52,8 +52,11 @@ pub(crate) async fn run_active_skill_entrypoint(
     }
     let environment = prepare_skill_environment(app, &resolved).await?;
     let started_at = crate::now_ms();
-    let output = execute_declared_entrypoint(app, &resolved, environment.as_deref(), &input).await?;
-    if output.stdout.len() > MAX_SKILL_RUN_OUTPUT_BYTES || output.stderr.len() > MAX_SKILL_RUN_OUTPUT_BYTES {
+    let output =
+        execute_declared_entrypoint(app, &resolved, environment.as_deref(), &input).await?;
+    if output.stdout.len() > MAX_SKILL_RUN_OUTPUT_BYTES
+        || output.stderr.len() > MAX_SKILL_RUN_OUTPUT_BYTES
+    {
         return Err("Skill 脚本输出超过 256 KiB 上限".to_string());
     }
     if !output.status.success() {
@@ -116,7 +119,14 @@ async fn prepare_skill_environment(
         .parent()
         .ok_or_else(|| "Skill 环境路径无效".to_string())?;
     fs::create_dir_all(parent).map_err(|error| error.to_string())?;
-    let staging = parent.join(format!(".{}-{}.staging", environment.file_name().and_then(|item| item.to_str()).unwrap_or("runtime"), crate::now_ms()));
+    let staging = parent.join(format!(
+        ".{}-{}.staging",
+        environment
+            .file_name()
+            .and_then(|item| item.to_str())
+            .unwrap_or("runtime"),
+        crate::now_ms()
+    ));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|error| error.to_string())?;
     }
@@ -217,7 +227,10 @@ async fn setup_python_environment(
     apply_clean_environment(&mut create, staging, "python");
     let output = run_command(create, b"", SETUP_TIMEOUT_SECONDS).await?;
     if !output.status.success() {
-        return Err(format!("创建 Python Skill venv 失败：{}", bounded_diagnostic(&output.stderr)));
+        return Err(format!(
+            "创建 Python Skill venv 失败：{}",
+            bounded_diagnostic(&output.stderr)
+        ));
     }
     let venv_python = venv_python_path(&venv);
     let mut install = Command::new(&venv_python);
@@ -234,7 +247,10 @@ async fn setup_python_environment(
         .arg("-r")
         .arg(&lock_source);
     apply_clean_environment(&mut install, staging, "python");
-    install.env("PIP_CACHE_DIR", runtime_cache_root().join("skill-pip-cache"));
+    install.env(
+        "PIP_CACHE_DIR",
+        runtime_cache_root().join("skill-pip-cache"),
+    );
     let output = run_command(install, b"", SETUP_TIMEOUT_SECONDS).await?;
     if !output.status.success() {
         return Err(format!(
@@ -276,12 +292,19 @@ async fn execute_declared_entrypoint(
         _ => return Err("不支持的 Skill runtime".to_string()),
     };
     apply_clean_environment(&mut command, &execution_root, &resolved.runtime.kind);
-    run_command(command, input, u64::from(resolved.entrypoint.timeout_seconds)).await
+    run_command(
+        command,
+        input,
+        u64::from(resolved.entrypoint.timeout_seconds),
+    )
+    .await
 }
 
 fn runtime_identity(app: &tauri::AppHandle, kind: &str) -> Result<String, String> {
     match kind {
-        "node" => bundled_node_and_npm(app).map(|(node, _)| format!("node-{}", file_identity(&node))),
+        "node" => {
+            bundled_node_and_npm(app).map(|(node, _)| format!("node-{}", file_identity(&node)))
+        }
         "python" => bundled_python(app).map(|python| format!("python-{}", file_identity(&python))),
         _ => Err("不支持的 Skill runtime".to_string()),
     }
@@ -314,7 +337,9 @@ fn bundled_node_and_npm(app: &tauri::AppHandle) -> Result<(PathBuf, PathBuf), St
 
 fn bundled_python(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let root = if cfg!(debug_assertions) {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("resources").join("systematic-python")
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("resources")
+            .join("systematic-python")
     } else {
         app.path()
             .resource_dir()
@@ -325,7 +350,12 @@ fn bundled_python(app: &tauri::AppHandle) -> Result<PathBuf, String> {
         .map_err(|_| "受控 Python runtime 不可用，请重新准备应用资源".to_string())?;
     let relative = serde_json::from_str::<Value>(&manifest)
         .ok()
-        .and_then(|value| value.get("pythonRelativePath").and_then(Value::as_str).map(str::to_string))
+        .and_then(|value| {
+            value
+                .get("pythonRelativePath")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
         .ok_or_else(|| "受控 Python runtime manifest 无效".to_string())?;
     let python = root.join(relative);
     if !python.is_file() {
@@ -386,7 +416,8 @@ fn environment_ready(
         return Ok(false);
     }
     let value = fs::read_to_string(manifest).map_err(|error| error.to_string())?;
-    let value = serde_json::from_str::<Value>(&value).map_err(|_| "Skill 环境元数据无效".to_string())?;
+    let value =
+        serde_json::from_str::<Value>(&value).map_err(|_| "Skill 环境元数据无效".to_string())?;
     if value.get("bundleHash").and_then(Value::as_str) != Some(resolved.bundle_hash.as_str())
         || value.get("lockHash").and_then(Value::as_str) != Some(lock_hash)
     {
@@ -465,14 +496,23 @@ async fn run_command(
             .await
             .map_err(|error| format!("写入 Skill 输入失败：{}", error))?;
     }
-    match timeout(Duration::from_secs(timeout_seconds), child.wait_with_output()).await {
+    match timeout(
+        Duration::from_secs(timeout_seconds),
+        child.wait_with_output(),
+    )
+    .await
+    {
         Ok(Ok(output)) => Ok(output),
         Ok(Err(error)) => Err(format!("等待 Skill runtime 失败：{}", error)),
         Err(_) => Err(format!("Skill runtime 超时（{} 秒）", timeout_seconds)),
     }
 }
 
-fn validate_json_contract(schema: &Option<Value>, value: &Value, label: &str) -> Result<(), String> {
+fn validate_json_contract(
+    schema: &Option<Value>,
+    value: &Value,
+    label: &str,
+) -> Result<(), String> {
     let Some(schema) = schema else {
         return Ok(());
     };
@@ -508,11 +548,7 @@ fn validate_json_schema_value(schema: &Value, value: &Value, path: &str) -> Resu
             }
         }
         let properties = schema.get("properties").and_then(Value::as_object);
-        if schema
-            .get("additionalProperties")
-            .and_then(Value::as_bool)
-            == Some(false)
-        {
+        if schema.get("additionalProperties").and_then(Value::as_bool) == Some(false) {
             for key in object.keys() {
                 if !properties.is_some_and(|properties| properties.contains_key(key)) {
                     return Err(format!("Skill {} 包含 schema 未声明字段 {}", path, key));
@@ -522,7 +558,11 @@ fn validate_json_schema_value(schema: &Value, value: &Value, path: &str) -> Resu
         if let Some(properties) = properties {
             for (key, property_schema) in properties {
                 if let Some(item) = object.get(key) {
-                    validate_json_schema_value(property_schema, item, &format!("{}.{}", path, key))?;
+                    validate_json_schema_value(
+                        property_schema,
+                        item,
+                        &format!("{}.{}", path, key),
+                    )?;
                 }
             }
         }
@@ -554,7 +594,13 @@ fn sha256(bytes: &[u8]) -> String {
 fn sanitize_path_component(value: &str) -> String {
     value
         .chars()
-        .map(|character| if character.is_ascii_alphanumeric() { character } else { '-' })
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
         .collect()
 }
 
@@ -567,7 +613,11 @@ fn bounded_diagnostic(bytes: &[u8]) -> String {
 }
 
 fn null_device() -> &'static str {
-    if cfg!(windows) { "NUL" } else { "/dev/null" }
+    if cfg!(windows) {
+        "NUL"
+    } else {
+        "/dev/null"
+    }
 }
 
 fn venv_python_path(venv: &Path) -> PathBuf {
@@ -590,14 +640,28 @@ mod tests {
             "required": ["rows"],
             "properties": { "rows": { "type": "array" } }
         });
-        assert!(validate_json_contract(&Some(schema.clone()), &serde_json::json!({"rows": []}), "input").is_ok());
-        assert!(validate_json_contract(&Some(schema.clone()), &serde_json::json!({}), "input").is_err());
-        assert!(validate_json_contract(&Some(schema), &serde_json::json!({"rows": [], "other": true}), "input").is_err());
+        assert!(validate_json_contract(
+            &Some(schema.clone()),
+            &serde_json::json!({"rows": []}),
+            "input"
+        )
+        .is_ok());
+        assert!(
+            validate_json_contract(&Some(schema.clone()), &serde_json::json!({}), "input").is_err()
+        );
+        assert!(validate_json_contract(
+            &Some(schema),
+            &serde_json::json!({"rows": [], "other": true}),
+            "input"
+        )
+        .is_err());
     }
 
     #[test]
     fn python_requirements_must_be_hash_complete() {
-        assert!(requirements_are_hash_complete("requests==2.32.0 --hash=sha256:abc"));
+        assert!(requirements_are_hash_complete(
+            "requests==2.32.0 --hash=sha256:abc"
+        ));
         assert!(!requirements_are_hash_complete("requests==2.32.0"));
     }
 }

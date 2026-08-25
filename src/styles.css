@@ -939,8 +939,8 @@ button {
   z-index: 320;
   width: min(400px, 92vw);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 8px;
+  grid-template-rows: auto 30px minmax(0, 1fr);
+  gap: 6px;
   padding: 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
@@ -985,6 +985,47 @@ button {
   background: rgba(255, 255, 255, 0.07);
   cursor: pointer;
 }
+
+.market-picker__categories {
+  min-width: 0;
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--line);
+  scrollbar-width: none;
+}
+
+.market-picker__categories::-webkit-scrollbar { display: none; }
+
+.market-picker__categories button {
+  position: relative;
+  flex: 1 0 auto;
+  min-width: 54px;
+  padding: 0 8px;
+  border: 0;
+  color: var(--weak);
+  background: transparent;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0;
+  cursor: pointer;
+}
+
+.market-picker__categories button::after {
+  content: "";
+  position: absolute;
+  right: 8px;
+  bottom: -1px;
+  left: 8px;
+  height: 2px;
+  background: transparent;
+}
+
+.market-picker__categories button:hover { color: var(--text); }
+.market-picker__categories button.is-active { color: #dbcfff; }
+.market-picker__categories button.is-active::after { background: var(--purple); }
+.market-picker__categories button:focus-visible { outline: 1px solid var(--focus); outline-offset: -2px; }
 
 .market-picker__list {
   min-height: 0;
@@ -1033,6 +1074,18 @@ button {
   white-space: nowrap;
 }
 
+.market-picker__snapshot-quote {
+  display: grid;
+  justify-items: end;
+  gap: 2px;
+  min-width: 76px;
+  font-variant-numeric: tabular-nums;
+}
+.market-picker__snapshot-quote strong { color: var(--text); font-size: 11px; font-weight: 600; }
+.market-picker__snapshot-quote em { color: var(--weak); font-size: 9px; font-style: normal; }
+.market-picker__snapshot-quote em.positive { color: #e07777; }
+.market-picker__snapshot-quote em.negative { color: #63c69e; }
+
 /* Starring is a secondary action, so it stays quiet until the row is hovered
    while remaining reachable by keyboard at all times. */
 .market-picker__star {
@@ -1078,7 +1131,7 @@ button {
   letter-spacing: 0;
 }
 
-.market-title span {
+.market-title__trigger > span {
   color: var(--muted);
   font-size: 12px;
 }
@@ -13709,7 +13762,7 @@ button {
     font-size: 16px;
   }
 
-  .market-title span,
+  .market-title__trigger > span,
   .price-strip-values > span:nth-of-type(n + 4) {
     display: none;
   }
@@ -27424,6 +27477,11 @@ button {
 }
 .workspace-surface--intelligence::before { display: none; }
 .workspace-surface--automation { --workspace-accent: #c49bff; }
+.workspace-surface--market {
+  --workspace-accent: #67bea7;
+  background-color: #07090b;
+}
+.workspace-surface--market::before { display: none; }
 
 @container (max-width: 1100px) {
   .workspace-surface {

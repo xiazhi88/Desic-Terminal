@@ -32,6 +32,7 @@
     "smoke:systematic-month-preview": "node scripts/systematic/smoke-systematic-preview.mjs --month",
     "test:release-version": "node scripts/check-release-version.mjs",
     "test:kline-merge": "node --experimental-strip-types scripts/test-kline-merge-semantics.mjs",
+    "test:market-radar": "node --experimental-strip-types scripts/test-market-radar-workspace.mjs",
     "smoke:i18n-preview": "node scripts/smoke-i18n-preview.mjs",
     "smoke:terminal-preview": "node scripts/smoke-terminal-preview.mjs",
     "smoke:trade-ticket-preview": "node scripts/smoke-trade-ticket-preview.mjs",

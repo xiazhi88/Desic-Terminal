@@ -26,6 +26,35 @@ exact signatures.
 `ctx.interval` describe the immutable current-time event. `ctx.bar` is the active
 Bar during `on_bar`.
 
+## Cross-sectional factor scores
+
+`ctx.factor_scores(factor_id)` returns a read-only mapping of instrument id to a
+row exposing `score`, `rank`, `universeSize`, and `asOfMs`. It reports where an
+instrument stands against the rest of the universe, which no single-instrument
+field can express.
+
+```python
+scores = ctx.factor_scores("builtin-kline-blend-v1")
+mine = scores.get(ctx.instrument_id)
+if mine and mine["rank"] <= 10:
+    return ctx.open_long("top-10 cross-sectional score")
+```
+
+Three rules, all enforced:
+
+- **The factor id must be a string literal.** The host precomputes each named
+  cross-section before the first event, so a computed identifier is refused when
+  the source loads. Unlike `interval`, there is no safe fallback set to preload.
+- **Reading a score is not a decision.** It produces no action and places no
+  order; the action methods remain the only way to trade.
+- **An empty mapping means unknown, not zero.** The host omits a cross-section
+  when the universe was too thin to rank or its snapshot went stale. Decide
+  explicitly what the strategy does in that case rather than treating a missing
+  entry as a neutral score.
+
+A ranking over very few instruments carries little information, so check
+`universeSize` before gating on `rank`.
+
 A Bar exposes `openTimeMs`, `closeTimeMs`, `open`, `high`, `low`, `close`,
 `volume`, and `confirmed`, read directly as `bar.close`. All `1m` bars are
 confirmed.

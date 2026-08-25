@@ -74,6 +74,10 @@ STRATEGY_CONTEXT_CALLS = {
     # single-contract strategy source should use the action methods above.
     "signal": (3, {"direction", "reason", "confidence", "metadata"}),
     "paper_intent": (3, {"action", "reason", "quantity", "metadata"}),
+    # Read-only cross-sectional scores. This produces no action and places no
+    # order: it reports where an instrument ranks so the strategy's own action
+    # methods can use that as a condition.
+    "factor_scores": (1, {"factor_id"}),
     "factor": (3, {"factor_id", "values", "metadata"}),
     "alpha": (4, {"model_id", "horizon_ms", "scores", "metadata"}),
     "portfolio_target": (1, {"weights", "metadata"}),
@@ -90,6 +94,7 @@ STRATEGY_CONTEXT_POSITIONAL_PARAMETERS = {
     "set_protection": ("reason",),
     "cancel_protection": ("reason",),
     "cancel_order": ("order_id", "reason"),
+    "factor_scores": ("factor_id",),
     "signal": ("direction", "reason", "confidence"),
     "paper_intent": ("action", "reason", "quantity"),
     "factor": ("factor_id", "values", "metadata"),
@@ -468,6 +473,41 @@ def validate_event_host_validated(value):
     return value
 
 
+def validate_factor_scores(value, cutoff_ms):
+    """Validate host-supplied cross-sectional scores.
+
+    Scores describe the cutoff the event carries, so a row timestamped after it
+    would be information from the strategy's future. The shared future-timestamp
+    walk is applied per row rather than trusted.
+    """
+    scores = plain_dict(value, "event.factorScores")
+    if len(scores) > 32:
+        raise ProtocolFailure("invalid_factor_scores", "event.factorScores supports at most 32 factors")
+    for factor_id, rows in scores.items():
+        nonempty_string(factor_id, "event.factorScores key", 160)
+        instrument_rows = plain_dict(rows, f"event.factorScores[{factor_id}]")
+        if len(instrument_rows) > 1_000:
+            raise ProtocolFailure(
+                "invalid_factor_scores",
+                f"event.factorScores[{factor_id}] supports at most 1000 instruments",
+            )
+        for inst_id, row in instrument_rows.items():
+            label = f"event.factorScores[{factor_id}][{inst_id}]"
+            nonempty_string(inst_id, f"{label} key", 64, INSTRUMENT_ID_PATTERN)
+            row = plain_dict(row, label)
+            reject_unknown_fields(row, {"score", "rank", "universeSize", "asOfMs"}, label)
+            finite_number(row.get("score"), f"{label}.score")
+            positive_int(row.get("rank"), f"{label}.rank")
+            positive_int(row.get("universeSize"), f"{label}.universeSize")
+            if "asOfMs" in row:
+                as_of = positive_int(row.get("asOfMs"), f"{label}.asOfMs")
+                if as_of > cutoff_ms:
+                    raise ProtocolFailure(
+                        "invalid_factor_scores",
+                        f"{label}.asOfMs must not be later than event.asOfMs",
+                    )
+
+
 def validate_event_full(event):
     value = plain_dict(event, "event")
     kind = value.get("kind")
@@ -478,8 +518,10 @@ def validate_event_full(event):
     validate_market(value.get("market"), cutoff_ms)
     if "portfolio" in value:
         validate_portfolio(value["portfolio"], cutoff_ms)
+    if "factorScores" in value:
+        validate_factor_scores(value["factorScores"], cutoff_ms)
     if kind in {"start", "bar"}:
-        allowed = {"kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio", "hostValidated"}
+        allowed = {"kind", "snapshotId", "asOfMs", "instrumentId", "interval", "market", "portfolio", "factorScores", "hostValidated"}
         if kind == "bar":
             allowed.add("bar")
         reject_unknown_fields(value, allowed, "event")
@@ -487,7 +529,7 @@ def validate_event_full(event):
         if kind == "start" and "portfolio" not in value:
             raise ProtocolFailure("invalid_portfolio", f"{kind} events require event.portfolio")
     else:
-        reject_unknown_fields(value, {"kind", "snapshotId", "asOfMs", "market", "portfolio", "universe", "hostValidated"}, "event")
+        reject_unknown_fields(value, {"kind", "snapshotId", "asOfMs", "market", "portfolio", "universe", "factorScores", "hostValidated"}, "event")
         universe = value.get("universe")
         if not isinstance(universe, list) or not universe or len(universe) > 1_000:
             raise ProtocolFailure("invalid_universe", "rebalance event requires 1 to 1000 universe rows")
@@ -933,7 +975,7 @@ class SimulatedPortfolio(ImmutableObject):
 
 class StrategyContext(ImmutableObject):
     __slots__ = (
-        "as_of_ms", "kind", "snapshot_id", "market", "indicators", "portfolio", "params", "instrument_id", "interval", "bar", "universe"
+        "as_of_ms", "kind", "snapshot_id", "market", "indicators", "portfolio", "params", "instrument_id", "interval", "bar", "universe", "_factor_scores"
     )
 
     def __init__(self, event, market, portfolio=None, params=None, indicator_cache=None):
@@ -949,9 +991,40 @@ class StrategyContext(ImmutableObject):
         object.__setattr__(self, "interval", event.get("interval"))
         object.__setattr__(self, "bar", freeze(event["bar"]) if event.get("bar") is not None else None)
         object.__setattr__(self, "universe", tuple(freeze(row) for row in event.get("universe", [])))
+        # Cross-sectional scores the host computed for this cutoff, keyed by
+        # factor id and then by instrument id.
+        factor_scores = event.get("factorScores") or {}
+        object.__setattr__(
+            self,
+            "_factor_scores",
+            MappingProxyType(
+                {
+                    str(factor_id): MappingProxyType(
+                        {str(inst_id): freeze(row) for inst_id, row in (rows or {}).items()}
+                    )
+                    for factor_id, rows in factor_scores.items()
+                }
+            ),
+        )
 
     def position(self, instrument_id, side):
         return self.portfolio.position(instrument_id, side)
+
+    def factor_scores(self, factor_id):
+        """Cross-sectional scores for `factor_id` at this cutoff.
+
+        Returns a mapping of instrument id to a row exposing `score`, `rank`,
+        `universeSize` and `asOfMs`. Reading a score never produces an action and
+        never places an order; the strategy's own action methods remain the only
+        way to trade, so this cannot widen what a strategy is permitted to do.
+
+        An empty mapping means the host had no cross-section for this cutoff, for
+        example when the universe was too thin or the snapshot had gone stale.
+        Treat that as "no information", not as every instrument scoring zero.
+        """
+        if not isinstance(factor_id, str):
+            raise ValueError("factor_id must be a string")
+        return self._factor_scores.get(factor_id, MappingProxyType({}))
 
     def no_action(self, reason=None):
         output = {"kind": "no_action", "asOfMs": self.as_of_ms}
@@ -1317,6 +1390,9 @@ class SourcePolicyVisitor(ast.NodeVisitor):
         self.action_sites = []
         self.market_intervals = set()
         self.dynamic_market_interval = False
+        # Factor identifiers this source reads, so the host can precompute their
+        # cross-sections before dispatching the first event.
+        self.factor_ids = set()
 
     def _forbidden(self, code, message, node=None):
         if node is not None and node.lineno > 0:
@@ -1360,6 +1436,29 @@ class SourcePolicyVisitor(ast.NodeVisitor):
             )
         self.generic_visit(node)
 
+    def _record_factor_id(self, node):
+        """Record a ctx.factor_scores("literal") reference.
+
+        The host precomputes a cross-section for each factor a strategy names, so
+        it has to know the names before the first event. An interval expressed
+        dynamically can fall back to loading every supported series, because that
+        set is small and fixed. The set of factor identifiers is unbounded, so
+        there is no equivalent fallback: a dynamic identifier is refused instead
+        of silently producing an empty score map at runtime.
+        """
+        argument = node.args[0] if node.args else next(
+            (keyword.value for keyword in node.keywords if keyword.arg == "factor_id"),
+            None,
+        )
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            self.factor_ids.add(argument.value)
+        else:
+            self._forbidden(
+                "invalid_strategy_api",
+                "ctx.factor_scores requires a string literal factor id so the host can precompute it before the first event",
+                node,
+            )
+
     def _record_market_interval(self, node):
         interval = node.args[1] if len(node.args) >= 2 else next(
             (keyword.value for keyword in node.keywords if keyword.arg == "interval"),
@@ -1381,6 +1480,13 @@ class SourcePolicyVisitor(ast.NodeVisitor):
 
     def visit_Call(self, node):
         function = node.func
+        if (
+            isinstance(function, ast.Attribute)
+            and function.attr == "factor_scores"
+            and isinstance(function.value, ast.Name)
+            and function.value.id == "ctx"
+        ):
+            self._record_factor_id(node)
         if isinstance(function, ast.Attribute) and function.attr == "bars":
             if (
                 isinstance(function.value, ast.Attribute)
@@ -1575,11 +1681,11 @@ def source_is_safe(source):
         raise ProtocolFailure("invalid_source", f"strategy source has invalid syntax at line {error.lineno or 0}") from error
     visitor = SourcePolicyVisitor()
     visitor.visit(tree)
-    return source, visitor.action_sites, visitor.selected_market_intervals()
+    return source, visitor.action_sites, visitor.selected_market_intervals(), sorted(visitor.factor_ids)
 
 
 def load_strategy(source):
-    source, action_sites, market_intervals = source_is_safe(source)
+    source, action_sites, market_intervals, factor_ids = source_is_safe(source)
     namespace = {"__name__": "__desic_strategy__", "__builtins__": SAFE_BUILTINS}
     try:
         compiled = builtins.compile(source, "<desic-strategy>", "exec")
@@ -1591,7 +1697,7 @@ def load_strategy(source):
     handlers = sorted(name for name in ("on_start", "on_bar", "on_fill", "on_rebalance") if callable(namespace.get(name)))
     if not handlers:
         raise ProtocolFailure("missing_handler", "strategy source must define on_start(ctx), on_bar(ctx), and/or on_rebalance(ctx)")
-    return namespace, handlers, action_sites, market_intervals
+    return namespace, handlers, action_sites, market_intervals, factor_ids
 
 
 def emit(message):
@@ -1677,7 +1783,7 @@ def main():
                 reject_unknown_fields(message, {"protocol", "type", "requestId", "source", "params"}, "load")
                 strategy_params = plain_dict(message.get("params", {}), "load.params")
                 ensure_json_value(strategy_params, "load.params")
-                namespace, handlers, action_sites, market_intervals = load_strategy(message.get("source"))
+                namespace, handlers, action_sites, market_intervals, factor_ids = load_strategy(message.get("source"))
                 strategy_started = False
                 last_event_as_of_ms = None
                 market_cache = {}
@@ -1689,6 +1795,9 @@ def main():
                     "handlers": handlers,
                     "actionSites": action_sites,
                     "marketIntervals": market_intervals,
+                    # Declared statically so the host can compute each factor's
+                    # cross-section before the first event is dispatched.
+                    "factorIds": factor_ids,
                 })
             elif message_type == "invoke":
                 if namespace is None:

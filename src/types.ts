@@ -697,9 +697,46 @@ export type OkxInstrumentSummary = {
   maxMktSz: string;
   lever: string;
   state: string;
+  instCategory?: string;
+  groupId?: string;
+  listTime?: string;
+  expTime?: string;
+  securityName?: string;
+  securityNameZhHans?: string;
+  securityNameZhHant?: string;
+  localizedSecurityName?: string;
+  listingExchange?: string;
+  securityMetadataSource?: string;
+  securityLocalizationSource?: string;
   iconPath?: string | null;
   iconCached: boolean;
   updatedAt: number;
+};
+
+export type EquitySecuritySummary = {
+  ticker: string;
+  securityName: string;
+  exchange: string;
+};
+
+export type EquitySecurityDirectory = {
+  source: string;
+  updatedAt: number;
+  stale: boolean;
+  securities: EquitySecuritySummary[];
+};
+
+export type EquitySecurityLocalization = {
+  ticker: string;
+  exchange: string;
+  nameZhHans?: string;
+  nameZhHant?: string;
+  updatedAt: number;
+};
+
+export type EquitySecurityLocalizations = {
+  source: string;
+  localizations: EquitySecurityLocalization[];
 };
 
 export type MarketAssetsSummary = {
@@ -1555,6 +1592,123 @@ export type DecisionContext = {
   accountSnapshot: unknown;
   precheck: unknown;
   limitations: string[];
+};
+
+export type MarketRadarResearchScore = {
+  instId: string;
+  asOf: number;
+  observations: number;
+  relativeStrength30dPct: number;
+  volatility20dPct: number;
+  volumeRatio20d?: number | null;
+  trendQuality30d: number;
+  strengthScore: number;
+  lowVolatilityScore: number;
+  activityScore: number;
+  trendQualityScore: number;
+  compositeScore: number;
+  rank: number;
+  modelVersion: string;
+};
+
+export type MarketRadarComponentDelta = {
+  composite: number;
+  strength: number;
+  lowVolatility: number;
+  activity: number;
+  trendQuality: number;
+  liquidity: number;
+};
+
+export type MarketRadarRankChange = {
+  instId: string;
+  currentRank: number;
+  rank1h?: number | null;
+  rankDelta1h?: number | null;
+  rank24h?: number | null;
+  rankDelta24h?: number | null;
+  rank7d?: number | null;
+  rankDelta7d?: number | null;
+  componentDelta24h?: MarketRadarComponentDelta | null;
+};
+
+export type MarketRadarAlertTrigger = {
+  eventId: string;
+  ruleId: string;
+  ruleName: string;
+  kind: "enterTop" | "rankRise" | "activityAbove" | "spreadAbove" | "newListing" | "historyReady";
+  instId: string;
+  currentValue: number;
+  threshold: number;
+  triggeredAt: number;
+};
+
+export type MarketRadarSnapshotResult = {
+  snapshotAt: number;
+  universeSize: number;
+  changes: MarketRadarRankChange[];
+  alerts: MarketRadarAlertTrigger[];
+};
+
+export type MarketRadarValidationHorizon = {
+  horizonDays: number;
+  observations: number;
+  dates: number;
+  rankIc?: number | null;
+  trainingRankIc?: number | null;
+  validationRankIc?: number | null;
+  icStabilityDelta?: number | null;
+  topQuantileReturnPct?: number | null;
+  bottomQuantileReturnPct?: number | null;
+  grossSpreadPct?: number | null;
+  netSpreadAfterCostPct?: number | null;
+  topQuantileWinRatePct?: number | null;
+  topQuantileTurnoverPct?: number | null;
+};
+
+export type MarketRadarValidationRegime = {
+  regime: "up" | "sideways" | "down";
+  horizonDays: number;
+  observations: number;
+  dates: number;
+  rankIc?: number | null;
+  grossSpreadPct?: number | null;
+};
+
+export type MarketRadarValidationReport = {
+  status: "accumulating" | "ready";
+  generatedAt: number;
+  lookbackDays: number;
+  snapshotDates: number;
+  firstSnapshotAt?: number | null;
+  lastSnapshotAt?: number | null;
+  modelVersions: string[];
+  horizons: MarketRadarValidationHorizon[];
+  regimes: MarketRadarValidationRegime[];
+  limitations: string[];
+};
+
+export type MarketRadarSavedItem = {
+  id: string;
+  name: string;
+  definitionJson: string;
+  enabled: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type MarketRadarHistoryStatus = {
+  state: "idle" | "running" | "completed" | "partial" | "failed";
+  phase: "idle" | "preparing" | "daily" | "hourly" | "complete";
+  total: number;
+  completed: number;
+  failed: number;
+  dailyReady: number;
+  hourlyReady: number;
+  currentSymbol?: string | null;
+  message: string;
+  startedAt?: number | null;
+  finishedAt?: number | null;
 };
 
 export type Ticker = {

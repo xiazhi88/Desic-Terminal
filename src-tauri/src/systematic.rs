@@ -9,7 +9,7 @@
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fs,
     io::{BufRead, BufReader, Write},
     path::{Path, PathBuf},
@@ -21,16 +21,25 @@ use std::{
     time::Instant,
 };
 
+use desic_chart_dsl::OhlcvColumns;
+use desic_factor_dsl::{
+    evaluate_panel as evaluate_factor_panel, FactorLimits as FactorDslLimits,
+    PanelInput as FactorPanelInput,
+};
 use desic_systematic::{
-    recommended_backtest_workers, resolve_backtest_position_sizing, resolve_position_sizing,
-    score_kline_blend, BacktestEngine, BacktestJobControl, BacktestMetrics,
+    bucket_turnover, evaluate_verdicts, is_monotonic, overall_level, quantile_spread,
+    quantile_stats, rank_autocorrelation, recommended_backtest_workers,
+    resolve_backtest_position_sizing, resolve_position_sizing, score_kline_blend, spearman_rank_ic,
+    summarize_ic, train_validation_split, BacktestEngine, BacktestJobControl, BacktestMetrics,
     BacktestPositionSizingOutcome, BacktestReport, BacktestRequest, BacktestStatistics, ClosedBar,
-    ClosedTrade, EndOfRunPolicy, EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide,
-    InstrumentContract, KlineBlendFactorDefinition, KlineFactorFeatures, MarginAssumptions,
-    MarketBar, MarketDataWindow, OpenPositionSummary, PositionSizing, ReplaySnapshot,
+    ClosedTrade, EndOfRunPolicy, EquityPoint, ExecutionAssumptions, ExpressionFactorDefinition,
+    FactorDefinition, FactorObservation, Fill, FillReason, FillSide, IcSummary, InstrumentContract,
+    IntendedSign, KlineBlendFactorDefinition, KlineFactorFeatures, MarginAssumptions, MarketBar,
+    MarketDataWindow, OpenPositionSummary, PositionSizing, QuantileStat, ReplaySnapshot,
     StatefulEventDrivenStrategy, StrategyAction, StrategyActionEvent, StrategyContext,
     StrategyContextSnapshot, StrategyExecution, SystematicError, TimeframeAggregator, TradeSide,
-    VirtualPortfolio, VisualRuleDefinition, ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
+    VerdictFinding, VerdictInput, VirtualPortfolio, VisualRuleDefinition,
+    MAX_KLINE_FACTOR_LOOKBACK_BARS, ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
 };
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
@@ -43,7 +52,7 @@ use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{oneshot, Mutex as AsyncMutex, Notify, Semaphore},
-    time::{timeout, Duration},
+    time::{sleep, timeout, Duration},
 };
 
 use super::*;
@@ -100,6 +109,11 @@ const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 12;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMATIC_PYTHON_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
+// Windows Defender and similar endpoint scanners can briefly retain a handle on
+// freshly installed Python launchers. Retrying the same-directory rename avoids
+// treating that transient lock as a broken environment.
+const SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT: usize = 12;
+const SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_DELAY: Duration = Duration::from_millis(250);
 const SYSTEMATIC_PYTHON_RUNNER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const SYSTEMATIC_PYTHON_RUNNER_STDOUT_LIMIT: usize = 8 * 1024 * 1024;
 const SYSTEMATIC_PYTHON_VISIBLE_MARKET_BAR_LIMIT: usize = 20_000;
@@ -685,6 +699,10 @@ pub(crate) struct SystematicFactorView {
     pub factor_id: String,
     pub inst_id: String,
     pub rank: usize,
+    /// Rank under the saved formula, when a preview is compared against it.
+    /// Absent for a saved evaluation or an unchanged formula.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub previous_rank: Option<usize>,
     pub alpha_score: f64,
     pub momentum_pct: f64,
     pub realized_volatility_pct: f64,
@@ -704,7 +722,10 @@ pub(crate) struct SystematicFactorDefinitionView {
     pub version: u32,
     pub status: String,
     pub description: String,
-    pub definition: KlineBlendFactorDefinition,
+    pub definition: FactorDefinition,
+    /// Stable discriminator so the panel can pick an editor without inspecting
+    /// the definition payload.
+    pub kind: String,
     pub source_hash: String,
     pub updated_at: i64,
 }
@@ -1325,7 +1346,6 @@ struct StrategyAiReadSkillResourceInput {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SystematicOverview {
     pub universe: SystematicUniverseView,
-    pub factors: Vec<SystematicFactorView>,
     pub active_factor_id: Option<String>,
     pub factor_definitions: Vec<SystematicFactorDefinitionView>,
     pub strategies: Vec<SystematicStrategyView>,
@@ -1365,11 +1385,343 @@ pub(crate) struct SystematicFactorEvaluateRequest {
     pub factor_id: String,
 }
 
+/// Scores an unsaved definition so weight edits can be judged before they are
+/// committed. Saving to see a ranking was the slowest loop in the removed v1
+/// panel, and it forced a version bump for every experiment.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorPreviewRequest {
+    /// Present when previewing an edit to a stored factor, so the response can
+    /// report rank movement against the saved version.
+    #[serde(default)]
+    pub factor_id: Option<String>,
+    pub definition: Value,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorDeleteRequest {
+    pub factor_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicCaptureUniverseRequest {
+    /// Reference time deciding which instruments have current enough local
+    /// history. Omit to use the live clock.
+    #[serde(default)]
+    pub as_of_ms: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorEvaluationStartRequest {
+    pub factor_id: String,
+    /// Rebalance cadence. Defaults to daily; see the cadence note on the default.
+    #[serde(default)]
+    pub grid_minutes: Option<i64>,
+    #[serde(default)]
+    pub window_days: Option<i64>,
+    #[serde(default)]
+    pub horizons_minutes: Option<Vec<i64>>,
+    #[serde(default)]
+    pub quantile_buckets: Option<usize>,
+    #[serde(default)]
+    pub universe_limit: Option<usize>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorEvaluationCancelRequest {
+    pub evaluation_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorEvaluationListRequest {
+    pub factor_id: String,
+}
+
+/// A stored evaluation.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorEvaluationRecordView {
+    pub id: String,
+    pub factor_id: String,
+    pub factor_version: u32,
+    pub status: String,
+    pub window_start_at: i64,
+    pub window_end_at: i64,
+    pub train_end_at: i64,
+    pub grid_minutes: i64,
+    pub horizons_minutes: Vec<i64>,
+    pub quantile_buckets: usize,
+    pub universe_snapshot_id: String,
+    pub universe_size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub metrics: Option<Value>,
+    pub verdicts: Vec<VerdictFinding>,
+    /// Worst finding level, for a single headline state.
+    pub overall_level: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub created_at: i64,
+}
+
+struct PersistFactorEvaluation<'a> {
+    evaluation_id: &'a str,
+    factor: &'a StoredFactorDefinition,
+    status: &'a str,
+    window_start_at: i64,
+    window_end_at: i64,
+    train_end_at: i64,
+    grid_minutes: i64,
+    horizons: &'a [i64],
+    quantile_buckets: usize,
+    universe_snapshot_id: &'a str,
+    metrics: &'a SystematicFactorEvaluationMetrics,
+    verdicts: &'a [VerdictFinding],
+}
+
+fn persist_factor_evaluation(
+    app: &tauri::AppHandle,
+    input: PersistFactorEvaluation<'_>,
+) -> Result<SystematicFactorEvaluationRecordView, String> {
+    let conn = open_database(app)?;
+    let now = now_ms();
+    let definition_json =
+        serde_json::to_string(&input.factor.definition).map_err(|error| error.to_string())?;
+    let metrics_json = serde_json::to_string(input.metrics).map_err(|error| error.to_string())?;
+    let verdicts_json = serde_json::to_string(input.verdicts).map_err(|error| error.to_string())?;
+    let horizons_json = serde_json::to_string(input.horizons).map_err(|error| error.to_string())?;
+    conn.execute(
+        "INSERT INTO systematic_factor_evaluations(
+           id,factor_id,factor_version,definition_json,source_hash,status,
+           window_start_at,window_end_at,train_end_at,grid_minutes,horizons_json,
+           quantile_buckets,universe_snapshot_id,universe_size,metrics_json,
+           verdicts_json,diagnostics_json,error,created_at,updated_at
+         ) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,'{}',NULL,?17,?17)",
+        params![
+            input.evaluation_id,
+            input.factor.id,
+            input.factor.version as i64,
+            definition_json,
+            input.factor.source_hash,
+            input.status,
+            input.window_start_at,
+            input.window_end_at,
+            input.train_end_at,
+            input.grid_minutes,
+            horizons_json,
+            input.quantile_buckets as i64,
+            input.universe_snapshot_id,
+            input.metrics.universe_size as i64,
+            metrics_json,
+            verdicts_json,
+            now,
+        ],
+    )
+    .map_err(|error| error.to_string())?;
+    load_factor_evaluation(&conn, input.evaluation_id)?
+        .ok_or_else(|| "Stored evaluation was not found".to_string())
+}
+
+fn persist_factor_evaluation_failure(
+    app: &tauri::AppHandle,
+    evaluation_id: &str,
+    factor_id: &str,
+    error_message: &str,
+) -> Result<(), String> {
+    let conn = open_database(app)?;
+    let now = now_ms();
+    conn.execute(
+        "INSERT INTO systematic_factor_evaluations(
+           id,factor_id,factor_version,definition_json,source_hash,status,
+           window_start_at,window_end_at,train_end_at,grid_minutes,horizons_json,
+           quantile_buckets,universe_snapshot_id,universe_size,metrics_json,
+           verdicts_json,diagnostics_json,error,created_at,updated_at
+         ) VALUES(?1,?2,0,'{}','','failed',0,0,0,0,'[]',0,'',0,'{}','[]','{}',?3,?4,?4)",
+        params![evaluation_id, factor_id, error_message, now],
+    )
+    .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+/// Decodes stored verdicts, tolerating a legacy or truncated payload.
+///
+/// A stored evaluation stays readable even if its verdict encoding changes: the
+/// metrics remain the durable record, and verdicts are re-derivable.
+fn parse_verdicts(encoded: String) -> Vec<VerdictFinding> {
+    serde_json::from_str::<Vec<VerdictFinding>>(&encoded).unwrap_or_default()
+}
+
+fn evaluation_row_to_view(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<SystematicFactorEvaluationRecordView> {
+    let horizons_json: String = row.get(8)?;
+    let metrics_json: String = row.get(12)?;
+    let verdicts_json: String = row.get(13)?;
+    // Parse into an owned value before any borrow can escape into the row's
+    // error type.
+    let verdicts = parse_verdicts(verdicts_json);
+    let overall = overall_level(verdicts.as_slice());
+    Ok(SystematicFactorEvaluationRecordView {
+        id: row.get(0)?,
+        factor_id: row.get(1)?,
+        factor_version: row.get::<_, i64>(2)?.max(0) as u32,
+        status: row.get(3)?,
+        window_start_at: row.get(4)?,
+        window_end_at: row.get(5)?,
+        train_end_at: row.get(6)?,
+        grid_minutes: row.get(7)?,
+        horizons_minutes: serde_json::from_str(&horizons_json).unwrap_or_default(),
+        quantile_buckets: row.get::<_, i64>(9)?.max(0) as usize,
+        universe_snapshot_id: row.get(10)?,
+        universe_size: row.get::<_, i64>(11)?.max(0) as usize,
+        metrics: serde_json::from_str::<Value>(&metrics_json).ok(),
+        verdicts,
+        overall_level: serde_json::to_value(overall)
+            .ok()
+            .and_then(|value| value.as_str().map(str::to_string))
+            .unwrap_or_else(|| "pass".to_string()),
+        error: row.get(14)?,
+        created_at: row.get(15)?,
+    })
+}
+
+const FACTOR_EVALUATION_COLUMNS: &str = "id,factor_id,factor_version,status,window_start_at,\
+     window_end_at,train_end_at,grid_minutes,horizons_json,quantile_buckets,\
+     universe_snapshot_id,universe_size,metrics_json,verdicts_json,error,created_at";
+
+fn load_factor_evaluation(
+    conn: &Connection,
+    evaluation_id: &str,
+) -> Result<Option<SystematicFactorEvaluationRecordView>, String> {
+    let sql = format!(
+        "SELECT {FACTOR_EVALUATION_COLUMNS} FROM systematic_factor_evaluations WHERE id=?1"
+    );
+    conn.query_row(&sql, [evaluation_id], evaluation_row_to_view)
+        .optional()
+        .map_err(|error| error.to_string())
+}
+
+fn load_factor_evaluations(
+    conn: &Connection,
+    factor_id: &str,
+) -> Result<Vec<SystematicFactorEvaluationRecordView>, String> {
+    let sql = format!(
+        "SELECT {FACTOR_EVALUATION_COLUMNS} FROM systematic_factor_evaluations
+         WHERE factor_id=?1 ORDER BY created_at DESC LIMIT 50"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([factor_id], evaluation_row_to_view)
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorRepairRequest {
+    pub factor_id: String,
+    /// How many instruments to repair, highest turnover first. Bounded so one
+    /// click cannot start an unbounded download.
+    #[serde(default)]
+    pub limit: Option<usize>,
+}
+
+/// Outcome of one bounded repair pass.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorRepairView {
+    pub factor_id: String,
+    /// Instruments that were missing local history before the pass.
+    pub candidates: usize,
+    /// Instruments actually attempted after applying the limit.
+    pub attempted: usize,
+    pub repaired: usize,
+    pub failed: usize,
+    pub inserted: usize,
+    pub cancelled: bool,
+    /// Days of one-minute history fetched per instrument.
+    ///
+    /// Reported so the panel can explain why a pass takes minutes: the venue
+    /// serves one archive file per instrument-day, and an evaluation needs about
+    /// three months of them.
+    pub days_per_instrument: usize,
+    /// Instruments still needing history after this pass.
+    pub remaining: usize,
+    /// Per-instrument outcomes, in attempt order.
+    pub results: Vec<SystematicFactorRepairResult>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorRepairResult {
+    pub inst_id: String,
+    /// `repaired`, `incomplete`, or `failed`.
+    pub status: String,
+    pub inserted: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Default and ceiling for one repair pass.
+///
+/// Repair now fetches roughly three months of one-minute history per instrument,
+/// because an evaluation needs data at every past grid point rather than only the
+/// most recent lookback. Measured against the venue's daily archive that is about
+/// 97 files and ~2.8 MB compressed per instrument, so a pass of 30 would be
+/// thousands of requests and tens of minutes behind a single click.
+///
+/// The default is therefore small enough to finish in a few minutes and be
+/// repeated deliberately, rather than large enough to look like a hang. The
+/// ceiling stays available for a user who knowingly asks for more.
+const DEFAULT_FACTOR_REPAIR_LIMIT: usize = 8;
+const MAX_FACTOR_REPAIR_LIMIT: usize = 50;
+
+/// Archive files one instrument's repair fetches, for cost reporting.
+///
+/// The venue publishes one-minute candles as one archive per instrument-day, so
+/// this is the request count the UI can state before the user commits.
+fn repair_archive_days(span_bars: usize) -> usize {
+    span_bars.div_ceil(24 * 60)
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct SystematicFactorEvaluationView {
     pub factor_id: String,
+    pub factor_version: u32,
+    pub kind: String,
+    /// Aligned cutoff the scores describe. `None` when no snapshot exists.
+    pub as_of_ms: Option<i64>,
+    pub snapshot_id: Option<String>,
     pub factors: Vec<SystematicFactorView>,
+    /// Absent only when evaluation could not start at all.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<FactorCoverageDiagnostics>,
+    /// Machine-readable blocker so the panel can offer the matching fix rather
+    /// than rendering an unexplained empty table.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
+}
+
+/// Result of scoring an unsaved definition. It carries no id or version because
+/// nothing was persisted.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorPreviewView {
+    pub kind: String,
+    pub as_of_ms: Option<i64>,
+    pub snapshot_id: Option<String>,
+    pub factors: Vec<SystematicFactorView>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<FactorCoverageDiagnostics>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1739,6 +2091,65 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
           source TEXT NOT NULL,
           created_at INTEGER NOT NULL
         );
+        -- Point-in-time instrument registry.
+        --
+        -- The exchange retains nothing about a delisted perpetual: the
+        -- instruments endpoint simply stops listing it, and a delisted
+        -- instrument identifier is indistinguishable from one that never
+        -- existed. Without an accumulating local record, any historical
+        -- cross-sectional study silently restricts itself to instruments that
+        -- happen to still be listed today, which inflates measured performance
+        -- because the delisted names are exactly the ones that failed.
+        --
+        -- Rows are never deleted. A disappearance sets `delisted_at`, which
+        -- keeps the instrument out of the tradable universe while leaving it in
+        -- the historical evaluation sample.
+        -- Factor evaluations: did this factor's ranking precede returns?
+        --
+        -- One row per completed or attempted evaluation. The definition and its
+        -- hash are copied in rather than referenced, because a factor can be
+        -- edited afterwards and a stored result has to keep describing the
+        -- formula it actually measured.
+        CREATE TABLE IF NOT EXISTS systematic_factor_evaluations (
+          id TEXT PRIMARY KEY,
+          factor_id TEXT NOT NULL,
+          factor_version INTEGER NOT NULL,
+          definition_json TEXT NOT NULL,
+          source_hash TEXT NOT NULL,
+          status TEXT NOT NULL,
+          window_start_at INTEGER NOT NULL,
+          window_end_at INTEGER NOT NULL,
+          -- Boundary between the in-sample and out-of-sample halves, matching
+          -- the split the parameter optimiser already uses.
+          train_end_at INTEGER NOT NULL,
+          grid_minutes INTEGER NOT NULL,
+          horizons_json TEXT NOT NULL,
+          quantile_buckets INTEGER NOT NULL,
+          universe_snapshot_id TEXT NOT NULL,
+          universe_size INTEGER NOT NULL,
+          metrics_json TEXT NOT NULL,
+          verdicts_json TEXT NOT NULL,
+          diagnostics_json TEXT NOT NULL,
+          error TEXT,
+          created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS systematic_instrument_registry (
+          inst_id TEXT PRIMARY KEY,
+          first_seen_at INTEGER NOT NULL,
+          last_seen_at INTEGER NOT NULL,
+          -- crypto | tradfi | index | unknown
+          asset_class TEXT NOT NULL,
+          -- Raw exchange fields, retained so classification can be revised
+          -- later without re-deriving it from a lossy label.
+          inst_family TEXT NOT NULL DEFAULT '',
+          ct_type TEXT NOT NULL DEFAULT '',
+          base_ccy TEXT NOT NULL DEFAULT '',
+          state TEXT NOT NULL DEFAULT '',
+          exp_time INTEGER,
+          delisted_at INTEGER,
+          updated_at INTEGER NOT NULL
+        );
         CREATE TABLE IF NOT EXISTS systematic_data_snapshots (
           id TEXT PRIMARY KEY,
           inst_id TEXT NOT NULL,
@@ -1932,6 +2343,10 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
           ON systematic_universe_snapshots(created_at DESC);
         CREATE INDEX IF NOT EXISTS idx_systematic_factors_updated
           ON systematic_factor_definitions(updated_at DESC, name COLLATE NOCASE ASC);
+        CREATE INDEX IF NOT EXISTS idx_systematic_instrument_registry_alive
+          ON systematic_instrument_registry(delisted_at, asset_class);
+        CREATE INDEX IF NOT EXISTS idx_systematic_factor_evaluations_factor
+          ON systematic_factor_evaluations(factor_id, created_at DESC);
         ",
     )
     .map_err(|error| error.to_string())?;
@@ -2032,8 +2447,9 @@ pub(crate) fn migrate_systematic(conn: &Connection) -> Result<(), String> {
     .map_err(|error| error.to_string())?;
 
     let now = now_ms();
-    let factor_id = "builtin-kline-blend-v1";
-    let factor_definition = KlineBlendFactorDefinition::baseline(factor_id);
+    let factor_id = BUILTIN_KLINE_FACTOR_ID;
+    let factor_definition =
+        FactorDefinition::KlineBlend(KlineBlendFactorDefinition::baseline(factor_id));
     let factor_definition_json =
         serde_json::to_string(&factor_definition).map_err(|error| error.to_string())?;
     let factor_source_hash = sha256_bytes(factor_definition_json.as_bytes());
@@ -2323,22 +2739,23 @@ pub(crate) async fn systematic_overview(
     run_systematic_blocking(move || {
         let conn = open_read_database(&app)?;
         let universe = load_latest_universe(&conn)?;
+        // Factor scoring is deliberately absent here. Scoring an aligned
+        // universe reads a bounded K-line tail per eligible instrument, and the
+        // research page polls this command while any run is in flight, so
+        // computing it on every overview load costs a full cross-sectional pass
+        // that no consumer reads. Ranked rows are produced only by the explicit
+        // preview/evaluate commands.
         let factor_definitions = load_factor_definitions(&conn)?;
         let active_factor = factor_definitions
             .iter()
             .find(|factor| factor.status == "research")
             .or_else(|| factor_definitions.first());
-        let factors = match (universe.as_ref(), active_factor) {
-            (Some(snapshot), Some(factor)) => compute_factor_rows(&conn, snapshot, factor)?,
-            _ => Vec::new(),
-        };
         let backtests_page = load_backtest_page(&conn, 1, SYSTEMATIC_BACKTEST_HISTORY_PAGE_SIZE)?;
         Ok(SystematicOverview {
             universe: universe
                 .as_ref()
                 .map(|snapshot| snapshot.view())
                 .unwrap_or_else(empty_universe_view),
-            factors,
             active_factor_id: active_factor.map(|factor| factor.id.clone()),
             factor_definitions: factor_definitions
                 .iter()
@@ -2379,9 +2796,12 @@ pub(crate) async fn systematic_backtests_page(
 #[tauri::command]
 pub(crate) async fn systematic_capture_universe_snapshot(
     app: tauri::AppHandle,
+    request: Option<SystematicCaptureUniverseRequest>,
 ) -> Result<SystematicUniverseView, String> {
     let app_for_work = app.clone();
-    let view = run_systematic_blocking(move || capture_universe_snapshot(&app_for_work)).await?;
+    let as_of_ms = request.and_then(|request| request.as_of_ms);
+    let view =
+        run_systematic_blocking(move || capture_universe_snapshot(&app_for_work, as_of_ms)).await?;
     emit_systematic_event(
         &app,
         json!({
@@ -2407,7 +2827,7 @@ pub(crate) async fn systematic_factor_create_default(
                 .unwrap_or("Closed-bar K-line factor"),
         )?;
         let code = unique_factor_code(&app, "KLINE")?;
-        let definition = KlineBlendFactorDefinition::baseline(&id);
+        let definition = FactorDefinition::KlineBlend(KlineBlendFactorDefinition::baseline(&id));
         save_factor_definition(&app, None, &id, &name, &code, "", definition, "draft")
     })
     .await
@@ -2426,8 +2846,8 @@ pub(crate) async fn systematic_factor_save(
         let code = normalize_factor_code(&request.code)?;
         let description = normalize_factor_description(&request.description)?;
         let status = normalize_factor_status(request.status.as_deref().unwrap_or("draft"))?;
-        let definition = serde_json::from_value::<KlineBlendFactorDefinition>(request.definition)
-            .map_err(|error| format!("K-line factor definition is invalid: {error}"))?
+        let definition = serde_json::from_value::<FactorDefinition>(request.definition)
+            .map_err(|error| format!("Factor definition is invalid: {error}"))?
             .with_factor_id(&id);
         save_factor_definition(
             &app_for_work,
@@ -2459,19 +2879,846 @@ pub(crate) async fn systematic_factor_evaluate(
 ) -> Result<SystematicFactorEvaluationView, String> {
     run_systematic_blocking(move || {
         validate_id(&request.factor_id, "factor ID")?;
+        // Capture first: it needs the writable handle, and the read handle below
+        // must observe the result.
+        let snapshot = ensure_universe_snapshot(&app)?;
         let conn = open_read_database(&app)?;
         let factor = load_factor_definition(&conn, &request.factor_id)?
             .ok_or_else(|| "Factor definition was not found".to_string())?;
-        let factors = match load_latest_universe(&conn)? {
-            Some(snapshot) => compute_factor_rows(&conn, &snapshot, &factor)?,
-            None => Vec::new(),
+        // A missing snapshot is a distinct, actionable state: v1 returned an
+        // empty row set here, which the UI could not tell apart from a universe
+        // where every instrument lacked local history.
+        let Some(snapshot) = snapshot else {
+            return Ok(SystematicFactorEvaluationView {
+                factor_id: factor.id,
+                factor_version: factor.version,
+                kind: factor.definition.kind_label().to_string(),
+                as_of_ms: None,
+                snapshot_id: None,
+                factors: Vec::new(),
+                diagnostics: None,
+                unavailable_reason: Some("noUniverseSnapshot".to_string()),
+            });
         };
+        let (factors, diagnostics) = compute_factor_rows(&conn, &snapshot, &factor)?;
         Ok(SystematicFactorEvaluationView {
             factor_id: factor.id,
+            factor_version: factor.version,
+            kind: factor.definition.kind_label().to_string(),
+            as_of_ms: snapshot.cutoff_at,
+            snapshot_id: Some(snapshot.id.clone()),
             factors,
+            diagnostics: Some(diagnostics),
+            unavailable_reason: None,
         })
     })
     .await
+}
+
+/// Scores a definition that has not been saved.
+///
+/// This is deliberately read-only: it opens the read database, never writes a
+/// definition row, and never bumps a version. It exists so adjusting a formula
+/// can be judged from the resulting ranking instead of from the numbers alone.
+#[tauri::command]
+pub(crate) async fn systematic_factor_preview(
+    app: tauri::AppHandle,
+    request: SystematicFactorPreviewRequest,
+) -> Result<SystematicFactorPreviewView, String> {
+    run_systematic_blocking(move || {
+        // A preview is anonymous unless it edits a stored factor, so the id is
+        // only used to look up the saved ranking for comparison.
+        let factor_id = match request.factor_id.as_deref() {
+            Some(value) => {
+                validate_id(value, "factor ID")?;
+                Some(value.to_string())
+            }
+            None => None,
+        };
+        let preview_id = factor_id.clone().unwrap_or_else(|| "preview".to_string());
+        let definition = serde_json::from_value::<FactorDefinition>(request.definition)
+            .map_err(|error| format!("Factor definition is invalid: {error}"))?
+            .with_factor_id(&preview_id);
+        definition
+            .validate()
+            .map_err(|error| format!("Factor definition is invalid: {error}"))?;
+
+        let snapshot = ensure_universe_snapshot(&app)?;
+        let conn = open_read_database(&app)?;
+        let Some(snapshot) = snapshot else {
+            return Ok(SystematicFactorPreviewView {
+                kind: definition.kind_label().to_string(),
+                as_of_ms: None,
+                snapshot_id: None,
+                factors: Vec::new(),
+                diagnostics: None,
+                unavailable_reason: Some("noUniverseSnapshot".to_string()),
+            });
+        };
+
+        // `compute_factor_rows` takes a stored row, so wrap the candidate in a
+        // transient one. Nothing here reaches the database.
+        let candidate = StoredFactorDefinition {
+            id: preview_id,
+            code: String::new(),
+            name: String::new(),
+            version: 0,
+            status: "draft".to_string(),
+            description: String::new(),
+            definition,
+            source_hash: String::new(),
+            updated_at: now_ms(),
+        };
+        let (mut factors, diagnostics) = compute_factor_rows(&conn, &snapshot, &candidate)?;
+
+        // Rank movement is only meaningful against a saved formula.
+        if let Some(factor_id) = factor_id.as_deref() {
+            if let Some(saved) = load_factor_definition(&conn, factor_id)? {
+                if saved.definition != candidate.definition {
+                    let (saved_rows, _) = compute_factor_rows(&conn, &snapshot, &saved)?;
+                    let saved_ranks = saved_rows
+                        .iter()
+                        .map(|row| (row.inst_id.clone(), row.rank))
+                        .collect::<HashMap<_, _>>();
+                    for row in &mut factors {
+                        row.previous_rank = saved_ranks.get(&row.inst_id).copied();
+                    }
+                }
+            }
+        }
+
+        Ok(SystematicFactorPreviewView {
+            kind: candidate.definition.kind_label().to_string(),
+            as_of_ms: snapshot.cutoff_at,
+            snapshot_id: Some(snapshot.id.clone()),
+            factors,
+            diagnostics: Some(diagnostics),
+            unavailable_reason: None,
+        })
+    })
+    .await
+}
+
+/// Deletes a local factor definition.
+///
+/// The seeded built-in is refused: it is recreated by the schema migration, so
+/// deleting it would reappear on the next launch and confuse the library.
+#[tauri::command]
+pub(crate) async fn systematic_factor_delete(
+    app: tauri::AppHandle,
+    request: SystematicFactorDeleteRequest,
+) -> Result<(), String> {
+    let app_for_event = app.clone();
+    let factor_id = request.factor_id.clone();
+    run_systematic_blocking(move || {
+        validate_id(&request.factor_id, "factor ID")?;
+        if request.factor_id == BUILTIN_KLINE_FACTOR_ID {
+            return Err(
+                "The built-in K-line factor cannot be deleted. Duplicate it and edit the copy instead."
+                    .to_string(),
+            );
+        }
+        let conn = open_database(&app)?;
+        let removed = conn
+            .execute(
+                "DELETE FROM systematic_factor_definitions WHERE id=?1",
+                [&request.factor_id],
+            )
+            .map_err(|error| error.to_string())?;
+        if removed == 0 {
+            return Err("Factor definition was not found".to_string());
+        }
+        Ok(())
+    })
+    .await?;
+    emit_systematic_event(
+        &app_for_event,
+        json!({
+            "type": "factorDeleted",
+            "factorId": factor_id,
+            "timestamp": now_ms(),
+        }),
+    );
+    Ok(())
+}
+
+/// Downloads the local one-minute history a factor needs but does not have.
+///
+/// This closes the gap that made the removed panel a dead end: an instrument
+/// without enough local history was dropped from the ranking with no way to act
+/// on it. Backtests already had this loop through `sync_kline_window`; factor
+/// research now uses the same machinery.
+///
+/// The pass is deliberately bounded and cancellable. It repairs the highest
+/// turnover instruments first, because those are the ones a cross-sectional
+/// ranking is actually usable on.
+#[tauri::command]
+pub(crate) async fn systematic_factor_repair_data(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, SystematicRuntime>,
+    request: SystematicFactorRepairRequest,
+) -> Result<SystematicFactorRepairView, String> {
+    let factor_id = request.factor_id.clone();
+    validate_id(&factor_id, "factor ID")?;
+    let limit = request
+        .limit
+        .unwrap_or(DEFAULT_FACTOR_REPAIR_LIMIT)
+        .clamp(1, MAX_FACTOR_REPAIR_LIMIT);
+
+    // Plan against a snapshot so the instruments repaired are exactly the ones
+    // the ranking excluded.
+    let app_for_plan = app.clone();
+    let factor_id_for_plan = factor_id.clone();
+    let plan = run_systematic_blocking(move || {
+        let snapshot = ensure_universe_snapshot(&app_for_plan)?;
+        let conn = open_read_database(&app_for_plan)?;
+        let factor = load_factor_definition(&conn, &factor_id_for_plan)?
+            .ok_or_else(|| "Factor definition was not found".to_string())?;
+        let Some(snapshot) = snapshot else {
+            return Err(
+                "No instrument universe is available yet. Refresh market resources and try again."
+                    .to_string(),
+            );
+        };
+        Ok(plan_factor_repair_targets(
+            &conn, &snapshot, &factor, limit,
+        )?)
+    })
+    .await?;
+
+    if plan.targets.is_empty() {
+        return Ok(SystematicFactorRepairView {
+            factor_id,
+            candidates: plan.candidates,
+            attempted: 0,
+            repaired: 0,
+            failed: 0,
+            inserted: 0,
+            cancelled: false,
+            days_per_instrument: plan.days_per_instrument,
+            remaining: plan.candidates,
+            results: Vec::new(),
+        });
+    }
+
+    // Reuse the backtest job control so this pass is cancellable and reports
+    // progress through the same state machine.
+    let control = BacktestJobControl::new(plan.targets.len() as u64);
+    let job_id = format!("factor-repair:{factor_id}");
+    {
+        let mut jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        // A second pass for the same factor would download the same windows.
+        if jobs.contains_key(&job_id) {
+            return Err("A data repair for this factor is already running".to_string());
+        }
+        jobs.insert(job_id.clone(), control.clone());
+    }
+    control.start();
+    let token = control.cancellation_token();
+
+    emit_systematic_event(
+        &app,
+        json!({
+            "type": "factorDataSync",
+            "status": "running",
+            "factorId": factor_id,
+            "completed": 0,
+            "total": plan.targets.len(),
+            "timestamp": now_ms(),
+        }),
+    );
+
+    let mut results: Vec<SystematicFactorRepairResult> = Vec::new();
+    let mut inserted_total = 0_usize;
+    let mut repaired = 0_usize;
+    let mut failed = 0_usize;
+    let mut cancelled = false;
+
+    for (index, target) in plan.targets.iter().enumerate() {
+        if token.is_cancelled() {
+            cancelled = true;
+            break;
+        }
+        emit_systematic_event(
+            &app,
+            json!({
+                "type": "factorDataSync",
+                "status": "running",
+                "factorId": factor_id,
+                "instId": target.inst_id,
+                "completed": index,
+                "total": plan.targets.len(),
+                "timestamp": now_ms(),
+            }),
+        );
+        match sync_kline_window(
+            &app,
+            &target.inst_id,
+            SYSTEMATIC_INTERVAL,
+            target.start_open,
+            target.end_open,
+        )
+        .await
+        {
+            Ok(report) => {
+                inserted_total = inserted_total.saturating_add(report.inserted);
+                // A completed sync can still leave holes the exchange never
+                // served; report that separately from an outright failure.
+                let complete =
+                    report.status == "complete" && report.missing == 0 && report.invalid == 0;
+                if complete {
+                    repaired += 1;
+                } else {
+                    failed += 1;
+                }
+                results.push(SystematicFactorRepairResult {
+                    inst_id: target.inst_id.clone(),
+                    status: if complete { "repaired" } else { "incomplete" }.to_string(),
+                    inserted: report.inserted,
+                    error: if complete {
+                        None
+                    } else {
+                        Some(report.message.clone())
+                    },
+                });
+            }
+            Err(error) => {
+                failed += 1;
+                results.push(SystematicFactorRepairResult {
+                    inst_id: target.inst_id.clone(),
+                    status: "failed".to_string(),
+                    inserted: 0,
+                    error: Some(error),
+                });
+            }
+        }
+        control.record_progress((index + 1) as u64);
+    }
+
+    control.complete();
+    {
+        let mut jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        jobs.remove(&job_id);
+    }
+
+    emit_systematic_event(
+        &app,
+        json!({
+            "type": "factorDataSync",
+            "status": if cancelled { "cancelled" } else { "completed" },
+            "factorId": factor_id,
+            "completed": results.len(),
+            "total": plan.targets.len(),
+            "repaired": repaired,
+            "failed": failed,
+            "inserted": inserted_total,
+            "timestamp": now_ms(),
+        }),
+    );
+
+    Ok(SystematicFactorRepairView {
+        factor_id,
+        candidates: plan.candidates,
+        attempted: results.len(),
+        repaired,
+        failed,
+        inserted: inserted_total,
+        cancelled,
+        days_per_instrument: plan.days_per_instrument,
+        // What is left to do, so the panel can say whether another pass is needed
+        // instead of leaving the user to compare two numbers.
+        remaining: plan.candidates.saturating_sub(repaired),
+        results,
+    })
+}
+
+/// Runs a factor evaluation and stores the result.
+///
+/// This is the step that turns a ranking into evidence. Without it a factor is a
+/// sorted list with no indication of whether the ordering means anything, which
+/// is the state the previous implementation never left.
+#[tauri::command]
+pub(crate) async fn systematic_factor_evaluation_start(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, SystematicRuntime>,
+    request: SystematicFactorEvaluationStartRequest,
+) -> Result<SystematicFactorEvaluationRecordView, String> {
+    let factor_id = request.factor_id.clone();
+    validate_id(&factor_id, "factor ID")?;
+
+    let grid_minutes = request
+        .grid_minutes
+        .unwrap_or(DEFAULT_FACTOR_GRID_MINUTES)
+        .clamp(MIN_FACTOR_GRID_MINUTES, MAX_FACTOR_GRID_MINUTES);
+    let buckets = request
+        .quantile_buckets
+        .unwrap_or(DEFAULT_FACTOR_QUANTILE_BUCKETS)
+        .clamp(2, MAX_FACTOR_QUANTILE_BUCKETS);
+    let universe_limit = request
+        .universe_limit
+        .unwrap_or(DEFAULT_FACTOR_EVALUATION_UNIVERSE)
+        .clamp(
+            MIN_CROSS_SECTION_FOR_EVALUATION,
+            MAX_FACTOR_EVALUATION_UNIVERSE,
+        );
+    let horizons = match request.horizons_minutes.as_ref() {
+        Some(values) if !values.is_empty() => {
+            let mut horizons = values
+                .iter()
+                .copied()
+                .filter(|value| *value > 0)
+                .collect::<Vec<_>>();
+            horizons.sort_unstable();
+            horizons.dedup();
+            if horizons.is_empty() {
+                return Err("At least one positive forward horizon is required".to_string());
+            }
+            horizons
+        }
+        _ => DEFAULT_FACTOR_HORIZONS_MINUTES.to_vec(),
+    };
+
+    let days = request
+        .window_days
+        .unwrap_or(DEFAULT_FACTOR_EVALUATION_DAYS)
+        .clamp(7, MAX_FACTOR_EVALUATION_DAYS);
+    // Data is available up to a cutoff clear of the live edge, so the newest bars
+    // have settled.
+    let data_end_open = default_research_cutoff_ms(now_ms()).saturating_sub(ONE_MINUTE_MS);
+    let longest_horizon = horizons.iter().copied().max().unwrap_or(0);
+    // The last grid point has to sit at least one longest-horizon before the data
+    // edge, or its forward return cannot be known and the point contributes
+    // nothing. Ending the grid at the data edge meant every point failed its
+    // longest horizon, and with a single horizon that produced no measurable IC at
+    // all while reporting only "not enough valid points".
+    let window_end_open = data_end_open
+        .saturating_sub(longest_horizon * ONE_MINUTE_MS)
+        .max(0);
+    let window_start_open = window_end_open
+        .saturating_sub(days * 24 * 60 * ONE_MINUTE_MS)
+        .max(0);
+    if window_end_open <= window_start_open {
+        return Err(format!(
+            "The evaluation window is too short for a {longest_horizon}-minute forward horizon. Shorten the horizon or lengthen the window."
+        ));
+    }
+
+    let evaluation_id = systematic_id("factorEval");
+    let job_id = format!("factor-eval:{evaluation_id}");
+    let expected_points =
+        grid_cutoffs(window_start_open, window_end_open, grid_minutes).len() as u64;
+    let control = BacktestJobControl::new(expected_points.max(1));
+    {
+        let mut jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        jobs.insert(job_id.clone(), control.clone());
+    }
+    control.start();
+
+    emit_systematic_event(
+        &app,
+        json!({
+            "type": "factorEvaluationProgress",
+            "status": "running",
+            "factorId": factor_id,
+            "evaluationId": evaluation_id,
+            "completed": 0,
+            "total": expected_points,
+            "timestamp": now_ms(),
+        }),
+    );
+
+    let app_for_work = app.clone();
+    let evaluation_id_for_work = evaluation_id.clone();
+    let factor_id_for_work = factor_id.clone();
+    let horizons_for_work = horizons.clone();
+    let control_for_work = control.clone();
+    let outcome = run_systematic_blocking(move || {
+        let snapshot = ensure_universe_snapshot(&app_for_work)?;
+        let conn = open_read_database(&app_for_work)?;
+        let factor = load_factor_definition(&conn, &factor_id_for_work)?
+            .ok_or_else(|| "Factor definition was not found".to_string())?;
+        let Some(snapshot) = snapshot else {
+            return Err(
+                "No instrument universe is available yet. Refresh market resources and try again."
+                    .to_string(),
+            );
+        };
+        let (points, universe_size, skipped_sparse) = build_factor_grid(
+            &conn,
+            &snapshot,
+            &factor,
+            window_start_open,
+            window_end_open,
+            data_end_open,
+            grid_minutes,
+            &horizons_for_work,
+            universe_limit,
+            Some(&control_for_work),
+        )?;
+        // A grid that produced nothing needs a specific explanation. The common
+        // cause is depth, not a broken factor: instruments repaired only far
+        // enough to rank the current bar have no history at a cutoff months back,
+        // so every point is discarded. Saying "not enough valid points" leaves the
+        // user unable to tell that from a factor that genuinely does not work.
+        if points.is_empty() && skipped_sparse > 0 {
+            return Err(format!(
+                "All {skipped_sparse} evaluation points were discarded because too few instruments had history at those past times. An evaluation needs roughly {} days of 1-minute bars per instrument, while ranking needs only the most recent lookback. Repair data for more instruments, or shorten the evaluation window.",
+                (window_end_open - window_start_open) / (24 * 60 * ONE_MINUTE_MS)
+            ));
+        }
+        let metrics = summarize_factor_grid(
+            &points,
+            &horizons_for_work,
+            buckets,
+            grid_minutes,
+            universe_size,
+            skipped_sparse,
+        );
+        let train_end_at = points
+            .len()
+            .checked_mul(7)
+            .map(|value| value / 10)
+            .and_then(|index| points.get(index.saturating_sub(1)))
+            .map(|point| point.as_of_ms)
+            .unwrap_or(window_end_open);
+        Ok((factor, snapshot, metrics, train_end_at, evaluation_id_for_work))
+    })
+    .await;
+
+    control.complete();
+    {
+        let mut jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        jobs.remove(&job_id);
+    }
+    let cancelled = control.cancellation_token().is_cancelled();
+
+    let (factor, snapshot, metrics, train_end_at, _) = match outcome {
+        Ok(values) => values,
+        Err(error) => {
+            persist_factor_evaluation_failure(&app, &evaluation_id, &factor_id, &error)?;
+            emit_systematic_event(
+                &app,
+                json!({
+                    "type": "factorEvaluationProgress",
+                    "status": "failed",
+                    "factorId": factor_id,
+                    "evaluationId": evaluation_id,
+                    "error": error,
+                    "timestamp": now_ms(),
+                }),
+            );
+            return Err(error);
+        }
+    };
+
+    // Verdicts are derived from the primary horizon: the shortest one, which is
+    // the cadence the factor would actually be traded at.
+    let primary = metrics.horizons.first();
+    let verdict_input = VerdictInput {
+        intended_sign: IntendedSign::Unspecified,
+        train_ic: primary.and_then(|horizon| horizon.train_ic.clone()),
+        validation_ic: primary.and_then(|horizon| horizon.validation_ic.clone()),
+        quantiles: primary
+            .map(|horizon| horizon.quantiles.clone())
+            .unwrap_or_default(),
+        rank_autocorrelation: metrics.rank_autocorrelation,
+        turnover: metrics.top_bucket_turnover,
+        annualised_cost_at_full_turnover: Some(metrics.annualised_cost_at_full_turnover),
+        sharpe: None,
+        min_cross_section: metrics.min_cross_section,
+        buckets,
+        dropped_pct: if metrics.universe_size == 0 {
+            0.0
+        } else {
+            1.0 - (metrics.min_cross_section as f64 / metrics.universe_size as f64)
+        },
+        trials: 0,
+    };
+    let verdicts = evaluate_verdicts(&verdict_input);
+    let status = if cancelled { "cancelled" } else { "completed" };
+
+    let view = persist_factor_evaluation(
+        &app,
+        PersistFactorEvaluation {
+            evaluation_id: &evaluation_id,
+            factor: &factor,
+            status,
+            window_start_at: window_start_open,
+            window_end_at: window_end_open,
+            train_end_at,
+            grid_minutes,
+            horizons: &horizons,
+            quantile_buckets: buckets,
+            universe_snapshot_id: &snapshot.id,
+            metrics: &metrics,
+            verdicts: &verdicts,
+        },
+    )?;
+
+    emit_systematic_event(
+        &app,
+        json!({
+            "type": "factorEvaluationProgress",
+            "status": status,
+            "factorId": factor_id,
+            "evaluationId": evaluation_id,
+            "completed": metrics.grid_points,
+            "total": expected_points,
+            "timestamp": now_ms(),
+        }),
+    );
+    Ok(view)
+}
+
+/// Cancels a running factor evaluation.
+#[tauri::command]
+pub(crate) async fn systematic_factor_evaluation_cancel(
+    runtime: tauri::State<'_, SystematicRuntime>,
+    request: SystematicFactorEvaluationCancelRequest,
+) -> Result<(), String> {
+    validate_id(&request.evaluation_id, "evaluation ID")?;
+    let job_id = format!("factor-eval:{}", request.evaluation_id);
+    let control = {
+        let jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        jobs.get(&job_id).cloned()
+    };
+    match control {
+        Some(control) => {
+            control.request_cancel();
+            Ok(())
+        }
+        None => Err("No evaluation is running with that identifier".to_string()),
+    }
+}
+
+/// Lists stored evaluations for a factor, newest first.
+#[tauri::command]
+pub(crate) async fn systematic_factor_evaluation_list(
+    app: tauri::AppHandle,
+    request: SystematicFactorEvaluationListRequest,
+) -> Result<Vec<SystematicFactorEvaluationRecordView>, String> {
+    run_systematic_blocking(move || {
+        validate_id(&request.factor_id, "factor ID")?;
+        let conn = open_read_database(&app)?;
+        load_factor_evaluations(&conn, &request.factor_id)
+    })
+    .await
+}
+
+/// What a factor builder may offer: sources, operators, and starting presets.
+///
+/// Published from the evaluator's own crate so the builder cannot offer something
+/// the evaluator would reject. A duplicated frontend list would drift, and the
+/// mismatch would only appear when a user tried to save.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorBuilderCatalogueView {
+    pub sources: Vec<desic_factor_dsl::SourceDescriptor>,
+    pub operators: Vec<desic_factor_dsl::OperatorDescriptor>,
+    pub presets: Vec<SystematicFactorPresetView>,
+    /// Largest window any single stage or source may request.
+    pub max_window_bars: usize,
+    pub max_pipeline_stages: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorPresetView {
+    pub id: String,
+    pub label_en: String,
+    pub label_zh: String,
+    /// Direction the published evidence supports, so the report can judge the
+    /// sign against intent rather than assuming positive.
+    pub expected_sign: String,
+    pub expression: Value,
+}
+
+#[tauri::command]
+pub(crate) async fn systematic_factor_builder_catalogue(
+) -> Result<SystematicFactorBuilderCatalogueView, String> {
+    let presets = desic_factor_dsl::builtin_presets()
+        .into_iter()
+        .map(|preset| {
+            Ok(SystematicFactorPresetView {
+                id: preset.id.to_string(),
+                label_en: preset.label_en.to_string(),
+                label_zh: preset.label_zh.to_string(),
+                expected_sign: serde_json::to_value(preset.expected_sign)
+                    .ok()
+                    .and_then(|value| value.as_str().map(str::to_string))
+                    .unwrap_or_else(|| "unknown".to_string()),
+                expression: serde_json::to_value(&preset.expression)
+                    .map_err(|error| error.to_string())?,
+            })
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok(SystematicFactorBuilderCatalogueView {
+        sources: desic_factor_dsl::source_catalogue(),
+        operators: desic_factor_dsl::operator_catalogue(),
+        presets,
+        max_window_bars: MAX_KLINE_FACTOR_LOOKBACK_BARS,
+        max_pipeline_stages: desic_factor_dsl::MAX_CROSS_SECTION_OPS,
+    })
+}
+
+/// Assembles a factor expression from builder selections.
+///
+/// The host owns translation from selections to an expression, so the frontend
+/// never has to construct the abstract syntax tree by hand. Hand-authored JSON
+/// was the failure mode of the previous editor: it exposed the representation
+/// instead of the decision.
+#[tauri::command]
+pub(crate) async fn systematic_factor_compose_expression(
+    request: SystematicFactorComposeRequest,
+) -> Result<Value, String> {
+    let series = desic_factor_dsl::source_expression(&request.source_id, request.source_window)
+        .ok_or_else(|| format!("Unknown factor source: {}", request.source_id))?;
+    let mut pipeline = Vec::new();
+    for stage in &request.stages {
+        pipeline.push(compose_stage(stage)?);
+    }
+    let expression = desic_factor_dsl::FactorExpression { series, pipeline };
+    // Validate here so the builder can surface the same message the evaluator
+    // would produce, before anything is saved.
+    expression
+        .validate(desic_factor_dsl::FactorLimits::default())
+        .map_err(|error| error.to_string())?;
+    if !expression.has_cross_section() {
+        return Err(
+            "A factor needs at least one cross-sectional stage, otherwise its scores cannot be compared between instruments."
+                .to_string(),
+        );
+    }
+    serde_json::to_value(&expression).map_err(|error| error.to_string())
+}
+
+fn compose_stage(
+    stage: &SystematicFactorComposeStage,
+) -> Result<desic_factor_dsl::FactorStage, String> {
+    use desic_factor_dsl::{CrossSectionOp, FactorStage, TimeSeriesOp, WinsorizeMethod};
+    let window = stage
+        .window
+        .unwrap_or(60)
+        .clamp(2, MAX_KLINE_FACTOR_LOOKBACK_BARS);
+    let ascending = stage.ascending.unwrap_or(true);
+    let op = match stage.op.as_str() {
+        "csRank" => FactorStage::CrossSection {
+            op: CrossSectionOp::CsRank { ascending },
+        },
+        "csZscore" => FactorStage::CrossSection {
+            op: CrossSectionOp::CsZscore,
+        },
+        "csDemean" => FactorStage::CrossSection {
+            op: CrossSectionOp::CsDemean,
+        },
+        "csScale" => FactorStage::CrossSection {
+            op: CrossSectionOp::CsScale,
+        },
+        "csWinsorize" => FactorStage::CrossSection {
+            op: CrossSectionOp::CsWinsorize {
+                method: WinsorizeMethod::Mad { scale: 3.0 },
+            },
+        },
+        "tsRank" => FactorStage::TimeSeries {
+            op: TimeSeriesOp::TsRank { window },
+        },
+        "tsMean" => FactorStage::TimeSeries {
+            op: TimeSeriesOp::TsMean { window },
+        },
+        "tsZscore" => FactorStage::TimeSeries {
+            op: TimeSeriesOp::TsZscore { window },
+        },
+        "tsStd" => FactorStage::TimeSeries {
+            op: TimeSeriesOp::TsStd { window },
+        },
+        "delta" => FactorStage::TimeSeries {
+            op: TimeSeriesOp::Delta { bars: window },
+        },
+        other => return Err(format!("Unknown factor operator: {other}")),
+    };
+    Ok(op)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorComposeRequest {
+    pub source_id: String,
+    pub source_window: usize,
+    #[serde(default)]
+    pub stages: Vec<SystematicFactorComposeStage>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorComposeStage {
+    pub op: String,
+    #[serde(default)]
+    pub window: Option<usize>,
+    #[serde(default)]
+    pub ascending: Option<bool>,
+}
+
+/// Records the currently listed perpetuals into the point-in-time registry.
+///
+/// Safe to call repeatedly; it is idempotent within a snapshot interval. The
+/// registry only grows, so calling it more often costs nothing but improves the
+/// resolution of the recorded life windows.
+#[tauri::command]
+pub(crate) async fn systematic_instrument_registry_snapshot(
+    app: tauri::AppHandle,
+) -> Result<SystematicInstrumentRegistryView, String> {
+    run_systematic_blocking(move || snapshot_instrument_registry(&app)).await
+}
+
+/// Reads the accumulated registry without recording a new observation.
+#[tauri::command]
+pub(crate) async fn systematic_instrument_registry_summary(
+    app: tauri::AppHandle,
+) -> Result<SystematicInstrumentRegistryView, String> {
+    run_systematic_blocking(move || {
+        let conn = open_read_database(&app)?;
+        load_instrument_registry_view(&conn)
+    })
+    .await
+}
+
+/// Cancels a running factor data repair.
+#[tauri::command]
+pub(crate) async fn systematic_factor_repair_cancel(
+    runtime: tauri::State<'_, SystematicRuntime>,
+    request: SystematicFactorDeleteRequest,
+) -> Result<(), String> {
+    validate_id(&request.factor_id, "factor ID")?;
+    let job_id = format!("factor-repair:{}", request.factor_id);
+    let control = {
+        let jobs = runtime
+            .jobs
+            .lock()
+            .map_err(|_| "Systematic job queue lock is unavailable".to_string())?;
+        jobs.get(&job_id).cloned()
+    };
+    match control {
+        Some(control) => {
+            control.request_cancel();
+            Ok(())
+        }
+        None => Err("No data repair is running for this factor".to_string()),
+    }
 }
 
 /// Runs only the application-owned Python protocol fixture. The production
@@ -5414,39 +6661,382 @@ where
     }
 }
 
-fn capture_universe_snapshot(app: &tauri::AppHandle) -> Result<SystematicUniverseView, String> {
+/// Cutoff used when a caller does not supply one: the most recent whole hour
+/// that is already at least an hour old. This matches the backtest convention of
+/// staying clear of the live edge so local one-minute history has settled.
+fn default_research_cutoff_ms(now: i64) -> i64 {
+    let hour_ms = 60 * ONE_MINUTE_MS;
+    let floored = now - now.rem_euclid(hour_ms);
+    floored.saturating_sub(hour_ms).max(0)
+}
+
+/// Summary of one registry snapshot pass.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicInstrumentRegistryView {
+    pub total_known: usize,
+    pub live: usize,
+    pub delisted: usize,
+    pub crypto: usize,
+    pub tradfi: usize,
+    pub non_rankable: usize,
+    pub unknown: usize,
+    /// Newly recorded on this pass.
+    pub added: usize,
+    /// Newly marked delisted on this pass.
+    pub newly_delisted: usize,
+    pub updated_at: i64,
+}
+
+/// Records the currently listed perpetuals and marks disappearances as delisted.
+///
+/// This accumulates the point-in-time universe the exchange does not retain. It
+/// is intentionally additive: a row is never removed, and candle history for a
+/// delisted instrument is never deleted, because a historical cross-sectional
+/// evaluation has to include instruments that were tradable at the time even
+/// though they are not tradable now.
+fn snapshot_instrument_registry(
+    app: &tauri::AppHandle,
+) -> Result<SystematicInstrumentRegistryView, String> {
+    let summary = load_market_assets_summary(app)?.ok_or_else(|| {
+        "OKX perpetual contract cache is unavailable. Refresh market resources before recording the instrument registry."
+            .to_string()
+    })?;
+    let mut conn = open_database(app)?;
+    let now = now_ms();
+
+    // Only USDT-settled perpetuals are in scope, matching the universe builder.
+    let observed = summary
+        .instruments
+        .iter()
+        .filter(|instrument| {
+            instrument.inst_type.eq_ignore_ascii_case("SWAP")
+                && instrument.settle_ccy.eq_ignore_ascii_case("USDT")
+                && instrument
+                    .inst_id
+                    .to_ascii_uppercase()
+                    .ends_with("-USDT-SWAP")
+        })
+        .collect::<Vec<_>>();
+
+    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let mut added = 0_usize;
+    let mut observed_ids: BTreeSet<String> = BTreeSet::new();
+
+    for instrument in &observed {
+        observed_ids.insert(instrument.inst_id.clone());
+        let asset_class = classify_instrument(&instrument.base_ccy, &instrument.inst_id);
+        let existed: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM systematic_instrument_registry WHERE inst_id=?1)",
+                [&instrument.inst_id],
+                |row| row.get(0),
+            )
+            .map_err(|error| error.to_string())?;
+        if !existed {
+            added += 1;
+        }
+        // Re-listing clears `delisted_at`: the instrument is tradable again, and
+        // `first_seen_at` stays at the original observation so the life window
+        // remains truthful.
+        transaction
+            .execute(
+                "INSERT INTO systematic_instrument_registry(
+                   inst_id,first_seen_at,last_seen_at,asset_class,inst_family,ct_type,
+                   base_ccy,state,exp_time,delisted_at,updated_at
+                 ) VALUES(?1,?2,?2,?3,?4,?5,?6,?7,NULL,NULL,?2)
+                 ON CONFLICT(inst_id) DO UPDATE SET
+                   last_seen_at=excluded.last_seen_at,
+                   asset_class=excluded.asset_class,
+                   inst_family=excluded.inst_family,
+                   ct_type=excluded.ct_type,
+                   base_ccy=excluded.base_ccy,
+                   state=excluded.state,
+                   delisted_at=NULL,
+                   updated_at=excluded.updated_at",
+                params![
+                    instrument.inst_id,
+                    now,
+                    asset_class.code(),
+                    instrument.inst_family,
+                    instrument.ct_type,
+                    instrument.base_ccy,
+                    instrument.state,
+                ],
+            )
+            .map_err(|error| error.to_string())?;
+    }
+
+    // Anything previously live and absent now has been delisted. Stamping the
+    // time preserves the life window; the row and its candles stay.
+    let mut newly_delisted = 0_usize;
+    if !observed.is_empty() {
+        let previously_live: Vec<String> = {
+            let mut statement = transaction
+                .prepare(
+                    "SELECT inst_id FROM systematic_instrument_registry WHERE delisted_at IS NULL",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|error| error.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|error| error.to_string())?;
+            rows
+        };
+        for inst_id in previously_live {
+            if observed_ids.contains(&inst_id) {
+                continue;
+            }
+            transaction
+                .execute(
+                    "UPDATE systematic_instrument_registry
+                     SET delisted_at=?2, updated_at=?2 WHERE inst_id=?1",
+                    params![inst_id, now],
+                )
+                .map_err(|error| error.to_string())?;
+            newly_delisted += 1;
+        }
+    }
+
+    transaction.commit().map_err(|error| error.to_string())?;
+    let mut view = load_instrument_registry_view(&conn)?;
+    view.added = added;
+    view.newly_delisted = newly_delisted;
+    Ok(view)
+}
+
+fn load_instrument_registry_view(
+    conn: &Connection,
+) -> Result<SystematicInstrumentRegistryView, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT asset_class, delisted_at IS NULL AS is_live, COUNT(*)
+             FROM systematic_instrument_registry GROUP BY asset_class, is_live",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)? != 0,
+                row.get::<_, i64>(2)? as usize,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+
+    let mut view = SystematicInstrumentRegistryView {
+        total_known: 0,
+        live: 0,
+        delisted: 0,
+        crypto: 0,
+        tradfi: 0,
+        non_rankable: 0,
+        unknown: 0,
+        added: 0,
+        newly_delisted: 0,
+        updated_at: now_ms(),
+    };
+    for (asset_class, is_live, count) in rows {
+        view.total_known += count;
+        if is_live {
+            view.live += count;
+        } else {
+            view.delisted += count;
+        }
+        match asset_class.as_str() {
+            "crypto" => view.crypto += count,
+            "tradfi" => view.tradfi += count,
+            "nonRankable" => view.non_rankable += count,
+            _ => view.unknown += count,
+        }
+    }
+    Ok(view)
+}
+
+/// Instruments that were listed at `as_of_ms`, restricted to rankable classes.
+///
+/// This is the point-in-time universe. An instrument delisted after `as_of_ms`
+/// is included, because it was tradable at that moment and excluding it is
+/// exactly the survivorship bias this registry exists to prevent.
+fn load_point_in_time_universe(
+    conn: &Connection,
+    as_of_ms: i64,
+    asset_classes: &[&str],
+) -> Result<Vec<String>, String> {
+    if asset_classes.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = asset_classes
+        .iter()
+        .map(|_| "?")
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT inst_id FROM systematic_instrument_registry
+         WHERE first_seen_at <= ?1
+           AND (delisted_at IS NULL OR delisted_at > ?1)
+           AND asset_class IN ({placeholders})
+         ORDER BY inst_id ASC"
+    );
+    let mut statement = conn.prepare(&sql).map_err(|error| error.to_string())?;
+    let mut bindings: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(as_of_ms)];
+    for class in asset_classes {
+        bindings.push(Box::new((*class).to_string()));
+    }
+    let binding_refs = bindings
+        .iter()
+        .map(|value| value.as_ref() as &dyn rusqlite::ToSql)
+        .collect::<Vec<_>>();
+    let rows = statement
+        .query_map(binding_refs.as_slice(), |row| row.get::<_, String>(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    Ok(rows)
+}
+
+/// Returns a usable universe snapshot, capturing one when none exists or the
+/// newest is stale.
+///
+/// v1 read the newest snapshot and returned an empty result when there was none,
+/// and nothing in the product ever wrote one, so factor evaluation could not
+/// produce output at all. Capturing on demand removes that dead end. Capture
+/// needs the writable database, so it runs before the caller's read handle is
+/// opened.
+fn ensure_universe_snapshot(
+    app: &tauri::AppHandle,
+) -> Result<Option<StoredUniverseSnapshot>, String> {
+    {
+        let conn = open_read_database(app)?;
+        if let Some(existing) = load_latest_universe(&conn)? {
+            let age_ms = now_ms().saturating_sub(existing.created_at);
+            if age_ms <= FRESH_FACTOR_SNAPSHOT_WINDOW_MS {
+                return Ok(Some(existing));
+            }
+        }
+    }
+    // Record the listed set before capturing. The registry is what makes a
+    // historical reading unbiased later, and every missed observation is a
+    // permanent hole, so it is refreshed opportunistically here rather than
+    // relying on a separate schedule. A failure must not block evaluation.
+    if let Err(error) = snapshot_instrument_registry(app) {
+        eprintln!("systematic_instrument_registry_snapshot_skipped error={error}");
+    }
+    // A capture failure must not mask an existing snapshot: fall back to
+    // whatever is stored so a stale ranking still beats an empty table.
+    match capture_universe_snapshot(app, Some(default_research_cutoff_ms(now_ms()))) {
+        Ok(_) => {}
+        Err(error) => {
+            let conn = open_read_database(app)?;
+            let existing = load_latest_universe(&conn)?;
+            if existing.is_none() {
+                return Err(error);
+            }
+            return Ok(existing);
+        }
+    }
+    let conn = open_read_database(app)?;
+    load_latest_universe(&conn)
+}
+
+/// Captures the aligned instrument universe.
+///
+/// `as_of_ms` selects the reference time that decides whether an instrument's
+/// local history is current enough to score. v1 always compared against
+/// wall-clock `now` with a five-minute window, which tied research eligibility
+/// to whichever symbols the live WebSocket happened to be streaming. Passing an
+/// explicit cutoff makes the decision reproducible.
+fn capture_universe_snapshot(
+    app: &tauri::AppHandle,
+    as_of_ms: Option<i64>,
+) -> Result<SystematicUniverseView, String> {
     let summary = load_market_assets_summary(app)?.ok_or_else(|| {
         "OKX perpetual contract cache is unavailable. Refresh market resources before creating a universe snapshot."
             .to_string()
     })?;
     let conn = open_database(app)?;
-    let now = now_ms();
+    // Freshness is judged against the requested cutoff, not the current clock.
+    let now = match as_of_ms {
+        Some(value) if value > 0 => value,
+        _ => now_ms(),
+    };
+    // An explicit research cutoff sits clear of the live edge, so the tolerance
+    // has to cover that gap plus normal settling. Against the live clock the
+    // tighter live-trading window still applies.
+    let research_freshness_window_ms = if as_of_ms.is_some_and(|value| value > 0) {
+        let behind_live = now_ms().saturating_sub(now).max(0);
+        behind_live.saturating_add(2 * 60 * ONE_MINUTE_MS)
+    } else {
+        FRESH_UNIVERSE_WINDOW_MS
+    };
+    // Instruments listed at the reference time, restricted to rankable classes.
+    // Reading this from the registry rather than from the live cache is what
+    // makes an earlier cutoff honest: an instrument delisted after `now` was
+    // tradable then and must stay in the sample, while equity-underlying and
+    // stablecoin perpetuals are excluded from the ranking because a
+    // cross-sectional comparison is only meaningful among comparable
+    // instruments. An empty registry means it has not been populated yet, so
+    // fall back to the live cache instead of producing an empty universe.
+    let rankable = load_point_in_time_universe(&conn, now, &["crypto"])?;
+    let rankable: Option<BTreeSet<String>> = if rankable.is_empty() {
+        None
+    } else {
+        Some(rankable.into_iter().collect())
+    };
+
     let mut instruments = Vec::new();
     for instrument in summary.instruments.iter().filter(|instrument| {
-        instrument.inst_type.eq_ignore_ascii_case("SWAP")
+        if !(instrument.inst_type.eq_ignore_ascii_case("SWAP")
             && instrument.settle_ccy.eq_ignore_ascii_case("USDT")
             && instrument
                 .inst_id
                 .to_ascii_uppercase()
-                .ends_with("-USDT-SWAP")
+                .ends_with("-USDT-SWAP"))
+        {
+            return false;
+        }
+        match rankable.as_ref() {
+            Some(rankable) => rankable.contains(&instrument.inst_id),
+            // No registry yet: classify inline so equity and stablecoin
+            // perpetuals are still kept out of the ranking.
+            None => {
+                classify_instrument(&instrument.base_ccy, &instrument.inst_id)
+                    == InstrumentAssetClass::Crypto
+            }
+        }
     }) {
         let contract_value = parse_positive_decimal(&instrument.ct_val);
         let min_size = parse_positive_decimal(&instrument.min_sz);
         let lot_size = parse_positive_decimal(&instrument.lot_sz);
+        // Bars at or after the reference time must not count: a snapshot taken
+        // for an earlier cutoff has to describe only what was known then.
+        let latest_countable_open = now.saturating_sub(ONE_MINUTE_MS);
         let (available_bars, latest_open): (i64, Option<i64>) = conn
             .query_row(
                 "SELECT COUNT(*), MAX(open_time)
                  FROM candles
-                 WHERE symbol=?1 AND interval=?2 AND confirm=1",
-                params![instrument.inst_id, SYSTEMATIC_INTERVAL],
+                 WHERE symbol=?1 AND interval=?2 AND confirm=1 AND open_time<=?3",
+                params![
+                    instrument.inst_id,
+                    SYSTEMATIC_INTERVAL,
+                    latest_countable_open
+                ],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(|error| error.to_string())?;
         let last_closed_at = latest_open.map(|value| value.saturating_add(ONE_MINUTE_MS));
         let is_contract_valid =
             contract_value.is_some() && min_size.is_some() && lot_size.is_some();
+        // Freshness is judged against the reference time, which for research is
+        // deliberately set clear of the live edge so recent bars have settled.
+        // A five-minute window only makes sense against the live clock: measured
+        // from a cutoff an hour back, no instrument can ever satisfy it, so every
+        // contract became ineligible no matter how much history it had.
         let is_fresh = last_closed_at
-            .is_some_and(|value| now.saturating_sub(value) <= FRESH_UNIVERSE_WINDOW_MS);
+            .is_some_and(|value| now.saturating_sub(value) <= research_freshness_window_ms);
         let eligible = instrument.state.eq_ignore_ascii_case("live")
             && is_contract_valid
             && available_bars as usize >= BASELINE_FACTOR_MIN_BARS
@@ -7256,7 +8846,7 @@ struct StoredFactorDefinition {
     version: u32,
     status: String,
     description: String,
-    definition: KlineBlendFactorDefinition,
+    definition: FactorDefinition,
     source_hash: String,
     updated_at: i64,
 }
@@ -7270,6 +8860,7 @@ impl StoredFactorDefinition {
             version: self.version,
             status: self.status,
             description: self.description,
+            kind: self.definition.kind_label().to_string(),
             definition: self.definition,
             source_hash: self.source_hash,
             updated_at: self.updated_at,
@@ -7315,15 +8906,14 @@ fn load_factor_definitions(conn: &Connection) -> Result<Vec<StoredFactorDefiniti
                 source_hash,
                 updated_at,
             )| {
-                let definition =
-                    serde_json::from_str::<KlineBlendFactorDefinition>(&definition_json)
-                        .map_err(|error| {
-                            format!("Factor {id} has an invalid K-line definition: {error}")
-                        })?
-                        .with_factor_id(&id);
-                definition.validate().map_err(|error| {
-                    format!("Factor {id} has an invalid K-line definition: {error}")
-                })?;
+                // Definitions persisted before the `kind` tag existed decode
+                // through the compatibility path in `FactorDefinition`.
+                let definition = serde_json::from_str::<FactorDefinition>(&definition_json)
+                    .map_err(|error| format!("Factor {id} has an invalid definition: {error}"))?
+                    .with_factor_id(&id);
+                definition
+                    .validate()
+                    .map_err(|error| format!("Factor {id} has an invalid definition: {error}"))?;
                 normalize_factor_status(&status)?;
                 Ok(StoredFactorDefinition {
                     id,
@@ -7357,7 +8947,7 @@ fn save_factor_definition(
     name: &str,
     code: &str,
     description: &str,
-    definition: KlineBlendFactorDefinition,
+    definition: FactorDefinition,
     status: &str,
 ) -> Result<SystematicFactorDefinitionView, String> {
     let conn = open_database(app)?;
@@ -7380,12 +8970,12 @@ fn save_factor_definition_with_conn(
     name: &str,
     code: &str,
     description: &str,
-    definition: KlineBlendFactorDefinition,
+    definition: FactorDefinition,
     status: &str,
 ) -> Result<SystematicFactorDefinitionView, String> {
     definition
         .validate()
-        .map_err(|error| format!("K-line factor definition is invalid: {error}"))?;
+        .map_err(|error| format!("Factor definition is invalid: {error}"))?;
     normalize_factor_status(status)?;
     let definition_json = serde_json::to_string(&definition).map_err(|error| error.to_string())?;
     let source_hash = sha256_bytes(definition_json.as_bytes());
@@ -7401,16 +8991,30 @@ fn save_factor_definition_with_conn(
         return Err("Factor code is already used by another local definition".to_string());
     }
     let now = now_ms();
+    // A version identifies a distinct scoring formula, so it advances only when
+    // the stored definition or its code actually changes. Renaming a factor or
+    // editing its research description must not invalidate evaluations that
+    // reference an earlier version.
     let version = if existing_id.is_some() {
-        conn.query_row(
-            "SELECT version FROM systematic_factor_definitions WHERE id=?1",
-            [id],
-            |row| row.get::<_, i64>(0),
-        )
-        .optional()
-        .map_err(|error| error.to_string())?
-        .map(|value| value.saturating_add(1).max(1))
-        .unwrap_or(1)
+        let existing: Option<(i64, String, String)> = conn
+            .query_row(
+                "SELECT version,source_hash,code FROM systematic_factor_definitions WHERE id=?1",
+                [id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        match existing {
+            Some((current_version, current_hash, current_code)) => {
+                let material_change = current_hash != source_hash || current_code != code;
+                if material_change {
+                    current_version.saturating_add(1).max(1)
+                } else {
+                    current_version.max(1)
+                }
+            }
+            None => 1,
+        }
     } else {
         1
     };
@@ -7451,22 +9055,831 @@ fn save_factor_definition_with_conn(
         .ok_or_else(|| "Saved factor definition was not found".to_string())
 }
 
+/// Why an eligible universe member produced no score.
+///
+/// v1 dropped these instruments with a bare `continue`, so a user faced an empty
+/// table with no way to tell an empty universe from missing local history. Every
+/// exclusion now carries a reason that reaches the UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum FactorSkipReason {
+    NoLocalBars,
+    InsufficientBars,
+    SeriesGap,
+    InvalidPrice,
+    ReadFailed,
+}
+
+impl FactorSkipReason {
+    fn code(self) -> &'static str {
+        match self {
+            Self::NoLocalBars => "noLocalBars",
+            Self::InsufficientBars => "insufficientBars",
+            Self::SeriesGap => "seriesGap",
+            Self::InvalidPrice => "invalidPrice",
+            Self::ReadFailed => "readFailed",
+        }
+    }
+}
+
+/// Per-instrument exclusion detail, capped before it reaches the UI.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FactorSkipSample {
+    pub inst_id: String,
+    pub reason: String,
+    /// Present for `insufficientBars`: how many confirmed bars were available.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub available_bars: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_bars: Option<usize>,
+}
+
+const MAX_FACTOR_SKIP_SAMPLES: usize = 20;
+
+/// Coverage accounting for one cross-sectional evaluation.
+///
+/// The shape follows the reporting Alphalens performs in
+/// `get_clean_factor`: quantify how much of the intended input was dropped, and
+/// attribute the loss to a cause instead of reporting a bare total.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FactorCoverageDiagnostics {
+    pub universe_total: usize,
+    pub universe_eligible: usize,
+    pub scored: usize,
+    /// Share of eligible instruments that produced no score, 0.0 to 1.0.
+    pub dropped_pct: f64,
+    pub reason_counts: BTreeMap<String, usize>,
+    pub samples: Vec<FactorSkipSample>,
+    pub snapshot_id: String,
+    pub snapshot_age_ms: i64,
+    pub snapshot_stale: bool,
+    /// A z-score needs at least two members; below that every score is 0.0.
+    pub cross_section_sufficient: bool,
+    /// Instruments holding enough history for a historical evaluation, not just
+    /// for scoring the current bar.
+    ///
+    /// Ranking needs one lookback; an evaluation walks a grid across months and
+    /// needs history at every past cutoff. Repairing only enough to rank produced
+    /// a healthy-looking ranking beside an evaluation that could not yield a
+    /// single valid grid point, so the two are reported separately.
+    pub evaluation_ready: usize,
+    /// Bars an instrument needs before it can contribute to an evaluation.
+    pub evaluation_required_bars: usize,
+    /// The universe is the currently listed contract set, so a historical
+    /// reading excludes instruments delisted during the window. Stated rather
+    /// than silently accepted.
+    pub survivorship_note: String,
+}
+
+struct FactorCoverageBuilder {
+    reason_counts: BTreeMap<String, usize>,
+    samples: Vec<FactorSkipSample>,
+}
+
+impl FactorCoverageBuilder {
+    fn new() -> Self {
+        Self {
+            reason_counts: BTreeMap::new(),
+            samples: Vec::new(),
+        }
+    }
+
+    fn record(
+        &mut self,
+        inst_id: &str,
+        reason: FactorSkipReason,
+        available_bars: Option<usize>,
+        required_bars: Option<usize>,
+    ) {
+        *self
+            .reason_counts
+            .entry(reason.code().to_string())
+            .or_insert(0) += 1;
+        if self.samples.len() < MAX_FACTOR_SKIP_SAMPLES {
+            self.samples.push(FactorSkipSample {
+                inst_id: inst_id.to_string(),
+                reason: reason.code().to_string(),
+                available_bars,
+                required_bars,
+            });
+        }
+    }
+
+    fn finish(
+        self,
+        snapshot: &StoredUniverseSnapshot,
+        universe_total: usize,
+        universe_eligible: usize,
+        scored: usize,
+        evaluation_ready: usize,
+        evaluation_required_bars: usize,
+        now_ms_value: i64,
+    ) -> FactorCoverageDiagnostics {
+        let snapshot_age_ms = now_ms_value.saturating_sub(snapshot.created_at).max(0);
+        FactorCoverageDiagnostics {
+            universe_total,
+            universe_eligible,
+            scored,
+            // Measured against the whole universe, matching what the diagnostics
+            // now account for. Dividing by the eligible subset reported full
+            // coverage whenever the few instruments with data all scored, which
+            // is the opposite of the truth when most of the universe is missing.
+            dropped_pct: if universe_total == 0 {
+                0.0
+            } else {
+                (universe_total.saturating_sub(scored)) as f64 / universe_total as f64
+            },
+            reason_counts: self.reason_counts,
+            samples: self.samples,
+            snapshot_id: snapshot.id.clone(),
+            snapshot_age_ms,
+            snapshot_stale: snapshot_age_ms > FRESH_FACTOR_SNAPSHOT_WINDOW_MS,
+            cross_section_sufficient: scored >= 2,
+            evaluation_ready,
+            evaluation_required_bars,
+            survivorship_note:
+                "Universe reflects currently listed USDT perpetuals. Contracts delisted during the window are absent, so historical readings carry survivorship bias."
+                    .to_string(),
+        }
+    }
+}
+
+/// A factor snapshot older than this is reported as stale so the panel can offer
+/// a refresh instead of presenting values as current.
+const FRESH_FACTOR_SNAPSHOT_WINDOW_MS: i64 = 15 * ONE_MINUTE_MS;
+
+/// Seeded by the schema migration, so it cannot be deleted.
+const BUILTIN_KLINE_FACTOR_ID: &str = "builtin-kline-blend-v1";
+
+/// Base currencies whose perpetuals track a traditional-finance underlying
+/// rather than a crypto asset.
+///
+/// These are not excluded from the product: a cross-sectional ranking is only
+/// meaningful among comparable instruments, so they are labelled and the
+/// universe selector filters by label. Ranking an equity perpetual against a
+/// memecoin on momentum mixes two different asset classes; keeping the label
+/// preserves the option to study them as their own cross-section later.
+///
+/// The list is explicit on purpose. Pattern-matching a ticker cannot distinguish
+/// an equity perpetual from a crypto asset that happens to share a name, so an
+/// unrecognised base is reported as `unknown` rather than guessed.
+const TRADFI_PERPETUAL_BASES: &[&str] = &[
+    // US equities offered as perpetuals.
+    "AAPL", "AMZN", "COIN", "CRCL", "GOOGL", "HOOD", "META", "MSTR", "NVDA", "TSLA",
+    // Volatility and index products.
+    "UVXY", "VIX", "SPX", "NDX", // Commodities and metals.
+    "XAU", "XAG", "OIL", "GOLD", "SILVER",
+];
+
+/// Quote-stable assets and wrapped equivalents that should not enter a
+/// cross-sectional ranking.
+///
+/// A stablecoin perpetual has near-zero return dispersion, so it contributes no
+/// cross-sectional information while still consuming a universe slot and
+/// distorting z-scores. Wrapped assets duplicate an existing constituent.
+const NON_RANKABLE_BASES: &[&str] = &[
+    "USDT", "USDC", "DAI", "FDUSD", "TUSD", "USDE", "USDD", "PYUSD", "EURT", "EURS",
+];
+
+/// Asset class recorded in the instrument registry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstrumentAssetClass {
+    Crypto,
+    Tradfi,
+    /// Stablecoin or wrapped duplicate: listed, but not rankable.
+    NonRankable,
+    /// Recognised as neither; surfaced rather than silently treated as crypto.
+    Unknown,
+}
+
+impl InstrumentAssetClass {
+    fn code(self) -> &'static str {
+        match self {
+            Self::Crypto => "crypto",
+            Self::Tradfi => "tradfi",
+            Self::NonRankable => "nonRankable",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Classifies a perpetual by its base currency.
+///
+/// Deliberately conservative: only an explicitly listed base is labelled
+/// `tradfi` or `nonRankable`. Anything else with a well-formed crypto base is
+/// `crypto`, and an empty or unparseable base is `unknown`.
+fn classify_instrument(base_ccy: &str, inst_id: &str) -> InstrumentAssetClass {
+    // Prefer the exchange-provided base; fall back to the identifier prefix when
+    // the cache predates that field.
+    let base = if base_ccy.trim().is_empty() {
+        inst_id.split('-').next().unwrap_or("").trim()
+    } else {
+        base_ccy.trim()
+    };
+    if base.is_empty() {
+        return InstrumentAssetClass::Unknown;
+    }
+    let upper = base.to_ascii_uppercase();
+    if TRADFI_PERPETUAL_BASES
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&upper))
+    {
+        return InstrumentAssetClass::Tradfi;
+    }
+    if NON_RANKABLE_BASES
+        .iter()
+        .any(|candidate| candidate.eq_ignore_ascii_case(&upper))
+    {
+        return InstrumentAssetClass::NonRankable;
+    }
+    // A crypto base is alphanumeric and short. Anything else is not something
+    // this classifier understands, so it is reported rather than assumed.
+    if upper.len() <= 12 && upper.chars().all(|c| c.is_ascii_alphanumeric()) {
+        InstrumentAssetClass::Crypto
+    } else {
+        InstrumentAssetClass::Unknown
+    }
+}
+
+/// Builds the grid of scores and forward returns for one factor.
+///
+/// Memory is bounded by design. Scores come from the existing scorer at each
+/// cutoff, which reads only the trailing window each instrument needs, and the
+/// close series held for forward returns covers the evaluation window at one
+/// instrument at a time. Nothing loads the full panel history at once.
+fn build_factor_grid(
+    conn: &Connection,
+    snapshot: &StoredUniverseSnapshot,
+    factor: &StoredFactorDefinition,
+    window_start_open: i64,
+    window_end_open: i64,
+    // Latest bar that exists. Forward returns may read up to here, which is past
+    // the last grid point by one longest-horizon.
+    data_end_open: i64,
+    grid_minutes: i64,
+    horizons: &[i64],
+    universe_limit: usize,
+    control: Option<&BacktestJobControl>,
+) -> Result<(Vec<GridPoint>, usize, usize), String> {
+    let cutoffs = grid_cutoffs(window_start_open, window_end_open, grid_minutes);
+    if cutoffs.is_empty() {
+        return Ok((Vec::new(), 0, 0));
+    }
+
+    // Restrict to the most liquid instruments: a cross-sectional ranking is only
+    // actionable where it can be traded, and this bounds the work.
+    let mut universe = snapshot
+        .instruments
+        .iter()
+        .filter(|item| item.eligible)
+        .map(|item| item.inst_id.clone())
+        .collect::<Vec<_>>();
+    universe.sort();
+    universe.truncate(universe_limit.min(MAX_FACTOR_EVALUATION_UNIVERSE));
+    if universe.len() < MIN_CROSS_SECTION_FOR_EVALUATION {
+        return Ok((Vec::new(), universe.len(), cutoffs.len()));
+    }
+
+    // One pass per instrument to collect closes for forward returns, read out to
+    // the data edge so the last grid point's longest horizon can still resolve.
+    let mut closes: HashMap<String, BTreeMap<i64, f64>> = HashMap::new();
+    for inst_id in &universe {
+        let series = load_close_series(conn, inst_id, window_start_open, data_end_open)?;
+        closes.insert(inst_id.clone(), series);
+    }
+
+    let total_steps = cutoffs.len() as u64;
+    if let Some(control) = control {
+        control.record_progress(0);
+        let _ = total_steps;
+    }
+
+    let mut points = Vec::new();
+    let mut skipped_sparse = 0_usize;
+    for (index, cutoff) in cutoffs.iter().copied().enumerate() {
+        if let Some(control) = control {
+            if control.cancellation_token().is_cancelled() {
+                break;
+            }
+        }
+        // Score using the same path the ranking uses, so an evaluation cannot
+        // disagree with what the panel displays.
+        let scoped = StoredUniverseSnapshot {
+            id: snapshot.id.clone(),
+            cutoff_at: Some(cutoff),
+            instruments: snapshot
+                .instruments
+                .iter()
+                .filter(|item| universe.iter().any(|id| id == &item.inst_id))
+                .cloned()
+                .collect(),
+            coverage: snapshot.coverage.clone(),
+            created_at: snapshot.created_at,
+        };
+        let (rows, _) = compute_factor_rows(conn, &scoped, factor)?;
+        if rows.len() < required_grid_point_members(universe.len()) {
+            skipped_sparse += 1;
+            if let Some(control) = control {
+                control.record_progress((index + 1) as u64);
+            }
+            continue;
+        }
+
+        let samples = rows
+            .iter()
+            .map(|row| GridSample {
+                inst_id: row.inst_id.clone(),
+                score: row.alpha_score,
+                forward_returns: horizons
+                    .iter()
+                    .map(|horizon| {
+                        closes.get(&row.inst_id).and_then(|series| {
+                            // Bounded by the data edge, not the grid edge: the
+                            // grid already stops a longest-horizon short of it.
+                            forward_return_at(series, cutoff, *horizon, data_end_open)
+                        })
+                    })
+                    .collect(),
+            })
+            .collect::<Vec<_>>();
+        points.push(GridPoint {
+            as_of_ms: cutoff,
+            samples,
+        });
+        if let Some(control) = control {
+            control.record_progress((index + 1) as u64);
+        }
+    }
+    Ok((points, universe.len(), skipped_sparse))
+}
+
+/// Cross-section below this cannot support an evaluation at all.
+/// Fewest instruments an evaluation will attempt.
+///
+/// Two is the arithmetic floor: a rank correlation over one instrument is
+/// undefined, and over two it is always exactly +1 or -1 regardless of the
+/// factor. Three is the smallest cross-section that can actually disagree with a
+/// forward ranking, so it is the smallest that carries any information.
+///
+/// This is deliberately not set to a statistically comfortable number. A higher
+/// floor silently produced "no valid grid points" on a small local cache, which
+/// is indistinguishable from a broken factor. The result is instead computed and
+/// the conclusion layer reports how thin it is.
+const MIN_CROSS_SECTION_FOR_EVALUATION: usize = 3;
+
+/// Metrics for one horizon.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorHorizonMetrics {
+    pub horizon_minutes: i64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub train_ic: Option<IcSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_ic: Option<IcSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_ic: Option<IcSummary>,
+    pub quantiles: Vec<QuantileStat>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quantile_spread: Option<f64>,
+    pub monotonic: bool,
+    /// Per-period IC series, for the time-series chart.
+    pub ic_series: Vec<f64>,
+}
+
+/// Full evaluation payload.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicFactorEvaluationMetrics {
+    pub horizons: Vec<SystematicFactorHorizonMetrics>,
+    /// Mean rank autocorrelation between consecutive grid points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rank_autocorrelation: Option<f64>,
+    /// Mean turnover of the top bucket between consecutive grid points.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub top_bucket_turnover: Option<f64>,
+    pub grid_points: usize,
+    pub skipped_sparse_points: usize,
+    pub universe_size: usize,
+    pub min_cross_section: usize,
+    /// Annualised fee-only drag at full turnover for this cadence.
+    pub annualised_cost_at_full_turnover: f64,
+    /// Stated so a reader never mistakes these returns for realisable ones.
+    pub excludes_funding: bool,
+    pub boundary_notes: Vec<String>,
+}
+
+/// Round-trip taker cost assumption, as a fraction.
+///
+/// Base-tier taker fees on a major venue are about 5 basis points per side, so a
+/// round trip is about 10. This is a floor, not an estimate: measured slippage at
+/// modest size ranges from a fraction of a basis point on the largest instrument
+/// to tens of basis points on illiquid ones, and depth data is not ingested here.
+const ROUND_TRIP_TAKER_COST: f64 = 0.001;
+
+/// Annualised cost of rebalancing fully at this cadence.
+fn annualised_cost_at_full_turnover(grid_minutes: i64) -> f64 {
+    if grid_minutes <= 0 {
+        return 0.0;
+    }
+    let rebalances_per_year = (365.0 * 24.0 * 60.0) / grid_minutes as f64;
+    ROUND_TRIP_TAKER_COST * rebalances_per_year
+}
+
+/// Computes metrics from a built grid.
+fn summarize_factor_grid(
+    points: &[GridPoint],
+    horizons: &[i64],
+    buckets: usize,
+    grid_minutes: i64,
+    universe_size: usize,
+    skipped_sparse: usize,
+) -> SystematicFactorEvaluationMetrics {
+    let mut horizon_metrics = Vec::new();
+    // The split index is shared across horizons so every horizon reports the same
+    // in-sample and out-of-sample periods.
+    let split = train_validation_split(points.len(), 5);
+
+    for (horizon_index, horizon_minutes) in horizons.iter().copied().enumerate() {
+        let mut ic_series = Vec::new();
+        let mut observations_by_period = Vec::new();
+        for point in points {
+            let scores = point
+                .samples
+                .iter()
+                .filter_map(|sample| {
+                    sample.forward_returns[horizon_index].map(|forward| (sample, forward))
+                })
+                .collect::<Vec<_>>();
+            if scores.len() < required_grid_point_members(universe_size) {
+                continue;
+            }
+            let score_values = scores
+                .iter()
+                .map(|(sample, _)| sample.score)
+                .collect::<Vec<_>>();
+            let forward_values = scores
+                .iter()
+                .map(|(_, forward)| *forward)
+                .collect::<Vec<_>>();
+            if let Some(ic) = spearman_rank_ic(&score_values, &forward_values) {
+                ic_series.push(ic);
+            }
+            observations_by_period.push(
+                scores
+                    .iter()
+                    .map(|(sample, forward)| FactorObservation {
+                        inst_id: sample.inst_id.clone(),
+                        score: sample.score,
+                        forward_return: *forward,
+                    })
+                    .collect::<Vec<_>>(),
+            );
+        }
+
+        let (train_ic, validation_ic) = match split {
+            Some((train, _)) if ic_series.len() > train => (
+                summarize_ic(&ic_series[..train]),
+                summarize_ic(&ic_series[train..]),
+            ),
+            _ => (summarize_ic(&ic_series), None),
+        };
+        let quantiles = quantile_stats(&observations_by_period, buckets).unwrap_or_default();
+        horizon_metrics.push(SystematicFactorHorizonMetrics {
+            horizon_minutes,
+            train_ic,
+            validation_ic,
+            full_ic: summarize_ic(&ic_series),
+            quantile_spread: quantile_spread(&quantiles),
+            monotonic: is_monotonic(&quantiles),
+            quantiles,
+            ic_series,
+        });
+    }
+
+    // Ranking stability, measured on the scores themselves rather than on any one
+    // horizon's returns.
+    let mut autocorrelations = Vec::new();
+    let mut turnovers = Vec::new();
+    for pair in points.windows(2) {
+        let previous = pair[0]
+            .samples
+            .iter()
+            .map(|sample| (sample.inst_id.clone(), sample.score))
+            .collect::<Vec<_>>();
+        let current = pair[1]
+            .samples
+            .iter()
+            .map(|sample| (sample.inst_id.clone(), sample.score))
+            .collect::<Vec<_>>();
+        if let Some(value) = rank_autocorrelation(&previous, &current) {
+            autocorrelations.push(value);
+        }
+        let take = (previous.len() / buckets).max(1);
+        let top_of = |mut rows: Vec<(String, f64)>| {
+            rows.sort_by(|left, right| {
+                right
+                    .1
+                    .partial_cmp(&left.1)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+                    .then_with(|| left.0.cmp(&right.0))
+            });
+            rows.into_iter()
+                .take(take)
+                .map(|(inst_id, _)| inst_id)
+                .collect::<Vec<_>>()
+        };
+        if let Some(value) = bucket_turnover(&top_of(previous), &top_of(current)) {
+            turnovers.push(value);
+        }
+    }
+
+    let mean = |values: &[f64]| {
+        if values.is_empty() {
+            None
+        } else {
+            Some(values.iter().sum::<f64>() / values.len() as f64)
+        }
+    };
+
+    SystematicFactorEvaluationMetrics {
+        horizons: horizon_metrics,
+        rank_autocorrelation: mean(&autocorrelations),
+        top_bucket_turnover: mean(&turnovers),
+        grid_points: points.len(),
+        skipped_sparse_points: skipped_sparse,
+        universe_size,
+        // Falls back to the universe size when every grid point was filtered
+        // out. Reporting the minimum over surviving points yields zero in that
+        // case, which made the verdict claim "fewer than two instruments" even
+        // where several were scorable — describing the wrong problem, and the
+        // most severe one, when the real cause was the sparsity threshold.
+        min_cross_section: points
+            .iter()
+            .map(|point| point.samples.len())
+            .min()
+            .unwrap_or(universe_size),
+        annualised_cost_at_full_turnover: annualised_cost_at_full_turnover(grid_minutes),
+        excludes_funding: true,
+        boundary_notes: vec![
+            "Returns exclude perpetual funding. Funding is a signed component of a long/short return, not only a cost, so a carry-driven factor is understated here."
+                .to_string(),
+            "The universe is built from currently listed contracts, so instruments delisted during the window are absent and measured performance is biased upward."
+                .to_string(),
+            "Outlier handling uses only values from the same timestamp; no whole-sample statistic is applied."
+                .to_string(),
+            "Cost is a base-tier taker floor and ignores depth, which dominates on illiquid instruments."
+                .to_string(),
+        ],
+    }
+}
+
+/// One instrument to repair, with the exact window the factor needs.
+#[derive(Debug, Clone, PartialEq)]
+struct FactorRepairTarget {
+    inst_id: String,
+    start_open: i64,
+    end_open: i64,
+}
+
+#[derive(Debug, Clone)]
+struct FactorRepairPlan {
+    /// Instruments missing local history before the limit was applied.
+    candidates: usize,
+    /// Days of one-minute history each target will fetch.
+    days_per_instrument: usize,
+    targets: Vec<FactorRepairTarget>,
+}
+
+/// Chooses which instruments to repair for a factor.
+///
+/// Selection mirrors the exclusion logic in `compute_factor_rows`, so a repair
+/// targets exactly the instruments the ranking dropped. Only data problems are
+/// repairable; an instrument excluded for a non-data reason is skipped because
+/// downloading bars would not change its status.
+///
+/// Ordering is by locally observed turnover, descending, then by identifier for
+/// determinism. Turnover is the practical proxy for "worth ranking" and cannot
+/// be read from a contract that has no bars at all, so instruments with no local
+/// history sort last but remain eligible.
+fn plan_factor_repair_targets(
+    conn: &Connection,
+    snapshot: &StoredUniverseSnapshot,
+    factor: &StoredFactorDefinition,
+    limit: usize,
+) -> Result<FactorRepairPlan, String> {
+    let Some(cutoff_at) = snapshot.cutoff_at else {
+        return Ok(FactorRepairPlan {
+            candidates: 0,
+            days_per_instrument: 0,
+            targets: Vec::new(),
+        });
+    };
+    let minimum_bars = factor.definition.minimum_bars();
+    // Repair enough history for a historical evaluation, not merely enough to
+    // score the current bar.
+    //
+    // Downloading one lookback plus a small margin produced roughly three hours
+    // of bars, which is sufficient for the live ranking and useless for anything
+    // else: an evaluation walks a grid across months, so at every past cutoff the
+    // instrument had no history and every grid point was discarded. The ranking
+    // looked healthy while the evaluation could never produce a single valid
+    // point.
+    //
+    // The span therefore covers the default evaluation window plus the longest
+    // default forward horizon, plus one lookback so the earliest grid point can
+    // still be scored.
+    let evaluation_span_bars = (DEFAULT_FACTOR_EVALUATION_DAYS * 24 * 60) as usize;
+    let horizon_bars = DEFAULT_FACTOR_HORIZONS_MINUTES
+        .iter()
+        .copied()
+        .max()
+        .unwrap_or(0) as usize;
+    let span_bars = evaluation_span_bars
+        .saturating_add(horizon_bars)
+        .saturating_add(minimum_bars);
+    let end_open = cutoff_at.saturating_sub(ONE_MINUTE_MS);
+    let start_open = end_open
+        .saturating_sub((span_bars as i64) * ONE_MINUTE_MS)
+        .max(0);
+
+    // Every listed instrument is considered, not only the eligible ones.
+    // Eligibility already requires enough fresh local history, so an instrument
+    // with no bars is never eligible — and that is precisely what repair exists
+    // to fix. Filtering on eligibility here found no candidates in the common
+    // case of a mostly empty local cache.
+    let mut scored: Vec<(f64, FactorRepairTarget)> = Vec::new();
+    for instrument in &snapshot.instruments {
+        // A contract without valid specifications cannot be scored no matter how
+        // much history is downloaded, so downloading it would waste the budget.
+        if instrument.contract_value.is_none()
+            || instrument.min_size.is_none()
+            || instrument.lot_size.is_none()
+        {
+            continue;
+        }
+        // This plan exists for evaluation readiness, so testing only the latest
+        // factor lookback is wrong. A contract with 182 recent bars can rank now
+        // and still contribute to none of a 90-day grid. Count the exact repair
+        // window instead; `(symbol, interval, open_time)` is unique, so a full
+        // count inside the bounded range also proves there are no minute gaps.
+        let bars_in_repair_window: usize = conn
+            .query_row(
+                "SELECT COUNT(*) FROM candles
+                 WHERE symbol=?1 AND interval=?2 AND confirm=1
+                   AND open_time>=?3 AND open_time<=?4",
+                params![
+                    instrument.inst_id,
+                    SYSTEMATIC_INTERVAL,
+                    start_open,
+                    end_open
+                ],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|count| count.max(0) as usize)
+            .map_err(|error| error.to_string())?;
+        // `start_open` and `end_open` are inclusive, but the latest bar can still
+        // be settling. Requiring `span_bars` rather than `span_bars + 1` allows
+        // that one edge bar without accepting a real hole inside the history.
+        if bars_in_repair_window >= span_bars {
+            continue;
+        }
+        // Use the latest closed bar only to prioritise candidates by tradability;
+        // it is not the readiness test above.
+        let latest =
+            load_confirmed_tail(conn, &instrument.inst_id, cutoff_at, 1).unwrap_or_default();
+        let turnover = latest
+            .last()
+            .map(|bar| {
+                let contract_value = instrument.contract_value.unwrap_or(1.0);
+                (bar.volume * bar.close * contract_value).max(0.0)
+            })
+            .unwrap_or(0.0);
+        scored.push((
+            turnover,
+            FactorRepairTarget {
+                inst_id: instrument.inst_id.clone(),
+                start_open,
+                end_open,
+            },
+        ));
+    }
+    let candidates = scored.len();
+    scored.sort_by(|left, right| {
+        right
+            .0
+            .partial_cmp(&left.0)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.1.inst_id.cmp(&right.1.inst_id))
+    });
+    Ok(FactorRepairPlan {
+        candidates,
+        days_per_instrument: repair_archive_days(span_bars),
+        targets: scored
+            .into_iter()
+            .take(limit)
+            .map(|(_, target)| target)
+            .collect(),
+    })
+}
+
 fn compute_factor_rows(
     conn: &Connection,
     snapshot: &StoredUniverseSnapshot,
     factor: &StoredFactorDefinition,
-) -> Result<Vec<SystematicFactorView>, String> {
+) -> Result<(Vec<SystematicFactorView>, FactorCoverageDiagnostics), String> {
+    let universe_total = snapshot.instruments.len();
+    let universe_eligible = snapshot
+        .instruments
+        .iter()
+        .filter(|item| item.eligible)
+        .count();
+    let mut coverage = FactorCoverageBuilder::new();
     let Some(cutoff_at) = snapshot.cutoff_at else {
-        return Ok(Vec::new());
+        return Ok((
+            Vec::new(),
+            coverage.finish(
+                snapshot,
+                universe_total,
+                universe_eligible,
+                0,
+                0,
+                0,
+                now_ms(),
+            ),
+        ));
     };
     let minimum_bars = factor.definition.minimum_bars();
+    // History an instrument needs before it can contribute to a historical
+    // evaluation, as opposed to merely being ranked right now.
+    let evaluation_required_bars = (DEFAULT_FACTOR_EVALUATION_DAYS * 24 * 60) as usize
+        + DEFAULT_FACTOR_HORIZONS_MINUTES
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0) as usize
+        + minimum_bars;
+    let evaluation_ready = snapshot
+        .instruments
+        .iter()
+        .filter(|item| item.available_bars >= evaluation_required_bars)
+        .count();
+    // Scoring stays restricted to eligible instruments: ranking a contract whose
+    // local history is stale or absent would be worse than omitting it. The
+    // ineligible ones are still accounted for below, because "422 instruments
+    // have no local bars" is the explanation a reader needs, and it is invisible
+    // if only the eligible subset is counted.
+    for instrument in snapshot.instruments.iter().filter(|item| !item.eligible) {
+        coverage.record(
+            &instrument.inst_id,
+            if instrument.available_bars == 0 {
+                FactorSkipReason::NoLocalBars
+            } else {
+                FactorSkipReason::InsufficientBars
+            },
+            Some(instrument.available_bars),
+            Some(minimum_bars),
+        );
+    }
     let mut candidates = Vec::new();
     for instrument in snapshot.instruments.iter().filter(|item| item.eligible) {
         let bars = match load_confirmed_tail(conn, &instrument.inst_id, cutoff_at, minimum_bars) {
             Ok(bars) => bars,
-            Err(_) => continue,
+            Err(_) => {
+                coverage.record(
+                    &instrument.inst_id,
+                    FactorSkipReason::ReadFailed,
+                    None,
+                    None,
+                );
+                continue;
+            }
         };
-        if bars.len() < minimum_bars || !bars_are_continuous(&bars) {
+        if bars.is_empty() {
+            coverage.record(
+                &instrument.inst_id,
+                FactorSkipReason::NoLocalBars,
+                Some(0),
+                Some(minimum_bars),
+            );
+            continue;
+        }
+        if bars.len() < minimum_bars {
+            coverage.record(
+                &instrument.inst_id,
+                FactorSkipReason::InsufficientBars,
+                Some(bars.len()),
+                Some(minimum_bars),
+            );
+            continue;
+        }
+        if !bars_are_continuous(&bars) {
+            coverage.record(
+                &instrument.inst_id,
+                FactorSkipReason::SeriesGap,
+                Some(bars.len()),
+                Some(minimum_bars),
+            );
             continue;
         }
         let first_close = bars.first().map(|bar| bar.close).unwrap_or_default();
@@ -7474,6 +9887,12 @@ fn compute_factor_rows(
             .last()
             .ok_or_else(|| "Factor series unexpectedly empty".to_string())?;
         if first_close <= 0.0 {
+            coverage.record(
+                &instrument.inst_id,
+                FactorSkipReason::InvalidPrice,
+                Some(bars.len()),
+                Some(minimum_bars),
+            );
             continue;
         }
         let momentum_pct = latest.close / first_close - 1.0;
@@ -7507,47 +9926,306 @@ fn compute_factor_rows(
             volume_ratio: candidate.volume_ratio,
         })
         .collect::<Vec<_>>();
-    let scores = score_kline_blend(&factor.definition, &features)
-        .map_err(|error| format!("K-line factor evaluation failed: {error}"))?;
+    // Scoring differs per family, so each variant produces its own ranked
+    // (inst_id, score) list. Candidate loading, evidence, and coverage
+    // accounting are shared below so the two paths cannot drift apart.
+    let ranked: Vec<(String, f64)> = match &factor.definition {
+        FactorDefinition::KlineBlend(blend) => score_kline_blend(blend, &features)
+            .map_err(|error| format!("K-line factor evaluation failed: {error}"))?
+            .into_iter()
+            .map(|score| (score.inst_id, score.normalized_score))
+            .collect(),
+        FactorDefinition::Expression(definition) => {
+            score_expression_factor(conn, snapshot, definition, &candidates, cutoff_at)?
+        }
+    };
+
+    let formula_note = match &factor.definition {
+        FactorDefinition::KlineBlend(blend) => format!(
+            "Formula: {:+.2}M - {:.2}RV {:+.2}V.",
+            blend.momentum_weight, blend.volatility_penalty_weight, blend.volume_weight
+        ),
+        FactorDefinition::Expression(_) => {
+            "Formula: expression pipeline over confirmed 1m bars.".to_string()
+        }
+    };
+
     let mut candidates_by_instrument = candidates
         .into_iter()
         .map(|candidate| (candidate.inst_id.clone(), candidate))
         .collect::<HashMap<_, _>>();
-    let coverage = snapshot.view().coverage;
-    Ok(scores
+    let snapshot_coverage = snapshot.view().coverage;
+    let rows = ranked
         .into_iter()
         .enumerate()
-        .filter_map(|(index, score)| {
+        .filter_map(|(index, (inst_id, score))| {
             candidates_by_instrument
-                .remove(&score.inst_id)
+                .remove(&inst_id)
                 .map(|candidate| {
-                    let definition = &factor.definition;
                     SystematicFactorView {
                         id: format!("{}:{}:{}", factor.id, snapshot.id, candidate.inst_id),
                         factor_id: factor.id.clone(),
                         inst_id: candidate.inst_id,
                         rank: index + 1,
-                        alpha_score: score.normalized_score,
+                        previous_rank: None,
+                        alpha_score: score,
                         momentum_pct: candidate.momentum_pct,
                         realized_volatility_pct: candidate.realized_volatility_pct,
                         volume_ratio: candidate.volume_ratio,
                         liquidity_usdt: candidate.liquidity_usdt,
-                        coverage: coverage.clone(),
+                        coverage: snapshot_coverage.clone(),
                         evidence: format!(
-                            "{} closed 1m bars; momentum {:+.2}%, realised volatility {:.2}%, volume ratio {:.2}x. Formula: {:+.2}M - {:.2}RV {:+.2}V.",
+                            "{} closed 1m bars; momentum {:+.2}%, realised volatility {:.2}%, volume ratio {:.2}x. {}",
                             minimum_bars,
                             candidate.momentum_pct * 100.0,
                             candidate.realized_volatility_pct * 100.0,
                             candidate.volume_ratio,
-                            definition.momentum_weight,
-                            definition.volatility_penalty_weight,
-                            definition.volume_weight,
+                            formula_note,
                         ),
                         counter_evidence: "Only confirmed local 1m K-lines are used. Funding, open interest, order-book, trade-flow, and future bars are excluded.".to_string(),
                     }
                 })
         })
-        .collect())
+        .collect::<Vec<_>>();
+    let diagnostics = coverage.finish(
+        snapshot,
+        universe_total,
+        universe_eligible,
+        rows.len(),
+        evaluation_ready,
+        evaluation_required_bars,
+        now_ms(),
+    );
+    Ok((rows, diagnostics))
+}
+
+/// Evaluation defaults.
+///
+/// The cadence default is daily rather than intraday. Fee-only drag at full
+/// turnover rises steeply with frequency — roughly 5% annualised weekly, 37%
+/// daily, 110% at eight-hourly, and 876% hourly on base taker fees — while gross
+/// return scales only with the square root of frequency. Moving from weekly to
+/// eight-hourly multiplies cost about 21-fold against a gross ceiling of about
+/// 4.6-fold, so a fast default would present results that cannot survive their
+/// own trading costs. Deciding often and trading rarely is the better lever, and
+/// that belongs to a no-trade buffer rather than to the grid.
+const DEFAULT_FACTOR_GRID_MINUTES: i64 = 1_440;
+const MIN_FACTOR_GRID_MINUTES: i64 = 60;
+const MAX_FACTOR_GRID_MINUTES: i64 = 10_080;
+
+/// Default evaluation window.
+const DEFAULT_FACTOR_EVALUATION_DAYS: i64 = 90;
+const MAX_FACTOR_EVALUATION_DAYS: i64 = 366;
+
+/// Forward horizons in minutes, as multiples of the daily default.
+const DEFAULT_FACTOR_HORIZONS_MINUTES: [i64; 3] = [1_440, 4_320, 10_080];
+
+/// Bucket count default.
+///
+/// Three rather than five or ten: optimal bucket count falls as the
+/// cross-section narrows and its variance rises, and a perpetual universe is
+/// measured in tens, not thousands. A decile over forty instruments holds four
+/// names, whose mean is an individual instrument's return wearing a statistic's
+/// clothing.
+const DEFAULT_FACTOR_QUANTILE_BUCKETS: usize = 3;
+const MAX_FACTOR_QUANTILE_BUCKETS: usize = 10;
+
+/// Instruments per evaluation, highest turnover first.
+const DEFAULT_FACTOR_EVALUATION_UNIVERSE: usize = 50;
+const MAX_FACTOR_EVALUATION_UNIVERSE: usize = 200;
+
+/// Preferred minimum scored instruments for a grid point to contribute.
+///
+/// A handful of names cannot support a meaningful cross-sectional correlation, so
+/// a sparse grid point is skipped and counted rather than allowed to add noise.
+const PREFERRED_GRID_POINT_MEMBERS: usize = 10;
+
+/// Absolute floor below which a rank correlation is undefined rather than merely
+/// imprecise: two points always correlate perfectly.
+const ABSOLUTE_MIN_GRID_POINT_MEMBERS: usize = 3;
+
+/// Members a grid point needs, given how many instruments can be scored at all.
+///
+/// Applying the preferred threshold as a hard floor discarded every grid point
+/// whenever the whole universe was smaller than it, which reported "no valid grid
+/// points" and left no way to tell a broken factor from a small local cache. The
+/// threshold now degrades to the universe size so a narrow cross-section still
+/// produces a measurable — if explicitly weak — result.
+fn required_grid_point_members(universe_size: usize) -> usize {
+    PREFERRED_GRID_POINT_MEMBERS
+        .min(universe_size)
+        .max(ABSOLUTE_MIN_GRID_POINT_MEMBERS)
+}
+
+/// One instrument's score and forward returns at one grid point.
+#[derive(Debug, Clone)]
+struct GridSample {
+    inst_id: String,
+    score: f64,
+    /// One entry per requested horizon; `None` when the horizon extends past the
+    /// window and the return is therefore unknown.
+    forward_returns: Vec<Option<f64>>,
+}
+
+/// A grid point: an aligned cutoff and every instrument scored at it.
+#[derive(Debug, Clone)]
+struct GridPoint {
+    as_of_ms: i64,
+    samples: Vec<GridSample>,
+}
+
+/// Loads closing prices keyed by bar open time for one instrument.
+///
+/// Reading one instrument at a time is deliberate. The candle table's primary key
+/// is `(symbol, interval, open_time)`, so a single-instrument range scan follows
+/// the index order, whereas a query spanning instruments at each timestamp would
+/// not. It also bounds memory to one instrument's window instead of the whole
+/// panel's.
+fn load_close_series(
+    conn: &Connection,
+    inst_id: &str,
+    start_open: i64,
+    end_open: i64,
+) -> Result<BTreeMap<i64, f64>, String> {
+    let mut statement = conn
+        .prepare(
+            "SELECT open_time,close FROM candles
+             WHERE symbol=?1 AND interval=?2 AND confirm=1
+               AND open_time>=?3 AND open_time<=?4
+             ORDER BY open_time ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = statement
+        .query_map(
+            params![inst_id, SYSTEMATIC_INTERVAL, start_open, end_open],
+            |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        )
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let mut series = BTreeMap::new();
+    for (open_time, close) in rows {
+        let close = parse_candle_decimal("close", &close)?;
+        if close > 0.0 {
+            series.insert(open_time, close);
+        }
+    }
+    Ok(series)
+}
+
+/// Forward return from `as_of` over `horizon_minutes`.
+///
+/// Both endpoints must be present. A return computed across a data gap would be
+/// a single compounded move spanning the outage, which any momentum or reversal
+/// factor would read as a genuine signal, so a missing endpoint yields `None`
+/// rather than reaching for the nearest available bar.
+fn forward_return_at(
+    series: &BTreeMap<i64, f64>,
+    as_of_ms: i64,
+    horizon_minutes: i64,
+    window_end_open: i64,
+) -> Option<f64> {
+    let entry_open = as_of_ms;
+    let exit_open = as_of_ms + horizon_minutes * ONE_MINUTE_MS;
+    // Refusing to look past the window keeps the measurement inside the data the
+    // caller asked about.
+    if exit_open > window_end_open {
+        return None;
+    }
+    let entry = series.get(&entry_open)?;
+    let exit = series.get(&exit_open)?;
+    if *entry <= 0.0 {
+        return None;
+    }
+    Some(exit / entry - 1.0)
+}
+
+/// Aligned grid cutoffs across the window.
+fn grid_cutoffs(window_start_open: i64, window_end_open: i64, grid_minutes: i64) -> Vec<i64> {
+    let step = grid_minutes * ONE_MINUTE_MS;
+    if step <= 0 || window_end_open < window_start_open {
+        return Vec::new();
+    }
+    // Snap to a multiple of the step so repeated evaluations of the same window
+    // land on identical cutoffs and remain comparable.
+    let first = window_start_open + (step - window_start_open.rem_euclid(step)).rem_euclid(step);
+    let mut cutoffs = Vec::new();
+    let mut cursor = first;
+    while cursor <= window_end_open {
+        cutoffs.push(cursor);
+        cursor += step;
+    }
+    cutoffs
+}
+
+/// Scores an expression factor over the aligned panel.
+///
+/// Only instruments that already passed the candidate screen are loaded, so the
+/// panel here matches the one the blend scorer sees. Each instrument's bars are
+/// read up to the same cutoff and truncated to a common length, because a
+/// cross-sectional statistic over rows representing different moments would
+/// compare one instrument's present against another's past.
+fn score_expression_factor(
+    conn: &Connection,
+    _snapshot: &StoredUniverseSnapshot,
+    definition: &ExpressionFactorDefinition,
+    candidates: &[FactorCandidate],
+    cutoff_at: i64,
+) -> Result<Vec<(String, f64)>, String> {
+    let validation = definition
+        .expression
+        .validate(FactorDslLimits::default())
+        .map_err(|error| format!("Factor expression is invalid: {error}"))?;
+    let required_bars = validation.minimum_bars.max(2);
+
+    let mut panel: Vec<FactorPanelInput> = Vec::new();
+    for candidate in candidates {
+        let bars = load_confirmed_tail(conn, &candidate.inst_id, cutoff_at, required_bars)
+            .unwrap_or_default();
+        if bars.len() < required_bars || !bars_are_continuous(&bars) {
+            continue;
+        }
+        panel.push(FactorPanelInput {
+            inst_id: candidate.inst_id.clone(),
+            columns: OhlcvColumns {
+                timestamp: bars.iter().map(|bar| bar.open_time_ms).collect(),
+                open: bars.iter().map(|bar| bar.open).collect(),
+                high: bars.iter().map(|bar| bar.high).collect(),
+                low: bars.iter().map(|bar| bar.low).collect(),
+                close: bars.iter().map(|bar| bar.close).collect(),
+                volume: bars.iter().map(|bar| bar.volume).collect(),
+            },
+        });
+    }
+    if panel.len() < 2 {
+        // Below two members a cross-sectional statistic carries no information.
+        // Returning nothing lets the caller report the reason instead of
+        // presenting a degenerate ranking.
+        return Ok(Vec::new());
+    }
+
+    // Truncate to the shortest available history so every column represents the
+    // same set of timestamps.
+    let common_bars = panel
+        .iter()
+        .map(|input| input.columns.len())
+        .min()
+        .unwrap_or(0);
+    for input in &mut panel {
+        let excess = input.columns.len() - common_bars;
+        if excess > 0 {
+            input.columns.timestamp.drain(0..excess);
+            input.columns.open.drain(0..excess);
+            input.columns.high.drain(0..excess);
+            input.columns.low.drain(0..excess);
+            input.columns.close.drain(0..excess);
+            input.columns.volume.drain(0..excess);
+        }
+    }
+
+    let output = evaluate_factor_panel(&definition.expression, &panel, FactorDslLimits::default())
+        .map_err(|error| format!("Factor expression evaluation failed: {error}"))?;
+    Ok(output.ranked_latest())
 }
 
 #[derive(Debug)]
@@ -11016,6 +13694,47 @@ fn local_python_environment_manifest_path(venv_path: &Path) -> PathBuf {
     venv_path.join(SYSTEMATIC_PYTHON_ENVIRONMENT_MANIFEST)
 }
 
+/// Move a fully prepared environment into its final location. On Windows, an
+/// on-access scanner can retain a just-created Python launcher briefly after
+/// pip exits, causing the same-volume rename to return `PermissionDenied`.
+async fn activate_staged_local_python_environment(
+    staging: &Path,
+    venv_path: &Path,
+) -> std::io::Result<()> {
+    for attempt in 0..=SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT {
+        match fs::rename(staging, venv_path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT =>
+            {
+                sleep(SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the retry loop always returns after its final attempt")
+}
+
+/// A venv without its interpreter cannot run a strategy and has no user-owned
+/// content. Remove it so a retry can build a complete environment rather than
+/// remaining permanently guarded after an interrupted first install.
+async fn remove_incomplete_local_python_environment(venv_path: &Path) -> std::io::Result<()> {
+    for attempt in 0..=SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT {
+        match fs::remove_dir_all(venv_path) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt < SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT =>
+            {
+                sleep(SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_DELAY).await;
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!("the retry loop always returns after its final attempt")
+}
+
 fn local_python_runtime_view() -> SystematicPythonRuntimeView {
     let venv_path = local_python_venv_path();
     let environment_exists = venv_path.is_dir();
@@ -11177,6 +13896,17 @@ fn local_python_environment_failure_view(
                 "{label} is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12-3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then retry.\n{error}"
             ),
         )
+    } else if lowercase.contains("could not activate the local python environment")
+        && (lowercase.contains("access is denied")
+            || lowercase.contains("permission denied")
+            || lowercase.contains("拒绝访问"))
+    {
+        (
+            "invalidEnvironment",
+            format!(
+                "{label} finished preparing the local research environment, but Windows kept the new environment files in use while Desic was activating it. Close programs scanning or using the Desic workspace, then retry.\n{error}"
+            ),
+        )
     } else {
         (
             "invalidEnvironment",
@@ -11215,7 +13945,18 @@ async fn ensure_local_python_environment(
             return Ok(current);
         }
     } else if current.state == "invalidEnvironment" {
-        return Ok(current);
+        let venv_path = local_python_venv_path();
+        if let Err(error) = remove_incomplete_local_python_environment(&venv_path).await {
+            return Ok(local_python_runtime_unavailable_view(
+                "invalidEnvironment",
+                format!(
+                    "Desic found an incomplete local Python environment at {} but Windows would not allow it to be removed for recreation. Close any program using that directory and retry.\n{error}",
+                    venv_path.display(),
+                ),
+                true,
+                None,
+            ));
+        }
     }
 
     let environment_root = local_python_environment_root();
@@ -11305,26 +14046,61 @@ async fn ensure_local_python_environment(
             }
         };
         write_local_python_environment_manifest(&staging, &version, &python_source)?;
-        match fs::rename(&staging, &venv_path) {
+        match activate_staged_local_python_environment(&staging, &venv_path).await {
             Ok(()) => version,
             Err(error) if venv_path.exists() => {
-                let _ = fs::remove_dir_all(&staging);
-                if local_python_venv_interpreter_path(&venv_path).is_file() {
-                    install_local_python_dependencies(
-                        &local_python_venv_interpreter_path(&venv_path),
-                        app,
-                    )
-                    .await?
+                let existing_interpreter = local_python_venv_interpreter_path(&venv_path);
+                if existing_interpreter.is_file() {
+                    let _ = remove_incomplete_local_python_environment(&staging).await;
+                    match install_local_python_dependencies(&existing_interpreter, app).await {
+                        Ok(version) => version,
+                        Err(install_error) => {
+                            return Ok(local_python_environment_failure_view(
+                                &interpreter,
+                                &install_error,
+                            ));
+                        }
+                    }
                 } else {
-                    return Err(format!(
-                        "Could not activate the local Python environment: {error}"
-                    ));
+                    match remove_incomplete_local_python_environment(&venv_path).await {
+                        Ok(()) => {
+                            match activate_staged_local_python_environment(&staging, &venv_path)
+                                .await
+                            {
+                                Ok(()) => version,
+                                Err(retry_error) => {
+                                    let _ =
+                                        remove_incomplete_local_python_environment(&staging).await;
+                                    return Ok(local_python_environment_failure_view(
+                                        &interpreter,
+                                        &format!(
+                                            "Could not activate the local Python environment after removing an incomplete prior environment: {retry_error}"
+                                        ),
+                                    ));
+                                }
+                            }
+                        }
+                        Err(remove_error) => {
+                            let _ = remove_incomplete_local_python_environment(&staging).await;
+                            return Ok(local_python_environment_failure_view(
+                                &interpreter,
+                                &format!(
+                                    "Could not activate the local Python environment: {error}. An incomplete prior environment at {} could not be removed: {remove_error}",
+                                    venv_path.display(),
+                                ),
+                            ));
+                        }
+                    }
                 }
             }
             Err(error) => {
-                let _ = fs::remove_dir_all(&staging);
-                return Err(format!(
-                    "Could not activate the local Python environment: {error}"
+                let _ = remove_incomplete_local_python_environment(&staging).await;
+                return Ok(local_python_environment_failure_view(
+                    &interpreter,
+                    &format!(
+                        "Could not activate the local Python environment after {} retry attempts: {error}",
+                        SYSTEMATIC_PYTHON_ENVIRONMENT_ACTIVATION_RETRY_COUNT,
+                    ),
                 ));
             }
         }
@@ -11669,6 +14445,8 @@ struct LocalPythonStrategyRunner {
     handlers: Vec<String>,
     action_sites: Vec<Value>,
     market_intervals: Vec<String>,
+    /// Factor identifiers the source statically declares reading.
+    factor_ids: Vec<String>,
     started: bool,
     initial_market_sent: bool,
     market_series: PythonMarketSeriesCursor,
@@ -12055,6 +14833,10 @@ impl LocalPythonStrategyRunner {
                 .iter()
                 .map(|(interval, _)| (*interval).to_string())
                 .collect(),
+            // Empty until the loaded message declares otherwise: reading no
+            // factors is the correct default, and a dynamic identifier is
+            // refused by the runtime rather than guessed at here.
+            factor_ids: Vec::new(),
             started: false,
             initial_market_sent: false,
             market_series: PythonMarketSeriesCursor::default(),
@@ -12139,6 +14921,21 @@ impl LocalPythonStrategyRunner {
                     .map(|(interval, _)| (*interval).to_string())
                     .collect()
             });
+        // Factor identifiers the source reads. The runtime refuses a dynamic
+        // identifier, so an absent list means the strategy reads no factors
+        // rather than that the set is unknown; there is no permissive fallback
+        // here, unlike market intervals.
+        let factor_ids = loaded
+            .get("factorIds")
+            .and_then(Value::as_array)
+            .map(|values| {
+                values
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
         if !handlers.iter().any(|handler| handler == "on_bar") {
             return Err(python_runtime_error(
                 "A Python backtest strategy must define on_bar(ctx)",
@@ -12147,8 +14944,19 @@ impl LocalPythonStrategyRunner {
         self.handlers = handlers;
         self.action_sites = action_sites;
         self.market_intervals = market_intervals;
+        self.factor_ids = factor_ids;
         self.market_series = PythonMarketSeriesCursor::for_intervals(&self.market_intervals);
         Ok(())
+    }
+
+    /// Factor identifiers this strategy reads, declared at load time.
+    ///
+    /// Production code reads the field directly in the `on_bar` guard; this
+    /// accessor exists for the load-time tests, which only compile when a real
+    /// interpreter is configured.
+    #[cfg(test)]
+    pub(crate) fn factor_ids(&self) -> &[String] {
+        &self.factor_ids
     }
 
     fn wait_for_ready(&mut self) -> Result<(), SystematicError> {
@@ -12645,6 +15453,20 @@ impl StatefulEventDrivenStrategy for LocalPythonStrategyRunner {
     }
 
     fn on_bar(&mut self, context: &StrategyContext<'_>) -> Result<StrategyAction, SystematicError> {
+        // A backtest loads one instrument's candles, so it cannot build the
+        // cross-section `ctx.factor_scores` describes. Refusing is the honest
+        // outcome: serving an empty mapping would let the strategy silently take
+        // its no-data branch on every bar and report a completed run whose
+        // factor gate never actually applied.
+        if !self.factor_ids.is_empty() {
+            self.abort();
+            return Err(SystematicError::OutputContractViolation {
+                reason: format!(
+                    "this strategy reads cross-sectional factor scores ({}), which a single-instrument backtest cannot supply. Run it as a live Profile, or remove the ctx.factor_scores call to backtest it.",
+                    self.factor_ids.join(", ")
+                ),
+            });
+        }
         if !self.started && self.handlers.iter().any(|handler| handler == "on_start") {
             let event_started = Instant::now();
             let start_event = self.build_event(context, "start")?;
@@ -14249,6 +17071,52 @@ mod tests {
     }
 
     #[test]
+    fn environment_failure_view_explains_windows_activation_locks() {
+        let interpreter = LocalPythonInterpreter {
+            program: "py".to_string(),
+            leading_args: vec!["-3".to_string()],
+            version: "3.12".to_string(),
+        };
+        let failure = local_python_environment_failure_view(
+            &interpreter,
+            "Could not activate the local Python environment after 12 retry attempts: 拒绝访问。 (os error 5)",
+        );
+        assert_eq!(failure.state, "invalidEnvironment");
+        assert!(failure
+            .reason
+            .contains("Windows kept the new environment files in use"));
+        assert!(failure.reason.contains("retry"));
+    }
+
+    #[test]
+    fn staged_python_environment_can_activate_and_be_recreated() {
+        let root = std::env::temp_dir().join(systematic_id("python-venv-activation-test"));
+        let staging = root.join("staging");
+        let venv = root.join("venv");
+        fs::create_dir_all(&staging).expect("create staged environment");
+        fs::write(staging.join("marker"), "ready").expect("write staged marker");
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        runtime
+            .block_on(activate_staged_local_python_environment(&staging, &venv))
+            .expect("activate staged environment");
+        assert!(!staging.exists());
+        assert_eq!(
+            fs::read_to_string(venv.join("marker")).expect("read activated marker"),
+            "ready"
+        );
+
+        runtime
+            .block_on(remove_incomplete_local_python_environment(&venv))
+            .expect("remove environment for recreation");
+        assert!(!venv.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn bundled_python_runtime_manifest_parses() {
         let manifest_path = Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("resources")
@@ -14472,7 +17340,10 @@ mod tests {
             .files
             .iter()
             .any(|file| file.path == "templates/ema-trend.py"));
-        assert!(summary.files.iter().all(|file| file.sha256.len() == 64 && file.bytes > 0));
+        assert!(summary
+            .files
+            .iter()
+            .all(|file| file.sha256.len() == 64 && file.bytes > 0));
 
         // The body carries its own Markdown structure; the legacy generated
         // 规则/内容 sections must not come back.
@@ -15190,6 +18061,54 @@ def on_bar(ctx):
     }
 
     #[test]
+    fn python_factor_ids_are_declared_statically_or_refused() {
+        let Ok(interpreter) = std::env::var("DESIC_SYSTEMATIC_TEST_PYTHON") else {
+            return;
+        };
+        let launch = |source: &str| {
+            LocalPythonStrategyRunner::launch(
+                LocalPythonBacktestSpec {
+                    interpreter: Path::new(&interpreter).to_path_buf(),
+                    definition: PythonStrategyDefinition {
+                        schema_version: "desic.systematic.strategy/v1".to_string(),
+                        protocol: SYSTEMATIC_PYTHON_PROTOCOL.to_string(),
+                        entrypoint: "on_bar".to_string(),
+                        source: source.to_string(),
+                        parameters: json!({}),
+                        parameter_tuning: BTreeMap::new(),
+                    },
+                },
+                "factor-id-selection-test",
+            )
+        };
+
+        // A strategy reading no factors declares none.
+        let none = launch("def on_bar(ctx):\n    return ctx.no_action(\"wait\")\n")
+            .expect("launch without factors");
+        assert!(none.factor_ids().is_empty());
+        drop(none);
+
+        // A literal identifier is captured so the host can precompute it.
+        let literal = launch(
+            "def on_bar(ctx):\n    scores = ctx.factor_scores(\"factor-abc\")\n    return ctx.no_action(str(len(scores)))\n",
+        )
+        .expect("launch with a literal factor id");
+        assert_eq!(literal.factor_ids(), &["factor-abc".to_string()]);
+        drop(literal);
+
+        // A dynamic identifier is refused rather than falling back: unlike the
+        // fixed set of market intervals, the set of factor identifiers is
+        // unbounded, so there is nothing safe to preload.
+        let dynamic = launch(
+            "def on_bar(ctx):\n    name = \"factor-\" + \"abc\"\n    ctx.factor_scores(name)\n    return ctx.no_action(\"wait\")\n",
+        );
+        assert!(
+            dynamic.is_err(),
+            "a dynamic factor id must be refused at load time"
+        );
+    }
+
+    #[test]
     fn strategy_ai_test_reports_action_sites_when_python_is_available() {
         let Ok(interpreter) = std::env::var("DESIC_SYSTEMATIC_TEST_PYTHON") else {
             return;
@@ -15352,6 +18271,7 @@ def on_bar(ctx):
             "systematic_paper_intents",
             "systematic_registry_packages",
             "systematic_settings",
+            "systematic_instrument_registry",
         ] {
             let exists: bool = conn
                 .query_row(
@@ -15373,11 +18293,792 @@ def on_bar(ctx):
         assert_eq!(rule_packages, 0);
         let factors = load_factor_definitions(&conn).expect("factor definitions");
         assert_eq!(factors.len(), 1);
-        assert_eq!(factors[0].id, "builtin-kline-blend-v1");
+        assert_eq!(factors[0].id, BUILTIN_KLINE_FACTOR_ID);
         assert_eq!(
             factors[0].definition.minimum_bars(),
             BASELINE_FACTOR_MIN_BARS
         );
+        // The seeded row must round-trip through the tagged representation.
+        assert_eq!(factors[0].definition.kind_label(), "klineBlend");
+    }
+
+    /// Builds a universe snapshot row directly so factor coverage can be tested
+    /// without the market-assets cache.
+    fn insert_test_universe_snapshot(
+        conn: &Connection,
+        id: &str,
+        cutoff_at: i64,
+        instruments: &[(&str, bool)],
+    ) {
+        let rows = instruments
+            .iter()
+            .map(|(inst_id, eligible)| {
+                json!({
+                    "instId": inst_id,
+                    "contractValue": 1.0,
+                    "minSize": 1.0,
+                    "lotSize": 1.0,
+                    "eligible": eligible,
+                    "coverage": if *eligible { "complete" } else { "partial" },
+                    "availableBars": 5_000,
+                    "lastClosedAt": cutoff_at,
+                })
+            })
+            .collect::<Vec<_>>();
+        conn.execute(
+            "INSERT INTO systematic_universe_snapshots(
+               id,cutoff_at,instruments_json,coverage_json,source,created_at
+             ) VALUES(?1,?2,?3,?4,'test',?5)",
+            params![
+                id,
+                cutoff_at,
+                serde_json::to_string(&rows).expect("instruments"),
+                json!({
+                    "totalInstruments": instruments.len(),
+                    "eligibleInstruments": instruments.iter().filter(|(_, e)| *e).count(),
+                    "coveragePct": 100.0,
+                    "coverage": "complete",
+                })
+                .to_string(),
+                cutoff_at,
+            ],
+        )
+        .expect("universe snapshot");
+    }
+
+    fn insert_test_candles(conn: &Connection, symbol: &str, first_open: i64, count: usize) {
+        for index in 0..count {
+            let open_time = first_open + (index as i64) * ONE_MINUTE_MS;
+            let price = 100.0 + index as f64;
+            conn.execute(
+                "INSERT INTO candles(symbol,interval,open_time,close_time,open,high,low,close,volume,confirm,source,updated_at)
+                 VALUES(?1,'1m',?2,?3,?4,?5,?6,?7,?8,1,'test',?2)",
+                params![
+                    symbol,
+                    open_time,
+                    open_time + ONE_MINUTE_MS,
+                    price.to_string(),
+                    (price + 1.0).to_string(),
+                    (price - 1.0).to_string(),
+                    price.to_string(),
+                    "10".to_string(),
+                ],
+            )
+            .expect("candle insert");
+        }
+    }
+
+    fn create_test_candle_table(conn: &Connection) {
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS candles(
+               symbol TEXT NOT NULL, interval TEXT NOT NULL, open_time INTEGER NOT NULL,
+               close_time INTEGER NOT NULL, open TEXT NOT NULL, high TEXT NOT NULL,
+               low TEXT NOT NULL, close TEXT NOT NULL, volume TEXT NOT NULL,
+               confirm INTEGER NOT NULL, source TEXT NOT NULL, updated_at INTEGER NOT NULL,
+               PRIMARY KEY (symbol, interval, open_time)
+             );",
+        )
+        .expect("candle table");
+    }
+
+    #[test]
+    fn factor_coverage_attributes_every_excluded_instrument() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        create_test_candle_table(&conn);
+
+        let cutoff_at = 1_700_000_000_000_i64;
+        // One instrument has a full history, one is short, one has none.
+        let first_open = cutoff_at - 400 * ONE_MINUTE_MS;
+        insert_test_candles(&conn, "BTC-USDT-SWAP", first_open, 300);
+        insert_test_candles(&conn, "ETH-USDT-SWAP", first_open, 300);
+        insert_test_candles(&conn, "SOL-USDT-SWAP", first_open, 10);
+        insert_test_universe_snapshot(
+            &conn,
+            "universe-test",
+            cutoff_at,
+            &[
+                ("BTC-USDT-SWAP", true),
+                ("ETH-USDT-SWAP", true),
+                ("SOL-USDT-SWAP", true),
+                ("DOGE-USDT-SWAP", true),
+                ("XRP-USDT-SWAP", false),
+            ],
+        );
+
+        let snapshot = load_latest_universe(&conn)
+            .expect("snapshot read")
+            .expect("snapshot present");
+        let factor = load_factor_definition(&conn, BUILTIN_KLINE_FACTOR_ID)
+            .expect("factor read")
+            .expect("builtin factor");
+        let (rows, diagnostics) =
+            compute_factor_rows(&conn, &snapshot, &factor).expect("factor rows");
+
+        assert_eq!(rows.len(), 2);
+        assert_eq!(diagnostics.universe_total, 5);
+        assert_eq!(diagnostics.universe_eligible, 4);
+        assert_eq!(diagnostics.scored, 2);
+        // Every exclusion is attributed, including instruments the snapshot
+        // marked ineligible. Those are the common case when the local cache is
+        // mostly empty, and omitting them made the banner claim full coverage
+        // while almost nothing had been scored.
+        // SOL is short, and XRP is ineligible. The fixture records a nonzero
+        // `availableBars` for every row, so the ineligible one is attributed to
+        // insufficient rather than absent history.
+        assert_eq!(
+            diagnostics.reason_counts.get("insufficientBars").copied(),
+            Some(2)
+        );
+        // DOGE has no local candles at all.
+        assert_eq!(
+            diagnostics.reason_counts.get("noLocalBars").copied(),
+            Some(1)
+        );
+        assert_eq!(diagnostics.samples.len(), 3);
+        // Coverage is measured against the whole universe: 2 of 5 scored.
+        assert!((diagnostics.dropped_pct - 0.6).abs() < 1e-9);
+        assert!(diagnostics
+            .samples
+            .iter()
+            .any(|sample| sample.inst_id == "SOL-USDT-SWAP"
+                && sample.reason == "insufficientBars"
+                && sample.available_bars == Some(10)
+                && sample.required_bars == Some(BASELINE_FACTOR_MIN_BARS)));
+        assert!(diagnostics.cross_section_sufficient);
+        assert!(!diagnostics.survivorship_note.is_empty());
+        // Ranks are dense and ordered, and a saved evaluation reports no
+        // previous rank.
+        assert_eq!(rows[0].rank, 1);
+        assert_eq!(rows[1].rank, 2);
+        assert!(rows.iter().all(|row| row.previous_rank.is_none()));
+    }
+
+    #[test]
+    fn expression_factors_score_through_the_shared_pipeline() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        create_test_candle_table(&conn);
+
+        let cutoff_at = 1_700_000_000_000_i64;
+        let first_open = cutoff_at - 400 * ONE_MINUTE_MS;
+        // Rising, flat and falling closes so a momentum ranking has a known order.
+        for (symbol, step) in [
+            ("AAA-USDT-SWAP", 1.0_f64),
+            ("BBB-USDT-SWAP", 0.0),
+            ("CCC-USDT-SWAP", -0.3),
+        ] {
+            for index in 0..300 {
+                let open_time = first_open + (index as i64) * ONE_MINUTE_MS;
+                let price = 100.0 + step * index as f64;
+                conn.execute(
+                    "INSERT INTO candles(symbol,interval,open_time,close_time,open,high,low,close,volume,confirm,source,updated_at)
+                     VALUES(?1,'1m',?2,?3,?4,?5,?6,?7,'10',1,'test',?2)",
+                    params![
+                        symbol,
+                        open_time,
+                        open_time + ONE_MINUTE_MS,
+                        price.to_string(),
+                        (price + 1.0).to_string(),
+                        (price - 1.0).to_string(),
+                        price.to_string(),
+                    ],
+                )
+                .expect("candle insert");
+            }
+        }
+        insert_test_universe_snapshot(
+            &conn,
+            "universe-expression",
+            cutoff_at,
+            &[
+                ("AAA-USDT-SWAP", true),
+                ("BBB-USDT-SWAP", true),
+                ("CCC-USDT-SWAP", true),
+            ],
+        );
+
+        // A cross-sectional rank of a short trailing return, saved as an
+        // expression factor rather than a fixed blend.
+        let definition_json = json!({
+            "kind": "expression",
+            "factorId": "factor-expression-test",
+            "expression": {
+                "series": {
+                    "kind": "arithmetic",
+                    "op": "subtract",
+                    "left": {
+                        "kind": "arithmetic",
+                        "op": "divide",
+                        "left": { "kind": "field", "field": "close" },
+                        "right": {
+                            "kind": "rolling",
+                            "function": "sma",
+                            "input": { "kind": "field", "field": "close" },
+                            "window": 30
+                        }
+                    },
+                    "right": { "kind": "number", "value": 1.0 }
+                },
+                "pipeline": [
+                    { "scope": "crossSection", "op": "csRank", "ascending": true }
+                ]
+            }
+        });
+        let definition = serde_json::from_value::<FactorDefinition>(definition_json)
+            .expect("expression definition decodes");
+        assert_eq!(definition.kind_label(), "expression");
+        definition.validate().expect("definition validates");
+
+        let saved = save_factor_definition_with_conn(
+            &conn,
+            None,
+            "factor-expression-test",
+            "Expression momentum",
+            "EXPRMOM",
+            "Cross-sectional rank of a trailing return.",
+            definition,
+            "research",
+        )
+        .expect("save expression factor");
+        assert_eq!(saved.kind, "expression");
+
+        let snapshot = load_latest_universe(&conn)
+            .expect("snapshot read")
+            .expect("snapshot present");
+        let factor = load_factor_definition(&conn, "factor-expression-test")
+            .expect("factor read")
+            .expect("factor present");
+        let (rows, diagnostics) =
+            compute_factor_rows(&conn, &snapshot, &factor).expect("factor rows");
+
+        assert_eq!(rows.len(), 3);
+        assert!(diagnostics.cross_section_sufficient);
+        // The rising instrument must rank first and the falling one last.
+        assert_eq!(rows[0].inst_id, "AAA-USDT-SWAP");
+        assert_eq!(rows[2].inst_id, "CCC-USDT-SWAP");
+        assert_eq!(rows[0].rank, 1);
+        // Evidence names the pipeline rather than the blend weights.
+        assert!(rows[0].evidence.contains("expression pipeline"));
+    }
+
+    #[test]
+    fn expression_factors_require_a_cross_sectional_stage() {
+        // Without a cross-sectional stage the values are per-instrument and not
+        // comparable, so ranking them would be meaningless.
+        let definition_json = json!({
+            "kind": "expression",
+            "factorId": "factor-no-cs",
+            "expression": {
+                "series": { "kind": "field", "field": "close" },
+                "pipeline": []
+            }
+        });
+        let definition =
+            serde_json::from_value::<FactorDefinition>(definition_json).expect("decodes");
+        assert!(definition.validate().is_err());
+    }
+
+    #[test]
+    fn factor_coverage_flags_a_single_member_cross_section() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        create_test_candle_table(&conn);
+
+        let cutoff_at = 1_700_000_000_000_i64;
+        insert_test_candles(&conn, "BTC-USDT-SWAP", cutoff_at - 400 * ONE_MINUTE_MS, 300);
+        insert_test_universe_snapshot(
+            &conn,
+            "universe-single",
+            cutoff_at,
+            &[("BTC-USDT-SWAP", true)],
+        );
+
+        let snapshot = load_latest_universe(&conn)
+            .expect("snapshot read")
+            .expect("snapshot present");
+        let factor = load_factor_definition(&conn, BUILTIN_KLINE_FACTOR_ID)
+            .expect("factor read")
+            .expect("builtin factor");
+        let (rows, diagnostics) =
+            compute_factor_rows(&conn, &snapshot, &factor).expect("factor rows");
+
+        // A one-member cross-section scores 0.0 for everything, which is not a
+        // ranking. The flag exists so the UI says so instead of implying order.
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].alpha_score, 0.0);
+        assert!(!diagnostics.cross_section_sufficient);
+    }
+
+    #[test]
+    fn repair_downloads_enough_history_to_evaluate_not_just_to_rank() {
+        // Measured against the live database, repair was fetching about 182 bars
+        // (~3 hours) per instrument. That is enough to rank the current bar and
+        // useless for an evaluation, which walks a grid across months: at every
+        // past cutoff the instrument had no history, so all 90 grid points were
+        // discarded while the ranking looked perfectly healthy.
+        let minimum_bars = BASELINE_FACTOR_MIN_BARS;
+        let evaluation_span_bars = (DEFAULT_FACTOR_EVALUATION_DAYS * 24 * 60) as usize;
+        let horizon_bars = DEFAULT_FACTOR_HORIZONS_MINUTES
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0) as usize;
+        let span_bars = evaluation_span_bars
+            .saturating_add(horizon_bars)
+            .saturating_add(minimum_bars);
+
+        // The old formula, retained here as the thing that must not come back.
+        let ranking_only = minimum_bars.saturating_mul(2).max(minimum_bars + 120);
+        assert!(ranking_only < 200, "old span was about three hours");
+        assert!(
+            span_bars > evaluation_span_bars,
+            "span must exceed the evaluation window itself"
+        );
+        // The span has to cover the window, the longest forward horizon, and one
+        // lookback so the earliest grid point is scorable.
+        assert!(span_bars >= evaluation_span_bars + horizon_bars + minimum_bars);
+        // Roughly 97 days of one-minute bars.
+        assert!(
+            span_bars > 130_000 && span_bars < 150_000,
+            "span {span_bars}"
+        );
+    }
+
+    #[test]
+    fn evaluation_grid_ends_one_longest_horizon_before_the_data_edge() {
+        // The last score needs a future close in order to measure its forward
+        // return. If the grid reaches the data edge, that return is unknowable and
+        // the point contributes nothing — with one horizon, every point can be
+        // lost while the UI only says "not enough valid points".
+        let data_end = 1_700_000_000_000_i64;
+        let longest_horizon = 7 * 24 * 60_i64;
+        let grid_end = data_end - longest_horizon * ONE_MINUTE_MS;
+        let cutoffs = grid_cutoffs(grid_end - 30 * 24 * 60 * ONE_MINUTE_MS, grid_end, 1_440);
+        let last = *cutoffs.last().expect("cutoff");
+        assert!(last <= grid_end);
+        assert!(last + longest_horizon * ONE_MINUTE_MS <= data_end);
+        // The data edge, not the grid edge, is the valid boundary for the
+        // forward-return lookup.
+        let mut series = BTreeMap::new();
+        series.insert(last, 100.0);
+        series.insert(last + longest_horizon * ONE_MINUTE_MS, 110.0);
+        let measured =
+            forward_return_at(&series, last, longest_horizon, data_end).expect("forward return");
+        assert!((measured - 0.1).abs() < 1e-12);
+        assert_eq!(
+            forward_return_at(&series, last, longest_horizon, grid_end),
+            None
+        );
+    }
+
+    #[test]
+    fn grid_cutoffs_are_aligned_and_reproducible() {
+        let step = 60 * ONE_MINUTE_MS;
+        // Start deliberately off-grid so the snapping behaviour is exercised.
+        let start = 1_700_000_123_456_i64;
+        let end = start + 5 * step;
+        let cutoffs = grid_cutoffs(start, end, 60);
+        assert!(!cutoffs.is_empty());
+        // Every cutoff sits on a multiple of the step, so repeated evaluations of
+        // the same window compare like with like.
+        assert!(cutoffs.iter().all(|cutoff| cutoff % step == 0));
+        assert!(cutoffs.windows(2).all(|pair| pair[1] - pair[0] == step));
+        assert!(cutoffs
+            .iter()
+            .all(|cutoff| *cutoff >= start && *cutoff <= end));
+        // Deterministic across calls.
+        assert_eq!(cutoffs, grid_cutoffs(start, end, 60));
+        // A reversed window yields nothing rather than panicking.
+        assert!(grid_cutoffs(end, start, 60).is_empty());
+        assert!(grid_cutoffs(start, end, 0).is_empty());
+    }
+
+    #[test]
+    fn forward_returns_never_reach_past_the_window_or_across_gaps() {
+        let mut series = BTreeMap::new();
+        let base = 1_700_000_000_000_i64;
+        for index in 0..10_i64 {
+            series.insert(base + index * ONE_MINUTE_MS, 100.0 + index as f64);
+        }
+        let window_end = base + 9 * ONE_MINUTE_MS;
+
+        // A horizon inside the window resolves.
+        let value = forward_return_at(&series, base, 5, window_end).expect("return");
+        assert!((value - (105.0 / 100.0 - 1.0)).abs() < 1e-12);
+
+        // A horizon extending past the window must not borrow a later bar: that
+        // would be information the evaluation is not entitled to.
+        assert_eq!(
+            forward_return_at(&series, base + 6 * ONE_MINUTE_MS, 5, window_end),
+            None
+        );
+
+        // A missing exit bar yields nothing rather than substituting a neighbour,
+        // which would manufacture a compounded move across the gap.
+        let mut gapped = series.clone();
+        gapped.remove(&(base + 5 * ONE_MINUTE_MS));
+        assert_eq!(forward_return_at(&gapped, base, 5, window_end), None);
+
+        // A missing entry bar is equally disqualifying.
+        let mut no_entry = series.clone();
+        no_entry.remove(&base);
+        assert_eq!(forward_return_at(&no_entry, base, 5, window_end), None);
+    }
+
+    #[test]
+    fn annualised_cost_rises_steeply_with_cadence() {
+        // The cadence default rests on this arithmetic, so it is asserted rather
+        // than left as a comment: gross return scales with the square root of
+        // frequency while cost scales linearly.
+        let weekly = annualised_cost_at_full_turnover(7 * 24 * 60);
+        let daily = annualised_cost_at_full_turnover(1_440);
+        let eight_hourly = annualised_cost_at_full_turnover(480);
+        let hourly = annualised_cost_at_full_turnover(60);
+
+        assert!(weekly < daily && daily < eight_hourly && eight_hourly < hourly);
+        // Roughly 5% weekly, 37% daily, 110% eight-hourly, 876% hourly.
+        assert!((weekly - 0.052).abs() < 0.005);
+        assert!((daily - 0.365).abs() < 0.01);
+        assert!((eight_hourly - 1.095).abs() < 0.02);
+        assert!((hourly - 8.76).abs() < 0.1);
+        // Moving from weekly to eight-hourly multiplies cost about 21-fold while
+        // the fundamental law caps the gross gain near sqrt(21) ~= 4.6.
+        assert!((eight_hourly / weekly - 21.0).abs() < 1.0);
+
+        // The shipped default is the daily cadence, not an intraday one.
+        assert_eq!(DEFAULT_FACTOR_GRID_MINUTES, 1_440);
+        assert!(
+            (annualised_cost_at_full_turnover(DEFAULT_FACTOR_GRID_MINUTES) - daily).abs() < 1e-12
+        );
+    }
+
+    #[test]
+    fn evaluation_metrics_carry_their_boundary_notes() {
+        // An empty grid still has to state what the numbers exclude, or a reader
+        // will treat the result as realisable.
+        let metrics = summarize_factor_grid(&[], &[1_440], 3, 1_440, 0, 0);
+        assert!(metrics.excludes_funding);
+        assert_eq!(metrics.grid_points, 0);
+        // Funding, survivorship, outlier scope and depth are each declared.
+        let joined = metrics.boundary_notes.join(" ");
+        assert!(joined.contains("funding"));
+        assert!(joined.contains("delisted"));
+        assert!(joined.contains("same timestamp"));
+        assert!(joined.contains("depth"));
+    }
+
+    #[test]
+    fn default_quantile_buckets_suit_a_narrow_universe() {
+        // Three, not ten: a decile over a few dozen instruments holds a handful of
+        // names whose mean is an individual instrument's return.
+        assert_eq!(DEFAULT_FACTOR_QUANTILE_BUCKETS, 3);
+        assert!(DEFAULT_FACTOR_EVALUATION_UNIVERSE >= DEFAULT_FACTOR_QUANTILE_BUCKETS * 2);
+    }
+
+    #[test]
+    fn instrument_classification_is_conservative() {
+        // Crypto bases classify as rankable.
+        assert_eq!(
+            classify_instrument("BTC", "BTC-USDT-SWAP"),
+            InstrumentAssetClass::Crypto
+        );
+        assert_eq!(
+            classify_instrument("DOGE", "DOGE-USDT-SWAP"),
+            InstrumentAssetClass::Crypto
+        );
+        // Equity and index underlyings are labelled, not discarded: ranking an
+        // equity perpetual against a memecoin mixes asset classes.
+        assert_eq!(
+            classify_instrument("HOOD", "HOOD-USDT-SWAP"),
+            InstrumentAssetClass::Tradfi
+        );
+        assert_eq!(
+            classify_instrument("UVXY", "UVXY-USDT-SWAP"),
+            InstrumentAssetClass::Tradfi
+        );
+        assert_eq!(
+            classify_instrument("XAU", "XAU-USDT-SWAP"),
+            InstrumentAssetClass::Tradfi
+        );
+        // Stablecoins carry no cross-sectional information and would distort a
+        // z-score while occupying a universe slot.
+        assert_eq!(
+            classify_instrument("USDC", "USDC-USDT-SWAP"),
+            InstrumentAssetClass::NonRankable
+        );
+        // Case-insensitive on the exchange-provided base.
+        assert_eq!(
+            classify_instrument("hood", "HOOD-USDT-SWAP"),
+            InstrumentAssetClass::Tradfi
+        );
+        // Falls back to the identifier prefix when the base is absent.
+        assert_eq!(
+            classify_instrument("", "CRCL-USDT-SWAP"),
+            InstrumentAssetClass::Tradfi
+        );
+        // An unparseable base is surfaced, never assumed to be crypto.
+        assert_eq!(classify_instrument("", ""), InstrumentAssetClass::Unknown);
+        assert_eq!(
+            classify_instrument("SOME LONG NAME", "X"),
+            InstrumentAssetClass::Unknown
+        );
+    }
+
+    /// Inserts a registry row directly, bypassing the market-assets cache.
+    fn insert_test_registry_row(
+        conn: &Connection,
+        inst_id: &str,
+        first_seen_at: i64,
+        delisted_at: Option<i64>,
+        asset_class: &str,
+    ) {
+        conn.execute(
+            "INSERT INTO systematic_instrument_registry(
+               inst_id,first_seen_at,last_seen_at,asset_class,inst_family,ct_type,
+               base_ccy,state,exp_time,delisted_at,updated_at
+             ) VALUES(?1,?2,?2,?3,'','','','live',NULL,?4,?2)",
+            params![inst_id, first_seen_at, asset_class, delisted_at],
+        )
+        .expect("registry row");
+    }
+
+    #[test]
+    fn point_in_time_universe_keeps_instruments_that_were_alive_then() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+
+        let january = 1_700_000_000_000_i64;
+        let march = january + 60 * 24 * 60 * ONE_MINUTE_MS;
+        let june = january + 150 * 24 * 60 * ONE_MINUTE_MS;
+
+        // Listed in January, still live.
+        insert_test_registry_row(&conn, "BTC-USDT-SWAP", january, None, "crypto");
+        // Listed in January, delisted in March. This is the case that matters:
+        // it was tradable in January, so a January reading must include it.
+        insert_test_registry_row(&conn, "DEAD-USDT-SWAP", january, Some(march), "crypto");
+        // Not listed until June.
+        insert_test_registry_row(&conn, "NEW-USDT-SWAP", june, None, "crypto");
+        // Equity perpetual, live throughout, excluded by class.
+        insert_test_registry_row(&conn, "HOOD-USDT-SWAP", january, None, "tradfi");
+        // Stablecoin, live throughout, excluded by class.
+        insert_test_registry_row(&conn, "USDC-USDT-SWAP", january, None, "nonRankable");
+
+        // As of January: the later-delisted instrument is present, the
+        // not-yet-listed one is absent.
+        let january_universe =
+            load_point_in_time_universe(&conn, january, &["crypto"]).expect("january");
+        assert_eq!(
+            january_universe,
+            vec!["BTC-USDT-SWAP".to_string(), "DEAD-USDT-SWAP".to_string()]
+        );
+
+        // As of June: the delisted instrument has dropped out, the new one is in.
+        let june_universe = load_point_in_time_universe(&conn, june, &["crypto"]).expect("june");
+        assert_eq!(
+            june_universe,
+            vec!["BTC-USDT-SWAP".to_string(), "NEW-USDT-SWAP".to_string()]
+        );
+
+        // Asset classes are selectable, so equity perpetuals remain available
+        // for study as their own cross-section.
+        let tradfi = load_point_in_time_universe(&conn, june, &["tradfi"]).expect("tradfi");
+        assert_eq!(tradfi, vec!["HOOD-USDT-SWAP".to_string()]);
+
+        // Multiple classes can be combined.
+        let combined =
+            load_point_in_time_universe(&conn, june, &["crypto", "tradfi"]).expect("combined");
+        assert_eq!(combined.len(), 3);
+
+        // No class selected yields nothing rather than everything.
+        assert!(load_point_in_time_universe(&conn, june, &[])
+            .expect("empty")
+            .is_empty());
+    }
+
+    #[test]
+    fn registry_summary_counts_by_class_and_liveness() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        let now = 1_700_000_000_000_i64;
+
+        insert_test_registry_row(&conn, "BTC-USDT-SWAP", now, None, "crypto");
+        insert_test_registry_row(&conn, "ETH-USDT-SWAP", now, None, "crypto");
+        insert_test_registry_row(&conn, "DEAD-USDT-SWAP", now, Some(now + 1), "crypto");
+        insert_test_registry_row(&conn, "HOOD-USDT-SWAP", now, None, "tradfi");
+        insert_test_registry_row(&conn, "USDC-USDT-SWAP", now, None, "nonRankable");
+        insert_test_registry_row(&conn, "WEIRD-USDT-SWAP", now, None, "unknown");
+
+        let view = load_instrument_registry_view(&conn).expect("summary");
+        assert_eq!(view.total_known, 6);
+        assert_eq!(view.live, 5);
+        assert_eq!(view.delisted, 1);
+        assert_eq!(view.crypto, 3);
+        assert_eq!(view.tradfi, 1);
+        assert_eq!(view.non_rankable, 1);
+        assert_eq!(view.unknown, 1);
+    }
+
+    #[test]
+    fn factor_repair_targets_only_instruments_with_repairable_gaps() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        create_test_candle_table(&conn);
+
+        let cutoff_at = 1_700_000_000_000_i64;
+        let first_open = cutoff_at - 400 * ONE_MINUTE_MS;
+        // Enough recent history to rank, but nowhere near enough for a 90-day
+        // evaluation: it must still be targeted. This is the production case that
+        // previously left 60 instruments at 182 bars forever.
+        insert_test_candles(&conn, "BTC-USDT-SWAP", first_open, 300);
+        // Short history: repairable.
+        insert_test_candles(&conn, "SOL-USDT-SWAP", first_open, 10);
+        // No history at all: repairable, sorts last on turnover.
+        insert_test_universe_snapshot(
+            &conn,
+            "universe-repair",
+            cutoff_at,
+            &[
+                ("BTC-USDT-SWAP", true),
+                ("SOL-USDT-SWAP", true),
+                ("DOGE-USDT-SWAP", true),
+                // Ineligible precisely because it has no local history, which is
+                // what repair fixes, so it must be a candidate.
+                ("XRP-USDT-SWAP", false),
+            ],
+        );
+
+        let snapshot = load_latest_universe(&conn)
+            .expect("snapshot read")
+            .expect("snapshot present");
+        let factor = load_factor_definition(&conn, BUILTIN_KLINE_FACTOR_ID)
+            .expect("factor read")
+            .expect("builtin factor");
+
+        let plan = plan_factor_repair_targets(&conn, &snapshot, &factor, 10).expect("plan");
+        // All four need evaluation history. BTC already has more than the factor's
+        // minimum lookback, which proves the repair plan no longer confuses
+        // ranking readiness with evaluation readiness.
+        assert_eq!(plan.candidates, 4);
+        let targeted = plan
+            .targets
+            .iter()
+            .map(|target| target.inst_id.as_str())
+            .collect::<Vec<_>>();
+        // Recent ranking history is not enough to exempt an instrument from an
+        // evaluation-history repair.
+        assert!(targeted.contains(&"BTC-USDT-SWAP"));
+        // Eligibility is not a filter here: an instrument is ineligible *because*
+        // it lacks history, so excluding it would make the button useless in the
+        // common case of a mostly empty local cache.
+        assert!(targeted.contains(&"XRP-USDT-SWAP"));
+        // Instruments with recent turnover outrank those with none, and ties
+        // among the empty ones break by identifier for determinism.
+        assert_eq!(
+            targeted,
+            vec![
+                "BTC-USDT-SWAP",
+                "SOL-USDT-SWAP",
+                "DOGE-USDT-SWAP",
+                "XRP-USDT-SWAP"
+            ]
+        );
+        // The requested window covers the evaluation period, longest forward
+        // horizon and one factor lookback, and ends before the cutoff so no
+        // unconfirmed bar is requested.
+        let target = &plan.targets[0];
+        assert!(target.end_open < cutoff_at);
+        assert!(
+            target.end_open - target.start_open
+                >= (factor.definition.minimum_bars() as i64) * ONE_MINUTE_MS
+        );
+    }
+
+    #[test]
+    fn factor_repair_plan_respects_the_requested_limit() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        create_test_candle_table(&conn);
+
+        let cutoff_at = 1_700_000_000_000_i64;
+        let instruments = [
+            ("AAA-USDT-SWAP", true),
+            ("BBB-USDT-SWAP", true),
+            ("CCC-USDT-SWAP", true),
+            ("DDD-USDT-SWAP", true),
+        ];
+        insert_test_universe_snapshot(&conn, "universe-limit", cutoff_at, &instruments);
+
+        let snapshot = load_latest_universe(&conn)
+            .expect("snapshot read")
+            .expect("snapshot present");
+        let factor = load_factor_definition(&conn, BUILTIN_KLINE_FACTOR_ID)
+            .expect("factor read")
+            .expect("builtin factor");
+
+        let plan = plan_factor_repair_targets(&conn, &snapshot, &factor, 2).expect("plan");
+        // All four need repair, but one pass downloads only the limit. The count
+        // of candidates is still reported in full so the UI can say how many
+        // remain.
+        assert_eq!(plan.candidates, 4);
+        assert_eq!(plan.targets.len(), 2);
+        // With no local history anywhere, ordering falls back to identifier so
+        // repeated passes are deterministic.
+        assert_eq!(plan.targets[0].inst_id, "AAA-USDT-SWAP");
+        assert_eq!(plan.targets[1].inst_id, "BBB-USDT-SWAP");
+    }
+
+    #[test]
+    fn sparsity_threshold_degrades_to_the_universe_size() {
+        // A large universe keeps the preferred threshold.
+        assert_eq!(
+            required_grid_point_members(50),
+            PREFERRED_GRID_POINT_MEMBERS
+        );
+        assert_eq!(
+            required_grid_point_members(10),
+            PREFERRED_GRID_POINT_MEMBERS
+        );
+        // A universe smaller than the preferred threshold must not discard every
+        // grid point: applying 10 as a hard floor to a 3-instrument universe
+        // skipped all of them and reported "no valid grid points", which is
+        // indistinguishable from a broken factor.
+        assert_eq!(required_grid_point_members(3), 3);
+        assert_eq!(required_grid_point_members(5), 5);
+        // Below three a rank correlation is undefined rather than imprecise, so
+        // the absolute floor still applies.
+        assert_eq!(
+            required_grid_point_members(1),
+            ABSOLUTE_MIN_GRID_POINT_MEMBERS
+        );
+        assert_eq!(
+            required_grid_point_members(0),
+            ABSOLUTE_MIN_GRID_POINT_MEMBERS
+        );
+    }
+
+    #[test]
+    fn empty_grids_report_the_scorable_universe_not_zero() {
+        // With every grid point filtered out, the reported cross-section must
+        // fall back to what was scorable. Reporting zero made the conclusion
+        // layer claim "fewer than two instruments" — the most severe verdict —
+        // when the real cause was the sparsity threshold.
+        let metrics = summarize_factor_grid(&[], &[1_440], 3, 1_440, 7, 90);
+        assert_eq!(metrics.grid_points, 0);
+        assert_eq!(metrics.skipped_sparse_points, 90);
+        assert_eq!(metrics.min_cross_section, 7);
+    }
+
+    #[test]
+    fn research_cutoff_defaults_to_a_settled_whole_hour() {
+        let hour_ms = 60 * ONE_MINUTE_MS;
+        // 12:34:56 resolves to 11:00, an hour clear of the live edge.
+        let now = 1_700_000_000_000_i64;
+        let cutoff = default_research_cutoff_ms(now);
+        assert_eq!(cutoff % hour_ms, 0);
+        assert!(now - cutoff >= hour_ms);
+        assert!(now - cutoff < 2 * hour_ms);
+        assert_eq!(default_research_cutoff_ms(0), 0);
     }
 
     #[test]
@@ -16632,13 +20333,17 @@ def on_bar(ctx):
             "Test factor",
             "TESTFX",
             "Test-only formula.",
-            KlineBlendFactorDefinition::baseline(id),
+            FactorDefinition::KlineBlend(KlineBlendFactorDefinition::baseline(id)),
             "draft",
         )
         .expect("first factor save");
         assert_eq!(first.version, 1);
         assert_eq!(first.code, "TESTFX");
-        assert_eq!(first.definition.lookback_bars, 60);
+        assert_eq!(first.kind, "klineBlend");
+        let FactorDefinition::KlineBlend(first_blend) = &first.definition else {
+            panic!("expected a K-line blend definition");
+        };
+        assert_eq!(first_blend.lookback_bars, 60);
 
         let second_definition = KlineBlendFactorDefinition {
             volume_weight: -0.5,
@@ -16651,14 +20356,35 @@ def on_bar(ctx):
             "Test factor revised",
             "TESTFX",
             "A revised test-only formula.",
-            second_definition,
+            FactorDefinition::KlineBlend(second_definition.clone()),
             "research",
         )
         .expect("second factor save");
         assert_eq!(second.version, 2);
         assert_eq!(second.status, "research");
-        assert_eq!(second.definition.volume_weight, -0.5);
+        let FactorDefinition::KlineBlend(second_blend) = &second.definition else {
+            panic!("expected a K-line blend definition");
+        };
+        assert_eq!(second_blend.volume_weight, -0.5);
         assert_ne!(first.source_hash, second.source_hash);
+
+        // Renaming and re-describing a factor without touching the formula must
+        // keep the version stable: a version identifies a scoring formula, and
+        // evaluations reference it.
+        let third = save_factor_definition_with_conn(
+            &conn,
+            Some(id),
+            id,
+            "Test factor renamed only",
+            "TESTFX",
+            "Only the prose changed.",
+            FactorDefinition::KlineBlend(second_definition),
+            "research",
+        )
+        .expect("third factor save");
+        assert_eq!(third.version, 2);
+        assert_eq!(third.source_hash, second.source_hash);
+        assert_eq!(third.name, "Test factor renamed only");
     }
 
     #[test]

@@ -42,11 +42,7 @@ impl StrategyExecution {
             (StrategyOrderType::Market, Some(_)) => Err(SystematicError::output_contract(
                 "market execution must not include limitPrice",
             )),
-            (StrategyOrderType::Limit, Some(price))
-                if price.is_finite() && price > 0.0 =>
-            {
-                Ok(())
-            }
+            (StrategyOrderType::Limit, Some(price)) if price.is_finite() && price > 0.0 => Ok(()),
             (StrategyOrderType::Limit, _) => Err(SystematicError::output_contract(
                 "limit execution requires a finite positive limitPrice",
             )),

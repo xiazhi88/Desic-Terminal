@@ -51,6 +51,7 @@ const STRATEGY_COMPLETIONS: readonly Completion[] = [
   { label: "ctx.indicators.ema", detail: "cached confirmed 1m EMA", type: "function", apply: "ctx.indicators.ema(ctx.instrument_id, \"1m\", 20)" },
   { label: "ctx.indicators.atr", detail: "cached confirmed 1m Wilder ATR", type: "function", apply: "ctx.indicators.atr(ctx.instrument_id, \"1m\", 14)" },
   { label: "ctx.portfolio.position", detail: "current virtual position", type: "function", apply: "ctx.portfolio.position(ctx.instrument_id, \"long\")" },
+  { label: "ctx.factor_scores", detail: "cross-sectional ranking; literal factor id only", type: "function", apply: "ctx.factor_scores(\"builtin-kline-blend-v1\")" },
   { label: "ctx.no_action", detail: "no trade decision", type: "function", apply: "ctx.no_action(\"reason\")" },
   { label: "ctx.open_long", detail: "open a virtual long", type: "function", apply: "ctx.open_long(1, \"reason\")" },
   { label: "ctx.open_short", detail: "open a virtual short", type: "function", apply: "ctx.open_short(1, \"reason\")" },

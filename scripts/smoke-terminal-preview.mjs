@@ -14,13 +14,14 @@ const notificationSeed = [
 const marketAssetsSeed = {
   cacheDir: "cache/market-assets",
   instruments: [
-    { instId: "BTC-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "BTC", instFamily: "BTC-USDT", iconPath: "cache/market-assets/icons/BTC.png", iconCached: true },
-    { instId: "ETH-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "ETH", instFamily: "ETH-USDT", iconPath: "cache/market-assets/icons/ETH.png", iconCached: true },
-    { instId: "SOL-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "SOL", instFamily: "SOL-USDT", iconPath: "cache/market-assets/icons/SOL.png", iconCached: true },
-    { instId: "BNB-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "BNB", instFamily: "BNB-USDT", iconPath: "cache/market-assets/icons/BNB.png", iconCached: true },
-    { instId: "XRP-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "XRP", instFamily: "XRP-USDT", iconPath: "cache/market-assets/icons/XRP.png", iconCached: true },
-    { instId: "DOGE-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "DOGE", instFamily: "DOGE-USDT", iconPath: "cache/market-assets/icons/DOGE.png", iconCached: true },
-    { instId: "AVAX-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "AVAX", instFamily: "AVAX-USDT", iconPath: "cache/market-assets/icons/AVAX.png", iconCached: true }
+    { instId: "BTC-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "BTC", instFamily: "BTC-USDT", listTime: "1704067200000", iconPath: "cache/market-assets/icons/BTC.png", iconCached: true },
+    { instId: "ETH-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "ETH", instFamily: "ETH-USDT", listTime: "1706745600000", iconPath: "cache/market-assets/icons/ETH.png", iconCached: true },
+    { instId: "SOL-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "SOL", instFamily: "SOL-USDT", listTime: "1709251200000", iconPath: "cache/market-assets/icons/SOL.png", iconCached: true },
+    { instId: "BNB-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "BNB", instFamily: "BNB-USDT", listTime: "1711929600000", iconPath: "cache/market-assets/icons/BNB.png", iconCached: true },
+    { instId: "XRP-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "XRP", instFamily: "XRP-USDT", listTime: "1714521600000", iconPath: "cache/market-assets/icons/XRP.png", iconCached: true },
+    { instId: "DOGE-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "DOGE", instFamily: "DOGE-USDT", listTime: "1717200000000", iconPath: "cache/market-assets/icons/DOGE.png", iconCached: true },
+    { instId: "AVAX-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "AVAX", instFamily: "AVAX-USDT", listTime: "1719792000000", iconPath: "cache/market-assets/icons/AVAX.png", iconCached: true },
+    { instId: "AAPL-USDT-SWAP", instType: "SWAP", state: "live", settleCcy: "USDT", baseCcy: "AAPL", instFamily: "AAPL-USDT", instCategory: "3", listTime: "1609459200000", securityName: "Apple Inc. - Common Stock", securityNameZhHans: "苹果公司", securityNameZhHant: "蘋果公司", localizedSecurityName: "苹果公司", listingExchange: "NASDAQ", securityMetadataSource: "NASDAQ Trader Symbol Directory", securityLocalizationSource: "Wikidata", iconPath: "cache/market-assets/icons/AAPL.png", iconCached: true }
   ]
 };
 
@@ -103,12 +104,12 @@ async function main() {
 
   await verifyChartResizeHandles(page);
 
-  const { rows, imageCount } = await verifyWatchlistRows(page, "desktop");
+  const { rows, watchedRows, imageCount } = await verifyWatchlistRows(page, "desktop");
   await verifyWatchlistCollapse(page);
   const expectedPublicStreams = Number(await page.locator(".connection-status").getAttribute("data-expected-public-streams"));
-  const expectedPublicStreamsFromRows = 1 + Math.ceil(rows / 5);
+  const expectedPublicStreamsFromRows = 1 + Math.ceil(watchedRows / 5);
   if (expectedPublicStreams !== expectedPublicStreamsFromRows) {
-    throw new Error(`public stream count should match Meta + Books shards: ${JSON.stringify({ rows, expectedPublicStreams, expectedPublicStreamsFromRows })}`);
+    throw new Error(`public stream count should match Meta + Books shards: ${JSON.stringify({ rows, watchedRows, expectedPublicStreams, expectedPublicStreamsFromRows })}`);
   }
   await verifyChartSymbolSwitch(page);
   await verifyChartTableExport(page);
@@ -228,6 +229,7 @@ async function main() {
   await verifyAiModelConfigLiveUpdate(page);
   await page.locator('.ai-panel-head button[title="收起"]').click();
 
+  await verifyMarketRadar(page);
   await verifySettingsConfigurationPage(page);
 
   const actionableConsoleErrors = consoleErrors.filter((text) => !/WebSocket|ERR_|Failed to load resource/i.test(text));
@@ -241,6 +243,76 @@ async function main() {
   process.stdout.write(
     `[smoke] terminal preview ok: rows=${rows}, iconRows=${imageCount}, depthRows=${depthCheck.asks + depthCheck.bids}, accountModal=ok, responsive=${responsiveCount}, overflow=${JSON.stringify(overflow)}\n`
   );
+}
+
+async function verifyMarketRadar(page) {
+  if (await page.locator(".notification-center").isVisible()) {
+    await page.locator(".notification-button").click();
+  }
+  await page.locator('[data-workspace="radar"]').click();
+  await page.waitForSelector(".market-radar-page", { timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelectorAll(".market-radar-table__row").length >= 7);
+  const rows = await page.locator(".market-radar-table__row").count();
+  const detail = await page.locator(".market-radar-detail").boundingBox();
+  const table = await page.locator(".market-radar-table").boundingBox();
+  if (rows < 7 || !detail || !table || rectsOverlap(detail, table)) {
+    throw new Error(`market radar desktop ranking layout failed: ${JSON.stringify({ rows, detail, table })}`);
+  }
+  const historyText = (await page.locator(".market-radar-page__history").textContent())?.trim() || "";
+  if (!historyText.includes("低频研究历史")) {
+    throw new Error(`market radar history readiness is not visible: ${JSON.stringify(historyText)}`);
+  }
+  const search = page.locator(".market-radar-page__search input");
+  await search.fill("ETH");
+  if (await page.locator(".market-radar-table__row").count() !== 1) {
+    throw new Error("market radar all-market search did not narrow to ETH");
+  }
+  await search.fill("Apple");
+  const equityDetail = (await page.locator(".market-radar-detail").textContent()) || "";
+  if (await page.locator(".market-radar-table__row").count() !== 1
+    || !equityDetail.includes("苹果公司")
+    || !equityDetail.includes("Apple Inc.")
+    || !equityDetail.includes("Wikidata")
+    || !equityDetail.includes("NASDAQ Trader Symbol Directory")) {
+    throw new Error(`market radar should expose localized and official equity metadata: ${JSON.stringify(equityDetail)}`);
+  }
+  await search.fill("苹果");
+  if (await page.locator(".market-radar-table__row").count() !== 1) {
+    throw new Error("market radar should search Chinese security names");
+  }
+  await search.fill("");
+  await page.locator(".market-radar-page__tools button", { hasText: "筛选" }).click();
+  const naturalFilter = page.locator(".market-radar-tools-panel__natural input");
+  await naturalFilter.fill("股票，成交额至少 1，点差不超过 100bp");
+  await page.locator(".market-radar-tools-panel__natural button", { hasText: "应用" }).click();
+  const parsedClauses = (await page.locator(".market-radar-tools-panel__parse").textContent()) || "";
+  if (!parsedClauses.includes("category=stock") || !parsedClauses.includes("turnover>=1") || await page.locator(".market-radar-table__row").count() !== 1) {
+    throw new Error(`market radar deterministic natural filter failed: ${JSON.stringify(parsedClauses)}`);
+  }
+  await page.locator(".market-radar-saved-filters__save button", { hasText: "重置" }).click();
+  await page.locator(".market-radar-page__tools button", { hasText: "比较" }).click();
+  await page.locator(".market-radar-detail__actions button", { hasText: "比较" }).click();
+  if (await page.locator(".market-radar-compare-grid article").count() !== 1) {
+    throw new Error("market radar comparison did not add the selected market");
+  }
+  await page.locator(".market-radar-page__tools button", { hasText: "宽度" }).click();
+  if (await page.locator(".market-radar-breadth-grid article").count() < 2
+    || !(await page.locator(".market-radar-breadth-grid").textContent())?.includes("#1")) {
+    throw new Error("market radar breadth and category strength ranking are not visible");
+  }
+  await page.locator(".market-radar-page__tools button", { hasText: "验证" }).click();
+  if (!((await page.locator(".market-radar-tools-panel").textContent()) || "").includes("真实产品宇宙")) {
+    throw new Error("market radar point-in-time validation boundary is not visible");
+  }
+  await page.locator(".market-radar-page__tabs button", { hasText: "高级模型" }).click();
+  await page.waitForSelector(".market-radar-page__expert-host");
+  await page.waitForFunction(() => document.querySelector(".market-radar-page__expert-host")?.textContent?.includes("仅在桌面运行时可用"));
+  const expertText = (await page.locator(".market-radar-page__expert-host").textContent())?.trim() || "";
+  if (!expertText.includes("高级模型仅在桌面运行时可用")) {
+    throw new Error(`market radar expert layer did not load its runtime boundary: ${JSON.stringify(expertText)}`);
+  }
+  await page.locator('[data-workspace="terminal"]').click();
+  await page.waitForSelector(".content-grid");
 }
 
 async function verifyAiModelConfigLiveUpdate(page) {
@@ -442,6 +514,30 @@ async function seedMarketAssets(page) {
       });
       return;
     }
+    if (url.pathname === "/api/v5/market/tickers") {
+      const data = marketAssetsSeed.instruments.map((instrument, index) => {
+        const last = instrument.instId.startsWith("BTC") ? 65000 : instrument.instId.startsWith("ETH") ? 2400 : 100 + index * 5;
+        const openFactors = [0.96, 1.03, 0.98, 1.05, 0.99, 1.08, 0.95, 1.02];
+        const open = last * openFactors[index];
+        return {
+          instId: instrument.instId,
+          last: String(last),
+          lastSz: "1",
+          askPx: String(last * 1.0005),
+          askSz: "10",
+          bidPx: String(last * 0.9995),
+          bidSz: "10",
+          open24h: String(open),
+          high24h: String(last * 1.04),
+          low24h: String(last * 0.95),
+          vol24h: String(1000 + index * 100),
+          volCcy24h: String(10000 - index * 500),
+          ts: now
+        };
+      });
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify({ code: "0", data }) });
+      return;
+    }
     if (url.pathname === "/api/v5/public/funding-rate") {
       await route.fulfill({
         status: 200,
@@ -474,7 +570,30 @@ async function openTerminalPreviewPage(browser, scenario) {
   // a market can be starred without leaving the menu.
   await page.locator(".market-title__trigger").click();
   await page.waitForSelector(".market-picker", { timeout: 10_000 });
+  await page.waitForFunction(() => Array.from(document.querySelectorAll(".market-picker__snapshot-quote strong")).some((node) => node.textContent?.trim() !== "--"));
+  const firstPickerBase = async () => (await page.locator(".market-picker__ident strong").first().textContent())?.trim();
+  const activeCategory = page.locator('.market-picker__categories [role="tab"].is-active');
+  if ((await activeCategory.textContent())?.trim() !== "热门" || await firstPickerBase() !== "BTC") {
+    throw new Error(`market picker should default to turnover-ranked popular markets: ${JSON.stringify({ active: await activeCategory.textContent(), first: await firstPickerBase() })}`);
+  }
+  await page.getByRole("tab", { name: "涨幅" }).click();
+  if (await firstPickerBase() !== "AVAX") throw new Error(`gainers should rank AVAX first, got ${await firstPickerBase()}`);
+  await page.getByRole("tab", { name: "跌幅" }).click();
+  if (await firstPickerBase() !== "DOGE") throw new Error(`losers should rank DOGE first, got ${await firstPickerBase()}`);
+  await page.getByRole("tab", { name: "新币" }).click();
+  if (await firstPickerBase() !== "AVAX") throw new Error(`new listings should rank AVAX first, got ${await firstPickerBase()}`);
+  await page.getByRole("tab", { name: "自选" }).click();
+  const watchlistCategoryState = await page.evaluate(() => ({
+    rows: document.querySelectorAll(".market-picker__row").length,
+    starred: document.querySelectorAll(".market-picker__star.is-on").length
+  }));
+  if (!watchlistCategoryState.rows || watchlistCategoryState.rows !== watchlistCategoryState.starred) {
+    throw new Error(`watchlist category should contain only starred markets: ${JSON.stringify(watchlistCategoryState)}`);
+  }
   const watchSearch = page.getByRole("textbox", { name: "搜索交易对" });
+  await watchSearch.fill("DOGE");
+  if (await firstPickerBase() !== "DOGE") throw new Error("market search should span the full universe from the watchlist category");
+  await page.getByRole("tab", { name: "热门" }).click();
   await watchSearch.fill("ETH");
   await page.waitForTimeout(120);
   const filteredOptions = await page.locator(".market-picker__row").allTextContents();
@@ -483,6 +602,15 @@ async function openTerminalPreviewPage(browser, scenario) {
   }
   if (!(await page.locator(".market-picker__star").count())) {
     throw new Error("market picker should expose star controls for search results");
+  }
+  await watchSearch.fill("Apple");
+  const companyResult = (await page.locator(".market-picker__row").first().textContent()) || "";
+  if (await firstPickerBase() !== "AAPL" || !companyResult.includes("苹果公司")) {
+    throw new Error(`market picker should search English and display the localized security name: ${JSON.stringify(companyResult)}`);
+  }
+  await watchSearch.fill("苹果");
+  if (await firstPickerBase() !== "AAPL") {
+    throw new Error("market picker should find new securities by their Chinese name");
   }
   await watchSearch.fill("");
   await page.keyboard.press("Escape");
@@ -1411,6 +1539,7 @@ async function verifyWatchlistRows(page, label) {
   }
 
   const imageCount = rowChecks.filter((item) => item.hasImage && item.naturalWidth > 0 && item.naturalHeight > 0).length;
+  const watchedRows = await page.locator(".market-picker__star.is-on").count();
   if (imageCount !== rowChecks.length) {
     throw new Error(`watchlist should render loaded cached/local icons for every checked row on ${label}: ${imageCount}/${rowChecks.length}`);
   }
@@ -1419,7 +1548,7 @@ async function verifyWatchlistRows(page, label) {
   await page.waitForTimeout(250);
   if (label !== "compact") await verifyWatchlistRows(page, "compact");
   if (label !== "desktop") await page.setViewportSize({ width: 1440, height: 900 });
-  return { rows, imageCount };
+  return { rows, watchedRows, imageCount };
 }
 
 async function verifyWatchlistCollapse(page) {

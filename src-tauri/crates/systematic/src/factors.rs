@@ -1,5 +1,6 @@
 use std::cmp::Ordering;
 
+use desic_factor_dsl::{FactorExpression, FactorLimits};
 use serde::{Deserialize, Serialize};
 
 use crate::SystematicError;
@@ -21,6 +22,149 @@ pub struct KlineBlendFactorDefinition {
     pub momentum_weight: f64,
     pub volatility_penalty_weight: f64,
     pub volume_weight: f64,
+}
+
+/// The persisted shape of a factor definition.
+///
+/// This is a tagged union so later factor families can be added without
+/// migrating stored rows. Definitions written before the tag existed are bare
+/// [`KlineBlendFactorDefinition`] objects, so deserialization falls back to that
+/// variant when no `kind` discriminator is present; see the custom
+/// [`Deserialize`] implementation below.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum FactorDefinition {
+    KlineBlend(KlineBlendFactorDefinition),
+    /// A composable expression evaluated over the aligned panel.
+    ///
+    /// Unlike the fixed blend, this can alternate cross-sectional and
+    /// time-series scope, which is required to express formulas whose scope
+    /// changes partway through.
+    Expression(ExpressionFactorDefinition),
+}
+
+/// A factor defined by an expression plus its evaluation pipeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpressionFactorDefinition {
+    pub factor_id: String,
+    pub expression: FactorExpression,
+}
+
+impl ExpressionFactorDefinition {
+    pub fn with_factor_id(mut self, factor_id: impl Into<String>) -> Self {
+        self.factor_id = factor_id.into();
+        self
+    }
+
+    /// Confirmed bars required per instrument, including stage lookback.
+    pub fn minimum_bars(&self) -> usize {
+        self.expression
+            .validate(FactorLimits::default())
+            .map(|validation| validation.minimum_bars)
+            .unwrap_or(MIN_KLINE_FACTOR_LOOKBACK_BARS + 1)
+    }
+
+    pub fn validate(&self) -> Result<(), SystematicError> {
+        validate_factor_id(&self.factor_id)?;
+        self.expression
+            .validate(FactorLimits::default())
+            .map_err(|error| SystematicError::invalid_argument("expression", error.to_string()))?;
+        // A factor with no cross-sectional stage yields values that are not
+        // comparable between instruments, so ranking them is meaningless.
+        if !self.expression.has_cross_section() {
+            return Err(SystematicError::invalid_argument(
+                "expression",
+                "a factor must contain at least one cross-sectional stage so its scores are comparable across instruments",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl FactorDefinition {
+    pub fn factor_id(&self) -> &str {
+        match self {
+            Self::KlineBlend(definition) => definition.factor_id.as_str(),
+            Self::Expression(definition) => definition.factor_id.as_str(),
+        }
+    }
+
+    pub fn with_factor_id(self, factor_id: impl Into<String>) -> Self {
+        match self {
+            Self::KlineBlend(definition) => Self::KlineBlend(definition.with_factor_id(factor_id)),
+            Self::Expression(definition) => Self::Expression(definition.with_factor_id(factor_id)),
+        }
+    }
+
+    /// Number of confirmed bars the evaluator must load per instrument.
+    pub fn minimum_bars(&self) -> usize {
+        match self {
+            Self::KlineBlend(definition) => definition.minimum_bars(),
+            Self::Expression(definition) => definition.minimum_bars(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), SystematicError> {
+        match self {
+            Self::KlineBlend(definition) => definition.validate(),
+            Self::Expression(definition) => definition.validate(),
+        }
+    }
+
+    /// Stable discriminator for diagnostics and UI copy.
+    pub fn kind_label(&self) -> &'static str {
+        match self {
+            Self::KlineBlend(_) => "klineBlend",
+            Self::Expression(_) => "expression",
+        }
+    }
+}
+
+impl From<KlineBlendFactorDefinition> for FactorDefinition {
+    fn from(definition: KlineBlendFactorDefinition) -> Self {
+        Self::KlineBlend(definition)
+    }
+}
+
+impl<'de> Deserialize<'de> for FactorDefinition {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error as _;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let kind = value.get("kind").and_then(serde_json::Value::as_str);
+        match kind {
+            // Rows persisted before the tag was introduced carry the K-line
+            // blend fields at the top level and must keep loading unchanged.
+            None => serde_json::from_value::<KlineBlendFactorDefinition>(value)
+                .map(Self::KlineBlend)
+                .map_err(D::Error::custom),
+            Some("klineBlend") => {
+                let mut value = value;
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.remove("kind");
+                }
+                serde_json::from_value::<KlineBlendFactorDefinition>(value)
+                    .map(Self::KlineBlend)
+                    .map_err(D::Error::custom)
+            }
+            Some("expression") => {
+                let mut value = value;
+                if let serde_json::Value::Object(map) = &mut value {
+                    map.remove("kind");
+                }
+                serde_json::from_value::<ExpressionFactorDefinition>(value)
+                    .map(Self::Expression)
+                    .map_err(D::Error::custom)
+            }
+            Some(other) => Err(D::Error::custom(format!(
+                "unsupported factor definition kind: {other}"
+            ))),
+        }
+    }
 }
 
 impl KlineBlendFactorDefinition {
@@ -250,6 +394,68 @@ fn z_scores(values: &[f64]) -> Vec<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn untagged_stored_definitions_load_as_kline_blend() {
+        // Rows written before `FactorDefinition` existed have no `kind` field.
+        // Loading one must not fail and must not change the parsed formula.
+        let legacy = r#"{
+            "factorId": "builtin-kline-blend-v1",
+            "lookbackBars": 60,
+            "momentumWeight": 1.0,
+            "volatilityPenaltyWeight": 1.0,
+            "volumeWeight": 0.25
+        }"#;
+        let parsed = serde_json::from_str::<FactorDefinition>(legacy).expect("legacy definition");
+        assert_eq!(
+            parsed,
+            FactorDefinition::KlineBlend(KlineBlendFactorDefinition::baseline(
+                "builtin-kline-blend-v1"
+            ))
+        );
+        assert_eq!(parsed.minimum_bars(), 61);
+        assert_eq!(parsed.kind_label(), "klineBlend");
+    }
+
+    #[test]
+    fn tagged_definitions_round_trip() {
+        let definition =
+            FactorDefinition::KlineBlend(KlineBlendFactorDefinition::baseline("factor-test"));
+        let encoded = serde_json::to_string(&definition).expect("encode");
+        assert!(encoded.contains("\"kind\":\"klineBlend\""));
+        let decoded = serde_json::from_str::<FactorDefinition>(&encoded).expect("decode");
+        assert_eq!(decoded, definition);
+    }
+
+    #[test]
+    fn unknown_definition_kinds_are_rejected() {
+        let unsupported = r#"{"kind":"neuralNet","factorId":"factor-test"}"#;
+        assert!(serde_json::from_str::<FactorDefinition>(unsupported).is_err());
+    }
+
+    #[test]
+    fn zero_variance_cross_sections_score_flat() {
+        // Documents the contract the UI relies on: a degenerate cross-section
+        // yields 0.0 for every instrument rather than NaN or an error, so the
+        // panel must warn from coverage diagnostics instead of from the scores.
+        let definition = KlineBlendFactorDefinition::baseline("factor-test");
+        let identical = |inst_id: &str| KlineFactorFeatures {
+            inst_id: inst_id.to_string(),
+            momentum_pct: 0.01,
+            realized_volatility_pct: 0.02,
+            volume_ratio: 1.0,
+        };
+        let scores = score_kline_blend(
+            &definition,
+            &[identical("BTC-USDT-SWAP"), identical("ETH-USDT-SWAP")],
+        )
+        .expect("scores");
+        assert!(scores.iter().all(|score| score.normalized_score == 0.0));
+
+        let single = score_kline_blend(&definition, &[identical("BTC-USDT-SWAP")]).expect("scores");
+        assert_eq!(single.len(), 1);
+        assert_eq!(single[0].normalized_score, 0.0);
+    }
 
     #[test]
     fn factor_definition_rejects_an_empty_formula() {

@@ -222,7 +222,10 @@ mod tests {
             preview.instructions,
             "Check funding basis first.\nReport conflicts explicitly."
         );
-        assert_eq!(preview.skill_ids, vec!["okx-market-intelligence".to_string()]);
+        assert_eq!(
+            preview.skill_ids,
+            vec!["okx-market-intelligence".to_string()]
+        );
         assert_eq!(preview.phase, "review");
         assert_eq!(preview.model.as_deref(), Some("gpt-5-codex"));
         assert!(preview.rejected_fields.contains(&"sandbox".to_string()));
@@ -235,9 +238,7 @@ mod tests {
     fn preview_truncates_oversized_instructions_and_unknown_phase() {
         let long = "x".repeat(MAX_TEMPLATE_INSTRUCTION_CHARS + 50);
         let preview = preview_codex_agent_template(
-            &format!(
-                "name = \"solo\"\nphase = \"execute\"\ninstructions = \"\"\"{long}\"\"\"\n"
-            ),
+            &format!("name = \"solo\"\nphase = \"execute\"\ninstructions = \"\"\"{long}\"\"\"\n"),
             None,
         )
         .expect("preview");
@@ -253,11 +254,9 @@ mod tests {
     #[test]
     fn preview_rejects_missing_agent_and_invalid_skill_ids() {
         assert!(preview_codex_agent_template("name = \"a\"\n", Some("missing")).is_err());
-        assert!(preview_codex_agent_template(
-            "name = \"a\"\nskills = [\"../escape\"]\n",
-            None
-        )
-        .is_err());
+        assert!(
+            preview_codex_agent_template("name = \"a\"\nskills = [\"../escape\"]\n", None).is_err()
+        );
         assert!(preview_codex_agent_template("name = \"a\"\ninstructions = 5\n", None).is_err());
     }
 }

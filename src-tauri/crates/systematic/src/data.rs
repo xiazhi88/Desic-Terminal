@@ -305,7 +305,8 @@ impl TimeframeAggregator {
     /// latest aggregate) and restores the single in-progress aggregate.
     /// The caller replays the bars the processed events contributed.
     pub fn restore_prefix(&mut self, completed_len: usize, current: Option<MarketBar>) {
-        self.completed.truncate(completed_len.min(self.completed.len()));
+        self.completed
+            .truncate(completed_len.min(self.completed.len()));
         self.current = current;
         self.started = !self.completed.is_empty() || self.current.is_some();
     }

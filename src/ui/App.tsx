@@ -23,6 +23,7 @@ import {
   Maximize2,
   Minus,
   Newspaper,
+  Radar,
   PanelLeftClose,
   PanelLeftOpen,
   Plus,
@@ -80,6 +81,8 @@ import type {
   ChartRiskRewardTradeIntent,
   ChartWindowState,
   ClassifiedOkxError,
+  EquitySecurityDirectory,
+  EquitySecurityLocalizations,
   FeishuConfigSummary,
   FundingRate,
   ChartTradeSources,
@@ -165,10 +168,14 @@ import {
   fetchTradeExecutionGuards,
   fetchTradeOpportunities,
   fetchTicker,
+  fetchMarketTickers,
   importAccountBillsArchive,
   initLocalStorage,
+  loadEquitySecurityDirectory,
+  loadEquitySecurityLocalizations,
   loadMarketAssetsCache,
   listenKlineSync,
+  listenMarketRadarDirectory,
   listenTradeAuditEvents,
   loadWatchlistConfig,
   openChartWindow,
@@ -197,6 +204,8 @@ import {
   setOkxLeverage,
   probeOkxStartupNetwork,
   syncMarketAssets,
+  startMarketRadarDirectoryStream,
+  startMarketRadarHistory,
   syncKlineIntegrity,
   syncPrivateHistory,
   syncOkxTime,
@@ -207,6 +216,7 @@ import {
   testProxyConfig
 } from "../lib/okx";
 import { calcChange, fmtCompact, fmtDelay, fmtPrice } from "../lib/format";
+import { mergeTickerSnapshot } from "../lib/marketRadar";
 import {
   buildHistoricalFillMarkers,
   chartOrderVisual,
@@ -298,6 +308,9 @@ const TradeOpportunitiesWorkspacePage = lazy(() =>
 const IntelligenceWorkspacePage = lazy(() =>
   import("./IntelligencePage").then((module) => ({ default: module.IntelligencePage }))
 );
+const MarketRadarWorkspacePage = lazy(() =>
+  import("./MarketRadarPage").then((module) => ({ default: module.MarketRadarPage }))
+);
 type SystematicResearchModule = typeof import("./SystematicResearchPage");
 
 let systematicResearchModulePromise: Promise<SystematicResearchModule> | null = null;
@@ -328,6 +341,8 @@ const SystematicResearchWorkspacePage = lazy(() =>
 );
 
 const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
+const EQUITY_METADATA_REFRESH_MS = 24 * 60 * 60 * 1_000;
+type MarketPickerCategory = "watchlist" | "popular" | "gainers" | "losers" | "new";
 const PRIMARY_CHART_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m"] as const;
 const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as const;
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
@@ -1477,7 +1492,9 @@ function TradingTerminal({
   previewMarketConsistency?: boolean;
 }) {
   const { t, i18n: translation } = useTranslation(["navigation", "common", "trading", "chart", "automation", "settings", "help"]);
-  const chineseUi = (translation.resolvedLanguage ?? translation.language).toLowerCase().startsWith("zh");
+  const resolvedUiLanguage = (translation.resolvedLanguage ?? translation.language).toLowerCase();
+  const chineseUi = resolvedUiLanguage.startsWith("zh");
+  const traditionalChineseUi = resolvedUiLanguage.startsWith("zh-tw") || resolvedUiLanguage.startsWith("zh-hant");
   const uiText = useCallback((chinese: string, english: string) => chineseUi ? chinese : english, [chineseUi]);
   const [symbol, setSymbol] = useState(DEFAULT_SYMBOL);
   const [ticketPriceFill, setTicketPriceFill] = useState<{ symbol: string; price: string; nonce: number } | null>(null);
@@ -1486,7 +1503,17 @@ function TradingTerminal({
   const marketPickerRef = useRef<HTMLDivElement | null>(null);
   const [compactTerminalLayout, setCompactTerminalLayout] = useState(() => window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY).matches);
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(initialMarketAssets);
+  const [equityDirectory, setEquityDirectory] = useState<EquitySecurityDirectory | null>(null);
+  const [equityLocalizations, setEquityLocalizations] = useState<EquitySecurityLocalizations | null>(null);
+  const [equityMetadataRefreshNonce, setEquityMetadataRefreshNonce] = useState(0);
+  const [marketTickers, setMarketTickers] = useState<Ticker[]>([]);
+  const [marketTickersFetchedAt, setMarketTickersFetchedAt] = useState<number | null>(null);
+  const marketTickersFetchedAtRef = useRef<number | null>(null);
+  const [marketTickersLoading, setMarketTickersLoading] = useState(false);
+  const [marketTickersError, setMarketTickersError] = useState<string | null>(null);
+  const marketTickersFlightRef = useRef<Promise<void> | null>(null);
   const [symbolSearch, setSymbolSearch] = useState("");
+  const [marketPickerCategory, setMarketPickerCategory] = useState<MarketPickerCategory>("popular");
   const [bar, setBar] = useState("30m");
   const [historyLoading, setHistoryLoading] = useState(false);
   const [marketCandleLoadError, setMarketCandleLoadError] = useState<{ symbol: string; bar: string; message: string } | null>(null);
@@ -1547,7 +1574,7 @@ function TradingTerminal({
   const contentGridRef = useRef<HTMLDivElement | null>(null);
   const centerPanelRef = useRef<HTMLElement | null>(null);
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
-  const [mainSection, setMainSection] = useState<"terminal" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
+  const [mainSection, setMainSection] = useState<"terminal" | "radar" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("terminal");
   const [pendingAiStrategyOpen, setPendingAiStrategyOpen] = useState<{ strategyId: string; runId?: string; optimizationId?: string } | null>(null);
   const [systematicLoading, setSystematicLoading] = useState(false);
   const [newsUnreadCount, setNewsUnreadCount] = useState(0);
@@ -1561,6 +1588,73 @@ function TradingTerminal({
   const handleSystematicReady = useCallback(() => {
     setSystematicLoading(false);
   }, []);
+
+  const refreshMarketTickerSnapshot = useCallback(() => {
+    if (marketTickersFlightRef.current) return marketTickersFlightRef.current;
+    setMarketTickersLoading(true);
+    setMarketTickersError(null);
+    const flight = fetchMarketTickers()
+      .then((incoming) => {
+        setMarketTickers((current) => mergeTickerSnapshot(current, incoming));
+        const fetchedAt = Date.now();
+        marketTickersFetchedAtRef.current = fetchedAt;
+        setMarketTickersFetchedAt(fetchedAt);
+      })
+      .catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        setMarketTickersError(message);
+        logger.error("market radar ticker snapshot failed", error);
+      })
+      .finally(() => {
+        marketTickersFlightRef.current = null;
+        setMarketTickersLoading(false);
+      });
+    marketTickersFlightRef.current = flight;
+    return flight;
+  }, []);
+
+  useEffect(() => {
+    const intervalMs = mainSection === "radar" ? 30_000 : 5 * 60_000;
+    if (document.visibilityState === "visible" && Date.now() - (marketTickersFetchedAtRef.current ?? 0) >= intervalMs) {
+      void refreshMarketTickerSnapshot();
+    }
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void refreshMarketTickerSnapshot();
+    }, intervalMs);
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible" && Date.now() - (marketTickersFetchedAtRef.current ?? 0) >= intervalMs) {
+        void refreshMarketTickerSnapshot();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
+  }, [mainSection, refreshMarketTickerSnapshot]);
+
+  useEffect(() => {
+    let active = true;
+    let unlisten: (() => void) | null = null;
+    void listenMarketRadarDirectory((summary) => {
+      if (active) setMarketAssets(summary);
+    }).then((dispose) => {
+      if (!active) dispose?.();
+      else unlisten = dispose;
+    });
+    void startMarketRadarDirectoryStream();
+    return () => {
+      active = false;
+      unlisten?.();
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!marketAssets?.instruments?.length) return;
+    void startMarketRadarHistory().catch((error) => {
+      logger.warn("market radar background history start failed", { error: String(error) });
+    });
+  }, [marketAssets?.instruments?.length]);
 
   useEffect(() => {
     const media = window.matchMedia(COMPACT_TERMINAL_MEDIA_QUERY);
@@ -1739,27 +1833,170 @@ function TradingTerminal({
     klineSyncKeys: Object.keys(klineSync).length
   };
   });
+  const equityTickers = useMemo(
+    () => [...new Set((marketAssets?.instruments ?? [])
+      .filter((instrument) => instrument.instCategory === "3" && instrument.baseCcy)
+      .map((instrument) => instrument.baseCcy.toUpperCase()))].sort(),
+    [marketAssets?.instruments]
+  );
+  const equityTickerKey = equityTickers.join(",");
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    const interval = window.setInterval(
+      () => setEquityMetadataRefreshNonce((value) => value + 1),
+      EQUITY_METADATA_REFRESH_MS
+    );
+    return () => window.clearInterval(interval);
+  }, []);
+  useEffect(() => {
+    if (!isTauriRuntime() || !equityTickerKey) {
+      setEquityDirectory(null);
+      setEquityLocalizations(null);
+      return;
+    }
+    let active = true;
+    void (async () => {
+      try {
+        const directory = await loadEquitySecurityDirectory(equityTickers);
+        if (!active || !directory) return;
+        setEquityDirectory(directory);
+        if (!chineseUi) {
+          setEquityLocalizations(null);
+          return;
+        }
+        const localizations = await loadEquitySecurityLocalizations(
+          directory.securities.map((security) => ({ ticker: security.ticker, exchange: security.exchange }))
+        );
+        if (active && localizations) setEquityLocalizations(localizations);
+      } catch (error) {
+        logger.warn("equity security metadata unavailable", { error: String(error) });
+      }
+    })();
+    return () => { active = false; };
+  }, [chineseUi, equityMetadataRefreshNonce, equityTickerKey]);
+  const equitySecurityMap = useMemo(
+    () => new Map((equityDirectory?.securities ?? []).map((security) => [security.ticker, security])),
+    [equityDirectory]
+  );
+  const equityLocalizationMap = useMemo(
+    () => new Map((equityLocalizations?.localizations ?? [])
+      .map((localization) => [`${localization.ticker}|${localization.exchange}`, localization])),
+    [equityLocalizations]
+  );
+  const enrichedMarketInstruments = useMemo(
+    () => (marketAssets?.instruments ?? []).map((instrument) => {
+      if (instrument.instCategory !== "3") return instrument;
+      const security = equitySecurityMap.get(instrument.baseCcy.toUpperCase());
+      if (!security) return instrument;
+      const localization = equityLocalizationMap.get(`${security.ticker}|${security.exchange}`);
+      const localizedSecurityName = chineseUi
+        ? traditionalChineseUi
+          ? localization?.nameZhHant || localization?.nameZhHans
+          : localization?.nameZhHans || localization?.nameZhHant
+        : undefined;
+      return {
+        ...instrument,
+        securityName: security.securityName,
+        securityNameZhHans: localization?.nameZhHans,
+        securityNameZhHant: localization?.nameZhHant,
+        localizedSecurityName,
+        listingExchange: security.exchange,
+        securityMetadataSource: equityDirectory?.source,
+        securityLocalizationSource: localization ? equityLocalizations?.source : undefined,
+      };
+    }),
+    [chineseUi, equityDirectory?.source, equityLocalizationMap, equityLocalizations?.source, equitySecurityMap, marketAssets?.instruments, traditionalChineseUi]
+  );
+  const enrichedMarketAssets = useMemo(
+    () => marketAssets ? { ...marketAssets, instruments: enrichedMarketInstruments } : null,
+    [enrichedMarketInstruments, marketAssets]
+  );
   const assetMap = useMemo(
-    () => new Map((marketAssets?.instruments ?? []).map((item) => [item.instId, item])),
-    [marketAssets]
+    () => new Map(enrichedMarketInstruments.map((item) => [item.instId, item])),
+    [enrichedMarketInstruments]
   );
   const currentInstrument = useMemo(() => assetMap.get(symbol), [assetMap, symbol]);
+  const marketTickerMap = useMemo(() => new Map(marketTickers.map((item) => [item.instId, item])), [marketTickers]);
   const filteredWatchOptions = useMemo(() => {
     const query = symbolSearch.trim().toUpperCase();
-    return (marketAssets?.instruments ?? [])
-      .filter((item) => item.instType === "SWAP" && item.state === "live" && item.settleCcy === "USDT")
-      .filter((item) => !query || item.instId.includes(query) || item.baseCcy.includes(query) || item.instFamily.includes(query))
+    const instruments = enrichedMarketInstruments
+      .filter((item) => item.instType === "SWAP" && item.state === "live" && item.settleCcy === "USDT");
+    const turnover = (item: MarketAssetsSummary["instruments"][number]) => {
+      const ticker = marketTickerMap.get(item.instId);
+      const last = Number(ticker?.last);
+      const volume = Number(ticker?.volCcy24h);
+      return Number.isFinite(last) && Number.isFinite(volume) ? last * volume : Number.NaN;
+    };
+    const change24h = (item: MarketAssetsSummary["instruments"][number]) => {
+      const ticker = marketTickerMap.get(item.instId);
+      const last = Number(ticker?.last);
+      const open = Number(ticker?.open24h);
+      return Number.isFinite(last) && Number.isFinite(open) && open > 0 ? (last / open) - 1 : Number.NaN;
+    };
+    const listedAt = (item: MarketAssetsSummary["instruments"][number]) => {
+      const value = Number(item.listTime);
+      return Number.isFinite(value) && value > 0 ? value : Number.NaN;
+    };
+    const compareMetric = (
+      left: MarketAssetsSummary["instruments"][number],
+      right: MarketAssetsSummary["instruments"][number],
+      metric: (item: MarketAssetsSummary["instruments"][number]) => number,
+      ascending = false
+    ) => {
+      const leftValue = metric(left);
+      const rightValue = metric(right);
+      if (!Number.isFinite(leftValue)) return Number.isFinite(rightValue) ? 1 : 0;
+      if (!Number.isFinite(rightValue)) return -1;
+      return ascending ? leftValue - rightValue : rightValue - leftValue;
+    };
+    const byTurnover = (
+      left: MarketAssetsSummary["instruments"][number],
+      right: MarketAssetsSummary["instruments"][number]
+    ) => compareMetric(left, right, turnover) || left.baseCcy.localeCompare(right.baseCcy);
+
+    if (query) {
+      const searchableNames = (item: MarketAssetsSummary["instruments"][number]) => [
+        item.securityName,
+        item.securityNameZhHans,
+        item.securityNameZhHant,
+      ].filter((name): name is string => Boolean(name)).map((name) => name.toUpperCase());
+      const matchScore = (item: MarketAssetsSummary["instruments"][number]) => {
+        const names = searchableNames(item);
+        if (item.baseCcy === query || item.instId === query || names.includes(query)) return 0;
+        if (item.baseCcy.startsWith(query) || item.instId.startsWith(query) || names.some((name) => name.startsWith(query))) return 1;
+        return 2;
+      };
+      return instruments
+        .filter((item) => item.instId.includes(query)
+          || item.baseCcy.includes(query)
+          || item.instFamily.includes(query)
+          || searchableNames(item).some((name) => name.includes(query)))
+        .sort((left, right) => matchScore(left) - matchScore(right) || byTurnover(left, right))
+        .slice(0, 40);
+    }
+
+    if (marketPickerCategory === "watchlist") {
+      const watchOrder = new Map(watchlist.map((instId, index) => [instId, index]));
+      return instruments
+        .filter((item) => watchOrder.has(item.instId))
+        .sort((left, right) => (watchOrder.get(left.instId) ?? 0) - (watchOrder.get(right.instId) ?? 0));
+    }
+
+    return instruments
       .sort((left, right) => {
-        const score = (item: MarketAssetsSummary["instruments"][number]) => {
-          if (!query) return watchlist.includes(item.instId) ? 2 : 1;
-          if (item.baseCcy === query || item.instId === query) return 0;
-          if (item.baseCcy.startsWith(query) || item.instId.startsWith(query)) return 1;
-          return 2;
-        };
-        return score(left) - score(right) || left.baseCcy.localeCompare(right.baseCcy);
+        if (marketPickerCategory === "gainers") {
+          return compareMetric(left, right, change24h) || byTurnover(left, right);
+        }
+        if (marketPickerCategory === "losers") {
+          return compareMetric(left, right, change24h, true) || byTurnover(left, right);
+        }
+        if (marketPickerCategory === "new") {
+          return compareMetric(left, right, listedAt) || byTurnover(left, right);
+        }
+        return byTurnover(left, right);
       })
-      .slice(0, 12);
-  }, [marketAssets?.instruments, symbolSearch, watchlist]);
+      .slice(0, 40);
+  }, [enrichedMarketInstruments, marketPickerCategory, marketTickerMap, symbolSearch, watchlist]);
   const streamWatchlist = useMemo(() => {
     const symbols = new Set([...watchlist, symbol].filter(Boolean));
     return [...symbols];
@@ -4013,6 +4250,7 @@ function TradingTerminal({
       "terminal",
       firstLaunchOnboarding.open && "onboarding-active",
       mainSection === "systematic" && "systematic-active",
+      mainSection === "radar" && "radar-active",
       mainSection === "automation" && "automation-active",
       mainSection === "intelligence" && "intelligence-active",
     )}>
@@ -4024,8 +4262,10 @@ function TradingTerminal({
           <button
             className={clsx(
               "rail-item",
-              (id === "opportunities"
-                ? mainSection === "opportunities"
+              (id === "radar"
+                ? mainSection === "radar"
+                : id === "opportunities"
+                  ? mainSection === "opportunities"
                 : id === "automation"
                     ? mainSection === "automation"
                   : id === "intelligence"
@@ -4054,6 +4294,9 @@ function TradingTerminal({
               setSystematicLoading(id === "systematic");
               if (id === "terminal") {
                 setMainSection("terminal");
+              }
+              if (id === "radar") {
+                setMainSection("radar");
               }
               if (id === "opportunities") {
                 setMainSection("opportunities");
@@ -4113,9 +4356,11 @@ function TradingTerminal({
                 watchlist={watchlist}
                 options={filteredWatchOptions}
                 query={symbolSearch}
-                marketAssets={marketAssets}
+                category={marketPickerCategory}
+                marketTickers={marketTickerMap}
                 cacheDir={marketAssetCacheDir}
                 onQueryChange={setSymbolSearch}
+                onCategoryChange={setMarketPickerCategory}
                 onSelect={(next) => { setSymbol(next); setMarketPickerOpen(false); }}
                 onAdd={addWatchSymbol}
                 onRemove={removeWatchSymbol}
@@ -4189,7 +4434,34 @@ function TradingTerminal({
           </div>
         </header>
 
-        {mainSection === "opportunities" ? (
+        {mainSection === "radar" ? (
+          <div className="market-radar-workspace">
+            <Suspense fallback={<div className="automation-page-loading"><Loader2 className="spin" size={20} /><span>{uiText("正在加载市场雷达", "Loading Market Radar")}</span></div>}>
+              <MarketRadarWorkspacePage
+                marketAssets={enrichedMarketAssets}
+                tickers={marketTickers}
+                fetchedAt={marketTickersFetchedAt}
+                loading={marketTickersLoading}
+                error={marketTickersError}
+                watchlist={watchlist}
+                cacheDir={marketAssetCacheDir}
+                desktop={isTauriRuntime()}
+                onNotify={pushNotification}
+                onRefresh={() => void refreshMarketTickerSnapshot()}
+                onOpenSymbol={(instId) => {
+                  setSymbol(instId);
+                  setMainSection("terminal");
+                }}
+                onUseForBacktest={(instId) => {
+                  setSymbol(instId);
+                  setMainSection("systematic");
+                }}
+                onAddWatch={addWatchSymbol}
+                onRemoveWatch={removeWatchSymbol}
+              />
+            </Suspense>
+          </div>
+        ) : mainSection === "opportunities" ? (
           <div className="opportunity-workspace">
             <Suspense fallback={<div className="automation-page-loading"><Loader2 className="spin" size={20} /><span>{uiText("正在加载交易机会工作台", "Loading Opportunities workspace")}</span></div>}>
               <TradeOpportunitiesWorkspacePage
@@ -8497,9 +8769,11 @@ function MarketPickerMenu({
   watchlist,
   options,
   query,
-  marketAssets,
+  category,
+  marketTickers,
   cacheDir,
   onQueryChange,
+  onCategoryChange,
   onSelect,
   onAdd,
   onRemove,
@@ -8509,9 +8783,11 @@ function MarketPickerMenu({
   watchlist: string[];
   options: OkxInstrumentSummary[];
   query: string;
-  marketAssets: MarketAssetsSummary | null;
+  category: MarketPickerCategory;
+  marketTickers: Map<string, Ticker>;
   cacheDir?: string;
   onQueryChange: (value: string) => void;
+  onCategoryChange: (category: MarketPickerCategory) => void;
   onSelect: (symbol: string) => void;
   onAdd: (symbol: string) => void;
   onRemove: (symbol: string) => void;
@@ -8519,7 +8795,13 @@ function MarketPickerMenu({
 }>) {
   const { t } = useTranslation(["trading", "common"]);
   const searchRef = useRef<HTMLInputElement | null>(null);
-  const searching = query.trim().length > 0;
+  const categories: Array<{ id: MarketPickerCategory; label: string }> = [
+    { id: "watchlist", label: t("trading:marketCategoryWatchlist") },
+    { id: "popular", label: t("trading:marketCategoryPopular") },
+    { id: "gainers", label: t("trading:marketCategoryGainers") },
+    { id: "losers", label: t("trading:marketCategoryLosers") },
+    { id: "new", label: t("trading:marketCategoryNew") }
+  ];
 
   useEffect(() => { searchRef.current?.focus(); }, []);
 
@@ -8544,66 +8826,79 @@ function MarketPickerMenu({
         ) : null}
       </div>
 
+      <div className="market-picker__categories" role="tablist" aria-label={t("trading:marketCategories")}>
+        {categories.map((item) => (
+          <button
+            key={item.id}
+            type="button"
+            role="tab"
+            className={item.id === category && !query ? "is-active" : undefined}
+            aria-selected={item.id === category && !query}
+            onClick={() => {
+              onCategoryChange(item.id);
+              if (query) onQueryChange("");
+            }}
+          >
+            {item.label}
+          </button>
+        ))}
+      </div>
+
       <div className="market-picker__list" role="listbox" aria-label={t("trading:watchlist")}>
-        {/* Without a query the menu is the watchlist; typing searches every
-            perpetual so an unlisted market can be starred straight from here. */}
-        {searching ? (
-          options.length > 0 ? options.map((item) => {
-            const starred = watchlist.includes(item.instId);
-            return (
-              <div className={clsx("market-picker__row", item.instId === symbol && "is-active")} key={item.instId}>
-                <button type="button" className="market-picker__pick" onClick={() => onSelect(item.instId)} role="option" aria-selected={item.instId === symbol}>
-                  <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={cacheDir} />
-                  <span className="market-picker__ident">
-                    <strong>{item.baseCcy}</strong>
-                    <small>{item.instId}</small>
-                  </span>
-                  <HotWatchQuote symbol={item.instId} />
-                </button>
-                <button
-                  type="button"
-                  className={clsx("market-picker__star", starred && "is-on")}
-                  disabled={starred ? item.instId === DEFAULT_SYMBOL : watchlist.length >= 10}
-                  onClick={() => (starred ? onRemove(item.instId) : onAdd(item.instId))}
-                  title={starred
-                    ? (item.instId === DEFAULT_SYMBOL ? t("trading:defaultMarketLocked") : t("trading:removeFromWatchlist"))
-                    : (watchlist.length >= 10 ? t("trading:watchlistFull") : t("trading:addToWatchlist"))}
-                  aria-label={starred ? t("trading:removeFromWatchlist") : t("trading:addToWatchlist")}
-                >
-                  <Star size={13} />
-                </button>
-              </div>
-            );
-          }) : <div className="market-picker__empty">{t("trading:noMatchingMarkets")}</div>
-        ) : (
-          watchlist.map((item) => {
-            const asset = marketAssets?.instruments.find((entry) => entry.instId === item);
-            return (
-              <div className={clsx("market-picker__row", item === symbol && "is-active")} key={item}>
-                <button type="button" className="market-picker__pick" onClick={() => onSelect(item)} role="option" aria-selected={item === symbol}>
-                  <SymbolIcon base={asset?.baseCcy || item.split("-")[0]} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={cacheDir} />
-                  <span className="market-picker__ident">
-                    <strong>{asset?.baseCcy || item.split("-")[0]}</strong>
-                    <small>{item}</small>
-                  </span>
-                  <HotWatchQuote symbol={item} />
-                </button>
-                <button
-                  type="button"
-                  className="market-picker__star is-on"
-                  disabled={item === DEFAULT_SYMBOL}
-                  onClick={() => onRemove(item)}
-                  title={item === DEFAULT_SYMBOL ? t("trading:defaultMarketLocked") : t("trading:removeFromWatchlist")}
-                  aria-label={t("trading:removeFromWatchlist")}
-                >
-                  <Star size={13} />
-                </button>
-              </div>
-            );
-          })
-        )}
+        {options.length > 0 ? options.map((item) => {
+          const starred = watchlist.includes(item.instId);
+          const snapshot = marketTickers.get(item.instId);
+          const displayName = item.localizedSecurityName || item.securityName;
+          const identityTitle = [...new Set([item.localizedSecurityName, item.securityName, item.instId].filter(Boolean))].join("\n");
+          return (
+            <div className={clsx("market-picker__row", item.instId === symbol && "is-active")} key={item.instId}>
+              <button
+                type="button"
+                className="market-picker__pick"
+                onClick={() => onSelect(item.instId)}
+                role="option"
+                aria-selected={item.instId === symbol}
+                title={identityTitle}
+              >
+                <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={cacheDir} />
+                <span className="market-picker__ident">
+                  <strong>{item.baseCcy}</strong>
+                  <small>{displayName || item.instId}</small>
+                </span>
+                <MarketPickerSnapshotQuote ticker={snapshot} />
+              </button>
+              <button
+                type="button"
+                className={clsx("market-picker__star", starred && "is-on")}
+                disabled={starred ? item.instId === DEFAULT_SYMBOL : watchlist.length >= 10}
+                onClick={() => (starred ? onRemove(item.instId) : onAdd(item.instId))}
+                title={starred
+                  ? (item.instId === DEFAULT_SYMBOL ? t("trading:defaultMarketLocked") : t("trading:removeFromWatchlist"))
+                  : (watchlist.length >= 10 ? t("trading:watchlistFull") : t("trading:addToWatchlist"))}
+                aria-label={starred ? t("trading:removeFromWatchlist") : t("trading:addToWatchlist")}
+              >
+                <Star size={13} />
+              </button>
+            </div>
+          );
+        }) : <div className="market-picker__empty">{t("trading:noMatchingMarkets")}</div>}
       </div>
     </div>
+  );
+}
+
+function MarketPickerSnapshotQuote({ ticker }: { ticker?: Ticker }) {
+  if (!ticker) return <span className="symbol-quote market-picker__snapshot-quote"><strong>--</strong><em>--</em></span>;
+  const last = Number(ticker.last);
+  const open = Number(ticker.open24h);
+  const change = Number.isFinite(last) && Number.isFinite(open) && open > 0 ? ((last / open) - 1) * 100 : null;
+  return (
+    <span className="symbol-quote market-picker__snapshot-quote">
+      <strong>{Number.isFinite(last) ? fmtPrice(last) : "--"}</strong>
+      <em className={clsx(change != null && change > 0 ? "positive" : change != null && change < 0 && "negative")}>
+        {change == null ? "--" : `${change > 0 ? "+" : ""}${change.toFixed(2)}%`}
+      </em>
+    </span>
   );
 }
 
@@ -8652,6 +8947,7 @@ function createAccountDraft(account?: AccountSummary): AccountConfigDraft {
 
 const navItems = [
   { id: "terminal", labelKey: "navigation:trading", Icon: TrendingUp },
+  { id: "radar", labelKey: "navigation:radar", Icon: Radar },
   { id: "opportunities", labelKey: "navigation:opportunities", Icon: ShieldAlert },
   { id: "automation", labelKey: "navigation:automation", Icon: Bot },
   { id: "intelligence", labelKey: "navigation:intelligence", Icon: Newspaper },

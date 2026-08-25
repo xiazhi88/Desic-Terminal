@@ -196,7 +196,10 @@ pub fn validate_runtime_manifest(manifest: &SkillRuntimeManifest) -> Result<(), 
                 let package_path = validate_bundle_relative_path(package_json)?;
                 let lock_path = validate_bundle_relative_path(&dependencies.lock_file)?;
                 if package_path != "package.json" || lock_path != "package-lock.json" {
-                    return Err("Node Skill 当前只支持根目录的 package.json 和 package-lock.json".to_string());
+                    return Err(
+                        "Node Skill 当前只支持根目录的 package.json 和 package-lock.json"
+                            .to_string(),
+                    );
                 }
             }
             "python" if dependencies.manager == "pip" => {
@@ -323,9 +326,16 @@ pub fn build_bundle_summary(
     if total > MAX_SKILL_BUNDLE_TOTAL_BYTES {
         return Err("Skill bundle 总大小超过上限".to_string());
     }
-    if let Some(dependencies) = manifest.runtime.as_ref().and_then(|runtime| runtime.dependencies.as_ref()) {
+    if let Some(dependencies) = manifest
+        .runtime
+        .as_ref()
+        .and_then(|runtime| runtime.dependencies.as_ref())
+    {
         if !paths.contains(&dependencies.lock_file) {
-            return Err(format!("Skill bundle 缺少依赖锁文件：{}", dependencies.lock_file));
+            return Err(format!(
+                "Skill bundle 缺少依赖锁文件：{}",
+                dependencies.lock_file
+            ));
         }
         if let Some(package_json) = dependencies.package_json.as_ref() {
             if !paths.contains(package_json) {
@@ -492,7 +502,8 @@ mod tests {
 
     #[test]
     fn dependency_files_must_be_part_of_the_bundle() {
-        let manifest = parse_runtime_manifest(r#"{
+        let manifest = parse_runtime_manifest(
+            r#"{
           "schemaVersion": 1,
           "runtime": {
             "kind": "node",
@@ -503,7 +514,8 @@ mod tests {
             },
             "entrypoints": [{"name":"run","script":"scripts/run.mjs"}]
           }
-        }"#)
+        }"#,
+        )
         .expect("manifest");
         let error = build_bundle_summary(
             vec![file("SKILL.md", 1), file("scripts/run.mjs", 2)],

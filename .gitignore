@@ -20,6 +20,8 @@ config/*.password
 
 # Runtime data, caches, and diagnostics
 cache/
+.npm-cache/
+.research/
 logs/
 diagnostics/
 /systematic-python/

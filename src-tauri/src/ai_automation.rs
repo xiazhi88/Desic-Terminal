@@ -25,10 +25,11 @@ const AGENT_TEMPLATE_PHASES: [&str; 3] = ["primary", "review", "final"];
 const MAX_AGENT_TEMPLATE_INSTRUCTION_CHARS: usize = 4_000;
 const MAX_AGENT_TEMPLATE_SKILL_IDS: usize = 24;
 const MAX_PROFILE_SYMBOLS: usize = 3;
-const REQUIRED_PROFILE_SKILL_IDS: [&str; 4] = [
+const REQUIRED_PROFILE_SKILL_IDS: [&str; 5] = [
     "desic-core-operations",
     "trading-philosophy",
     "okx-market-intelligence",
+    "market-radar-research",
     "desic-trade-operations",
 ];
 const DAILY_MARKET_REVIEW_EVIDENCE_RULES: &str = "历史 Smart Money 日内证据必须优先使用 intelligence.smartMoney.readSignalTrendByFilter：instId 使用完整永续交易对，granularity=1h，ts 使用 windowEnd-1 的 13 位毫秒字符串，limit 按窗口小时数设置；后端会把 ts 转成 OKX UTC+8 小时 dataVersion，绝不向上游发送 ts。readSignalOverviewByFilter 是当前小时快照且不得传 ts/dataVersion，只能作为明确标注的复盘后补充，不能归入目标日期或用于制造历史证据冲突。Daily Briefing 是可选的预生成产物；未启用或返回空列表不属于原始市场数据缺口，不得单独据此否决结论。System Stress 应按返回时间桶和 coverage 披露实际覆盖范围；ADL unknown 只表示没有可确认的警告状态。accountId 是不透明稳定标识，其中的 demo/live 字样不代表环境；只以独立 environment 字段和后端账户绑定校验为准。";
@@ -1609,7 +1610,10 @@ fn load_agent_schemes(conn: &Connection) -> Result<Vec<AiAgentScheme>, String> {
             }
             let phase = row.get::<_, String>(8)?.trim().to_ascii_lowercase();
             if !AGENT_TEMPLATE_PHASES.contains(&phase.as_str()) {
-                return Err(invalid_profile_row(8, format!("Agent 模板阶段无效：{phase}")));
+                return Err(invalid_profile_row(
+                    8,
+                    format!("Agent 模板阶段无效：{phase}"),
+                ));
             }
             let instructions = row.get::<_, String>(6)?;
             if instructions.chars().count() > MAX_AGENT_TEMPLATE_INSTRUCTION_CHARS {
@@ -1671,7 +1675,12 @@ fn agent_template_instructions(
                 .unwrap_or_default()
                 .trim();
             if !instructions.is_empty() {
-                return Some(instructions.chars().take(MAX_AGENT_TEMPLATE_INSTRUCTION_CHARS).collect());
+                return Some(
+                    instructions
+                        .chars()
+                        .take(MAX_AGENT_TEMPLATE_INSTRUCTION_CHARS)
+                        .collect(),
+                );
             }
         }
         return None;
@@ -1904,10 +1913,10 @@ fn ai_automation_run_detail_blocking(
             .map(from_json_or_default)
             .unwrap_or(Value::Null),
         template_snapshot: template_snapshot_json
-             .as_deref()
-             .map(from_json_or_default)
-             .unwrap_or(Value::Null),
-         skill_versions: from_json_or_default(&skill_versions_json),
+            .as_deref()
+            .map(from_json_or_default)
+            .unwrap_or(Value::Null),
+        skill_versions: from_json_or_default(&skill_versions_json),
         assistant_text,
         reasoning,
         tool_events: tool_json
@@ -2602,13 +2611,11 @@ fn apply_optimization_suggestion(
         )
         .map_err(|err| err.to_string())?;
     let mut config = crate::storage_config::load_ai_config_locked(app)?;
-    proposed = crate::storage_config::prepare_ai_skill_bundle_definitions(
-        vec![proposed],
-        Some(&config),
-    )?
-    .into_iter()
-    .next()
-    .ok_or_else(|| "候选 Skill 为空".to_string())?;
+    proposed =
+        crate::storage_config::prepare_ai_skill_bundle_definitions(vec![proposed], Some(&config))?
+            .into_iter()
+            .next()
+            .ok_or_else(|| "候选 Skill 为空".to_string())?;
     let proposed_content = serde_json::to_string(&proposed).map_err(|err| err.to_string())?;
     if proposed_content == base_content {
         return Err("候选 Skill 与当前基线完全相同".to_string());
@@ -2846,7 +2853,8 @@ pub(crate) fn ai_skill_version_publish(
     }
     let mut published_version = version;
     published_version.status = "published".to_string();
-    published_version.definition = serde_json::to_value(&definition).map_err(|err| err.to_string())?;
+    published_version.definition =
+        serde_json::to_value(&definition).map_err(|err| err.to_string())?;
     published_version.published_at = Some(now);
     Ok(published_version)
 }
@@ -2987,8 +2995,12 @@ fn with_required_profile_skills(items: Vec<String>) -> Vec<String> {
         .collect::<Vec<_>>();
     for skill_id in normalize_strings(items) {
         let skill_id = match skill_id.as_str() {
-            "okx-news-intelligence" | "okx-smart-money-analysis" => "okx-market-intelligence".to_string(),
-            "desic-perpetual-risk" | "desic-position-management" | "desic-market-analysis" => "desic-trade-operations".to_string(),
+            "okx-news-intelligence" | "okx-smart-money-analysis" => {
+                "okx-market-intelligence".to_string()
+            }
+            "desic-perpetual-risk" | "desic-position-management" | "desic-market-analysis" => {
+                "desic-trade-operations".to_string()
+            }
             _ => skill_id,
         };
         if !result.iter().any(|existing| existing == &skill_id) {
@@ -3000,9 +3012,7 @@ fn with_required_profile_skills(items: Vec<String>) -> Vec<String> {
 
 fn normalize_profile_reasoning_depth(value: &str) -> String {
     match value.trim() {
-        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => {
-            value.trim().to_string()
-        }
+        "none" | "minimal" | "low" | "medium" | "high" | "xhigh" => value.trim().to_string(),
         // Compatibility for local Profile rows written before the tier was removed.
         "ultra" => "xhigh".to_string(),
         _ => default_profile_reasoning_depth(),
@@ -4193,20 +4203,26 @@ fn template_snapshot_for_profile(
     conn: &Connection,
     profile: &AiAgentProfileSummary,
 ) -> Result<Option<Value>, String> {
-    let Some(scheme_id) = profile.multi_agent_scheme_id.as_deref().filter(|id| !id.trim().is_empty()) else {
+    let Some(scheme_id) = profile
+        .multi_agent_scheme_id
+        .as_deref()
+        .filter(|id| !id.trim().is_empty())
+    else {
         return Ok(None);
     };
     let scheme = load_agent_schemes(conn)?
         .into_iter()
         .find(|scheme| scheme.id == scheme_id);
-    Ok(scheme.map(|scheme| json!({
-        "id": scheme.id,
-        "name": scheme.name,
-        "description": scheme.description,
-        "builtin": scheme.builtin,
-        "instructions": scheme.instructions,
-        "capturedAt": now_ms()
-    })))
+    Ok(scheme.map(|scheme| {
+        json!({
+            "id": scheme.id,
+            "name": scheme.name,
+            "description": scheme.description,
+            "builtin": scheme.builtin,
+            "instructions": scheme.instructions,
+            "capturedAt": now_ms()
+        })
+    }))
 }
 
 fn queue_run(
@@ -6664,7 +6680,8 @@ async fn automation_tick(
             tauri::async_runtime::spawn(async move {
                 let _permit = permit;
                 if let Err(message) =
-                    execute_profile_run(run_app.clone(), run, profile, trigger, template_snapshot).await
+                    execute_profile_run(run_app.clone(), run, profile, trigger, template_snapshot)
+                        .await
                 {
                     if finalize_profile_run_if_needed(
                         &run_app,
@@ -7391,7 +7408,15 @@ fn mark_old_domain_events_processed(conn: &Connection, now: i64) -> Result<(), S
 fn claim_next_run(
     conn: &Connection,
     now: i64,
-) -> Result<Option<(AiAgentRunSummary, AiAgentProfileSummary, Value, Option<String>)>, String> {
+) -> Result<
+    Option<(
+        AiAgentRunSummary,
+        AiAgentProfileSummary,
+        Value,
+        Option<String>,
+    )>,
+    String,
+> {
     if !automation_master_enabled_with_conn(conn) {
         return Ok(None);
     }
@@ -9783,12 +9808,18 @@ mod tests {
 
         let mut input = test_scheme_input(Some("scheme-template-v2"));
         input.instructions = "  Focus on funding-basis divergence first.  ".to_string();
-        input.skill_ids = vec![" okx-news-intelligence ".to_string(), "okx-news-intelligence".to_string()];
+        input.skill_ids = vec![
+            " okx-news-intelligence ".to_string(),
+            "okx-news-intelligence".to_string(),
+        ];
         input.phase = "REVIEW".to_string();
         input.model = Some("  model-a  ".to_string());
         input.reasoning_depth = "not-a-depth".to_string();
         let saved = save_agent_scheme_with_conn(&conn, input).expect("save template");
-        assert_eq!(saved.instructions, "Focus on funding-basis divergence first.");
+        assert_eq!(
+            saved.instructions,
+            "Focus on funding-basis divergence first."
+        );
         assert_eq!(saved.skill_ids, vec!["okx-news-intelligence".to_string()]);
         assert_eq!(saved.phase, "review");
         assert_eq!(saved.model.as_deref(), Some("model-a"));
@@ -9976,6 +10007,7 @@ mod tests {
                 "desic-core-operations",
                 "trading-philosophy",
                 "okx-market-intelligence",
+                "market-radar-research",
                 "desic-trade-operations",
                 "custom-risk-check",
             ]

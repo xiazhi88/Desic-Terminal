@@ -10,6 +10,13 @@ export const ANALYSIS_TOOLS = new Set([
   "market.readFundingRate",
   "market.scanWatchlist",
   "market.readIndicators",
+  "radar.readRanking",
+  "radar.readInstrumentEvidence",
+  "radar.compareMarkets",
+  "radar.readBreadth",
+  "radar.readRankHistory",
+  "radar.readValidationReport",
+  "radar.listSavedFilters",
   "account.readSnapshot",
   "account.readBalances",
   "account.readPositions",
@@ -174,6 +181,7 @@ export const READ_TOOLS = ANALYSIS_TOOLS;
 export function requiredSkillForTool(name) {
   const canonicalName = toCanonicalToolName(name);
   if (canonicalName.startsWith("intelligence.news.") || canonicalName.startsWith("intelligence.smartMoney.")) return "okx-market-intelligence";
+  if (canonicalName.startsWith("radar.")) return "market-radar-research";
   return null;
 }
 

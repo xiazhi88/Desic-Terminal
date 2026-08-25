@@ -1,7 +1,7 @@
 import { forwardRef, type HTMLAttributes, type ReactNode } from "react";
 import clsx from "clsx";
 
-export type WorkspaceTone = "research" | "intelligence" | "automation";
+export type WorkspaceTone = "research" | "intelligence" | "automation" | "market";
 
 type WorkspaceFrameProps = HTMLAttributes<HTMLDivElement> & {
   children: ReactNode;

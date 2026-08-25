@@ -9,7 +9,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
-import { canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { buildSystemPrompt, canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, normalizeProviderToolInput, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -36,6 +36,54 @@ expectEqual("legacy approval", normalizePermissionMode("approval"), "copilot");
 expectEqual("legacy full", normalizePermissionMode("full"), "copilot");
 expectEqual("hyphenated limited auto", normalizePermissionMode("limited-auto"), "limited_auto");
 expectEqual("unknown mode", normalizePermissionMode("unsafe-yolo"), "advisor");
+
+const marketOverviewPrompt = buildSystemPrompt({
+  systemPrompt: "test",
+  enabledSkills: ["market-radar-research"],
+  skillDefinitions: [{
+    id: "market-radar-research",
+    name: "market-radar-research",
+    description: "Default research route for broad current-market analysis and market-overview work."
+  }]
+}, "advisor");
+expectTrue(
+  "broad current-market analysis routes through Radar",
+  marketOverviewPrompt.includes("宽泛当前市场分析")
+    && marketOverviewPrompt.includes("radar_readBreadth")
+    && marketOverviewPrompt.includes("radar_readRanking")
+);
+const noRadarOverviewPrompt = buildSystemPrompt({
+  systemPrompt: "test",
+  enabledSkills: [],
+  skillDefinitions: []
+}, "advisor");
+expectTrue(
+  "disabled Radar Skill does not inject broad market routing",
+  !noRadarOverviewPrompt.includes("宽泛当前市场分析")
+);
+const defaultAiConfig = JSON.parse(
+  readFileSync(new URL("../shared/default-ai-config.json", import.meta.url), "utf8")
+);
+const radarSkill = defaultAiConfig.skillDefinitions.find((skill) => skill.id === "market-radar-research");
+expectTrue(
+  "default Radar Skill catalog describes broad market routing",
+  String(radarSkill?.description || "").includes("broad current-market analysis")
+    && String(radarSkill?.rules || "").includes("radar.readBreadth and radar.readRanking")
+);
+expectEqual(
+  "provider omission sentinel is removed before Radar validation",
+  JSON.stringify(normalizeProviderToolInput("radar.readRanking", {
+    rankingBasis: "composite",
+    savedFilterId: ".invalid?"
+  })),
+  JSON.stringify({ rankingBasis: "composite" })
+);
+expectEqual(
+  "unknown invalid Radar filter id is not normalized",
+  normalizeProviderToolInput("radar.readRanking", { savedFilterId: "bad?" }).savedFilterId,
+  "bad?"
+);
+
 expectEqual(
   "model-facing tool references use registered provider names",
   toProviderToolReferences(
@@ -163,6 +211,11 @@ expectEqual("news event tools exposed with skill", isSkillToolEnabled("intellige
 expectEqual("derivatives evidence hidden without smart skill", isSkillToolEnabled("intelligence.smartMoney.readFundingBasis", []), false);
 expectEqual("derivatives evidence exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readFundingBasis", ["okx-market-intelligence"]), true);
 expectEqual("derivative decision context exposed with smart skill", isSkillToolEnabled("intelligence.smartMoney.readDerivativeDecisionContext", ["okx-market-intelligence"]), true);
+expectEqual("radar tools hidden without radar skill", isSkillToolEnabled("radar.readRanking", []), false);
+expectEqual("radar tools exposed with radar skill", isSkillToolEnabled("radar.readRanking", ["market-radar-research"]), true);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "radar.readValidationReport", enabled);
+expectPolicy({ permissionMode: "limited_auto", agentRole: "subagent" }, "radar.compareMarkets", enabled);
+expectPolicy({ permissionMode: "limited_auto", agentRole: "subagent" }, "radar.createAlert", disabled);
 
 const briefingAdvisorPolicies = buildToolPolicies({ permissionMode: "advisor", agentRole: "main", backgroundRun: true });
 expectEqual("briefing advisor can finish run", briefingAdvisorPolicies["background.finishRun"]?.enabled, true);
@@ -343,6 +396,39 @@ expectPolicy(
   }
   if (/disableLoopDetection/.test(sidecar)) {
     failures.push("sidecar must not retain a per-session loop detection switch");
+  }
+  for (const toolName of [
+    "radar.readRanking",
+    "radar.readInstrumentEvidence",
+    "radar.compareMarkets",
+    "radar.readBreadth",
+    "radar.readRankHistory",
+    "radar.readValidationReport",
+    "radar.listSavedFilters"
+  ]) {
+    if (!sidecar.includes(`tool(\"${toolName}\"`)) {
+      failures.push(`sidecar must register ${toolName}`);
+    }
+  }
+  if (!/const RADAR_COMPARE_SCHEMA[\s\S]*?minItems:\s*2[\s\S]*?maxItems:\s*4/.test(sidecar)) {
+    failures.push("radar.compareMarkets schema must require 2 to 4 instruments");
+  }
+  if (!/const RADAR_RANKING_SCHEMA[\s\S]*?limit:\s*\{[^}]*maximum:\s*100/.test(sidecar)) {
+    failures.push("radar.readRanking schema must cap responses at 100 rows");
+  }
+  if (!/const RADAR_AS_OF_PROPERTY[\s\S]*?minimum:\s*0[\s\S]*?value 0 is also accepted and normalized to the latest snapshot/.test(sidecar)) {
+    failures.push("radar point-in-time schema must document zero-placeholder compatibility and latest-snapshot omission");
+  }
+  if (!/savedFilterId:[\s\S]*?type:\s*\["string",\s*"null"\][\s\S]*?pattern:\s*"\^\[A-Za-z0-9\][\s\S]*?Send null or omit this property/.test(sidecar)) {
+    failures.push("radar.readRanking schema must use nullable validated saved filter ids without string placeholders");
+  }
+
+  const rustBridge = readFileSync(new URL("../src-tauri/src/lib.rs", import.meta.url), "utf8");
+  const executeToolStart = rustBridge.indexOf("async fn execute_ai_tool(");
+  const radarRoute = rustBridge.indexOf('if canonical_name.starts_with("radar.") {', executeToolStart);
+  const contextInjection = rustBridge.indexOf("inject_ai_execution_context(&mut input, context);", executeToolStart);
+  if (radarRoute < executeToolStart || contextInjection < executeToolStart || radarRoute > contextInjection) {
+    failures.push("radar tools must route before generic execution-context fields are injected into strict tool input");
   }
 }
 

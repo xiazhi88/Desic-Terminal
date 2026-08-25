@@ -31,6 +31,8 @@ import type {
   ChartWindowSummary,
   KlineSyncReport,
   KlineSyncSummary,
+  EquitySecurityDirectory,
+  EquitySecurityLocalizations,
   LeverageInfoRequest,
   LinearUsdtRiskBudget,
   LinearUsdtRiskBudgetRequest,
@@ -38,6 +40,11 @@ import type {
   LinearUsdtPerpetualEvaluationRequest,
   ListAlgoOrdersRequest,
   MarketAssetsSummary,
+  MarketRadarHistoryStatus,
+  MarketRadarResearchScore,
+  MarketRadarSavedItem,
+  MarketRadarSnapshotResult,
+  MarketRadarValidationReport,
   MarketSnapshot,
   ClosePositionRequest,
   CancelOrderRequest,
@@ -680,6 +687,18 @@ export async function ensureInstrumentsCache(instIds: string[]): Promise<MarketA
   return invokeOptional<MarketAssetsSummary>("ensure_instruments_cache", { instIds });
 }
 
+export async function loadEquitySecurityDirectory(tickers: string[]): Promise<EquitySecurityDirectory | null> {
+  if (tickers.length === 0) return null;
+  return invokeOptional<EquitySecurityDirectory>("equity_security_directory", { tickers });
+}
+
+export async function loadEquitySecurityLocalizations(
+  securities: Array<{ ticker: string; exchange: string }>
+): Promise<EquitySecurityLocalizations | null> {
+  if (securities.length === 0) return null;
+  return invokeOptional<EquitySecurityLocalizations>("equity_security_localizations", { securities });
+}
+
 async function syncMarketAssetsViaWeb(): Promise<MarketAssetsSummary | null> {
   const instruments = await okxFetch<{ data: Record<string, string>[] }>("/api/v5/public/instruments?instType=SWAP");
   const swaps = instruments.data.filter((item) => item.instType === "SWAP");
@@ -730,6 +749,17 @@ export async function fetchTicker(instId: string): Promise<Ticker> {
 
   const json = await okxFetch<{ data: Record<string, string>[] }>(`/api/v5/market/ticker?instId=${encodeURIComponent(instId)}`);
   return normalizeTicker(json.data[0]);
+}
+
+export async function fetchMarketTickers(): Promise<Ticker[]> {
+  if (isTauriRuntime()) {
+    const viaTauri = await invokeDesktop<Ticker[]>("okx_market_tickers");
+    if (!viaTauri) throw new Error("OKX market tickers returned no result");
+    return viaTauri;
+  }
+
+  const json = await okxFetch<{ data: Record<string, string>[] }>("/api/v5/market/tickers?instType=SWAP");
+  return json.data.map(normalizeTicker);
 }
 
 export async function fetchFundingRate(instId: string): Promise<FundingRate | null> {
@@ -819,6 +849,87 @@ export async function syncKlineIntegrity(
 
 export async function listenKlineSync(handler: (report: KlineSyncReport) => void): Promise<(() => void) | null> {
   return listenOptional<KlineSyncReport>("kline:sync", handler);
+}
+
+export async function startMarketRadarDirectoryStream(): Promise<boolean> {
+  return await invokeOptional<boolean>("market_radar_directory_stream_start") ?? false;
+}
+
+export async function listenMarketRadarDirectory(handler: (summary: MarketAssetsSummary) => void): Promise<(() => void) | null> {
+  return listenOptional<MarketAssetsSummary>("market-radar:directory-updated", handler);
+}
+
+export async function loadMarketRadarHistoryStatus(): Promise<MarketRadarHistoryStatus | null> {
+  return invokeOptional<MarketRadarHistoryStatus>("market_radar_history_status");
+}
+
+export async function startMarketRadarHistory(): Promise<MarketRadarHistoryStatus | null> {
+  return invokeOptional<MarketRadarHistoryStatus>("market_radar_history_start");
+}
+
+export async function loadMarketRadarResearchScores(): Promise<MarketRadarResearchScore[]> {
+  return await invokeOptional<MarketRadarResearchScore[]>("market_radar_research_scores") ?? [];
+}
+
+export async function recordMarketRadarSnapshot(input: {
+  fetchedAt: number;
+  modelVersion: string;
+  rows: Array<{
+    instId: string;
+    category?: string;
+    listTime?: number;
+    rank: number;
+    compositeScore: number;
+    strengthScore: number;
+    lowVolatilityScore: number;
+    activityScore: number;
+    rawActivityScore: number;
+    trendQualityScore: number;
+    rawTrendQualityScore?: number;
+    volatility20dPct?: number;
+    liquidityScore: number;
+    change24hPct: number;
+    turnover24h: number;
+    lastPrice: number;
+    spreadBps?: number;
+    historyReady: boolean;
+  }>;
+}): Promise<MarketRadarSnapshotResult | null> {
+  return invokeOptional<MarketRadarSnapshotResult>("market_radar_record_snapshot", { input });
+}
+
+export async function loadMarketRadarSavedFilters(): Promise<MarketRadarSavedItem[]> {
+  return await invokeOptional<MarketRadarSavedItem[]>("market_radar_saved_filters") ?? [];
+}
+
+export async function saveMarketRadarFilter(input: { id: string; name: string; definitionJson: string; enabled?: boolean }): Promise<MarketRadarSavedItem | null> {
+  return invokeOptional<MarketRadarSavedItem>("market_radar_save_filter", { input });
+}
+
+export async function deleteMarketRadarFilter(id: string): Promise<boolean> {
+  return await invokeOptional<boolean>("market_radar_delete_filter", { id }) ?? false;
+}
+
+export async function loadMarketRadarAlertRules(): Promise<MarketRadarSavedItem[]> {
+  return await invokeOptional<MarketRadarSavedItem[]>("market_radar_alert_rules") ?? [];
+}
+
+export async function saveMarketRadarAlertRule(input: { id: string; name: string; definitionJson: string; enabled?: boolean }): Promise<MarketRadarSavedItem | null> {
+  return invokeOptional<MarketRadarSavedItem>("market_radar_save_alert_rule", { input });
+}
+
+export async function deleteMarketRadarAlertRule(id: string): Promise<boolean> {
+  return await invokeOptional<boolean>("market_radar_delete_alert_rule", { id }) ?? false;
+}
+
+export async function loadMarketRadarValidationReport(lookbackDays = 90): Promise<MarketRadarValidationReport | null> {
+  return invokeOptional<MarketRadarValidationReport>("market_radar_validation_report", {
+    request: { lookbackDays },
+  });
+}
+
+export async function listenMarketRadarHistory(handler: (status: MarketRadarHistoryStatus) => void): Promise<(() => void) | null> {
+  return listenOptional<MarketRadarHistoryStatus>("market-radar:history-status", handler);
 }
 
 export async function listenTradeAuditEvents(handler: (event: TradeAuditEventSummary) => void): Promise<(() => void) | null> {

@@ -17,6 +17,8 @@ export type SystematicFactorView = {
   factorId: string;
   instId: string;
   rank: number;
+  /** Rank under the saved formula when previewing an edit; absent otherwise. */
+  previousRank?: number;
   alphaScore: number;
   momentumPct: number;
   realizedVolatilityPct: number;
@@ -28,6 +30,12 @@ export type SystematicFactorView = {
 };
 
 export type SystematicKlineBlendFactorDefinition = {
+  /**
+   * Discriminator for the persisted factor family. Definitions stored before
+   * this tag existed decode as `klineBlend` on the Rust side, so it is optional
+   * on read and always present on write.
+   */
+  kind?: "klineBlend";
   factorId: string;
   lookbackBars: number;
   momentumWeight: number;
@@ -35,21 +43,86 @@ export type SystematicKlineBlendFactorDefinition = {
   volumeWeight: number;
 };
 
+/** Tagged union of every supported factor family. */
+export type SystematicFactorDefinition = SystematicKlineBlendFactorDefinition;
+
 export type SystematicFactorDefinitionView = {
   id: string;
   code: string;
   name: string;
+  /** Advances only when the formula or code changes, not on rename. */
   version: number;
   status: "draft" | "research" | string;
   description: string;
-  definition: SystematicKlineBlendFactorDefinition;
+  definition: SystematicFactorDefinition;
+  kind: string;
   sourceHash: string;
   updatedAt: number;
 };
 
+/** Why an eligible instrument produced no score. */
+export type SystematicFactorSkipSample = {
+  instId: string;
+  reason:
+    | "noLocalBars"
+    | "insufficientBars"
+    | "seriesGap"
+    | "invalidPrice"
+    | "readFailed"
+    | string;
+  availableBars?: number;
+  requiredBars?: number;
+};
+
+/**
+ * Coverage accounting for one evaluation. Present so the panel can always
+ * explain an empty or partial ranking instead of rendering a bare table.
+ */
+export type SystematicFactorCoverageDiagnostics = {
+  universeTotal: number;
+  universeEligible: number;
+  scored: number;
+  /** Share of eligible instruments that produced no score, 0 to 1. */
+  droppedPct: number;
+  reasonCounts: Record<string, number>;
+  samples: SystematicFactorSkipSample[];
+  snapshotId: string;
+  snapshotAgeMs: number;
+  snapshotStale: boolean;
+  /** A cross-sectional z-score needs at least two scored instruments. */
+  crossSectionSufficient: boolean;
+  /**
+   * Instruments holding enough history for a historical evaluation.
+   *
+   * Ranking needs one lookback; an evaluation walks a grid across months. These
+   * are reported separately because a healthy ranking can sit beside an
+   * evaluation that cannot produce a single valid grid point.
+   */
+  evaluationReady: number;
+  evaluationRequiredBars: number;
+  survivorshipNote: string;
+};
+
 export type SystematicFactorEvaluationView = {
   factorId: string;
+  factorVersion: number;
+  kind: string;
+  asOfMs?: number | null;
+  snapshotId?: string | null;
   factors: SystematicFactorView[];
+  diagnostics?: SystematicFactorCoverageDiagnostics;
+  /** Set when evaluation could not start, e.g. `noUniverseSnapshot`. */
+  unavailableReason?: string;
+};
+
+/** Result of scoring an unsaved definition. Nothing was persisted. */
+export type SystematicFactorPreviewView = {
+  kind: string;
+  asOfMs?: number | null;
+  snapshotId?: string | null;
+  factors: SystematicFactorView[];
+  diagnostics?: SystematicFactorCoverageDiagnostics;
+  unavailableReason?: string;
 };
 
 export type SystematicStrategyView = {
@@ -483,7 +556,12 @@ export type SystematicPythonSampleTestView = {
 
 export type SystematicOverview = {
   universe: SystematicUniverseView;
-  factors: SystematicFactorView[];
+  /**
+   * Ranked factor rows are not part of the overview payload: scoring an aligned
+   * universe is a full cross-sectional pass, and this command is polled while
+   * runs are in flight. Use `evaluateSystematicFactor` or the preview command
+   * to obtain ranked rows on demand.
+   */
   activeFactorId?: string | null;
   factorDefinitions: SystematicFactorDefinitionView[];
   strategies: SystematicStrategyView[];
@@ -516,6 +594,13 @@ export type SystematicEvent = {
   estimatedRemainingMs?: number | null;
   stage?: string;
   mirror?: string | null;
+  /** Present on `factorSaved`, `factorDeleted`, and `factorDataSync`. */
+  factorId?: string;
+  /** Present on `factorEvaluationProgress`. */
+  evaluationId?: string;
+  /** `factorDataSync` progress counters. */
+  repaired?: number;
+  failed?: number;
   timestamp?: number;
 };
 
@@ -529,8 +614,15 @@ export function loadSystematicBacktests(page = 1, pageSize = 20) {
   });
 }
 
-export function captureSystematicUniverse() {
-  return invokeDesktop<SystematicUniverseView>("systematic_capture_universe_snapshot");
+/**
+ * Captures the aligned instrument universe. Pass `asOfMs` to decide eligibility
+ * against a fixed reference time instead of the live clock, which keeps a
+ * research reading reproducible.
+ */
+export function captureSystematicUniverse(asOfMs?: number) {
+  return invokeDesktop<SystematicUniverseView>("systematic_capture_universe_snapshot", {
+    request: { asOfMs }
+  });
 }
 
 export function createDefaultSystematicFactor(name?: string) {
@@ -544,7 +636,7 @@ export function saveSystematicFactor(request: {
   name: string;
   code: string;
   description?: string;
-  definition: SystematicKlineBlendFactorDefinition;
+  definition: SystematicFactorDefinition;
   status?: "draft" | "research";
 }) {
   return invokeDesktop<SystematicFactorDefinitionView>("systematic_factor_save", { request });
@@ -554,6 +646,307 @@ export function evaluateSystematicFactor(factorId: string) {
   return invokeDesktop<SystematicFactorEvaluationView>("systematic_factor_evaluate", {
     request: { factorId }
   });
+}
+
+/**
+ * Scores a definition without saving it, so weight and formula edits can be
+ * judged from the resulting ranking. Pass `factorId` when editing a stored
+ * factor to receive `previousRank` for each row.
+ */
+export function previewSystematicFactor(request: {
+  factorId?: string;
+  definition: SystematicFactorDefinition;
+}) {
+  return invokeDesktop<SystematicFactorPreviewView>("systematic_factor_preview", { request });
+}
+
+/** Deletes a local factor. The seeded built-in factor is refused. */
+export function deleteSystematicFactor(factorId: string) {
+  return invokeDesktop<void>("systematic_factor_delete", { request: { factorId } });
+}
+
+/** Per-instrument outcome of a repair pass. */
+export type SystematicFactorRepairResult = {
+  instId: string;
+  /** `repaired` (window complete), `incomplete` (holes remain), or `failed`. */
+  status: "repaired" | "incomplete" | "failed" | string;
+  inserted: number;
+  error?: string;
+};
+
+export type SystematicFactorRepairView = {
+  factorId: string;
+  /** Instruments missing history before the limit was applied. */
+  candidates: number;
+  attempted: number;
+  repaired: number;
+  failed: number;
+  inserted: number;
+  cancelled: boolean;
+  /** Days of 1m history fetched per instrument, so the UI can explain the wait. */
+  daysPerInstrument: number;
+  /** Instruments still needing history after this pass. */
+  remaining: number;
+  results: SystematicFactorRepairResult[];
+};
+
+/**
+ * Downloads the local one-minute history a factor needs but does not have.
+ *
+ * Bounded to at most 50 instruments per pass (default 30), highest turnover
+ * first, and cancellable via `cancelSystematicFactorRepair`. Progress arrives as
+ * `factorDataSync` systematic events.
+ */
+export function repairSystematicFactorData(factorId: string, limit?: number) {
+  return invokeDesktop<SystematicFactorRepairView>("systematic_factor_repair_data", {
+    request: { factorId, limit }
+  });
+}
+
+export function cancelSystematicFactorRepair(factorId: string) {
+  return invokeDesktop<void>("systematic_factor_repair_cancel", { request: { factorId } });
+}
+
+/**
+ * Accumulated point-in-time instrument registry.
+ *
+ * The exchange retains nothing about delisted perpetuals, so this local record
+ * is the only way a later historical study can include instruments that were
+ * tradable at the time but are not listed now. Excluding them is exactly the
+ * survivorship bias that inflates measured factor performance.
+ */
+export type SystematicInstrumentRegistryView = {
+  totalKnown: number;
+  live: number;
+  delisted: number;
+  /** Rankable crypto perpetuals. */
+  crypto: number;
+  /** Equity, index and commodity underlyings — labelled, not discarded. */
+  tradfi: number;
+  /** Stablecoins and wrapped duplicates: listed but not rankable. */
+  nonRankable: number;
+  /** Recognised as neither; surfaced rather than assumed to be crypto. */
+  unknown: number;
+  /** Newly recorded on this pass. */
+  added: number;
+  /** Newly marked delisted on this pass. */
+  newlyDelisted: number;
+  updatedAt: number;
+};
+
+/** Records the currently listed perpetuals. Idempotent and additive. */
+export function snapshotSystematicInstrumentRegistry() {
+  return invokeDesktop<SystematicInstrumentRegistryView>(
+    "systematic_instrument_registry_snapshot"
+  );
+}
+
+/** Reads the registry without recording a new observation. */
+export function loadSystematicInstrumentRegistry() {
+  return invokeDesktop<SystematicInstrumentRegistryView>(
+    "systematic_instrument_registry_summary"
+  );
+}
+
+/** A measure a factor can start from. */
+export type SystematicFactorSourceDescriptor = {
+  id: string;
+  labelEn: string;
+  labelZh: string;
+  detailEn: string;
+  detailZh: string;
+  takesWindow: boolean;
+  defaultWindow: number;
+};
+
+/** A selectable operator, scope-prefixed so its meaning is unambiguous. */
+export type SystematicFactorOperatorDescriptor = {
+  id: string;
+  /** Scope-prefixed name, e.g. `cs_rank`. */
+  name: string;
+  scope: "crossSection" | "timeSeries";
+  takesWindow: boolean;
+  takesDirection: boolean;
+  labelEn: string;
+  labelZh: string;
+  detailEn: string;
+  detailZh: string;
+};
+
+export type SystematicFactorPresetView = {
+  id: string;
+  labelEn: string;
+  labelZh: string;
+  /** Direction the published evidence supports. */
+  expectedSign: "positive" | "negative" | "unknown" | string;
+  expression: Record<string, unknown>;
+};
+
+/**
+ * What the builder may offer.
+ *
+ * Published by the evaluator's own crate rather than duplicated here, so the
+ * builder cannot offer an operator the evaluator would reject.
+ */
+export type SystematicFactorBuilderCatalogue = {
+  sources: SystematicFactorSourceDescriptor[];
+  operators: SystematicFactorOperatorDescriptor[];
+  presets: SystematicFactorPresetView[];
+  maxWindowBars: number;
+  maxPipelineStages: number;
+};
+
+export function loadSystematicFactorBuilderCatalogue() {
+  return invokeDesktop<SystematicFactorBuilderCatalogue>("systematic_factor_builder_catalogue");
+}
+
+/** One stage selection in the builder. */
+export type SystematicFactorComposeStage = {
+  op: string;
+  window?: number;
+  ascending?: boolean;
+};
+
+/**
+ * Turns builder selections into a validated factor expression.
+ *
+ * The host owns this translation so the UI never assembles the syntax tree by
+ * hand. Errors return the same wording the evaluator produces, so a problem
+ * surfaces while editing rather than on save.
+ */
+export function composeSystematicFactorExpression(request: {
+  sourceId: string;
+  sourceWindow: number;
+  stages: SystematicFactorComposeStage[];
+}) {
+  return invokeDesktop<Record<string, unknown>>("systematic_factor_compose_expression", {
+    request
+  });
+}
+
+/** How much attention a finding demands. */
+export type SystematicVerdictLevel = "pass" | "caution" | "fail";
+
+/**
+ * One mechanically derived finding about an evaluation.
+ *
+ * Every check is decidable from numbers already computed, so a report can state
+ * whether a factor works rather than leaving the reader to interpret raw metrics.
+ * Findings arrive ordered worst-first.
+ */
+export type SystematicVerdictFinding = {
+  code: string;
+  level: SystematicVerdictLevel;
+  detail: {
+    measured?: number;
+    threshold?: number;
+    count?: number;
+  };
+};
+
+/** Per-horizon evaluation metrics. */
+export type SystematicFactorHorizonMetrics = {
+  horizonMinutes: number;
+  trainIc?: SystematicIcSummary;
+  validationIc?: SystematicIcSummary;
+  fullIc?: SystematicIcSummary;
+  quantiles: SystematicQuantileStat[];
+  quantileSpread?: number;
+  monotonic: boolean;
+  /** Per-period IC values, for the time-series chart. */
+  icSeries: number[];
+};
+
+export type SystematicIcSummary = {
+  /** The first number to check: its sign says whether the factor points as intended. */
+  mean: number;
+  stdDev: number;
+  icir: number;
+  /** Inflated at high frequency; display but do not gate decisions on it. */
+  tStat: number;
+  hitRate: number;
+  periods: number;
+};
+
+export type SystematicQuantileStat = {
+  bucket: number;
+  meanReturn: number;
+  stdDev: number;
+  count: number;
+  /** Shown with every mean so precision is never implied. */
+  standardError: number;
+  /** Thin membership makes a bucket mean an individual instrument's return. */
+  minMembersPerPeriod: number;
+};
+
+export type SystematicFactorEvaluationMetrics = {
+  horizons: SystematicFactorHorizonMetrics[];
+  rankAutocorrelation?: number;
+  topBucketTurnover?: number;
+  gridPoints: number;
+  skippedSparsePoints: number;
+  universeSize: number;
+  minCrossSection: number;
+  /** Annualised fee-only drag at full turnover for this cadence. */
+  annualisedCostAtFullTurnover: number;
+  /** Always true today: funding is not ingested. */
+  excludesFunding: boolean;
+  boundaryNotes: string[];
+};
+
+export type SystematicFactorEvaluationRecordView = {
+  id: string;
+  factorId: string;
+  factorVersion: number;
+  status: "completed" | "cancelled" | "failed" | string;
+  windowStartAt: number;
+  windowEndAt: number;
+  /** In-sample / out-of-sample boundary. */
+  trainEndAt: number;
+  gridMinutes: number;
+  horizonsMinutes: number[];
+  quantileBuckets: number;
+  universeSnapshotId: string;
+  universeSize: number;
+  metrics?: SystematicFactorEvaluationMetrics;
+  verdicts: SystematicVerdictFinding[];
+  overallLevel: SystematicVerdictLevel;
+  error?: string;
+  createdAt: number;
+};
+
+/**
+ * Runs an evaluation: does this factor's ranking precede returns?
+ *
+ * `gridMinutes` defaults to daily. Faster cadences multiply fee drag far more
+ * quickly than they can raise gross return, so an intraday default would present
+ * results that cannot survive their own trading costs.
+ */
+export function startSystematicFactorEvaluation(request: {
+  factorId: string;
+  gridMinutes?: number;
+  windowDays?: number;
+  horizonsMinutes?: number[];
+  quantileBuckets?: number;
+  universeLimit?: number;
+}) {
+  return invokeDesktop<SystematicFactorEvaluationRecordView>(
+    "systematic_factor_evaluation_start",
+    { request }
+  );
+}
+
+export function cancelSystematicFactorEvaluation(evaluationId: string) {
+  return invokeDesktop<void>("systematic_factor_evaluation_cancel", {
+    request: { evaluationId }
+  });
+}
+
+export function loadSystematicFactorEvaluations(factorId: string) {
+  return invokeDesktop<SystematicFactorEvaluationRecordView[]>(
+    "systematic_factor_evaluation_list",
+    { request: { factorId } }
+  );
 }
 
 export function runSystematicPythonSample(selectInterpreter = false) {

@@ -15,7 +15,9 @@ default-members = ["."]
 members = [
   "crates/agent-automation",
   "crates/chart-dsl",
+  "crates/factor-dsl",
   "crates/intelligence",
+  "crates/market-radar",
   "crates/private-history",
   "crates/skill-runtime",
   "crates/systematic",
@@ -69,7 +71,9 @@ desic-skill-runtime = { path = "crates/skill-runtime" }
 desic-storage-config = { path = "crates/storage-config" }
 desic-trade-domain = { path = "crates/trade-domain" }
 desic-chart-dsl = { path = "crates/chart-dsl" }
+desic-factor-dsl = { path = "crates/factor-dsl" }
 desic-intelligence = { path = "crates/intelligence" }
+desic-market-radar = { path = "crates/market-radar" }
 desic-systematic = { path = "crates/systematic" }
 
 [target.'cfg(windows)'.dependencies]

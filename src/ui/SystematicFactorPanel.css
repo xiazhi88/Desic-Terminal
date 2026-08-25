@@ -1,0 +1,1152 @@
+/* Factor workbench.
+   This surface is lazy-loaded by Market Radar and must carry its own design
+   tokens. Keeping the small shared-control foundation here avoids importing the
+   full Strategy Research stylesheet into the expert-only bundle. */
+
+.systematic-factor-panel {
+  --lab-bg: #07090b;
+  --lab-panel: #0b0f12;
+  --lab-panel-raised: #10161a;
+  --lab-line: rgba(172, 193, 187, 0.17);
+  --lab-line-soft: rgba(172, 193, 187, 0.09);
+  --lab-text: #e8edf2;
+  --lab-muted: #98a7aa;
+  --lab-weak: #68777b;
+  --lab-accent: #67bea7;
+  --lab-accent-soft: rgba(103, 190, 167, 0.11);
+  --lab-gain: var(--up, #e37777);
+  --lab-loss: var(--down, #60c99f);
+  --lab-drawdown: var(--down, #60c99f);
+  --lab-gain-wash: rgba(227, 119, 119, 0.1);
+  --lab-loss-wash: rgba(96, 201, 159, 0.1);
+  --lab-state-ok: #67bea7;
+  --lab-state-warn: #d9ad5c;
+  --lab-state-error: #e37777;
+  --lab-warning: #d9ad5c;
+  --lab-radius-control: 5px;
+  --lab-radius-surface: 7px;
+  --lab-radius-pill: 999px;
+  --lab-space-2xs: 4px;
+  --lab-space-xs: 7px;
+  --lab-space-sm: 10px;
+  --lab-space-md: 14px;
+  --lab-space-lg: 20px;
+  --lab-space-xl: 28px;
+  --lab-text-metric: 19px;
+  --lab-text-title: 15px;
+  --lab-text-strong: 13px;
+  --lab-text-prose: 12px;
+  --lab-text-body: 11px;
+  --lab-text-label: 10px;
+  --lab-text-micro: 9px;
+  --lab-text-nano: 8px;
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: grid;
+  grid-template-columns: 250px minmax(0, 1fr);
+  overflow: hidden;
+  color: var(--lab-text);
+  background: var(--lab-bg);
+  font-variant-numeric: tabular-nums;
+  container-type: inline-size;
+}
+
+.systematic-factor-panel *,
+.systematic-factor-panel *::before,
+.systematic-factor-panel *::after { box-sizing: border-box; }
+
+.systematic-factor-panel button,
+.systematic-factor-panel input,
+.systematic-factor-panel textarea,
+.systematic-factor-panel select { font: inherit; letter-spacing: 0; }
+
+.systematic-factor-panel .systematic-lab__pane-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 28px;
+  align-items: center;
+  gap: var(--lab-space-xs);
+  padding: 0 var(--lab-space-sm);
+  border-bottom: 1px solid var(--lab-line);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-panel .systematic-lab__count {
+  min-width: 18px;
+  padding: 2px 4px;
+  border-radius: var(--lab-radius-control);
+  color: var(--lab-weak);
+  background: rgba(255, 255, 255, 0.055);
+  font-size: var(--lab-text-micro);
+  line-height: 1;
+  text-align: center;
+}
+
+.systematic-factor-panel .systematic-lab__icon-button,
+.systematic-factor-panel .systematic-lab__command-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  color: #dce5e5;
+  background: #11171a;
+  cursor: pointer;
+}
+
+.systematic-factor-panel .systematic-lab__icon-button {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+}
+
+.systematic-factor-panel .systematic-lab__command-button {
+  min-height: 29px;
+  padding: 0 9px;
+  font-size: var(--lab-text-body);
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.systematic-factor-panel .systematic-lab__command-button.is-primary {
+  border-color: rgba(103, 190, 167, 0.48);
+  color: #ccebe2;
+  background: var(--lab-accent-soft);
+}
+
+.systematic-factor-panel .systematic-lab__command-button.is-quiet {
+  color: var(--lab-muted);
+  background: transparent;
+}
+
+.systematic-factor-panel .systematic-lab__icon-button:hover:not(:disabled),
+.systematic-factor-panel .systematic-lab__command-button:hover:not(:disabled) {
+  border-color: rgba(103, 190, 167, 0.7);
+  color: #ecf7f4;
+  background: rgba(103, 190, 167, 0.16);
+}
+
+.systematic-factor-panel .systematic-lab__icon-button:focus-visible,
+.systematic-factor-panel .systematic-lab__command-button:focus-visible {
+  outline: 2px solid rgba(103, 190, 167, 0.72);
+  outline-offset: 2px;
+}
+
+.systematic-factor-panel .systematic-lab__icon-button:disabled,
+.systematic-factor-panel .systematic-lab__command-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.44;
+}
+
+.systematic-factor-panel .systematic-lab__row-delete {
+  align-self: stretch;
+  width: 28px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid transparent;
+  color: var(--lab-weak);
+  background: transparent;
+  cursor: pointer;
+}
+
+.systematic-factor-panel .systematic-lab__row-delete:hover:not(:disabled) {
+  border-left-color: rgba(227, 119, 119, 0.2);
+  color: var(--lab-state-error);
+  background: rgba(227, 119, 119, 0.08);
+}
+
+.systematic-factor-panel .systematic-lab-empty-state {
+  min-height: 170px;
+  height: 100%;
+  display: grid;
+  align-content: center;
+  justify-items: start;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-lg);
+  color: var(--lab-muted);
+}
+
+.systematic-factor-panel .systematic-lab-empty-state > span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--lab-line);
+  color: var(--lab-weak);
+}
+
+.systematic-factor-panel .systematic-lab-empty-state strong {
+  color: #d9e2e2;
+  font-size: var(--lab-text-body);
+}
+
+.systematic-factor-panel .systematic-lab-empty-state p {
+  max-width: 320px;
+  margin: 0;
+  color: var(--lab-weak);
+  font-size: var(--lab-text-label);
+  line-height: 1.45;
+}
+
+.systematic-factor-panel .systematic-lab-empty-state__action { margin-top: 7px; }
+.systematic-factor-panel .is-spinning { animation: systematic-factor-spin 800ms linear infinite; }
+
+@keyframes systematic-factor-spin { to { transform: rotate(360deg); } }
+
+.systematic-factor-panel__library {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: 34px minmax(0, 1fr);
+  border-right: 1px solid var(--lab-line);
+  background: var(--lab-panel);
+}
+
+.systematic-factor-panel__library-scroll { min-height: 0; overflow-y: auto; }
+
+.systematic-factor-panel__row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 28px;
+  align-items: center;
+  border-bottom: 1px solid var(--lab-line-soft);
+}
+
+.systematic-factor-panel__row:hover { background: rgba(255, 255, 255, 0.025); }
+.systematic-factor-panel__row.is-active {
+  background: var(--lab-accent-soft);
+  box-shadow: inset 2px 0 var(--lab-accent);
+}
+
+.systematic-factor-panel__row-select {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.systematic-factor-panel__row-select strong {
+  overflow: hidden;
+  color: var(--lab-text);
+  font-size: var(--lab-text-body);
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systematic-factor-panel__row-select small {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+}
+
+/* "Exists" and "checked" are different claims, so the badge is visible while
+   choosing rather than only inside the report. */
+.systematic-factor-panel__badge {
+  justify-self: start;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  margin-top: 2px;
+  padding: 1px 5px;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-pill);
+  color: var(--lab-weak);
+  font-size: var(--lab-text-nano);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-panel__badge.is-verified {
+  border-color: color-mix(in srgb, var(--lab-state-ok) 55%, transparent);
+  color: var(--lab-state-ok);
+}
+
+.systematic-factor-panel__main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+}
+
+/* Two stable product surfaces rather than a report appended beneath the editor.
+   The tab row stays visible while each surface owns its own scroll position. */
+.systematic-factor-panel__tabs {
+  min-width: 0;
+  min-height: 35px;
+  display: flex;
+  align-items: stretch;
+  gap: var(--lab-space-sm);
+  padding: 0 var(--lab-space-sm);
+  border-bottom: 1px solid var(--lab-line);
+  background: var(--lab-panel);
+}
+
+.systematic-factor-panel__tabs button {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 0 2px;
+  border: 0;
+  background: transparent;
+  color: var(--lab-weak);
+  font: inherit;
+  font-size: var(--lab-text-label);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.systematic-factor-panel__tabs button::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: transparent;
+}
+
+.systematic-factor-panel__tabs button:hover { color: var(--lab-text); }
+.systematic-factor-panel__tabs button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--lab-accent) 70%, transparent);
+  outline-offset: -2px;
+}
+.systematic-factor-panel__tabs button.is-active { color: var(--lab-text); }
+.systematic-factor-panel__tabs button.is-active::after { background: var(--lab-accent); }
+
+.systematic-factor-panel__tabs button > span {
+  display: grid;
+  place-items: center;
+  min-width: 17px;
+  height: 17px;
+  padding: 0 4px;
+  border-radius: var(--lab-radius-pill);
+  background: var(--lab-panel-raised);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-nano);
+  font-variant-numeric: tabular-nums;
+}
+
+.systematic-factor-panel__tabs button.is-active > span {
+  background: var(--lab-accent-soft);
+  color: var(--lab-text);
+}
+
+.systematic-factor-panel__view {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--lab-space-sm);
+  padding: var(--lab-space-sm);
+  overflow-y: auto;
+  scrollbar-gutter: stable;
+}
+
+.systematic-factor-panel__view.is-conclusion {
+  /* The report is its own surface; a width cap keeps long verdict prose readable
+     on ultrawide terminals without turning the section into a floating card. */
+  grid-template-columns: minmax(0, 1280px);
+  justify-content: center;
+}
+
+.systematic-factor-panel__main > .systematic-lab-empty-state {
+  align-self: stretch;
+  margin: var(--lab-space-sm);
+}
+
+/* Coverage banner. A partial or empty ranking always names its cause and offers
+   the action that addresses it. */
+.systematic-factor-panel__banner {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-surface);
+  background: var(--lab-panel-raised);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+}
+
+.systematic-factor-panel__banner > svg { flex: 0 0 auto; margin-top: 1px; color: var(--lab-weak); }
+.systematic-factor-panel__banner > div { min-width: 0; flex: 1; display: grid; gap: 2px; }
+.systematic-factor-panel__banner span { color: var(--lab-text); }
+.systematic-factor-panel__banner small { color: var(--lab-weak); font-size: var(--lab-text-micro); line-height: 1.45; }
+.systematic-factor-panel__banner small.is-warn { color: var(--lab-warning); }
+
+.systematic-factor-panel__banner.is-warn {
+  border-color: color-mix(in srgb, var(--lab-warning) 38%, transparent);
+  background: color-mix(in srgb, var(--lab-warning) 7%, var(--lab-panel-raised));
+}
+
+.systematic-factor-panel__banner.is-warn > svg { color: var(--lab-warning); }
+
+.systematic-factor-panel__ranking,
+.systematic-factor-panel__builder {
+  min-width: 0;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-surface);
+  background: var(--lab-panel);
+}
+
+.systematic-factor-panel__ranking-head,
+.systematic-factor-panel__builder-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lab-space-sm);
+  min-height: 36px;
+  padding: 0 var(--lab-space-sm);
+  border-bottom: 1px solid var(--lab-line-soft);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-panel__ranking-head > div { display: flex; gap: var(--lab-space-2xs); }
+.systematic-factor-panel__builder-head small {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+  font-weight: 400;
+  text-transform: none;
+}
+
+.systematic-factor-panel__table { min-width: 0; font-size: var(--lab-text-body); }
+
+/* Header and body rows are separate grids: each row is wrapped in a group so it
+   can carry an expandable evidence panel. Two independent grids only line up if
+   every track resolves to the same width, so the action column is a fixed size
+   rather than content-sized — an `auto` track there is measured from the buttons
+   in the body and from an empty cell in the header, which shifts every numeric
+   column left of it. The shared template lives in one custom property so the two
+   selectors cannot drift apart. */
+.systematic-factor-panel__table {
+  --factor-table-columns: 30px minmax(80px, 1.3fr) 62px 52px 66px 68px 70px 188px;
+}
+
+.systematic-factor-panel__table-head,
+.systematic-factor-panel__table-row {
+  display: grid;
+  grid-template-columns: var(--factor-table-columns);
+  align-items: center;
+  gap: var(--lab-space-2xs);
+  padding: 5px var(--lab-space-sm);
+}
+
+/* Numeric columns are right-aligned so digits line up by place value, and each
+   header is aligned the same way as the cells beneath it. Aligning only the
+   values leaves every number visually detached from its own label. */
+.systematic-factor-panel__table-head > :nth-child(3),
+.systematic-factor-panel__table-head > :nth-child(4),
+.systematic-factor-panel__table-head > :nth-child(5),
+.systematic-factor-panel__table-head > :nth-child(6),
+.systematic-factor-panel__table-head > :nth-child(7),
+.systematic-factor-panel__table-row > :nth-child(3),
+.systematic-factor-panel__table-row > :nth-child(4),
+.systematic-factor-panel__table-row > :nth-child(5),
+.systematic-factor-panel__table-row > :nth-child(6),
+.systematic-factor-panel__table-row > :nth-child(7) {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The rank column is a short ordinal, so it centres under its own header. */
+.systematic-factor-panel__table-head > :first-child,
+.systematic-factor-panel__table-row > :first-child { text-align: center; }
+
+.systematic-factor-panel__table-head {
+  border-bottom: 1px solid var(--lab-line-soft);
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-panel__table-group { border-bottom: 1px solid var(--lab-line-soft); }
+.systematic-factor-panel__table-row:hover { background: rgba(255, 255, 255, 0.022); }
+
+.systematic-factor-panel__instrument {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Rank movement follows the application convention where red is an up move. */
+.systematic-factor-panel__table-row .is-up { color: var(--lab-gain); }
+.systematic-factor-panel__table-row .is-down { color: var(--lab-loss); }
+
+/* The action cell has a fixed track, so its contents must fit rather than push
+   the column wider and break alignment with the header. */
+.systematic-factor-panel__row-actions {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--lab-space-2xs);
+  overflow: hidden;
+}
+
+.systematic-factor-panel__row-actions .systematic-lab__command-button {
+  min-height: 24px;
+  min-width: 0;
+  padding: 0 5px;
+  overflow: hidden;
+  font-size: var(--lab-text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Per-row attribution, reusing the evidence text the scorer already produces.
+   Indented to the second column so it reads as belonging to the instrument. */
+.systematic-factor-panel__evidence {
+  display: grid;
+  gap: 3px;
+  padding: var(--lab-space-xs) var(--lab-space-sm) var(--lab-space-xs) 42px;
+  background: rgba(255, 255, 255, 0.016);
+}
+
+.systematic-factor-panel__evidence p {
+  margin: 0;
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  line-height: 1.5;
+}
+
+.systematic-factor-panel__evidence small {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+  line-height: 1.45;
+}
+
+.systematic-factor-panel__fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: var(--lab-space-sm);
+  padding: var(--lab-space-sm);
+}
+
+.systematic-factor-panel__fields label,
+.systematic-factor-panel__description {
+  min-width: 0;
+  display: grid;
+  gap: var(--lab-space-2xs);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+}
+
+.systematic-factor-panel__description { padding: 0 var(--lab-space-sm) var(--lab-space-sm); }
+
+.systematic-factor-panel input[type="text"],
+.systematic-factor-panel input:not([type]),
+.systematic-factor-panel input[type="number"],
+.systematic-factor-panel textarea {
+  width: 100%;
+  min-width: 0;
+  min-height: 29px;
+  padding: 4px 7px;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  outline: 0;
+  background: var(--lab-bg);
+  color: var(--lab-text);
+  font: inherit;
+  font-size: var(--lab-text-body);
+}
+
+.systematic-factor-panel textarea { min-height: 52px; resize: vertical; }
+
+.systematic-factor-panel input:focus-visible,
+.systematic-factor-panel textarea:focus-visible {
+  border-color: color-mix(in srgb, var(--lab-accent) 85%, transparent);
+  box-shadow: 0 0 0 2px var(--lab-accent-soft);
+}
+
+.systematic-factor-panel__formula {
+  display: block;
+  margin: 0 var(--lab-space-sm);
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  overflow-x: auto;
+  border: 1px solid color-mix(in srgb, var(--lab-accent) 26%, transparent);
+  border-radius: var(--lab-radius-control);
+  background: color-mix(in srgb, var(--lab-accent) 5%, var(--lab-bg));
+  color: #d9cdfd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--lab-text-label);
+  white-space: nowrap;
+}
+
+.systematic-factor-panel__sliders {
+  display: grid;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-sm);
+}
+
+.systematic-factor-panel__slider {
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr) 78px;
+  align-items: center;
+  gap: var(--lab-space-sm);
+}
+
+.systematic-factor-panel__slider-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+}
+
+/* Help affordance. The wrapper is positioned so the bubble can escape the
+   grid cell without widening the row. */
+.systematic-factor-panel__help { position: relative; display: inline-flex; }
+
+.systematic-factor-panel__help button {
+  display: grid;
+  place-items: center;
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--lab-radius-pill);
+  background: transparent;
+  color: var(--lab-weak);
+  cursor: help;
+}
+
+.systematic-factor-panel__help button:hover,
+.systematic-factor-panel__help button:focus-visible { color: var(--lab-accent); }
+
+.systematic-factor-panel__help-bubble {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: -6px;
+  z-index: 20;
+  /* Wide enough to read a full explanation rather than a truncated label. */
+  width: max(260px, 24vw);
+  max-width: 360px;
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  border: 1px solid color-mix(in srgb, var(--lab-accent) 34%, var(--lab-line));
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-panel-raised);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  color: var(--lab-text);
+  font-size: var(--lab-text-label);
+  font-weight: 400;
+  line-height: 1.55;
+  text-transform: none;
+  white-space: normal;
+  pointer-events: none;
+}
+
+.systematic-factor-panel__slider input[type="range"] {
+  width: 100%;
+  min-width: 0;
+  height: 3px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--lab-radius-pill);
+  background: var(--lab-line);
+  accent-color: var(--lab-accent);
+}
+
+.systematic-factor-panel__hint {
+  margin: 0;
+  padding: var(--lab-space-sm);
+  color: var(--lab-weak);
+  font-size: var(--lab-text-label);
+  line-height: 1.5;
+}
+
+/* ---------- Report ---------- */
+
+.systematic-factor-report {
+  min-width: 0;
+  display: grid;
+  gap: var(--lab-space-xs);
+  align-content: start;
+}
+
+.systematic-factor-report__section {
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-surface);
+  background: var(--lab-panel);
+}
+
+/* Sectioned and collapsible rather than one long scroll: a single continuous
+   figure with no navigation is unreadable at report length. */
+.systematic-factor-report__section-head {
+  width: 100%;
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--lab-space-sm);
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.systematic-factor-report__section-head > span { display: grid; gap: 1px; }
+
+.systematic-factor-report__section-head strong {
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-report__section-head small {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+}
+
+.systematic-factor-report__section-body {
+  display: grid;
+  gap: var(--lab-space-xs);
+  padding: 0 var(--lab-space-sm) var(--lab-space-sm);
+}
+
+.systematic-factor-report__verdicts { display: grid; gap: var(--lab-space-2xs); margin: 0; padding: 0; list-style: none; }
+
+.systematic-factor-report__verdict {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-panel-raised);
+}
+
+.systematic-factor-report__verdict > svg { flex: 0 0 auto; margin-top: 1px; }
+.systematic-factor-report__verdict > div { min-width: 0; display: grid; gap: 2px; }
+.systematic-factor-report__verdict strong { color: var(--lab-text); font-size: var(--lab-text-body); }
+.systematic-factor-report__verdict p { margin: 0; color: var(--lab-muted); font-size: var(--lab-text-label); line-height: 1.5; }
+.systematic-factor-report__verdict small { color: var(--lab-weak); font-size: var(--lab-text-micro); font-variant-numeric: tabular-nums; }
+
+.systematic-factor-report__verdict.is-fail {
+  border-color: color-mix(in srgb, var(--lab-state-error) 45%, transparent);
+  background: color-mix(in srgb, var(--lab-state-error) 8%, var(--lab-panel-raised));
+}
+.systematic-factor-report__verdict.is-fail > svg { color: var(--lab-state-error); }
+
+.systematic-factor-report__verdict.is-caution {
+  border-color: color-mix(in srgb, var(--lab-warning) 40%, transparent);
+  background: color-mix(in srgb, var(--lab-warning) 7%, var(--lab-panel-raised));
+}
+.systematic-factor-report__verdict.is-caution > svg { color: var(--lab-warning); }
+.systematic-factor-report__verdict.is-pass > svg { color: var(--lab-state-ok); }
+
+.systematic-factor-report__stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(104px, 1fr));
+  gap: var(--lab-space-2xs);
+}
+
+.systematic-factor-report__stat {
+  display: grid;
+  gap: 1px;
+  padding: var(--lab-space-2xs) var(--lab-space-xs);
+  border: 1px solid var(--lab-line-soft);
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-bg);
+}
+
+.systematic-factor-report__stat span { color: var(--lab-weak); font-size: var(--lab-text-micro); }
+.systematic-factor-report__stat strong { color: var(--lab-text); font-size: var(--lab-text-strong); font-variant-numeric: tabular-nums; }
+/* IC mean is the number to read first, so it is promoted visually. */
+.systematic-factor-report__stat.is-emphasis strong { font-size: var(--lab-text-metric); }
+.systematic-factor-report__stat.is-warn strong { color: var(--lab-warning); }
+
+.systematic-factor-report__horizons { display: grid; gap: var(--lab-space-xs); }
+
+.systematic-factor-report__horizon {
+  display: grid;
+  gap: var(--lab-space-2xs);
+  padding: var(--lab-space-xs);
+  border: 1px solid var(--lab-line-soft);
+  border-radius: var(--lab-radius-control);
+}
+
+.systematic-factor-report__horizon-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+}
+
+.systematic-factor-report__horizon-head strong { color: var(--lab-text); }
+.systematic-factor-report__horizon-head b { color: var(--lab-text); font-variant-numeric: tabular-nums; }
+
+.systematic-factor-report__spark { width: 100%; height: 60px; }
+.systematic-factor-report__spark polyline { fill: none; stroke: var(--lab-accent); stroke-width: 1.4; }
+.systematic-factor-report__spark .is-axis { stroke: var(--lab-line); stroke-width: 1; }
+
+.systematic-factor-report__tstat { color: var(--lab-weak); font-size: var(--lab-text-micro); }
+
+.systematic-factor-report__quantiles { display: grid; gap: var(--lab-space-xs); }
+
+.systematic-factor-report__bars {
+  display: grid;
+  grid-auto-flow: column;
+  grid-auto-columns: minmax(0, 1fr);
+  gap: var(--lab-space-xs);
+  align-items: end;
+}
+
+.systematic-factor-report__bar { display: grid; justify-items: center; gap: 2px; }
+
+.systematic-factor-report__bar-track {
+  position: relative;
+  width: 100%;
+  height: 96px;
+  border-bottom: 1px solid var(--lab-line);
+  background: linear-gradient(var(--lab-line-soft), var(--lab-line-soft)) center / 100% 1px no-repeat;
+}
+
+.systematic-factor-report__bar-fill {
+  position: absolute;
+  left: 22%;
+  width: 56%;
+  border-radius: 2px;
+}
+
+.systematic-factor-report__bar-fill.is-gain { background: var(--lab-gain); }
+.systematic-factor-report__bar-fill.is-loss { background: var(--lab-loss); }
+
+/* The error bar is always present: a bucket mean shown without its precision
+   invites over-reading, especially where a bucket holds few instruments. */
+.systematic-factor-report__bar-error {
+  position: absolute;
+  left: 50%;
+  width: 1px;
+  transform: translateX(-50%);
+  background: var(--lab-text);
+  opacity: 0.6;
+}
+
+.systematic-factor-report__bar b { color: var(--lab-text); font-size: var(--lab-text-label); font-variant-numeric: tabular-nums; }
+.systematic-factor-report__bar small { color: var(--lab-weak); font-size: var(--lab-text-micro); }
+.systematic-factor-report__bar small.is-warn { color: var(--lab-warning); }
+
+.systematic-factor-report__note { margin: 0; color: var(--lab-weak); font-size: var(--lab-text-label); line-height: 1.5; }
+.systematic-factor-report__note.is-warn { color: var(--lab-warning); }
+
+.systematic-factor-report__boundaries { display: grid; gap: var(--lab-space-2xs); margin: 0; padding: 0; list-style: none; }
+
+.systematic-factor-report__boundaries li {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  line-height: 1.5;
+}
+
+.systematic-factor-report__boundaries svg { flex: 0 0 auto; margin-top: 2px; color: var(--lab-weak); }
+
+/* ---------- Expression builder ---------- */
+
+.systematic-factor-builder {
+  display: grid;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-sm);
+}
+
+.systematic-factor-builder__section {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 120px;
+  gap: var(--lab-space-sm);
+  align-items: end;
+}
+
+.systematic-factor-builder__field {
+  min-width: 0;
+  display: grid;
+  gap: var(--lab-space-2xs);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+}
+
+.systematic-factor-builder__field > span { display: flex; align-items: center; gap: 4px; }
+
+.systematic-factor-builder select {
+  width: 100%;
+  min-width: 0;
+  min-height: 29px;
+  padding: 4px 7px;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  outline: 0;
+  background: var(--lab-bg);
+  color: var(--lab-text);
+  font: inherit;
+  font-size: var(--lab-text-body);
+}
+
+.systematic-factor-builder select:focus-visible {
+  border-color: color-mix(in srgb, var(--lab-accent) 85%, transparent);
+  box-shadow: 0 0 0 2px var(--lab-accent-soft);
+}
+
+.systematic-factor-builder__detail {
+  margin: 0;
+  color: var(--lab-weak);
+  font-size: var(--lab-text-label);
+  line-height: 1.5;
+}
+
+.systematic-factor-builder__chain-head {
+  display: flex;
+  align-items: baseline;
+  gap: var(--lab-space-xs);
+  margin-top: var(--lab-space-2xs);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+
+.systematic-factor-builder__chain-head small {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+  font-weight: 400;
+  text-transform: none;
+}
+
+.systematic-factor-builder__chain {
+  display: grid;
+  gap: var(--lab-space-2xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: factor-stage;
+}
+
+/* One row per stage. Order is meaningful, so the row shows its position and can
+   be moved rather than only added and removed. */
+.systematic-factor-builder__stage {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr) 72px 96px auto;
+  align-items: center;
+  gap: var(--lab-space-xs);
+  padding: var(--lab-space-2xs) var(--lab-space-xs);
+  border: 1px solid var(--lab-line-soft);
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-bg);
+}
+
+/* The scope badge is the most important thing on the row: cross-sectional and
+   time-series are different operations, and confusing them is the documented way
+   factors go silently wrong. */
+.systematic-factor-builder__scope {
+  display: grid;
+  place-items: center;
+  padding: 2px 0;
+  border-radius: var(--lab-radius-pill);
+  font-size: var(--lab-text-nano);
+  font-weight: 750;
+  text-transform: uppercase;
+  cursor: help;
+}
+
+.systematic-factor-builder__scope.is-crossSection {
+  border: 1px solid color-mix(in srgb, var(--lab-accent) 50%, transparent);
+  background: var(--lab-accent-soft);
+  color: #d9cdfd;
+}
+
+.systematic-factor-builder__scope.is-timeSeries {
+  border: 1px solid color-mix(in srgb, var(--lab-state-ok) 44%, transparent);
+  background: color-mix(in srgb, var(--lab-state-ok) 10%, transparent);
+  color: #9fded4;
+}
+
+.systematic-factor-builder__stage-name { min-width: 0; display: grid; gap: 1px; }
+.systematic-factor-builder__stage-name code {
+  color: var(--lab-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--lab-text-label);
+}
+.systematic-factor-builder__stage-name small { color: var(--lab-weak); font-size: var(--lab-text-micro); }
+
+.systematic-factor-builder__stage-actions { display: flex; gap: 2px; }
+
+.systematic-factor-builder__stage-actions button {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 22px;
+  padding: 0;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  background: transparent;
+  color: var(--lab-muted);
+  cursor: pointer;
+}
+
+.systematic-factor-builder__stage-actions button:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--lab-accent) 60%, transparent);
+  color: var(--lab-text);
+}
+
+.systematic-factor-builder__stage-actions button:disabled { cursor: not-allowed; opacity: 0.4; }
+
+.systematic-factor-builder__add {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--lab-space-2xs);
+  padding-top: var(--lab-space-2xs);
+}
+
+.systematic-factor-builder__add .systematic-lab__command-button {
+  min-height: 24px;
+  padding: 0 7px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: var(--lab-text-micro);
+}
+
+.systematic-factor-builder__warning {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 0;
+  padding: var(--lab-space-2xs) var(--lab-space-xs);
+  border: 1px solid color-mix(in srgb, var(--lab-warning) 40%, transparent);
+  border-radius: var(--lab-radius-control);
+  background: color-mix(in srgb, var(--lab-warning) 7%, transparent);
+  color: var(--lab-warning);
+  font-size: var(--lab-text-label);
+  line-height: 1.5;
+}
+
+.systematic-factor-builder__warning.is-error {
+  border-color: color-mix(in srgb, var(--lab-state-error) 45%, transparent);
+  background: color-mix(in srgb, var(--lab-state-error) 8%, transparent);
+  color: var(--lab-state-error);
+}
+
+.systematic-factor-builder__warning svg { flex: 0 0 auto; margin-top: 2px; }
+
+/* ---------- Starting-point gallery ---------- */
+
+.systematic-factor-panel__picker-backdrop {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: var(--lab-space-lg);
+  background: rgba(4, 6, 10, 0.62);
+}
+
+.systematic-factor-panel__picker {
+  width: min(460px, 100%);
+  max-height: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-surface);
+  background: var(--lab-panel);
+  box-shadow: 0 18px 44px rgba(0, 0, 0, 0.55);
+}
+
+.systematic-factor-panel__picker header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--lab-space-sm);
+  padding: var(--lab-space-sm);
+  border-bottom: 1px solid var(--lab-line-soft);
+}
+
+.systematic-factor-panel__picker header > div { display: grid; gap: 2px; }
+.systematic-factor-panel__picker header span {
+  color: var(--lab-weak);
+  font-size: var(--lab-text-micro);
+  font-weight: 750;
+  text-transform: uppercase;
+}
+.systematic-factor-panel__picker header strong { color: var(--lab-text); font-size: var(--lab-text-title); }
+
+.systematic-factor-panel__picker header button {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  background: transparent;
+  color: var(--lab-muted);
+  cursor: pointer;
+}
+
+.systematic-factor-panel__picker-list {
+  display: grid;
+  gap: var(--lab-space-2xs);
+  padding: var(--lab-space-sm);
+  overflow-y: auto;
+}
+
+.systematic-factor-panel__picker-option {
+  display: grid;
+  gap: 3px;
+  padding: var(--lab-space-xs) var(--lab-space-sm);
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-bg);
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.systematic-factor-panel__picker-option:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--lab-accent) 62%, transparent);
+  background: var(--lab-accent-soft);
+}
+
+.systematic-factor-panel__picker-option:disabled { cursor: not-allowed; opacity: 0.5; }
+.systematic-factor-panel__picker-option strong { color: var(--lab-text); font-size: var(--lab-text-body); }
+.systematic-factor-panel__picker-option small { color: var(--lab-weak); font-size: var(--lab-text-micro); line-height: 1.45; }
+
+@container (max-width: 1100px) {
+  /* Narrow layout drops the two least decision-relevant numeric columns rather
+     than letting every column compress until the digits collide. Both grids read
+     the same property, so they stay aligned. */
+  .systematic-factor-panel__table {
+    --factor-table-columns: 30px minmax(80px, 1.3fr) 62px 52px 66px 150px;
+  }
+  .systematic-factor-panel__table-head > :nth-child(6),
+  .systematic-factor-panel__table-head > :nth-child(7),
+  .systematic-factor-panel__table-row > :nth-child(6),
+  .systematic-factor-panel__table-row > :nth-child(7) {
+    display: none;
+  }
+}
+
+@container (max-width: 900px) {
+  .systematic-factor-panel { grid-template-columns: minmax(0, 1fr); }
+  .systematic-factor-panel__library { display: none; }
+  .systematic-factor-panel__slider { grid-template-columns: 96px minmax(0, 1fr) 68px; }
+}

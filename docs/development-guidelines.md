@@ -175,6 +175,15 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 - 启动时必须检查观察交易对的所有要求周期。
 - 新增观察交易对时必须立即拉取并补齐该交易对的 K 线数据。
+- 自动完整性同步的资产范围是当前交易对与观察列表，不等于全市场研究宇宙。因子等截面研究需要为非观察合约扩充历史时，必须复用统一的 `sync_kline_window`、同一 `candles` 表和同一完整性检查；界面应称为“补充评估历史”等用途动作，不能表现成第二套 K 线存储或下载器。当前排名只需最近回看，历史评估需要在整个窗口的每个过去时点上都具备回看与前向收益数据，两种就绪状态必须分开计算和展示。
+- 市场雷达的产品目录和轻量快照必须独立于观察列表。目录使用 `public/instruments` 初始快照并通过低频 `instruments` WebSocket 增量维护；全市场当前排行使用单次 `market/tickers?instType=SWAP` 快照，按交易对仅接受 `incoming.ts >= stored.ts` 的更新，避免 OKX REST 缓存回退覆盖较新数据。
+- 股票永续的类型身份只接受 OKX `instCategory=3`；公司或证券英文名称与上市交易所来自独立的 NASDAQ Trader 官方 Symbol Directory，必须低频缓存并只向 WebView 返回当前股票永续需要的映射。中文界面可再按“代码 + 上市交易所”精确查询 Wikidata 的简体/繁体实体标签，中文命中与未命中必须分开设置刷新周期，代码或交易所存在歧义时拒绝猜测。外部目录不可用或名称未匹配时按“中文名 → 官方英文名 → OKX 合约代码”降级，不得阻塞产品目录、行情、历史同步或交易路径，也不得把外部名称写成 OKX 原始字段。
+- 市场雷达不得给全市场订阅高频 ticker、盘口、成交或 1 分钟 K 线。雷达可见时全市场 ticker 快照默认 30 秒刷新；其它主工作区且应用可见时降低到 5 分钟；页面隐藏时跳过轮询。观察列表和当前交易对继续使用既有分级 WebSocket 消费者。
+- 市场雷达的本地研究基线使用 UTC 日界线：全部 live USDT 永续最多保存 400 天 `1Dutc`，按当前 USDT 成交额选出的 Top 100 额外保存 90 天 `1H`。同步必须限制在 `listTime` 之后、只把 `confirm=1` 作为稳定研究输入，并通过共享请求门控遵守 `history-candles` 限额。历史准备属于应用级后台任务，必须在全市场 instruments 缓存就绪后自动启动，不得依赖市场雷达页面或 Tab 的挂载。股票永续收益使用独立标识的 `1Dutc-forward` 存储键和 `adjust=forward`，不得与未复权日线共用主键身份。
+- 市场雷达评分是截面研究证据。普通视图优先展示可解释的相对强度、波动率、成交活跃变化、趋势稳定性、覆盖度与数据截止时间；缺少低频历史时可以显式降级为当前快照评分，但不得称为收益潜力、交易信号或自动下单命令。表达式构建器只进入市场雷达的按需高级模型视图，不得重新成为策略研究主 Tab。
+- 排名变化、评分归因、保存筛选、研究提醒和历史有效性必须共享同一份低频点时快照。快照按 UTC 小时覆盖写入、默认保留 90 天；归因保存的是进入最终综合分的加权贡献，不能把不同量纲的原始分数直接相加。提醒只在状态跨阈值时触发，事件必须持久化去重，并同时执行规则冷却、单规则每日上限和全局每日上限。
+- 历史有效性只能评估实际保存过的点时产品宇宙。时点 `t` 的基准价格必须在快照中保存，前向收益只读取 `t` 之后确认完成的日线；股票继续使用 `1Dutc-forward`。报告至少区分 1/5/20 日、Rank IC、Top/Bottom 分位收益差、点差成本代理、换手率和按时间切分的训练/验证段。样本不足必须显示积累中，不得用当前存活合约、未来目录或未确认 K 线倒填结果。
+- 自然语言筛选只作为确定性解析器的输入。解析结果必须展示为可复现的结构化条件，未识别片段必须显式保留；AI 不得直接决定交易对、隐藏改写条件或把筛选结果描述成交易建议。
 - 启动和新增观察交易对时也必须确保该交易对 instruments 合约规则进入本地缓存。
 - 下单预检、保证金估算、数量步进、价格步进、合约面值等任何需要 `minSz/lotSz/tickSz/maxLmtSz/maxMktSz/ctVal/lever` 的地方，必须先读本地 `cache/market-assets/swap-instruments.json`，缓存缺失时才允许请求 OKX 并回写缓存。
 - 禁止在每次下单前无条件调用 OKX `public/instruments`，这会增加下单路径延迟。
@@ -198,8 +207,8 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 本机 Claude Code 必须通过官方 `claude -p` 非交互入口执行，不能把消费端 OAuth 交给第三方 Agent SDK 代发请求；后者可能被服务端以 `403 Request not allowed` 拒绝。运行只加载 `user` 设置源以保留用户自己的 `ANTHROPIC_BASE_URL` / 认证路由，不读取或复制其值；命令行必须使用 `--strict-mcp-config`、`--tools ""`、`--disable-slash-commands`、`--no-session-persistence` 和 `disableAllHooks=true`，同时关闭 CLAUDE.md、自动记忆和后台任务。仅将当轮已通过 Desic 权限策略的工具放入带随机 Bearer Token 的临时 loopback MCP，并以 `mcp__<server>__<tool>` 精确授权；临时 MCP 配置和系统提示文件在 macOS/Linux 使用 `0600`，Windows 依赖当前用户临时目录 ACL，并在运行后删除。
 - AI 配置保存成功后必须发布只含脱敏摘要的配置变更事件；模型选择器应实时合并新摘要，当前选择仍有效时不得被 active model 强制覆盖。事件载荷不得包含 API Key、OAuth Token 或本地认证文件路径。
 - 持久化配置引用账户、AI 模型等可删除对象的稳定 ID 时，读取摘要和实际执行路径都必须重新校验引用。失效的 AI 模型引用可回退并写回当前模型；失效的账户引用必须清除并暂停相关后台任务，不能静默切换到其它账户。
-- `desic-core-operations`、`trading-philosophy`、`okx-market-intelligence`、`desic-trade-operations` 是全局必需 Skills：界面必须显示为已启用且不可关闭，Rust 保存和读取配置时必须补齐三个显式 Skill；`desic-core-operations` 继续作为不可编辑的隐式固定规范，不写入 `enabledSkills`。`desic-trade-operations` 合并交易机会、市场证据、永续风险、仓位生命周期与保护核对；`okx-market-intelligence` 合并新闻、事件、情绪、宏观、Smart Money 与衍生品情报。旧 Skill ID 只作为读取迁移别名，不得重新出现在新的默认配置或工具路由中。`trading-philosophy` 必需但可定制，升级默认内容时只能迁移完全未修改的旧内置版本，必须保留用户自定义内容；其默认理念约束证据、风险和可修正性，不得把具体指标、周期、盈亏比或风险比例固化为普适规则。
-- 默认系统 Prompt 与四个内置 Skill 的基线统一维护在 `shared/default-ai-config.json`，Rust、前端和 Sidecar 不得各自复制一份。默认基线升级只能按旧内容精确匹配或指纹迁移；任何用户编辑过的 Prompt 或 Skill 都必须原样保留。
+- `desic-core-operations`、`trading-philosophy`、`okx-market-intelligence`、`market-radar-research`、`desic-trade-operations` 是全局必需 Skills：界面必须显示为已启用且不可关闭，Rust 保存和读取配置时必须补齐四个显式 Skill；`desic-core-operations` 继续作为不可编辑的隐式固定规范，不写入 `enabledSkills`。`desic-trade-operations` 合并交易机会、市场证据、永续风险、仓位生命周期与保护核对；`okx-market-intelligence` 合并新闻、事件、情绪、宏观、Smart Money 与衍生品情报；`market-radar-research` 约束全市场排行、归因、广度、保存筛选和点时验证的只读解释。旧 Skill ID 只作为读取迁移别名，不得重新出现在新的默认配置或工具路由中。`trading-philosophy` 必需但可定制，升级默认内容时只能迁移完全未修改的旧内置版本，必须保留用户自定义内容；其默认理念约束证据、风险和可修正性，不得把具体指标、周期、盈亏比或风险比例固化为普适规则。
+- 默认系统 Prompt 与五个内置 Skill 的基线统一维护在 `shared/default-ai-config.json`，Rust、前端和 Sidecar 不得各自复制一份。默认基线升级只能按旧内容精确匹配或指纹迁移；任何用户编辑过的 Prompt 或 Skill 都必须原样保留。
 - Cline Core 0.0.56 的 `subscribe` 流式文本和 reasoning 增量位于 `agent_event.payload.event`，并以每段一个 `content_start` 事件发送；sidecar 必须同时映射嵌套的 text、reasoning 和 tool 事件，不能只处理顶层 delta 或等待 `content_end`，否则 UI 会停在 running，直到结束后一次性显示。
 - Cline Legacy `usage` 事件同时携带本次模型调用增量和当前 Run 累计值；统计整轮用量必须优先使用 `totalInputTokens/totalOutputTokens/totalCache*`，旧事件缺少累计缓存时才累加缓存增量，禁止只取最后一条 `inputTokens/outputTokens`。规范化后的 `inputTokens` 是包含缓存读取/写入的完整 prompt 输入，cache 只是细分，`totalTokens=inputTokens+outputTokens` 不得再次加 cache。Reasoning 明细没有可靠上游覆盖时必须标记未报告，不能用 `0` 冒充真实值。
 - Cline 最终正文只认原生 `AgentDoneEvent.text`（同步 `start()` 结果只作为同结构兜底）。`content_start/content_end` 是当前 iteration 的内容块：可作为不落库的正文预览实时显示；出现 tool call 或 `iteration_end.hadToolCalls=true` 时通过结构化事件清空预览并将该轮文本归入过程区，无工具的最后一轮由 `done.text` 替换预览。禁止通过正文前缀、子串重叠、关键词或重复段落匹配来推断“过程/结果”。
@@ -214,6 +223,8 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
   - 停止。
   - sidecar 重启。
 - 工具权限必须同时经过 Sidecar policy、Cline `beforeTool` Hook 和 Rust 授权；全部采用默认拒绝，SDK 新增工具不能自动获权。
+- `radar.*` 必须要求激活 `market-radar-research`，只允许读取 SQLite 中实际保存的小时快照、筛选定义和点时验证；未指定单一品种的宽泛当前市场分析、市场概况或盘面强弱必须在常驻 Skill 路由层先加载该 Skill，并至少读取 breadth 与默认 composite ranking，实时结论再补充实时行情或情报且分开标注时间；不得读取 React 文本或隐式跟随当前 Tab、临时查询和可见行。返回值必须带 `snapshotAt`、`modelVersion`、宇宙覆盖、限制以及 `globalRank`/`scopeRank` 区分。保存筛选依赖的原始字段必须随快照持久化；旧快照缺字段时失败关闭，不得用加权贡献近似原始值。Radar 的严格 DTO 必须只接收工具 schema 参数；`operator`、`sessionId`、`agentRunId`、`agentProfileId` 等可信执行元数据应留在授权上下文，不能注入领域输入。最新快照和全市场查询应分别省略 `asOf` 和 `savedFilterId`；为兼容会补齐可选整数的 Provider，schema 可接受 `asOf=0`，但后端必须将其安全规范化为最新快照；`all`/`all-markets` 仅在不存在同名已启用筛选时回退为无筛选，命名筛选必须优先使用数据库中的精确 ID。Provider 将省略的可选 `savedFilterId` 表达为固定 `.invalid?` 哨兵时，Sidecar 必须在 schema 校验前删除它，Rust 也必须将其视为未提供；其它非法 ID 不得被宽松归一化。AI 工具面不得暴露快照写入、筛选或提醒增删改、交易机会和订单操作。
+- 后台 Profile 调用单品种或多品种 Radar 工具时，Rust 必须按不可变 Run 品种范围再次校验 `instId`/`instIds`；只读全市场排名和广度可以用于研究候选发现，但不能扩张后续交易工具的 Profile 品种范围。
 - 所有 Provider 的工具参数必须在 Sidecar 执行前统一通过公开 JSON Schema 校验，不能只依赖部分本机 CLI Bridge 或 Rust `serde` 的泛化错误。可修正的参数类型错误应作为 `accepted=false / executed=false / errorCode=invalid_tool_arguments` 的正常工具结果返回，让 Agent 按字段路径修正并重试，而不是让 Cline 直接以 `tool call failed` 结束整轮；交易工具不得静默拼接、展平或猜测畸形参数。Rust 执行边界仍必须独立校验并失败关闭。
 - `intelligence.*` 的模型参数必须先拒绝 `accountId`、环境和凭据字段，再由情报执行器注入当前 UI 或 Profile 账户；通用后台 scope 不得提前写入 `accountId`。
 - 后台 Profile 的账户只读工具同样不能信任模型自行选择的 `accountId`；sidecar 应以非空 `agentProfileAccountId` 为绑定依据覆盖为 Profile 账户，不能依赖子 Agent 的 `backgroundRun` 标记，因为配置型专家会以 `backgroundRun=false` 限制动作权限。Rust 仍必须根据不可变 Run 快照二次注入和校验，不能因模型传入 `profile`、`default` 等占位值让必需账户风险 Agent 误判为无账户。

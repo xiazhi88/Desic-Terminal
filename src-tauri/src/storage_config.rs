@@ -349,12 +349,17 @@ pub(crate) fn ai_save_config(
             })
             .unwrap_or_default(),
     );
-    let skill_definitions = prepare_ai_skill_bundle_definitions(skill_definitions, existing.as_ref())?;
+    let skill_definitions =
+        prepare_ai_skill_bundle_definitions(skill_definitions, existing.as_ref())?;
     let mut skill_runtime_trust = existing
         .as_ref()
         .map(|config| config.skill_runtime_trust.clone())
         .unwrap_or_default();
-    revoke_runtime_trust_for_changed_bundles(existing.as_ref(), &skill_definitions, &mut skill_runtime_trust);
+    revoke_runtime_trust_for_changed_bundles(
+        existing.as_ref(),
+        &skill_definitions,
+        &mut skill_runtime_trust,
+    );
     let config = AiConfig {
         provider: Some(active_model.provider.clone()),
         model: active_model.model.clone(),
@@ -439,8 +444,8 @@ pub(crate) fn ai_agent_template_preview_codex(
     if metadata.len() > 256 * 1024 {
         return Err("Codex agent 定义超过 256 KiB 预览上限".to_string());
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|_| "Codex agent 定义必须是 UTF-8 文本".to_string())?;
+    let content =
+        fs::read_to_string(&path).map_err(|_| "Codex agent 定义必须是 UTF-8 文本".to_string())?;
     desic_skill_runtime::preview_codex_agent_template(&content, agent_name.as_deref())
 }
 
@@ -472,7 +477,9 @@ pub(crate) fn ai_skill_set_runtime_trust(
         }
     }
     if trusted {
-        config.skill_runtime_trust.insert(skill_id.to_string(), true);
+        config
+            .skill_runtime_trust
+            .insert(skill_id.to_string(), true);
     } else {
         config.skill_runtime_trust.remove(skill_id);
     }
@@ -554,9 +561,8 @@ pub(crate) fn sync_cline_skill_files_from_config(config: &AiConfig) -> Result<()
         // Resource files are a complete immutable snapshot. Clear an older
         // materialization first so a removed reference never leaks forward.
         if dir.exists() {
-            fs::remove_dir_all(&dir).map_err(|err| {
-                format!("清理旧 Skill 目录 {} 失败：{}", dir.display(), err)
-            })?;
+            fs::remove_dir_all(&dir)
+                .map_err(|err| format!("清理旧 Skill 目录 {} 失败：{}", dir.display(), err))?;
         }
         materialize_cline_skill_directory(&dir, id, skill, None)?;
     }
@@ -657,9 +663,8 @@ fn materialize_skill_bundle_resources(
         }
         let destination = target_dir.join(&relative);
         if let Some(parent) = destination.parent() {
-            fs::create_dir_all(parent).map_err(|err| {
-                format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err)
-            })?;
+            fs::create_dir_all(parent)
+                .map_err(|err| format!("创建 Skill 资源目录 {} 失败：{}", parent.display(), err))?;
         }
         write_file_atomically(&destination, &bytes)?;
     }
@@ -703,9 +708,10 @@ fn verify_skill_bundle_store(
         .map_err(|err| format!("Skill bundle 存储目录不可用：{}", err))?;
     for file in &bundle.files {
         let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
-        let resolved = canonical_root.join(&path).canonicalize().map_err(|_| {
-            format!("Skill bundle 缺少受锁定的文件：{}", path.replace('\\', "/"))
-        })?;
+        let resolved = canonical_root
+            .join(&path)
+            .canonicalize()
+            .map_err(|_| format!("Skill bundle 缺少受锁定的文件：{}", path.replace('\\', "/")))?;
         if !resolved.starts_with(&canonical_root) {
             return Err("Skill bundle 文件路径超出存储目录".to_string());
         }
@@ -729,7 +735,11 @@ pub(crate) fn resolve_active_skill_entrypoint(
 ) -> Result<ResolvedSkillEntrypoint, String> {
     let skill_id = skill_id.trim();
     let entrypoint_name = entrypoint_name.trim();
-    if skill_id.is_empty() || skill_id.len() > 120 || entrypoint_name.is_empty() || entrypoint_name.len() > 64 {
+    if skill_id.is_empty()
+        || skill_id.len() > 120
+        || entrypoint_name.is_empty()
+        || entrypoint_name.len() > 64
+    {
         return Err("Skill entrypoint 请求格式无效".to_string());
     }
     if !active_skill_ids.contains(skill_id) {
@@ -768,12 +778,21 @@ pub(crate) fn resolve_active_skill_entrypoint(
         .find(|item| item.name == entrypoint_name)
         .cloned()
         .ok_or_else(|| format!("Skill {} 未声明 entrypoint {}", skill_id, entrypoint_name))?;
-    if !bundle.files.iter().any(|file| file.path == entrypoint.script) {
-        return Err(format!("Skill entrypoint 脚本不在 bundle 清单中：{}", entrypoint.script));
+    if !bundle
+        .files
+        .iter()
+        .any(|file| file.path == entrypoint.script)
+    {
+        return Err(format!(
+            "Skill entrypoint 脚本不在 bundle 清单中：{}",
+            entrypoint.script
+        ));
     }
     let bundle_root = verify_skill_bundle_store(skill_id, bundle)?;
     let script_path = bundle_root
-        .join(desic_skill_runtime::validate_bundle_relative_path(&entrypoint.script)?)
+        .join(desic_skill_runtime::validate_bundle_relative_path(
+            &entrypoint.script,
+        )?)
         .canonicalize()
         .map_err(|_| format!("Skill entrypoint 脚本不存在：{}", entrypoint.script))?;
     if !script_path.starts_with(&bundle_root) || !script_path.is_file() {
@@ -968,14 +987,20 @@ fn collect_imported_directory_files(
         }
         let file_type = entry.file_type().map_err(|err| err.to_string())?;
         if file_type.is_symlink() {
-            return Err(format!("Skill bundle 不接受符号链接：{}", child_relative.display()));
+            return Err(format!(
+                "Skill bundle 不接受符号链接：{}",
+                child_relative.display()
+            ));
         }
         if file_type.is_dir() {
             collect_imported_directory_files(root, &child_relative, files)?;
             continue;
         }
         if !file_type.is_file() {
-            return Err(format!("Skill bundle 只接受普通文件：{}", child_relative.display()));
+            return Err(format!(
+                "Skill bundle 只接受普通文件：{}",
+                child_relative.display()
+            ));
         }
         let path = child_relative.to_string_lossy().replace('\\', "/");
         let path = desic_skill_runtime::validate_bundle_relative_path(&path)?;
@@ -1075,7 +1100,9 @@ fn read_imported_skill_bundle(
                 return Err(format!("Skill ZIP 文件超过大小上限：{}", path));
             }
             let mut bytes = Vec::with_capacity(entry.size() as usize);
-            entry.read_to_end(&mut bytes).map_err(|err| err.to_string())?;
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(|err| err.to_string())?;
             files.push(ImportedSkillFile { path, bytes });
         }
         files
@@ -1100,7 +1127,11 @@ fn imported_bundle_definition(
     let markdown = std::str::from_utf8(&markdown.bytes)
         .map_err(|_| "SKILL.md 必须是 UTF-8 文本".to_string())?;
     let mut definition = parse_imported_skill(markdown, fallback)?;
-    let manifest = match bundle.files.iter().find(|file| file.path == "desic-skill.json") {
+    let manifest = match bundle
+        .files
+        .iter()
+        .find(|file| file.path == "desic-skill.json")
+    {
         Some(file) => desic_skill_runtime::parse_runtime_manifest(
             std::str::from_utf8(&file.bytes)
                 .map_err(|_| "desic-skill.json 必须是 UTF-8 文本".to_string())?,
@@ -1155,9 +1186,8 @@ fn persist_imported_bundle_files(
             }
             write_file_atomically(&destination, &file.bytes)?;
         }
-        fs::rename(&staging, &target).map_err(|err| {
-            format!("固化 Skill bundle 到 {} 失败：{}", target.display(), err)
-        })
+        fs::rename(&staging, &target)
+            .map_err(|err| format!("固化 Skill bundle 到 {} 失败：{}", target.display(), err))
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
@@ -1181,14 +1211,20 @@ fn builtin_skill_reference_files(id: &str) -> &'static [(&'static str, &'static 
             ("references/news-and-events.md", "# News and Events\n\nIdentify source, publication time, fetch time, event/article IDs, reaction window, related assets, importance, factual summary, possible impact, validation conditions, and risks.\n"),
             ("references/smart-money-evidence.md", "# Smart Money Evidence\n\nResolve the trader pool, then combine performance, positions, orders, positioning, taker flow, crowding, funding, basis, liquidation samples, and systemic stress. State sample, horizon, coverage, data version, counterexamples, and limitations.\n"),
         ],
+        "market-radar-research" => &[
+            ("references/ranking-semantics.md", "# Ranking Semantics\n\n`globalRank` is the saved all-market composite rank. `scopeRank` is recomputed inside the requested category and deterministic filter using the requested `rankingBasis`. Always state both the snapshot time and model version. Component values are weighted contributions to the final composite score.\n"),
+            ("references/point-in-time-validation.md", "# Point-in-Time Validation\n\nUse only saved historical universes and later confirmed daily candles. Check status, snapshot dates, observations, model versions, chronological training and validation IC, quantile spreads, spread-cost proxy, turnover, regimes, and limitations. An accumulating report supports no effectiveness claim.\n"),
+            ("references/research-boundary.md", "# Research Boundary\n\nMarket Radar prioritizes research. Rankings, rank changes, breadth, and validation diagnostics are not profit forecasts, trade signals, position sizing, or order instructions. Read independent live market, instrument, account, and risk evidence before any actionable trade workflow.\n"),
+        ],
         _ => &[],
     }
 }
 
 pub(crate) fn ensure_builtin_skill_bundles() -> Result<(), String> {
-    const BUILTIN_BUNDLE_IDS: [&str; 2] = [
+    const BUILTIN_BUNDLE_IDS: [&str; 3] = [
         "desic-trade-operations",
         "okx-market-intelligence",
+        "market-radar-research",
     ];
     let defaults = desic_storage_config::default_ai_skill_definitions();
     for id in BUILTIN_BUNDLE_IDS {
@@ -1199,10 +1235,14 @@ pub(crate) fn ensure_builtin_skill_bundles() -> Result<(), String> {
             path: "SKILL.md".to_string(),
             bytes: render_skill_markdown(id, skill, None).into_bytes(),
         }];
-        files.extend(builtin_skill_reference_files(id).iter().map(|(path, content)| ImportedSkillFile {
-            path: (*path).to_string(),
-            bytes: content.as_bytes().to_vec(),
-        }));
+        files.extend(
+            builtin_skill_reference_files(id)
+                .iter()
+                .map(|(path, content)| ImportedSkillFile {
+                    path: (*path).to_string(),
+                    bytes: content.as_bytes().to_vec(),
+                }),
+        );
         let bundle = ImportedSkillBundle {
             files: files.clone(),
             source: desic_skill_runtime::SkillBundleSource {
@@ -1231,10 +1271,7 @@ pub(crate) fn ensure_builtin_skill_bundles() -> Result<(), String> {
     Ok(())
 }
 
-fn skill_definition_text_matches(
-    left: &AiSkillDefinition,
-    right: &AiSkillDefinition,
-) -> bool {
+fn skill_definition_text_matches(left: &AiSkillDefinition, right: &AiSkillDefinition) -> bool {
     left.id == right.id
         && left.name == right.name
         && left.description == right.description
@@ -1261,9 +1298,10 @@ fn rebuild_skill_bundle_after_definition_edit(
         let bytes = if path == "SKILL.md" {
             render_skill_markdown(&definition.id, definition, None).into_bytes()
         } else {
-            let resolved = canonical_root.join(&path).canonicalize().map_err(|_| {
-                format!("原 Skill bundle 缺少资源：{}", path.replace('\\', "/"))
-            })?;
+            let resolved = canonical_root
+                .join(&path)
+                .canonicalize()
+                .map_err(|_| format!("原 Skill bundle 缺少资源：{}", path.replace('\\', "/")))?;
             if !resolved.starts_with(&canonical_root) {
                 return Err("原 Skill bundle 资源路径超出存储目录".to_string());
             }
@@ -1317,7 +1355,11 @@ pub(crate) fn revoke_runtime_trust_for_changed_bundles(
             .skill_definitions
             .iter()
             .find(|item| item.id == definition.id)
-            .and_then(|item| item.bundle.as_ref().map(|bundle| bundle.bundle_hash.as_str()));
+            .and_then(|item| {
+                item.bundle
+                    .as_ref()
+                    .map(|bundle| bundle.bundle_hash.as_str())
+            });
         let next_hash = definition
             .bundle
             .as_ref()
@@ -1422,7 +1464,10 @@ pub(crate) fn ai_skill_import(
         &source,
         desic_skill_runtime::SkillBundleSource {
             kind: "local".to_string(),
-            reference: source.file_name().and_then(|value| value.to_str()).map(str::to_string),
+            reference: source
+                .file_name()
+                .and_then(|value| value.to_str())
+                .map(str::to_string),
             revision: None,
             subpath: None,
         },
@@ -1522,7 +1567,9 @@ pub(crate) async fn ai_skill_install_git(
                 .filter(|output| output.status.success())
                 .and_then(|output| String::from_utf8(output.stdout).ok())
                 .map(|value| value.trim().to_string())
-                .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+                .filter(|value| {
+                    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+                })
         }
         Ok(output) => {
             return Err(format!(
@@ -3425,6 +3472,7 @@ fn merge_ai_skill_definitions(
         "desic-core-operations",
         "trading-philosophy",
         "okx-market-intelligence",
+        "market-radar-research",
         "desic-trade-operations",
     ];
     let mut merged = desic_storage_config::default_ai_skill_definitions();
@@ -3468,7 +3516,10 @@ fn merge_ai_skill_definitions(
         if let Some(existing) = merged.iter_mut().find(|skill| skill.id == item.id) {
             if legacy_alias {
                 existing.description = format!("{} {}", existing.description, item.description);
-                existing.rules = format!("{}\n\nMigrated legacy guidance:\n{}", existing.rules, item.rules);
+                existing.rules = format!(
+                    "{}\n\nMigrated legacy guidance:\n{}",
+                    existing.rules, item.rules
+                );
                 if !item.content.is_empty() {
                     existing.content.push_str("\n\nMigrated legacy guidance:\n");
                     existing.content.push_str(&item.content);
@@ -3499,7 +3550,9 @@ fn skill_text_fingerprint(skill: &desic_storage_config::AiSkillDefinition) -> u6
 fn canonical_skill_id(id: &str) -> &str {
     match id.trim() {
         "okx-news-intelligence" | "okx-smart-money-analysis" => "okx-market-intelligence",
-        "desic-perpetual-risk" | "desic-position-management" | "desic-market-analysis" => "desic-trade-operations",
+        "desic-perpetual-risk" | "desic-position-management" | "desic-market-analysis" => {
+            "desic-trade-operations"
+        }
         value => value,
     }
 }
@@ -3508,6 +3561,7 @@ fn normalize_ai_enabled_skills(items: Vec<String>) -> Vec<String> {
     let mut result = vec![
         "trading-philosophy".to_string(),
         "okx-market-intelligence".to_string(),
+        "market-radar-research".to_string(),
         "desic-trade-operations".to_string(),
     ];
     for item in items {
@@ -4031,7 +4085,7 @@ mod tests {
             rules: "rules".to_string(),
             content: content.to_string(),
             builtin: true,
-                bundle: None,
+            bundle: None,
         };
         let run_a = format!("run-a-{}", now_ms());
         let run_b = format!("run-b-{}", now_ms());
@@ -4115,19 +4169,13 @@ mod tests {
         let id = format!("resource-snapshot-{}", now_ms());
         let run_a = format!("resource-a-{}", now_ms());
         let run_b = format!("resource-b-{}", now_ms());
-        let version_a = imported_test_bundle(&id, "BODY A", "references/report.json", b"{\"version\":3}");
-        let version_b = imported_test_bundle(&id, "BODY B", "references/report.json", b"{\"version\":7}");
+        let version_a =
+            imported_test_bundle(&id, "BODY A", "references/report.json", b"{\"version\":3}");
+        let version_b =
+            imported_test_bundle(&id, "BODY B", "references/report.json", b"{\"version\":7}");
         assert_ne!(
-            version_a
-                .bundle
-                .as_ref()
-                .expect("bundle A")
-                .bundle_hash,
-            version_b
-                .bundle
-                .as_ref()
-                .expect("bundle B")
-                .bundle_hash
+            version_a.bundle.as_ref().expect("bundle A").bundle_hash,
+            version_b.bundle.as_ref().expect("bundle B").bundle_hash
         );
 
         sync_run_scoped_skill_files(
@@ -4170,7 +4218,8 @@ mod tests {
     #[test]
     fn editing_a_bundle_skill_forks_the_full_immutable_snapshot() {
         let id = format!("bundle-edit-{}", now_ms());
-        let original = imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
+        let original =
+            imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
         let mut edited = original.clone();
         edited.content = "UPDATED".to_string();
         let config = config_with_skills(vec![original.clone()], vec![id.clone()]);
@@ -4179,16 +4228,26 @@ mod tests {
             .into_iter()
             .next()
             .expect("edited definition");
-        let original_hash = &original.bundle.as_ref().expect("original bundle").bundle_hash;
+        let original_hash = &original
+            .bundle
+            .as_ref()
+            .expect("original bundle")
+            .bundle_hash;
         let prepared_bundle = prepared.bundle.as_ref().expect("prepared bundle");
         assert_ne!(&prepared_bundle.bundle_hash, original_hash);
         assert_eq!(prepared_bundle.source.kind, "edited");
-        assert_eq!(prepared_bundle.source.reference.as_deref(), Some(original_hash.as_str()));
+        assert_eq!(
+            prepared_bundle.source.reference.as_deref(),
+            Some(original_hash.as_str())
+        );
         let resource_path = skill_bundle_store_dir(&prepared.id, prepared_bundle)
             .expect("prepared path")
             .join("references")
             .join("data.json");
-        assert_eq!(fs::read_to_string(resource_path).expect("preserved resource"), "{\"source\":1}");
+        assert_eq!(
+            fs::read_to_string(resource_path).expect("preserved resource"),
+            "{\"source\":1}"
+        );
 
         for definition in [original, prepared] {
             let bundle = definition.bundle.expect("bundle summary");
@@ -4200,12 +4259,22 @@ mod tests {
     #[test]
     fn runtime_trust_is_revoked_when_bundle_changes() {
         let id = format!("bundle-trust-{}", now_ms());
-        let original = imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
-        let replacement = imported_test_bundle(&id, "REPLACEMENT", "references/data.json", b"{\"source\":2}");
+        let original =
+            imported_test_bundle(&id, "ORIGINAL", "references/data.json", b"{\"source\":1}");
+        let replacement = imported_test_bundle(
+            &id,
+            "REPLACEMENT",
+            "references/data.json",
+            b"{\"source\":2}",
+        );
         let mut existing = config_with_skills(vec![original.clone()], vec![id.clone()]);
         existing.skill_runtime_trust.insert(id.clone(), true);
         let mut trust = existing.skill_runtime_trust.clone();
-        revoke_runtime_trust_for_changed_bundles(Some(&existing), &[replacement.clone()], &mut trust);
+        revoke_runtime_trust_for_changed_bundles(
+            Some(&existing),
+            &[replacement.clone()],
+            &mut trust,
+        );
         assert!(!trust.contains_key(&id));
 
         for definition in [original, replacement] {
@@ -4246,10 +4315,12 @@ mod tests {
             "---\nname: test-bundle\ndescription: test\n---\n\nBody",
         )
         .expect("skill body");
-        fs::write(root.join("references").join("protocol.md"), "reference")
-            .expect("reference");
-        fs::write(root.join("scripts").join("normalize.mjs"), "process.stdout.write('{}')")
-            .expect("script");
+        fs::write(root.join("references").join("protocol.md"), "reference").expect("reference");
+        fs::write(
+            root.join("scripts").join("normalize.mjs"),
+            "process.stdout.write('{}')",
+        )
+        .expect("script");
         fs::write(root.join("assets.bin"), [0_u8, 255, 1]).expect("binary asset");
         fs::write(root.join(".gitignore"), "target/").expect("gitignore");
         fs::write(root.join(".git").join("config"), "ignored").expect("git metadata");
@@ -4391,7 +4462,8 @@ mod tests {
         assert!(read_cline_skill_resource("", "docs/actions.md", &loaded, None).is_err());
         // Not loaded this turn.
         assert!(
-            read_cline_skill_resource("okx-market-intelligence", "docs/x.md", &loaded, None).is_err()
+            read_cline_skill_resource("okx-market-intelligence", "docs/x.md", &loaded, None)
+                .is_err()
         );
         assert!(read_cline_skill_resource("../../etc", "passwd", &loaded, None).is_err());
         // Loaded, but the payload is a traversal: rejected before any filesystem
@@ -4556,9 +4628,14 @@ wire_api = "responses"
         for (id, expected_count) in [
             ("desic-trade-operations", 8),
             ("okx-market-intelligence", 2),
+            ("market-radar-research", 3),
         ] {
             let files = builtin_skill_reference_files(id);
-            assert_eq!(files.len(), expected_count, "{id} should expose focused references");
+            assert_eq!(
+                files.len(),
+                expected_count,
+                "{id} should expose focused references"
+            );
             assert!(files.iter().all(|(path, content)| {
                 path.starts_with("references/") && !content.trim().is_empty()
             }));
@@ -4859,6 +4936,7 @@ wire_api = "responses"
             vec![
                 "trading-philosophy",
                 "okx-market-intelligence",
+                "market-radar-research",
                 "desic-trade-operations",
                 "custom-research",
             ]
@@ -5034,7 +5112,7 @@ VI. Review and evolve
             rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
             content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
             builtin: true,
-                bundle: None,
+            bundle: None,
         };
         assert_eq!(skill_text_fingerprint(&stale), 0x701f_74f8_3aa4_b270);
 
@@ -5059,7 +5137,7 @@ VI. Review and evolve
             rules: PRE_DEBIAS_PHILOSOPHY_RULES.to_string(),
             content: PRE_DEBIAS_PHILOSOPHY_CONTENT.to_string(),
             builtin: true,
-                bundle: None,
+            bundle: None,
         };
         edited.content.push_str("\n19. 只做亚洲时段的突破。");
 
@@ -5129,7 +5207,7 @@ VI. Review and evolve
             rules: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_RULES.to_string(),
             content: PRE_ROUTING_FIX_OKX_NEWS_INTELLIGENCE_CONTENT.to_string(),
             builtin: true,
-                bundle: None,
+            bundle: None,
         };
         edited.content.push_str("\n11. 只看中文财经源。");
 

@@ -13,31 +13,43 @@
 mod backtest;
 mod data;
 mod error;
+mod factor_eval;
+mod factor_verdict;
 mod factors;
 mod job;
 mod output;
 mod rules;
 
 pub use backtest::{
-    recommended_backtest_workers, resolve_backtest_position_sizing, BacktestEngine, BacktestMetrics, BacktestPositionSizingOutcome, BacktestReport, BacktestRequest,
-    BacktestRunResult, BacktestStatistics, BacktestStatus, BacktestTiming, ClosedTrade,
-    EndOfRunPolicy,
-    EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide, FundingEvent, FundingPayment,
-    InstrumentContract, MarginAssumptions, OpenPositionSummary, PositionSizing,
-    PositionSizingMode, PositionSizingResolution, ReplaySnapshot, resolve_position_sizing,
-    OpenOrderSummary, PaperOrderStatus, ReproducibilityMetadata, SignalRecord,
-    StrategyActionEvent, StrategyContext, StrategyContextSnapshot, StrategyEvent,
-    UnfilledIntent, VirtualPortfolio,
+    recommended_backtest_workers, resolve_backtest_position_sizing, resolve_position_sizing,
+    BacktestEngine, BacktestMetrics, BacktestPositionSizingOutcome, BacktestReport,
+    BacktestRequest, BacktestRunResult, BacktestStatistics, BacktestStatus, BacktestTiming,
+    ClosedTrade, EndOfRunPolicy, EquityPoint, ExecutionAssumptions, Fill, FillReason, FillSide,
+    FundingEvent, FundingPayment, InstrumentContract, MarginAssumptions, OpenOrderSummary,
+    OpenPositionSummary, PaperOrderStatus, PositionSizing, PositionSizingMode,
+    PositionSizingResolution, ReplaySnapshot, ReproducibilityMetadata, SignalRecord,
+    StrategyActionEvent, StrategyContext, StrategyContextSnapshot, StrategyEvent, UnfilledIntent,
+    VirtualPortfolio,
 };
 pub use data::{
     ClosedBar, CurrentDataSnapshot, MarketBar, MarketDataWindow, TimeframeAggregator,
     ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
 };
 pub use error::SystematicError;
+pub use factor_eval::{
+    bucket_turnover, factor_correlation, is_monotonic, pearson, quantile_spread, quantile_stats,
+    rank_autocorrelation, spearman_rank_ic, summarize_ic, train_validation_split,
+    FactorObservation, IcSummary, QuantileStat,
+};
+pub use factor_verdict::{
+    evaluate_verdicts, overall_level, IntendedSign, VerdictDetail, VerdictFinding, VerdictInput,
+    VerdictLevel, HIGH_DROPPED_PCT, HIGH_TRIAL_COUNT, IMPLAUSIBLE_SINGLE_FACTOR_SHARPE,
+    LOW_RANK_AUTOCORRELATION,
+};
 pub use factors::{
-    score_kline_blend, KlineBlendFactorDefinition, KlineFactorFeatures, KlineFactorScore,
-    MAX_KLINE_FACTOR_COMPONENT_WEIGHT, MAX_KLINE_FACTOR_LOOKBACK_BARS,
-    MIN_KLINE_FACTOR_LOOKBACK_BARS,
+    score_kline_blend, ExpressionFactorDefinition, FactorDefinition, KlineBlendFactorDefinition,
+    KlineFactorFeatures, KlineFactorScore, MAX_KLINE_FACTOR_COMPONENT_WEIGHT,
+    MAX_KLINE_FACTOR_LOOKBACK_BARS, MIN_KLINE_FACTOR_LOOKBACK_BARS,
 };
 pub use job::{BacktestJobControl, BacktestJobProgress, BacktestJobState, CancellationToken};
 pub use output::{

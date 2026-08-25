@@ -136,6 +136,44 @@ Common field traps are deliberate protocol errors: `ctx.portfolio.position(instr
 
 `OpenOrder` fields are `id`, `instrumentId`, `action`, requested `quantity`, `filledQuantity`, `status`, `createdAtMs`, and optional limit `price`. Its status is `open` or `partially_filled`; only an ID currently present in `ctx.portfolio.open_orders` can be passed to `ctx.cancel_order(...)`. `Fill` fields are `id`, `orderId`, `instrumentId`, `action`, `quantity`, `price`, `notionalUsdt`, `filledAtMs`, `feeUsdt`, `marginDeltaUsdt`, and `marginAfterUsdt`. Closed `Trade` fields are `id`, `instrumentId`, `side`, `quantity`, `entryPrice`, `exitPrice`, `entryNotionalUsdt`, `exitNotionalUsdt`, `usedMarginUsdt`, `leverage`, `marginSafetyMultiplier`, `openedAtMs`, `closedAtMs`, `realizedPnlUsdt`, and `feesUsdt`.
 
+## Cross-Sectional Factor Scores
+
+`ctx.factor_scores(factor_id)` returns the host-computed cross-section for one
+factor at the current cutoff, as a read-only mapping of instrument id to a row
+exposing `score`, `rank`, `universeSize`, and `asOfMs`. It answers "where does
+this instrument rank against the rest of the universe right now", which a
+single-instrument view cannot express.
+
+```python
+def on_bar(ctx):
+    scores = ctx.factor_scores("factor-abc")
+    mine = scores.get(ctx.instrument_id)
+    if mine and mine["rank"] <= 10:
+        return ctx.open_long("top-10 cross-sectional score")
+    return ctx.no_action("not in the leading decile")
+```
+
+Three rules apply.
+
+**The factor id must be a string literal.** The host computes each requested
+cross-section before dispatching the first event, so it has to know the names in
+advance. A dynamic expression is refused at load time rather than silently
+yielding an empty mapping. This differs from `interval`, where an unprovable
+expression can fall back to loading every supported series, because the set of
+factor identifiers is unbounded and has no safe superset.
+
+**Reading a score is not an action.** This call produces no decision and places
+no order. Trading still happens only through the action methods below, so factor
+access cannot widen what a strategy is permitted to do.
+
+**An empty mapping means no information.** The host omits a cross-section when
+the universe was too thin to rank or the snapshot had gone stale. Treat a missing
+entry as unknown rather than as a score of zero, and decide explicitly what the
+strategy does in that case.
+
+Scores never carry a timestamp later than `event.asOfMs`; the runtime rejects the
+event if one does.
+
 ## Strategy Decisions
 
 New strategy packages return exactly one of these forms for `on_start` or `on_bar`:
