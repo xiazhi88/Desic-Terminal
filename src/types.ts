@@ -1876,6 +1876,10 @@ export type AiModelConfigSummary = {
   configured: boolean;
   permissionMode: AiPermissionMode | AiLegacyPermissionMode;
   reasoningDepth: AiReasoningDepth;
+  /** Positive fallback capacity in tokens for a model entry. */
+  contextWindow?: number;
+  /** Cline's exact catalog capacity remains authoritative at runtime. */
+  contextWindowSource?: "catalog";
 };
 
 export type AiModelConfigUpdate = {
@@ -1887,6 +1891,7 @@ export type AiModelConfigUpdate = {
   apiKey?: string;
   permissionMode?: AiPermissionMode;
   reasoningDepth?: AiReasoningDepth;
+  contextWindow?: number;
 };
 
 export type AiConnectionTestResult = {
@@ -1894,6 +1899,7 @@ export type AiConnectionTestResult = {
   name: string;
   provider: string;
   model: string;
+  contextWindow?: number;
 };
 
 export type AiLocalCliStatus = {
@@ -1976,6 +1982,7 @@ export type AiConfigUpdate = {
   stream?: boolean;
   permissionMode?: AiPermissionMode;
   reasoningDepth?: AiReasoningDepth;
+  contextWindow?: number;
   activeModelId?: string;
   models?: AiModelConfigUpdate[];
   systemPrompt?: string;
@@ -2353,6 +2360,34 @@ export type AiChatMessage = {
   content: string;
 };
 
+export type AiPromptDelivery = "queue" | "steer";
+
+export type AiPendingPrompt = {
+  sessionId: string;
+  id: string;
+  prompt: string;
+  delivery: AiPromptDelivery;
+  attachmentCount: number;
+  localMessageId?: string;
+};
+
+export type AiContextBreakdown = {
+  systemTokens: number;
+  toolsTokens: number;
+  conversationTokens: number;
+  estimated: true;
+  breakdownSource: "heuristic";
+};
+
+export type AiContextUsage = {
+  usedTokens: number;
+  contextWindow?: number;
+  measuredAt: number;
+  usedSource: "clineMessages";
+  contextWindowSource?: "clineModelCatalog" | "customModelConfig" | "fallback";
+  breakdown?: AiContextBreakdown;
+};
+
 export type AiSession = {
   id: string;
   title: string;
@@ -2385,6 +2420,11 @@ export type AiEvent =
   | { type: "toolCall"; sessionId: string; toolCallId?: string; name: string; arguments: unknown; allowed?: boolean; blocked?: boolean; policy?: string; agentId?: string | null; configuredAgentId?: string | null; parentAgentId?: string | null; startedAt?: number }
   | { type: "toolResult"; sessionId: string; toolCallId?: string; name: string; result: unknown; summary: string; ok: boolean; agentId?: string | null; configuredAgentId?: string | null; parentAgentId?: string | null; startedAt?: number; endedAt?: number; requestedAt?: number; executionStartedAt?: number; executionEndedAt?: number }
   | { type: "usage"; sessionId: string; usage: unknown }
+  | { type: "contextUsage"; sessionId: string; usage: AiContextUsage }
+  | { type: "pendingPrompts"; sessionId: string; prompts: AiPendingPrompt[] }
+  | { type: "pendingPromptSubmitted"; sessionId: string; prompt: AiPendingPrompt }
+  | { type: "pendingPromptError"; sessionId: string; prompt: string; promptId?: string; localMessageId?: string; delivery: AiPromptDelivery; operation?: "submit" | "list" | "update" | "delete"; message: string }
+  | { type: "turnStarted"; sessionId: string; prompt?: string | null; promptId?: string; localMessageId?: string; delivery?: AiPromptDelivery; startedAt: number }
   | {
       type: "agentStart";
       sessionId: string;

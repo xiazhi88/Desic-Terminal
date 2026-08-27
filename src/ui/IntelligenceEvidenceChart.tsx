@@ -88,6 +88,7 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
   const containerRef = useRef<HTMLDivElement | null>(null);
   const tooltipRef = useRef<HTMLDivElement | null>(null);
 
+  const locale = resolvedLocale();
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
@@ -149,10 +150,11 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
       return value;
     };
 
+    const chartText = (zh: string, en: string) => locale.toLowerCase().startsWith("zh") ? zh : en;
     if (kind === "positioning") {
-      const price = addLine("价格", "#4cc9f0", "right");
-      const oi = addLine("持仓量", "#39d98a", "oi");
-      const oiDelta = addHistogram("OI变化", "#39d98a", "delta");
+      const price = addLine(chartText("价格", "Price"), "#4cc9f0", "right");
+      const oi = addLine(chartText("持仓量", "Open interest"), "#39d98a", "oi");
+      const oiDelta = addHistogram(chartText("持仓变化", "OI change"), "#39d98a", "delta");
       chart.priceScale("oi").applyOptions({ scaleMargins: { top: 0.1, bottom: 0.58 } });
       chart.priceScale("delta").applyOptions({ scaleMargins: { top: 0.7, bottom: 0.02 } });
       price.setData(points.flatMap(({ item, time }) => {
@@ -170,9 +172,9 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
         return { time: point.time, value, color: value >= 0 ? "rgba(38,190,124,0.8)" : "rgba(246,70,93,0.82)" };
       }));
     } else if (kind === "takerFlow") {
-      const buy = addHistogram("主动买入", "rgba(38,190,124,0.82)");
-      const sell = addHistogram("主动卖出", "rgba(246,70,93,0.82)");
-      const net = addLine("净主动流", "#4cc9f0", "net");
+      const buy = addHistogram(chartText("主动买入", "Aggressive buy"), "rgba(38,190,124,0.82)");
+      const sell = addHistogram(chartText("主动卖出", "Aggressive sell"), "rgba(246,70,93,0.82)");
+      const net = addLine(chartText("净主动流", "Net taker flow"), "#4cc9f0", "net");
       chart.priceScale("net").applyOptions({ scaleMargins: { top: 0.1, bottom: 0.1 } });
       buy.setData(points.flatMap(({ item, time }) => {
         const value = numberValue(item, "buyVol", "buyVolume");
@@ -188,9 +190,9 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
       }));
     } else if (kind === "crowding") {
       for (const [key, label, color] of [
-        ["accountRatio", "普通账户", "#5c9dff"],
-        ["topAccountRatio", "精英人数", "#39d98a"],
-        ["topPositionRatio", "精英仓位", "#ff5d73"]
+        ["accountRatio", chartText("普通账户", "All accounts"), "#5c9dff"],
+        ["topAccountRatio", chartText("精英账户", "Top accounts"), "#39d98a"],
+        ["topPositionRatio", chartText("精英仓位", "Top positions"), "#ff5d73"]
       ] as const) {
         addLine(label, color).setData(points.flatMap(({ item, time }) => {
           const value = numberValue(item, key);
@@ -199,9 +201,9 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
       }
     } else {
       for (const [key, label, color] of [
-        ["fundingRate", "结算资金费率", "#4cc9f0"],
-        ["nextFundingRate", "预测资金费率", "#39d98a"],
-        ["premium", "溢价", "#ffb454"]
+        ["fundingRate", chartText("资金费率", "Funding rate"), "#4cc9f0"],
+        ["nextFundingRate", chartText("预测资金费率", "Next funding"), "#39d98a"],
+        ["premium", chartText("溢价", "Premium"), "#ffb454"]
       ] as const) {
         addLine(label, color).setData(points.flatMap(({ item, time }) => {
           const value = numberValue(item, key);
@@ -228,7 +230,7 @@ export function IntelligenceEvidenceChart({ kind, items, height = 230, ariaLabel
 
     container.dataset.chartReady = points.length > 0 ? "true" : "empty";
     return () => chart.remove();
-  }, [height, items, kind]);
+  }, [height, items, kind, locale]);
 
   return (
     <div className="intelligence-evidence-chart" ref={containerRef} style={{ height }} role="img" aria-label={ariaLabel} tabIndex={0}>

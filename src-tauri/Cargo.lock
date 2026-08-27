@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "desic-terminal"
-version = "0.1.34"
+version = "0.1.35"
 dependencies = [
  "aes-gcm",
  "base64 0.22.1",
@@ -772,6 +772,7 @@ dependencies = [
  "hmac",
  "native-tls",
  "rand",
+ "regex",
  "reqwest 0.12.28",
  "rusqlite",
  "semver",

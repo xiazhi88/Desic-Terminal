@@ -4,8 +4,10 @@ import clsx from "clsx";
 import { getAiAgentFailure } from "../lib/aiAgentTrace";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { logger } from "../lib/logger";
-import type { AiEvent, AiStoredMessage } from "../types";
+import type { AiContextUsage, AiEvent, AiStoredMessage } from "../types";
 import { formatLocalizedNumber, i18n } from "../i18n/runtime";
+import { AiToolDomainIcon } from "./AiToolDomainIcon";
+import { getAiToolPresentation, getAiToolDomainLabel } from "./aiToolPresentation";
 
 const AiMarkdown = lazy(() =>
   import("./AiMarkdown").then((module) => ({ default: module.AiMarkdown }))
@@ -18,12 +20,19 @@ export type AiUiMessage = {
   draftText?: string;
   reasoning?: string;
   completed?: boolean;
+  finishReason?: string;
   tools: AiToolRun[];
   approvals?: AiApprovalRun[];
   agents?: AiAgentRun[];
   teamEvents?: unknown[];
   timeline?: AiTimelineItem[];
   usage?: unknown;
+  usageIsSessionCumulative?: boolean;
+  contextUsage?: AiContextUsage;
+  createdAt?: number;
+  startedAt?: number;
+  firstTokenAt?: number;
+  completedAt?: number;
   status?: string;
   error?: boolean;
   errorMessage?: string;
@@ -41,12 +50,27 @@ export type AiToolRun = {
   policy?: string;
   agentId?: string | null;
   parentAgentId?: string | null;
+  messageId?: string;
   startedAt?: number;
   endedAt?: number;
   requestedAt?: number;
   executionStartedAt?: number;
   executionEndedAt?: number;
   status: "pending" | "running" | "done" | "blocked" | "failed";
+};
+
+export type AiResearchArtifact = {
+  id: string;
+  kind: "market" | "strategy" | "skill" | "intelligence" | "account" | "trade" | "research";
+  title: string;
+  summary: string;
+  data: unknown;
+  toolName?: string;
+  facts?: Array<[string, string]>;
+  sourceMessageId?: string;
+  strategyId?: string;
+  runId?: string;
+  optimizationId?: string;
 };
 
 export type AiApprovalRun = {
@@ -131,6 +155,9 @@ function isGenericAiFailure(value: string | undefined) {
 function normalizeAiFailureMessage(value: string | undefined) {
   const message = value?.trim() ?? "";
   if (isGenericAiFailure(message)) return processText("runFailed", "AI run failed", "AI 运行失败");
+  if (/AgentRuntimeAbortError: session_stop/i.test(message)) return processText("intentionalStop", "Stopped by user. The current run was cancelled before the provider finished.", "已由用户停止，本轮请求在模型完成前取消。");
+  if (/^reconnecting(?:\.{3})?\s+\d+\/\d+/i.test(message)) return processText("providerReconnecting", "The model provider is reconnecting because of a transient network issue. The desktop retry policy is handling the turn; existing text or tool progress is not replayed automatically.", "模型服务因瞬态网络问题正在重连。桌面重试策略正在处理本轮请求；已有文本或工具进度不会自动重放，以避免重复副作用。");
+  if (/^request timed out\.?$/i.test(message)) return processText("requestIdleTimeout", "The model produced no new response before the idle limit. The run stopped. Existing text or tool activity is never replayed automatically; retry the prompt when ready.", "模型在空闲限制内没有产生新响应，本次请求已停止。已有文本或工具活动不会自动重放，以避免重复操作；可在准备好后重试该提问。");
   if (/insufficient balance/i.test(message)) return processText("modelInsufficientBalance", "Model service balance is insufficient (Insufficient Balance)", "模型服务余额不足（Insufficient Balance）");
   return message;
 }
@@ -197,8 +224,162 @@ function strategyActionForTool(tool: AiToolRun) {
   };
 }
 
-function AiToolCard({ tool, onOpenStrategy }: { tool: AiToolRun; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
+function toolRecord(value: unknown) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function toolText(value: unknown) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function strategySourceForTool(value: unknown) {
+  // strategy.create nests the persisted Python definition under strategy.definition.
+
+  const root = toolRecord(value);
+  const strategy = toolRecord(root.strategy);
+  const definition = toolRecord(strategy.definition);
+  const version = toolRecord(root.version);
+  return toolText(root.source)
+    || toolText(root.code)
+    || toolText(definition.source)
+    || toolText(version.source)
+    || toolText(strategy.source)
+    || toolText(toolRecord(root.result).source)
+    || toolText(toolRecord(toolRecord(root.result).strategy).source);
+}
+
+function toolFactRows(value: unknown, limit = 7): Array<[string, string]> {
+  return Object.entries(toolRecord(value))
+    .filter(([, item]) => ["string", "number", "boolean"].includes(typeof item))
+    .slice(0, limit)
+    .map(([key, item]) => [key, String(item)]);
+}
+
+function artifactKindForTool(tool: AiToolRun): AiResearchArtifact["kind"] {
+  const name = getAiToolPresentation(tool.name).canonicalName;
+  if (name.startsWith("strategy.")) return "strategy";
+  if (name === "skills" || name.startsWith("skill.") || /(?:^|[._-])skill/i.test(name)) return "skill";
+  if (name.startsWith("market.")) return "market";
+  if (name.startsWith("intelligence.") || name.startsWith("radar.")) return "intelligence";
+  if (name.startsWith("account.") || name.startsWith("position.")) return "account";
+  if (name.startsWith("trade.") || name.startsWith("order.")) return "trade";
+  return "research";
+}
+
+export function aiResearchArtifactForTool(tool: AiToolRun, sourceMessageId?: string): AiResearchArtifact | null {
+  if (tool.status === "pending" || tool.status === "running") return null;
+  const presentation = getAiToolPresentation(tool.name);
+  const action = strategyActionForTool(tool);
+  const result = toolRecord(tool.result);
+  const strategy = toolRecord(result.strategy);
+  const input = toolRecord(tool.arguments);
+  const kind = artifactKindForTool(tool);
+  const title = kind === "strategy"
+    ? toolText(strategy.name) || toolText(result.strategyName) || action?.strategyId || presentation.label
+    : kind === "skill"
+      ? toolText(result.name) || toolText(result.skillName) || toolText(input.skillId) || toolText(input.skill) || presentation.label
+      : presentation.label;
+  const evidence = result.result && typeof result.result === "object" ? result.result : result;
+  const facts = toolFactRows(evidence);
+  return {
+    id: `tool-artifact:${tool.id}`,
+    kind,
+    title,
+    summary: tool.summary || presentation.summary,
+    data: kind === "skill" ? { ...result, input } : result,
+    toolName: presentation.canonicalName,
+    sourceMessageId: sourceMessageId ?? tool.messageId,
+    facts,
+    ...(action ?? {})
+  };
+}
+
+function developmentDocumentTitle(value: unknown) {
+  const match = toolText(value).match(/^\s*#\s+(.+?)\s*$/m);
+  return match?.[1]?.trim() || "";
+}
+
+function readableToolFactRows(tool: AiToolRun): Array<[string, string]> {
+  const kind = artifactKindForTool(tool);
+  const result = toolRecord(tool.result);
+  const input = toolRecord(tool.arguments);
+  const selected = kind === "trade" && Object.keys(result).length > 0 ? result : Object.keys(result).length > 0 ? result : input;
+  if (/readDevelopmentDocs$/i.test(tool.name)) {
+    const title = developmentDocumentTitle(selected.content);
+    const rows: Array<[string, string]> = [
+      [processText("toolDocument", "Document", "文档"), title || toolText(selected.documentationId) || processText("strategyProtocol", "Strategy development protocol", "策略开发协议")],
+      [processText("toolDocumentVersion", "Document version", "文档版本"), toolText(selected.documentationVersion)],
+      [processText("toolProtocol", "Protocol", "协议版本"), toolText(selected.protocolVersion)],
+      [processText("toolAccess", "Access", "访问权限"), selected.readOnly === true ? processText("toolReadOnly", "Read-only", "只读") : ""]
+    ];
+    return rows.filter(([, value]) => Boolean(value));
+  }
+  const labels: Record<string, string> = {
+    documentationId: processText("toolDocument", "Document", "文档"),
+    documentationVersion: processText("toolDocumentVersion", "Document version", "文档版本"),
+    protocolVersion: processText("toolProtocol", "Protocol", "协议版本"),
+    readOnly: processText("toolAccess", "Access", "访问权限")
+  };
+  return toolFactRows(selected, kind === "market" ? 8 : 6)
+    .filter(([key]) => !/^(content|contentSha256|sourceEventSeqs|seqId)$/i.test(key))
+    .map(([key, value]) => [labels[key] ?? key, key === "readOnly" ? (value === "true" ? processText("toolReadOnly", "Read-only", "只读") : processText("toolReadWrite", "Read and write", "读写")) : value]);
+}
+
+function toolResultBrief(tool: AiToolRun) {
+  const selected = toolRecord(tool.result);
+  if (/readDevelopmentDocs$/i.test(tool.name)) {
+    const title = developmentDocumentTitle(selected.content) || toolText(selected.documentationId) || processText("strategyProtocol", "Strategy development protocol", "策略开发协议");
+    return processText("toolDocumentReady", "Loaded {{title}} for this strategy task.", "已加载「{{title}}」，供本次策略任务引用。", { title });
+  }
+  return tool.summary || getAiToolPresentation(tool.name).summary;
+}
+
+function strategySourceBlock(tool: AiToolRun) {
+  if (!/^strategy\.create$/i.test(tool.name)) return null;
+  const source = strategySourceForTool(tool.result);
+  if (!source) return null;
+  return <section className="ai-tool-code-preview" aria-label={processText("strategySource", "Strategy source", "策略源代码")}><header><strong>{processText("strategySource", "Strategy source", "策略源代码")}</strong><span>{source.split("\n").length} {processText("lines", "lines", "行")}</span></header><pre><code>{source}</code></pre></section>;
+}
+
+function AiToolFactRows({ tool }: { tool: AiToolRun }) {
+  const rows = readableToolFactRows(tool);
+  if (rows.length === 0) return null;
+  return <dl className="ai-tool-facts">{rows.map(([key, value]) => <div key={`${key}:${value}`}><dt>{key}</dt><dd title={value}>{value}</dd></div>)}</dl>;
+}
+
+function AiToolDomainDetails({ tool, onOpenArtifact }: { tool: AiToolRun; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
+  const artifact = aiResearchArtifactForTool(tool);
+  const kind = artifact?.kind;
+  const actionLabel = kind === "strategy"
+    ? processText("openStrategyTab", "Open strategy", "打开策略")
+    : kind === "skill"
+      ? processText("openSkillTab", "Open Skill", "打开 Skill")
+      : kind === "market"
+        ? processText("openMarketEvidence", "Open market evidence", "打开市场证据")
+        : kind === "intelligence"
+          ? processText("openIntelligenceTab", "Open intelligence", "打开情报")
+          : kind === "account"
+            ? processText("openAccountEvidence", "Open account evidence", "打开账户证据")
+            : kind === "trade"
+              ? processText("openPrecheck", "Open precheck", "打开预检")
+              : processText("openResearchTab", "Open research", "打开研究资料");
+  return <div className={clsx("ai-tool-domain-details", `domain-${kind ?? "research"}`)}>
+    <div className="ai-tool-result-brief"><span>{tool.ok === false || tool.status === "failed" ? processText("toolResultFailed", "Tool did not complete", "工具未完成") : processText("toolResultReady", "Result ready", "结果已就绪")}</span><strong data-i18n-skip>{toolResultBrief(tool)}</strong></div>
+    <AiToolFactRows tool={tool} />
+    {strategySourceBlock(tool)}
+    {artifact && onOpenArtifact ? <button type="button" className="ai-tool-open-artifact" onClick={() => onOpenArtifact(artifact)}>{actionLabel}</button> : null}
+    <details className="ai-tool-raw">
+      <summary>{processText("rawToolPayload", "Raw payload", "原始载荷")}</summary>
+      <pre>{safeJson({ arguments: normalizeAiToolPayload(tool.arguments), result: normalizeAiToolPayload(tool.result) })}</pre>
+    </details>
+  </div>;
+}
+
+function AiToolCard({ tool, onOpenStrategy, onOpenArtifact }: { tool: AiToolRun; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
   const strategyAction = strategyActionForTool(tool);
+  const presentation = getAiToolPresentation(tool.name);
+  const artifact = aiResearchArtifactForTool(tool);
+  const opensMarketPanel = artifact?.kind === "market";
   return (
     <details
       className={clsx(
@@ -210,51 +391,51 @@ function AiToolCard({ tool, onOpenStrategy }: { tool: AiToolRun; onOpenStrategy?
         tool.ok === false && "result-failed"
       )}
     >
-      <summary>
-        <span>{processText("tool", "Tool", "工具")} · {tool.name}</span>
+      <summary onClick={opensMarketPanel ? (event) => { event.preventDefault(); if (artifact) onOpenArtifact?.(artifact); } : undefined} className={opensMarketPanel ? "ai-tool-direct-artifact" : undefined}>
+        <span className="ai-tool-title"><AiToolDomainIcon domain={presentation.domain} /> <span>{presentation.label}</span><code title={presentation.canonicalName}>{presentation.canonicalName}</code></span>
         <strong>{toolStatusLabel(tool)}</strong>
       </summary>
-      {tool.summary && <small data-i18n-skip>{tool.summary}</small>}
+      <small className="ai-tool-summary" data-i18n-skip>{tool.summary || presentation.summary}</small>
       {tool.policy && <small>{tool.policy}</small>}
-      <div className="ai-tool-io">
-        <details>
-          <summary>{processText("toolInput", "Input", "输入")}</summary>
-          <AiToolInputCode value={tool.arguments} />
-        </details>
-        <details>
-          <summary>{processText("toolOutput", "Output", "输出")}</summary>
-          <AiToolOutputCode value={tool.result} pending={tool.status === "running"} />
-        </details>
-      </div>
+      {!opensMarketPanel ? <AiToolDomainDetails tool={tool} onOpenArtifact={onOpenArtifact} /> : null}
+       <details className="ai-tool-io legacy">
+        <summary>{processText("toolDetails", "Details", "详情")} · {getAiToolDomainLabel(presentation.domain, i18n.language)}</summary>
+        <div className="ai-tool-io-grid">
+          <div><small>{processText("toolInput", "Input", "输入")}</small><AiToolInputCode value={tool.arguments} /></div>
+          <div><small>{processText("toolOutput", "Output", "输出")}</small><AiToolOutputCode value={tool.result} pending={tool.status === "running"} /></div>
+        </div>
+      </details>
       {strategyAction && onOpenStrategy ? <button type="button" className="ai-tool-open-strategy" onClick={() => onOpenStrategy(strategyAction.strategyId, strategyAction.runId, strategyAction.optimizationId)}>{processText("openStrategyLab", "Open in Strategy Lab", "在策略实验室打开")}</button> : null}
     </details>
   );
 }
 
-function AiToolTraceRow({ tool, now, onOpenStrategy }: { tool: AiToolRun; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
-  const Icon = tool.status === "running" ? Loader2 : tool.status === "failed" || tool.ok === false || tool.blocked ? CircleAlert : CheckCircle2;
+function AiToolTraceRow({ tool, now, onOpenStrategy, onOpenArtifact }: { tool: AiToolRun; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
+  const failed = tool.status === "failed" || tool.ok === false || tool.blocked;
+  const running = tool.status === "running";
   const duration = toolDurationLabel(tool, now);
   const source = toolDataSourceLabel(tool);
+  const presentation = getAiToolPresentation(tool.name);
+  const artifact = aiResearchArtifactForTool(tool);
+  const opensMarketPanel = artifact?.kind === "market";
   return (
-    <details className={clsx("ai-tool-trace", `tool-${tool.status}`, tool.ok === false && "result-failed")}>
-      <summary>
-        <Icon size={13} className={tool.status === "running" ? "spin" : undefined} />
-        <span className="ai-tool-trace-action">{toolActionLabel(tool)}</span>
-        <code title={tool.name}>{tool.name}</code>
+    <details className={clsx("ai-tool-trace", `tool-${tool.status}`, failed && "result-failed")}>
+      <summary onClick={opensMarketPanel ? (event) => { event.preventDefault(); if (artifact) onOpenArtifact?.(artifact); } : undefined} className={opensMarketPanel ? "ai-tool-direct-artifact" : undefined}>
+        <span className={clsx("ai-tool-state-dot", failed && "failed", running && "running")} aria-hidden="true" />
+        <AiToolDomainIcon domain={presentation.domain} size={13} />
+        <span className="ai-tool-trace-action">{presentation.label}</span>
+        <small className="ai-tool-summary" data-i18n-skip>{tool.summary || presentation.summary}</small>
         <strong>{toolStatusLabel(tool)}{source ? ` · ${source}` : ""}{duration ? ` · ${duration}` : ""}</strong>
       </summary>
-      {tool.summary && <small data-i18n-skip>{tool.summary}</small>}
       {strategyActionForTool(tool) && onOpenStrategy ? <button type="button" className="ai-tool-open-strategy" onClick={() => { const action = strategyActionForTool(tool); if (action) onOpenStrategy(action.strategyId, action.runId, action.optimizationId); }}>{processText("openStrategyLab", "Open in Strategy Lab", "在策略实验室打开")}</button> : null}
-      <div className="ai-tool-panel">
-        <details>
-          <summary>{processText("toolInput", "Input", "输入")}</summary>
-          <AiToolInputCode value={tool.arguments} />
-        </details>
-        <details>
-          <summary>{processText("toolOutput", "Output", "输出")}</summary>
-          <AiToolOutputCode value={tool.result} pending={tool.status === "running"} />
-        </details>
-      </div>
+      {!opensMarketPanel ? <AiToolDomainDetails tool={tool} onOpenArtifact={onOpenArtifact} /> : null}
+       <details className="ai-tool-panel legacy">
+        <summary>{processText("toolDetails", "Details", "详情")}</summary>
+        <div className="ai-tool-io-grid">
+          <div><small>{processText("toolInput", "Input", "输入")}</small><AiToolInputCode value={tool.arguments} /></div>
+          <div><small>{processText("toolOutput", "Output", "输出")}</small><AiToolOutputCode value={tool.result} pending={tool.status === "running"} /></div>
+        </div>
+      </details>
     </details>
   );
 }
@@ -271,7 +452,7 @@ function toolDataSourceLabel(tool: AiToolRun) {
   return processText("localRead", "Local read", "本地读取");
 }
 
-function AiToolGroup({ items, message, now, onOpenStrategy }: { items: Extract<AiTimelineItem, { kind: "tool" }>[]; message: AiUiMessage; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
+function AiToolGroup({ items, message, now, onOpenStrategy, onOpenArtifact }: { items: Extract<AiTimelineItem, { kind: "tool" }>[]; message: AiUiMessage; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
   const tools = items
     .map((item) =>
       item.agentId
@@ -289,12 +470,12 @@ function AiToolGroup({ items, message, now, onOpenStrategy }: { items: Extract<A
   return (
     <details className="ai-process-group ai-tool-group" open={running}>
       <summary>
-        <span>{processText("toolsRunCount", "Ran {{count}} tools", "运行了 {{count}} 个工具", { count: tools.length })}</span>
+        <span className="ai-tool-group-title"><AiToolDomainIcon domain={tools.length === 1 ? getAiToolPresentation(tools[0].name).domain : "system"} /><span>{processText("toolsRunCount", "Ran {{count}} tools", "运行了 {{count}} 个工具", { count: tools.length })}</span></span>
         <strong>{processText("toolsSucceededCount", "{{count}} succeeded", "{{count}} 成功", { count: done })}{failed ? ` · ${processText("toolsFailedCount", "{{count}} failed", "{{count}} 异常", { count: failed })}` : ""}{duration ? ` · ${duration}` : ""}</strong>
       </summary>
       <div className="ai-tool-trace-list">
         {tools.map((tool) => (
-          <AiToolTraceRow tool={tool} now={now} onOpenStrategy={onOpenStrategy} key={`${tool.agentId ?? "main"}-${tool.id}`} />
+          <AiToolTraceRow tool={tool} now={now} onOpenStrategy={onOpenStrategy} onOpenArtifact={onOpenArtifact} key={`${tool.agentId ?? "main"}-${tool.id}`} />
         ))}
       </div>
     </details>
@@ -330,6 +511,21 @@ function AiAgentCard({ agent, now }: { agent: AiAgentRun; now: number }) {
       ) : agent.result !== undefined ? <code>{safeJson(agent.result)}</code> : null}
     </details>
   );
+}
+
+export function aiArtifactsForMessage(message: AiUiMessage) {
+  const tools = [...(message.tools ?? []), ...(message.agents ?? []).flatMap((agent) => agent.tools ?? [])];
+  return tools.map((tool) => aiResearchArtifactForTool(tool, message.id)).filter((artifact): artifact is AiResearchArtifact => Boolean(artifact));
+}
+
+export function AiEvidenceReferences({ message, onOpenArtifact, onOpenMessage, uiText }: { message: AiUiMessage; onOpenArtifact?: (artifact: AiResearchArtifact) => void; onOpenMessage?: (messageId: string) => void; uiText: (zh: string, en: string) => string }) {
+  const artifacts = aiArtifactsForMessage(message).filter((artifact) => artifact.kind !== "research");
+  if (!onOpenArtifact || artifacts.length === 0) return null;
+  return <div className="ai-evidence-references" aria-label={uiText("本轮引用证据", "Evidence referenced this turn")}>
+    <small>{uiText("引用证据", "Evidence")}</small>
+    {artifacts.slice(0, 5).map((artifact) => <button key={artifact.id} type="button" onClick={() => onOpenArtifact(artifact)} onAuxClick={(event) => { if (event.button === 1 && artifact.sourceMessageId) onOpenMessage?.(artifact.sourceMessageId); }} title={uiText(`${artifact.title} · 打开证据`, `${artifact.title} · Open evidence`)} aria-label={uiText(`打开证据：${artifact.title}`, `Open evidence: ${artifact.title}`)}><span>{artifact.title}</span></button>)}
+    {message.id ? <button type="button" className="ai-evidence-anchor" onClick={() => onOpenMessage?.(message.id)} title={uiText("定位本轮回答", "Locate this answer")} aria-label={uiText("定位本轮回答", "Locate this answer")}>{uiText("定位回答", "Locate answer")}</button> : null}
+  </div>;
 }
 
 export function AiMessageError({ message }: { message: AiUiMessage }) {
@@ -382,6 +578,11 @@ function normalizedUsage(value: unknown) {
   };
 }
 
+export function aiReportedOutputTokens(value: unknown) {
+  const normalized = normalizedUsage(value);
+  return normalized?.reported && normalized.output > 0 ? normalized.output : null;
+}
+
 function formatTokenCount(value: number) {
   if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(value >= 10_000_000 ? 1 : 2)}M`;
   if (value >= 1_000) return `${(value / 1_000).toFixed(value >= 100_000 ? 0 : 1)}K`;
@@ -415,7 +616,7 @@ export function AiTokenUsageLine({ usage }: { usage: unknown }) {
   );
 }
 
-export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: { message: AiUiMessage; onApprove: (approvalId: string, approved: boolean, reason: string) => void; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void }) {
+export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy, onOpenArtifact }: { message: AiUiMessage; onApprove: (approvalId: string, approved: boolean, reason: string) => void; now: number; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
   const timeline = message.timeline ?? [];
   const hasTimeline = timeline.length > 0;
   const hasLegacyProcess =
@@ -442,7 +643,7 @@ export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: {
       </summary>
       <div className="ai-process-list">
         {hasTimeline ? (
-          groups.map((group) => renderProcessGroup(group, message, onApprove, now, onOpenStrategy))
+          groups.map((group) => renderProcessGroup(group, message, onApprove, now, onOpenStrategy, onOpenArtifact))
         ) : (
           <>
             {message.draftText && <MarkdownMessage content={message.draftText} />}
@@ -459,7 +660,7 @@ export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: {
                 <code>{safeJson(message.teamEvents)}</code>
               </details>
             )}
-            {message.tools.length > 0 && <AiToolGroup items={message.tools.map((tool) => ({ id: `legacy-${tool.id}`, kind: "tool", toolId: tool.id }))} message={message} now={now} onOpenStrategy={onOpenStrategy} />}
+            {message.tools.length > 0 && <AiToolGroup items={message.tools.map((tool) => ({ id: `legacy-${tool.id}`, kind: "tool", toolId: tool.id }))} message={message} now={now} onOpenStrategy={onOpenStrategy} onOpenArtifact={onOpenArtifact} />}
             {(message.approvals ?? []).map((approval) => <AiApprovalCard approval={approval} onApprove={onApprove} key={approval.id} />)}
           </>
         )}
@@ -468,8 +669,8 @@ export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy }: {
   );
 }
 
-function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
-  if (group.kind === "tools") return <AiToolGroup items={group.items} message={message} now={now} onOpenStrategy={onOpenStrategy} key={group.id} />;
+function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void, onOpenArtifact?: (artifact: AiResearchArtifact) => void) {
+  if (group.kind === "tools") return <AiToolGroup items={group.items} message={message} now={now} onOpenStrategy={onOpenStrategy} onOpenArtifact={onOpenArtifact} key={group.id} />;
   if (group.kind === "reasoning-summaries") {
     return (
       <div className="ai-reasoning-summaries" role="list" key={group.id}>
@@ -489,10 +690,10 @@ function renderProcessGroup(group: AiProcessGroup, message: AiUiMessage, onAppro
       </details>
     );
   }
-  return renderTimelineItem(group.item, message, onApprove, now, onOpenStrategy);
+  return renderTimelineItem(group.item, message, onApprove, now, onOpenStrategy, onOpenArtifact);
 }
 
-function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void) {
+function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprove: (approvalId: string, approved: boolean, reason: string) => void, now: number, onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void, onOpenArtifact?: (artifact: AiResearchArtifact) => void) {
   if (item.kind === "text") return <MarkdownMessage content={item.content} key={item.id} />;
   if (item.kind === "reasoning-summary") {
     return (
@@ -513,7 +714,7 @@ function renderTimelineItem(item: AiTimelineItem, message: AiUiMessage, onApprov
     const tool = item.agentId
       ? message.agents?.find((agent) => agent.id === item.agentId)?.tools?.find((entry) => entry.id === item.toolId)
       : message.tools.find((entry) => entry.id === item.toolId);
-    return tool ? <AiToolCard tool={tool} onOpenStrategy={onOpenStrategy} key={item.id} /> : null;
+    return tool ? <AiToolCard tool={tool} onOpenStrategy={onOpenStrategy} onOpenArtifact={onOpenArtifact} key={item.id} /> : null;
   }
   if (item.kind === "agent") {
     const agent = message.agents?.find((entry) => entry.id === item.agentId);
@@ -584,33 +785,45 @@ export function applyAiEvent(
     setMessages((items) =>
       updateLastAssistant(items, (message) => {
         if (message.completed) return message;
+        const now = Date.now();
+        const observedTextOrReasoning = Boolean(event.content)
+          && (event.channel === "text"
+            || event.channel === "text-preview"
+            || event.channel === "text-final"
+            || event.channel === "reasoning"
+            || event.channel === "reasoning-final");
+        const activeMessage = {
+          ...message,
+          startedAt: message.startedAt ?? message.createdAt ?? now,
+          firstTokenAt: message.firstTokenAt ?? (observedTextOrReasoning ? now : undefined)
+        };
         if (event.channel === "text-preview") {
-          return { ...message, text: event.content, status: "生成结果" };
+          return { ...activeMessage, text: event.content, status: "生成结果" };
         }
         if (event.channel === "text-preview-clear") {
-          return { ...message, text: "", status: "处理中" };
+          return { ...activeMessage, text: "", status: "处理中" };
         }
         if (event.channel === "text-final") {
-          return { ...message, text: event.content, status: "生成结果" };
+          return { ...activeMessage, text: event.content, status: "生成结果" };
         }
         if (event.channel === "reasoning" || event.channel === "reasoning-final") {
-          const currentReasoning = message.reasoning ?? "";
+          const currentReasoning = activeMessage.reasoning ?? "";
           const nextReasoning = event.channel === "reasoning-final"
             ? event.content
             : currentReasoning + event.content;
           const novelReasoning = nextReasoning.startsWith(currentReasoning)
             ? nextReasoning.slice(currentReasoning.length)
             : event.content;
-          if (!novelReasoning) return { ...message, reasoning: nextReasoning, status: "思考中" };
+          if (!novelReasoning) return { ...activeMessage, reasoning: nextReasoning, status: "思考中" };
           return appendAiTimelineText(
-            { ...message, reasoning: nextReasoning, status: "思考中" },
+            { ...activeMessage, reasoning: nextReasoning, status: "思考中" },
             event.reasoningSummary ? "reasoning-summary" : "reasoning",
             novelReasoning,
             event.reasoningId ?? undefined
           );
         }
         return appendAiTimelineText(
-          { ...message, draftText: `${message.draftText ?? ""}${event.content}`, status: "处理中" },
+          { ...activeMessage, draftText: `${activeMessage.draftText ?? ""}${event.content}`, status: "处理中" },
           "text",
           event.content
         );
@@ -791,6 +1004,49 @@ export function applyAiEvent(
     );
     return;
   }
+  if (event.type === "contextUsage") {
+    // Context is session-level state. Binding it to the last assistant races
+    // native queued turn boundaries and can attribute it to the wrong message.
+    return;
+  }
+  if (event.type === "turnStarted") {
+    const now = event.startedAt || Date.now();
+    setStatus("streaming");
+    setMessages((items) => {
+      const completed = updateLastAssistant(items, (message) => ({
+        ...message,
+        completed: true,
+        completedAt: message.completedAt ?? now,
+        status: undefined
+      }));
+      const next = [...completed];
+      if (event.prompt?.trim()) {
+        next.push({
+          id: event.localMessageId || `u-queued-${now}`,
+          role: "user",
+          text: event.prompt,
+          tools: [],
+          approvals: [],
+          createdAt: now
+        });
+      }
+      next.push({
+        id: `a-queued-${now}`,
+        role: "assistant",
+        text: "",
+        reasoning: "",
+        tools: [],
+        approvals: [],
+        usageIsSessionCumulative: true,
+        createdAt: now,
+        startedAt: now,
+        status: "连接模型服务"
+      });
+      return next;
+    });
+    return;
+  }
+  if (event.type === "pendingPrompts" || event.type === "pendingPromptSubmitted" || event.type === "pendingPromptError") return;
   if (event.type === "error") {
     logger.error("ai event error", event.message);
     setStatus("failed");
@@ -808,6 +1064,8 @@ export function applyAiEvent(
     setMessages((items) => updateLastAssistant(items, (message) => ({
       ...message,
       completed: true,
+      finishReason: event.finishReason ?? undefined,
+      completedAt: message.completedAt ?? Date.now(),
       error: failed || message.error,
       errorMessage: failed ? message.errorMessage || "AI 模型响应失败" : message.errorMessage,
       status: undefined
@@ -832,12 +1090,19 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
     text: failed && isGenericAiFailure(storedText) ? "" : storedText,
     reasoning: message.reasoning || undefined,
     completed,
+    finishReason: completed ? storedStatus : undefined,
     tools: metadata.tools,
     approvals: metadata.approvals,
     agents: metadata.agents,
     teamEvents: metadata.teamEvents,
     timeline: metadata.timeline,
     usage: message.tokenUsage ?? metadata.usage,
+    usageIsSessionCumulative: metadata.usageIsSessionCumulative,
+    contextUsage: metadata.contextUsage,
+    createdAt: message.createdAt,
+    startedAt: metadata.startedAt ?? message.createdAt,
+    firstTokenAt: metadata.firstTokenAt,
+    completedAt: metadata.completedAt,
     error: failed,
     errorMessage: failed ? normalizeAiFailureMessage(failureDetail) : undefined,
     status: completed ? undefined : message.status ?? undefined
@@ -865,14 +1130,19 @@ function recoverLegacyFinalText(content: string, timeline: AiTimelineItem[], eli
   };
 }
 
-function parseStoredAiMetadata(toolJson?: string | null): Pick<AiUiMessage, "tools" | "approvals" | "agents" | "teamEvents" | "timeline" | "usage"> {
-  const empty: Pick<AiUiMessage, "tools" | "approvals" | "agents" | "teamEvents" | "timeline" | "usage"> = {
+function parseStoredAiMetadata(toolJson?: string | null): Pick<AiUiMessage, "tools" | "approvals" | "agents" | "teamEvents" | "timeline" | "usage" | "usageIsSessionCumulative" | "contextUsage" | "startedAt" | "firstTokenAt" | "completedAt"> {
+  const empty: Pick<AiUiMessage, "tools" | "approvals" | "agents" | "teamEvents" | "timeline" | "usage" | "usageIsSessionCumulative" | "contextUsage" | "startedAt" | "firstTokenAt" | "completedAt"> = {
     tools: [],
     approvals: [],
     agents: [],
     teamEvents: [],
     timeline: [],
-    usage: undefined
+    usage: undefined,
+    usageIsSessionCumulative: false,
+    contextUsage: undefined,
+    startedAt: undefined,
+    firstTokenAt: undefined,
+    completedAt: undefined
   };
   if (!toolJson) return empty;
   try {
@@ -950,6 +1220,27 @@ function parseStoredAiMetadata(toolJson?: string | null): Pick<AiUiMessage, "too
         const teamIndex = metadata.teamEvents?.length ?? 0;
         metadata.teamEvents = [...(metadata.teamEvents ?? []), item.event ?? item];
         metadata.timeline = appendTimeline(metadata.timeline, { id: `team-${teamIndex}`, kind: "team", index: teamIndex });
+        return items;
+      }
+      if (item?.type === "contextUsage") {
+        const usage = item.usage as AiContextUsage | undefined;
+        if (usage && Number.isFinite(usage.usedTokens) && usage.usedTokens >= 0
+          && (usage.contextWindow === undefined || Number.isFinite(usage.contextWindow) && usage.contextWindow > 0)) {
+          metadata.contextUsage = usage;
+        }
+        return items;
+      }
+      if (item?.type === "turnTiming") {
+        const startedAt = Number(item.startedAt);
+        const firstTokenAt = Number(item.firstTokenAt);
+        const completedAt = Number(item.completedAt);
+        metadata.startedAt = Number.isFinite(startedAt) && startedAt > 0 ? startedAt : metadata.startedAt;
+        metadata.firstTokenAt = Number.isFinite(firstTokenAt) && firstTokenAt > 0 ? firstTokenAt : metadata.firstTokenAt;
+        metadata.completedAt = Number.isFinite(completedAt) && completedAt > 0 ? completedAt : metadata.completedAt;
+        return items;
+      }
+      if (item?.type === "usageScope") {
+        metadata.usageIsSessionCumulative = item.scope === "session-cumulative";
         return items;
       }
       if (item?.type === "usage") {
@@ -1275,7 +1566,8 @@ function toolStatusLabel(tool: AiToolRun) {
 }
 
 function toolActionLabel(tool: AiToolRun) {
-  if (tool.name.startsWith("market.") || tool.name.startsWith("account.")) return processText("read", "Read", "读取");
+  const canonicalName = getAiToolPresentation(tool.name).canonicalName;
+  if (canonicalName.startsWith("market.") || canonicalName.startsWith("account.")) return processText("read", "Read", "读取");
   if (tool.name.startsWith("chart.create") || tool.name.startsWith("alert.create") || tool.name.startsWith("script.create")) return processText("create", "Create", "创建");
   if (tool.name.startsWith("chart.update") || tool.name.startsWith("alert.update") || tool.name.startsWith("script.enable")) return processText("update", "Update", "更新");
   if (tool.name.startsWith("chart.delete") || tool.name.startsWith("alert.delete") || tool.name.startsWith("script.delete")) return processText("delete", "Delete", "删除");

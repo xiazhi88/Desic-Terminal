@@ -3,9 +3,11 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { aiRequestIdleTimeoutMs, bindConfiguredAgentToolEvent, buildSystemPrompt, createDesicTools, createProviderFetch, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, runProviderNetworkRetry, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { aiRequestIdleTimeoutMs, bindConfiguredAgentToolEvent, buildSystemPrompt, catalogContextWindowFor, consumeExpectedTurnStart, createDesicTools, createProviderFetch, createRuntimeConfig, estimateContextBreakdown, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, mutatePendingPrompts, normalizeCommand, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, runProviderNetworkRetry, sanitizeDiagnosticText, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const sessionId = "indicator-stream-test";
+const sanitizedDiagnostic = sanitizeDiagnosticText("Authorization: Bearer obvious-placeholder-token api_key=obvious-placeholder-query sk-obvious-placeholder-value");
+assert.doesNotMatch(sanitizedDiagnostic, /obvious-placeholder-token|obvious-placeholder-query|sk-obvious-placeholder-value/);
 const wrap = (event) => ({
   type: "agent_event",
   payload: { sessionId, event }
@@ -281,6 +283,128 @@ assert.equal(cumulativeUsage?.usage?.usageKind, "cumulative");
 assert.equal(cumulativeUsage?.usage?.inputTokens, 300);
 assert.equal(cumulativeUsage?.usage?.cacheReadTokens, 100);
 
+assert.equal(normalizeCommand({ type: "sendMessage", sessionId, delivery: "steer" }).delivery, "steer");
+assert.equal(normalizeCommand({ type: "sendMessage", sessionId, delivery: "invalid" }).delivery, undefined);
+assert.deepEqual(
+  mapCoreEvent(sessionId, {
+    type: "pending_prompts",
+    payload: {
+      prompts: [{ id: "pending-1", prompt: "继续比较资金费率", delivery: "queue", attachmentCount: 0 }]
+    }
+  }),
+  {
+    type: "pendingPrompts",
+    sessionId,
+    prompts: [{ sessionId, id: "pending-1", prompt: "继续比较资金费率", delivery: "queue", attachmentCount: 0 }]
+  }
+);
+assert.deepEqual(
+  mapCoreEvent(sessionId, {
+    type: "pending_prompt_submitted",
+    payload: { id: "pending-2", prompt: "优先检查账户风险", delivery: "steer", attachmentCount: 0 }
+  }),
+  {
+    type: "pendingPromptSubmitted",
+    sessionId,
+    prompt: { sessionId, id: "pending-2", prompt: "优先检查账户风险", delivery: "steer", attachmentCount: 0 }
+  }
+);
+assert.equal(
+  mapCoreEvent(sessionId, {
+    type: "agent_event",
+    payload: {
+      event: {
+        type: "run-started",
+        snapshot: {
+          messages: [{ role: "user", content: [{ type: "text", text: "队列中的下一问" }] }]
+        }
+      }
+    }
+  })?.prompt,
+  "队列中的下一问"
+);
+assert.equal(
+  mapCoreEvent(sessionId, {
+    type: "agent_event",
+    payload: {
+      subAgentId: "subagent-risk",
+      event: {
+        type: "run-started",
+        snapshot: { messages: [{ role: "user", content: "子代理任务" }] }
+      }
+    }
+  }),
+  null
+);
+const expectedTurnStarts = [
+  { prompt: "队列中的下一问", delivery: "queue", submittedAt: 1 },
+  { prompt: "优先检查风险", delivery: "steer", submittedAt: 2 }
+];
+assert.equal(consumeExpectedTurnStart(expectedTurnStarts, "网络重试原问题"), null);
+assert.equal(expectedTurnStarts.length, 2);
+assert.equal(consumeExpectedTurnStart(expectedTurnStarts, "优先检查风险")?.delivery, "steer");
+assert.deepEqual(expectedTurnStarts.map((item) => item.prompt), ["队列中的下一问"]);
+assert.equal(consumeExpectedTurnStart(expectedTurnStarts, "")?.delivery, "queue");
+assert.equal(expectedTurnStarts.length, 0);
+const duplicatePromptStarts = [
+  { prompt: "检查风险", delivery: "queue", submittedAt: 1, localMessageId: "local-queue" },
+  { prompt: "检查风险", delivery: "steer", submittedAt: 2, localMessageId: "local-steer" }
+];
+const consumedDuplicatePrompt = consumeExpectedTurnStart(duplicatePromptStarts, "检查风险");
+assert.equal(consumedDuplicatePrompt?.delivery, "steer");
+assert.equal(consumedDuplicatePrompt?.localMessageId, "local-steer");
+assert.equal(duplicatePromptStarts.length, 0);
+assert.equal(consumeExpectedTurnStart(duplicatePromptStarts, "检查风险"), null);
+const whitespaceDistinctStarts = [
+  { prompt: "检查风险", delivery: "queue", submittedAt: 1 },
+  { prompt: "检查风险 ", delivery: "queue", submittedAt: 2 }
+];
+assert.equal(consumeExpectedTurnStart(whitespaceDistinctStarts, "检查风险 ")?.prompt, "检查风险 ");
+assert.deepEqual(whitespaceDistinctStarts.map((item) => item.prompt), ["检查风险"]);
+await assert.rejects(
+  () => mutatePendingPrompts({
+    pendingPrompts: {
+      update: async () => ({ sessionId, prompts: [], updated: false }),
+      delete: async () => ({ sessionId, prompts: [], removed: false }),
+      list: async () => []
+    }
+  }, {
+    type: "updatePendingPrompt",
+    sessionId,
+    promptId: "missing-update",
+    prompt: "更新后的问题",
+    delivery: "queue"
+  }),
+  /was not updated/
+);
+await assert.rejects(
+  () => mutatePendingPrompts({
+    pendingPrompts: {
+      update: async () => ({ sessionId, prompts: [], updated: false }),
+      delete: async () => ({ sessionId, prompts: [], removed: false }),
+      list: async () => []
+    }
+  }, {
+    type: "deletePendingPrompt",
+    sessionId,
+    promptId: "missing-delete"
+  }),
+  /was not removed/
+);
+await assert.doesNotReject(() => mutatePendingPrompts({
+  pendingPrompts: {
+    update: async () => ({ sessionId, prompts: [], updated: true }),
+    delete: async () => ({ sessionId, prompts: [], removed: true }),
+    list: async () => { throw new Error("snapshot unavailable"); }
+  }
+}, {
+  type: "updatePendingPrompt",
+  sessionId,
+  promptId: "updated-before-list-failure",
+  prompt: "已更新",
+  delivery: "queue"
+}));
+
 const stableToolCallId = "call-stable-ticker";
 assert.equal(
   mapCoreEvent(sessionId, {
@@ -346,6 +470,9 @@ for (const message of [
 }
 assert.equal(isTransientAiNetworkError("HTTP 401 invalid API key"), false);
 assert.equal(isTransientAiNetworkError("HTTP 429 insufficient_quota"), false);
+assert.equal(isTransientAiNetworkError("HTTP 500 service unavailable"), true);
+assert.equal(isTransientAiNetworkError("Reconnecting... 1/5"), true);
+assert.equal(isTransientAiNetworkError("HTTP 401 invalid API key"), false);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli" }), null);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "claude-code" }), null);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native" }), 60_000);
@@ -454,7 +581,7 @@ const failedStatusRetry = await runProviderNetworkRetry({
   operation: async () => {
     failedStatusAttempts += 1;
     if (failedStatusAttempts === 1) {
-      return { result: { status: "failed", errorMessage: "Reconnecting... 1/5 (unexpected status 503 Service Unavailable)" } };
+      return { result: { status: "failed", errorMessage: "Reconnecting... 1/5" } };
     }
     return { result: { status: "completed", text: "ok" } };
   },
@@ -620,12 +747,39 @@ await assert.rejects(
     assert.equal(error.name, "ProviderHttpError");
     assert.equal(error.status, 503);
     assert.equal(error.message, 'error (503): {"message":"Service temporarily unavailable","type":"api_error"}');
-    assert.equal(isTransientAiNetworkError(error), false);
+    assert.equal(isTransientAiNetworkError(error), true);
     return true;
   }
 );
 
 await loadClineSdk();
+const catalogContextWindow = await catalogContextWindowFor({ provider: "deepseek", model: "deepseek-v4-flash" });
+assert.ok(Number.isFinite(catalogContextWindow.contextWindow) && catalogContextWindow.contextWindow > 0);
+assert.equal(catalogContextWindow.contextWindowSource, "clineModelCatalog");
+const customContextWindow = await catalogContextWindowFor({ provider: "deepseek", model: "unknown-custom-model", contextWindow: 123456 });
+assert.deepEqual(customContextWindow, { contextWindow: 123456, contextWindowSource: "customModelConfig" });
+assert.deepEqual(await catalogContextWindowFor({ provider: "deepseek", model: "unknown-custom-model" }), { contextWindow: 256000, contextWindowSource: "fallback" });
+const compactionConfig = createRuntimeConfig({
+  sessionId: "compaction-config-test",
+  config: { provider: "deepseek", model: "unknown-custom-model", contextWindow: 256000 }
+}, "advisor", [], "compaction-config-test");
+assert.deepEqual(compactionConfig.compaction, {
+  enabled: true,
+  strategy: "basic",
+  thresholdRatio: 0.9,
+  reserveTokens: 16384,
+  preserveRecentTokens: 32768,
+  maxInputTokens: 256000
+});
+assert.deepEqual(
+  estimateContextBreakdown([
+    { role: "system", content: "system rules" },
+    { role: "user", content: "question" },
+    { role: "assistant", content: "answer" },
+    { role: "tool", content: "tool output" }
+  ]),
+  { systemTokens: 3, toolsTokens: 3, conversationTokens: 4, estimated: true, breakdownSource: "heuristic" }
+);
 const modelFacingPrompt = buildSystemPrompt({
   backgroundRun: true,
   reviewRun: true,

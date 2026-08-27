@@ -2,321 +2,299 @@ import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import { chromium } from "playwright";
 
-const baseUrl = process.env.DESIC_AI_PREVIEW_URL || "http://127.0.0.1:1420/ai-preview";
+const baseUrl = process.env.DESIC_AI_PREVIEW_URL || "http://127.0.0.1:1420/ai-research-preview";
 const artifactDir = path.resolve("artifacts", "ai-preview");
+const viewports = [
+  { width: 1440, height: 900, name: "ai-research-1440x900" },
+  { width: 1280, height: 720, name: "ai-research-1280x720" },
+  { width: 720, height: 720, name: "ai-research-720x720" }
+];
 
-function rectsOverlap(a, b) {
-  return !(
-    a.x + a.width <= b.x ||
-    b.x + b.width <= a.x ||
-    a.y + a.height <= b.y ||
-    b.y + b.height <= a.y
-  );
+async function readLayout(page) {
+  return page.evaluate(() => {
+    const rect = (selector) => {
+      const box = document.querySelector(selector)?.getBoundingClientRect();
+      return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+    };
+    return {
+      viewport: { width: window.innerWidth, height: window.innerHeight },
+      scrollWidth: document.documentElement.scrollWidth,
+      scrollHeight: document.documentElement.scrollHeight,
+      host: rect(".ai-research-host"),
+      shell: rect(".ai-research-shell"),
+      sidebar: rect(".ai-session-sidebar"),
+      main: rect(".ai-panel-main"),
+      inspector: rect(".ai-research-inspector"),
+      inspectorTabCount: document.querySelectorAll(".ai-inspector-tabs [role=tab]").length,
+      columnResizeCount: document.querySelectorAll(".ai-column-resize").length,
+      toolArtifactCount: document.querySelectorAll(".ai-tool-open-artifact").length,
+      shellColumns: getComputedStyle(document.querySelector(".ai-research-shell")).gridTemplateColumns,
+      context: rect(".ai-research-context"),
+      composer: rect(".ai-composer"),
+      contextDisplay: document.querySelector(".ai-research-context") ? getComputedStyle(document.querySelector(".ai-research-context")).display : "removed",
+      contextText: document.querySelector(".ai-context-meter-wrap")?.textContent || "",
+       contextTriggerCount: document.querySelectorAll(".ai-context-meter-trigger").length,
+       runningSessionCount: document.querySelectorAll(".ai-session-item.running").length,
+       inspectorSectionCount: document.querySelectorAll(".ai-inspector-sections button").length,
+       intelligenceNavCount: document.querySelectorAll(".ai-intelligence-nav button").length,
+       welcomeCount: document.querySelectorAll(".ai-research-welcome").length,
+       commandPaletteCount: document.querySelectorAll(".ai-command-palette").length,
+      headerText: document.querySelector(".ai-panel-head")?.textContent || "",
+      messageMetricsText: Array.from(document.querySelectorAll(".ai-message-actions")).map((node) => node.textContent || "").join(" "),
+      placeholder: document.querySelector(".ai-composer textarea")?.getAttribute("placeholder") || "",
+      floatCount: document.querySelectorAll(".ai-float").length,
+      resizeCount: document.querySelectorAll(".ai-panel-resize").length,
+      sessionTabCount: document.querySelectorAll(".ai-session-tabs").length,
+      nativeSelectCount: document.querySelectorAll("select").length,
+      taskDockCount: document.querySelectorAll(".ai-task-dock").length,
+      queueDockCount: document.querySelectorAll(".ai-queue-dock").length,
+      stopButtonCount: document.querySelectorAll(".ai-send.stop").length,
+      sendButtonCount: document.querySelectorAll(".ai-send:not(.stop)").length,
+       composerControlCount: document.querySelectorAll(".ai-composer-controls").length,
+       legacyComposerActionCount: document.querySelectorAll(".ai-composer-actions").length,
+       inspectorShortcutCount: document.querySelectorAll(".ai-inspector-shortcut").length,
+       calendarScroll: document.querySelector(".ai-intel-calendar-scroll") ? (() => { const node = document.querySelector(".ai-intel-calendar-scroll"); return { overflowX: getComputedStyle(node).overflowX, scrollWidth: node.scrollWidth, width: node.clientWidth }; })() : null,
+      coarsePointer: matchMedia("(pointer: coarse)").matches,
+      touchTargets: Array.from(document.querySelectorAll(".ai-message-actions button, .ai-research-shell .ai-send, .ai-research-shell .terminal-select-trigger")).map((item) => {
+        const box = item.getBoundingClientRect();
+        return { width: box.width, height: box.height };
+      })
+    };
+  });
+}
+
+function assertLayout(layout) {
+  if (!layout.host || !layout.shell || !layout.sidebar || !layout.main || !layout.composer) {
+    throw new Error(`AI Research workspace regions are missing: ${JSON.stringify(layout)}`);
+  }
+  if (layout.floatCount !== 0 || layout.resizeCount !== 0 || layout.sessionTabCount !== 0) {
+    throw new Error(`Legacy floating assistant controls remain: ${JSON.stringify(layout)}`);
+  }
+  if (layout.scrollWidth > layout.viewport.width || layout.scrollHeight > layout.viewport.height) {
+    throw new Error(`AI Research preview overflows the viewport: ${JSON.stringify(layout)}`);
+  }
+  if (layout.sidebar.right > layout.main.x + 1 || layout.composer.bottom > layout.viewport.height) {
+    throw new Error(`AI Research columns or composer are misaligned: ${JSON.stringify(layout)}`);
+  }
+  if (layout.contextDisplay !== "removed" || layout.contextTriggerCount !== 1 || layout.runningSessionCount < 1 || layout.inspectorSectionCount !== 0) {
+    throw new Error(`Research context should be represented by one compact popover trigger: ${JSON.stringify(layout)}`);
+  }
+  if (layout.viewport.width > 880 && (!layout.inspector || layout.inspector.width < 280 || layout.inspectorTabCount < 1 || layout.columnResizeCount !== 2)) {
+    throw new Error(`Desktop research inspector should be a visible resizable tabbed third column: ${JSON.stringify(layout)}`);
+  }
+  if (layout.viewport.width <= 880 && layout.inspector && layout.inspector.width > 1) {
+    throw new Error(`Narrow layouts should collapse the research inspector without horizontal overflow: ${JSON.stringify(layout)}`);
+  }
+  if (!/deepseek-v4-flash/i.test(layout.headerText) || !/47\.2k\s*\/\s*256k/i.test(layout.contextText)) {
+    throw new Error(`Model or measured context state is missing: ${JSON.stringify(layout)}`);
+  }
+  if (!/TTFT\s+\d/i.test(layout.messageMetricsText)) {
+    throw new Error(`Measured TTFT metadata is missing: ${JSON.stringify(layout)}`);
+  }
+  if (/Press Enter|Shift\+Enter/i.test(layout.placeholder)) {
+    throw new Error(`Composer placeholder should not expose instructions: ${JSON.stringify(layout)}`);
+  }
+  if (layout.floatCount || layout.nativeSelectCount || layout.taskDockCount !== 1 || layout.queueDockCount !== 1) {
+    throw new Error(`AI Research controls are incomplete: ${JSON.stringify(layout)}`);
+  }
+  const expectedInspectorShortcuts = layout.viewport.width <= 660 ? 0 : 3;
+  if (layout.stopButtonCount !== 1 || layout.sendButtonCount !== 1 || layout.inspectorShortcutCount !== expectedInspectorShortcuts || layout.composerControlCount !== 1 || layout.legacyComposerActionCount !== 0) {
+    throw new Error(`Streaming composer and right-panel shortcuts are incomplete: ${JSON.stringify(layout)}`);
+  }
+  if (layout.coarsePointer && layout.touchTargets.some((target) => target.width < 44 || target.height < 44)) {
+    throw new Error(`Coarse-pointer controls need 44px targets: ${JSON.stringify(layout)}`);
+  }
 }
 
 async function main() {
+  await mkdir(artifactDir, { recursive: true });
   const browser = await chromium.launch({ headless: true });
-  const page = await browser.newPage({ viewport: { width: 1280, height: 760 }, deviceScaleFactor: 1 });
-  await page.addInitScript(() => localStorage.setItem("desic.ui.language.v1", "zh-CN"));
   const consoleErrors = [];
   const pageErrors = [];
-  page.on("console", (message) => {
-    if (message.type() === "error") consoleErrors.push(message.text());
-  });
-  page.on("pageerror", (error) => pageErrors.push(error.message));
 
-  await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
-  await page.waitForSelector(".ai-panel", { timeout: 30_000 });
-
-  const initial = await readAiPreviewState(page);
-  if (!initial.panel || !initial.float) throw new Error(`AI panel or float missing: ${JSON.stringify(initial)}`);
-  if (initial.bodyOverflowX > 2 || initial.bodyOverflowY > 2) {
-    throw new Error(`AI preview has global overflow: ${JSON.stringify(initial)}`);
-  }
-  if (!/deepseek-v4-pro/.test(initial.headerText) || !/生成中|思考中|调用工具|读取工具|连接中|stream/i.test(initial.headerText)) {
-    throw new Error(`AI header should show model and streaming state: ${JSON.stringify(initial)}`);
-  }
-  if (!initial.providerText.includes("https://api.deepseek.com")) {
-    throw new Error(`AI provider row missing base URL: ${JSON.stringify(initial)}`);
-  }
-  if (!initial.stopButton || initial.sendButton) {
-    throw new Error(`AI preview should start with stop button while streaming: ${JSON.stringify(initial)}`);
-  }
-  if (!initial.newSessionButton) {
-    throw new Error(`AI panel should expose a new-session button: ${JSON.stringify(initial)}`);
-  }
-  if (!initial.reasoningVisible || !initial.allowedToolVisible || !initial.resultToolVisible || !initial.blockedToolVisible) {
-    throw new Error(`AI preview should render reasoning, allowed/result/blocked tool cards: ${JSON.stringify(initial)}`);
-  }
-  const mergedHistoryGroup = page.locator(".ai-tool-group").filter({ hasText: "market.readInstrument" });
-  if (await mergedHistoryGroup.count() !== 1
-    || await mergedHistoryGroup.locator(".ai-tool-trace").count() !== 1
-    || !/运行了 1 个工具/.test(await mergedHistoryGroup.locator(":scope > summary").textContent() || "")
-    || !/2s/.test(await mergedHistoryGroup.locator(":scope > summary").textContent() || "")) {
-    throw new Error("historical tool lifecycle should render as one tool row");
-  }
-  const completedHistoryMessage = mergedHistoryGroup.locator("xpath=ancestor::article[1]");
-  if (!/已处理/.test(await completedHistoryMessage.locator(":scope > .ai-process > summary").textContent() || "")) {
-    throw new Error("stored completed AI message should not remain processing");
-  }
-  const storedReasoning = await completedHistoryMessage.locator(".ai-reasoning p").allTextContents();
-  if (storedReasoning.length !== 1
-    || storedReasoning[0].split("先读取账户和市场上下文").length - 1 !== 1) {
-    throw new Error(`stored reasoning event should render once: ${JSON.stringify(storedReasoning)}`);
-  }
-  const reasoningSummaries = await completedHistoryMessage.locator(".ai-reasoning-summary").allTextContents();
-  if (reasoningSummaries.length !== 2
-    || reasoningSummaries[0] !== "Inspecting account and market context"
-    || reasoningSummaries[1] !== "Planning the risk review") {
-    throw new Error(`Codex reasoning summaries should remain separate: ${JSON.stringify(reasoningSummaries)}`);
-  }
-  if (await completedHistoryMessage.locator(".ai-reasoning-summaries").count() !== 1) {
-    throw new Error("adjacent Codex reasoning summaries should share one compact process list");
-  }
-  const summaryStyles = await completedHistoryMessage.locator(".ai-reasoning-summary").evaluateAll((items) => items.map((item) => {
-    const style = getComputedStyle(item);
-    const textStyle = getComputedStyle(item.querySelector(".ai-markdown"));
-    const markerStyle = getComputedStyle(item, "::before");
-    return {
-      border: style.borderStyle,
-      background: style.backgroundColor,
-      display: style.display,
-      fontSize: Number.parseFloat(textStyle.fontSize),
-      fontWeight: Number.parseInt(textStyle.fontWeight, 10),
-      markerWidth: Number.parseFloat(markerStyle.width)
-    };
-  }));
-  if (summaryStyles.some((style) => (
-    style.border !== "none"
-    || style.background !== "rgba(0, 0, 0, 0)"
-    || style.display !== "grid"
-    || style.fontSize > 12.1
-    || style.fontWeight > 400
-    || style.markerWidth < 3
-  ))) {
-    throw new Error(`Codex reasoning summaries should use compact secondary typography: ${JSON.stringify(summaryStyles)}`);
-  }
-  const completedProcessText = await completedHistoryMessage.locator(":scope > .ai-process").textContent() || "";
-  const completedAnswerText = await completedHistoryMessage.locator(":scope > .ai-answer").textContent() || "";
-  if (completedProcessText.includes("历史工具状态已合并") || !completedAnswerText.includes("历史工具状态已合并")) {
-    throw new Error("stored final answer must render outside the process timeline");
-  }
-  const stableHistoryAgent = page.locator(".ai-agent-run", { hasText: "历史市场结构" });
-  if (await stableHistoryAgent.count() !== 1
-    || !/已完成 · 5s/.test(await stableHistoryAgent.locator(":scope > summary").textContent() || "")
-    || /运行中/.test(await stableHistoryAgent.locator(":scope > summary").textContent() || "")) {
-    throw new Error("configured Agent lifecycle should merge runtime starts and close on completion");
-  }
-  const modelErrorMessage = page.locator(".ai-message", { has: page.locator(".ai-agent-run.agent-model-error") });
-  const modelErrorCard = modelErrorMessage.locator(".ai-agent-run.agent-model-error");
-  if (await modelErrorMessage.count() !== 1
-    || await modelErrorCard.count() !== 1
-    || !await modelErrorCard.isVisible()
-    || !await modelErrorCard.locator(".ai-agent-error").isVisible()
-    || !/已处理/.test(await modelErrorMessage.locator(":scope > .ai-process > summary").textContent() || "")
-    || !/模型错误 · 625ms/.test(await modelErrorCard.locator(":scope > summary").textContent() || "")
-    || !/模型服务错误/.test(await modelErrorCard.locator(".ai-agent-error").textContent() || "")
-    || !/模型服务余额不足/.test(await modelErrorCard.locator(".ai-agent-error").textContent() || "")
-    || await modelErrorCard.locator(":scope > code").count() !== 0
-    || /finishReason/.test(await modelErrorMessage.textContent() || "")
-    || /(^|\s)failed($|\s)/i.test(await modelErrorMessage.textContent() || "")) {
-    throw new Error("model response errors should render as a dedicated localized error without raw JSON or a generic failed tail");
-  }
-  if (await modelErrorCard.locator(".ai-agent-error svg").count() !== 1) {
-    throw new Error("model response error should include a visible alert icon");
-  }
-  await stableHistoryAgent.evaluate((node) => {
-    let current = node;
-    while (current) {
-      if (current instanceof HTMLDetailsElement) current.open = true;
-      current = current.parentElement;
+  try {
+    for (const viewport of viewports) {
+      const page = await browser.newPage({ viewport, deviceScaleFactor: 1, hasTouch: viewport.width === 720 });
+      await page.addInitScript(() => localStorage.setItem("desic.ui.language.v1", "zh-CN"));
+      page.on("console", (message) => {
+        if (message.type() === "error") consoleErrors.push(message.text());
+      });
+      page.on("pageerror", (error) => pageErrors.push(error.message));
+      await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+      await page.waitForSelector(".ai-research-shell", { timeout: 30_000 });
+      const layout = await readLayout(page);
+      assertLayout(layout);
+      await page.screenshot({ path: path.join(artifactDir, `${viewport.name}.png`), fullPage: false });
+      await page.close();
     }
-  });
-  await stableHistoryAgent.scrollIntoViewIfNeeded();
-  const stableAgentTools = stableHistoryAgent.locator(".ai-agent-tools .ai-tool-trace");
-  if (await stableAgentTools.count() !== 2) {
-    throw new Error("configured Agent tool rows are missing");
-  }
-  const toolLayout = await stableAgentTools.locator(":scope > summary").evaluateAll((summaries) => summaries.map((summary) => {
-    const action = summary.querySelector(".ai-tool-trace-action")?.getBoundingClientRect();
-    const name = summary.querySelector("code")?.getBoundingClientRect();
-    const status = summary.querySelector("strong")?.getBoundingClientRect();
-    const style = summary.querySelector("code") ? getComputedStyle(summary.querySelector("code")) : null;
-    const box = summary.getBoundingClientRect();
-    return {
-      height: box.height,
-      actionX: action?.x ?? -1,
-      actionY: action?.y ?? -1,
-      nameX: name?.x ?? -1,
-      nameY: name?.y ?? -1,
-      statusRight: status ? status.right : -1,
-      whiteSpace: style?.whiteSpace ?? ""
-    };
-  }));
-  const spread = (values) => Math.max(...values) - Math.min(...values);
-  if (toolLayout.some((row) => row.height > 40 || row.whiteSpace !== "nowrap" || Math.abs(row.actionY - row.nameY) > 3)
-    || spread(toolLayout.map((row) => row.actionX)) > 1
-    || spread(toolLayout.map((row) => row.nameX)) > 1
-    || spread(toolLayout.map((row) => row.statusRight)) > 1) {
-    throw new Error(`configured Agent tool columns are not aligned: ${JSON.stringify(toolLayout)}`);
-  }
-  await mkdir(artifactDir, { recursive: true });
-  await page.screenshot({ path: path.join(artifactDir, "agent-tools-1280x760.png"), fullPage: false });
-  if (!initial.markdownListVisible || !initial.markdownTableVisible || !initial.markdownCodeVisible) {
-    throw new Error(`AI preview should render markdown list/table/code: ${JSON.stringify(initial)}`);
-  }
-  if (!initial.composerPermissionVisible || !/副驾驶/.test(initial.composerPermissionText) || !initial.composerModelVisible || !initial.composerReasoningVisible || !initial.approvalCardVisible) {
-    throw new Error(`AI preview should render composer model, reasoning, permission and approval card: ${JSON.stringify(initial)}`);
-  }
-  if (initial.nativeSelectCount !== 0) throw new Error(`AI preview rendered native selects: ${initial.nativeSelectCount}`);
-  if (initial.panel && initial.float && rectsOverlap(initial.panel, initial.float)) {
-    throw new Error(`AI float overlaps open panel: ${JSON.stringify(initial)}`);
-  }
-  if (initial.stopButtonRect.width < 34 || initial.stopButtonRect.height < 34 || initial.stopButtonRadius < 18) {
-    throw new Error(`AI stop button should be stable and circular: ${JSON.stringify(initial)}`);
-  }
 
-  await page.locator('.ai-panel-head button[title="会话列表"]').click();
-  await page.waitForTimeout(280);
-  const sessionsOpen = await readAiPreviewState(page);
-  if (!sessionsOpen.sessionSidebar || sessionsOpen.sessionSidebar.width < 260) {
-    throw new Error(`AI session sidebar should open at the left: ${JSON.stringify(sessionsOpen)}`);
-  }
-  if (!sessionsOpen.panel || sessionsOpen.panel.width < initial.panel.width + 250) {
-    throw new Error(`AI panel should expand when session sidebar opens: ${JSON.stringify({ initial, sessionsOpen })}`);
-  }
-  if (!sessionsOpen.panelMain || sessionsOpen.sessionSidebar.x >= sessionsOpen.panelMain.x) {
-    throw new Error(`AI session sidebar should remain left of the conversation: ${JSON.stringify(sessionsOpen)}`);
-  }
-  const userSessionsTab = page.getByRole("tab", { name: "用户会话" });
-  const automationSessionsTab = page.getByRole("tab", { name: "AI 自动化" });
-  if (await userSessionsTab.getAttribute("aria-selected") !== "true"
-    || await automationSessionsTab.getAttribute("aria-selected") !== "false") {
-    throw new Error("AI session history should default to user-initiated sessions");
-  }
-  if (await page.locator(".ai-session-items .ai-session-item").count() !== 1
-    || !/BTC 盘面咨询/.test(await page.locator(".ai-session-items").textContent() || "")) {
-    throw new Error("user session tab should only render user-initiated sessions");
-  }
-  await automationSessionsTab.click();
-  if (await automationSessionsTab.getAttribute("aria-selected") !== "true"
-    || await page.locator(".ai-session-items .ai-session-item").count() !== 2
-    || !/BTC 定时扫描/.test(await page.locator(".ai-session-items").textContent() || "")
-    || !/自动交易复盘/.test(await page.locator(".ai-session-items").textContent() || "")) {
-    throw new Error("automation session tab should render background runs and automated reviews");
-  }
-  await page.screenshot({ path: path.join(artifactDir, "session-history-tabs-1280x760.png"), fullPage: false });
-  await userSessionsTab.click();
-  await page.locator('.ai-session-list-head button[title="收起会话列表"]').click();
-  await page.waitForTimeout(280);
-  const sessionsClosed = await readAiPreviewState(page);
-  if (!sessionsClosed.panel || Math.abs(sessionsClosed.panel.width - initial.panel.width) > 2 || sessionsClosed.sessionSidebar.width > 2) {
-    throw new Error(`AI session sidebar should collapse cleanly: ${JSON.stringify({ initial, sessionsClosed })}`);
-  }
+    const page = await browser.newPage({ viewport: { width: 1280, height: 760 }, deviceScaleFactor: 1 });
+    await page.addInitScript(() => localStorage.setItem("desic.ui.language.v1", "zh-CN"));
+    await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    const process = page.locator(".ai-process").first();
+    const processSummary = process.locator(":scope > summary");
+    if (await process.getAttribute("open") === null) await processSummary.click();
+    const toolGroup = page.locator(".ai-tool-group").first();
+    if (await toolGroup.count() !== 1) throw new Error("Preview should include a grouped tool trace");
+    if (await toolGroup.getAttribute("open") === null) await toolGroup.locator(":scope > summary").click();
+    const directMarketTool = page.locator(".ai-tool-direct-artifact").first();
+    if (await directMarketTool.count() !== 1) throw new Error("A completed market tool should directly open its market workspace");
+    await directMarketTool.click();
+    if (await page.locator(".ai-research-inspector").count() !== 1 || await page.locator(".ai-inspector-tabs [role=tab]").count() < 2 || await page.locator(".ai-market-kline-canvas").count() !== 1) {
+      throw new Error("Clicking a market candle row should open a dedicated K-line workspace");
+    }
+    const visibleFacts = await page.locator(".ai-inspector-facts").allTextContents();
+    if (visibleFacts.some((value) => /ageMs|dataAt|seqId|sourceEventSeqs|fetchedAt/.test(value))) {
+      throw new Error(`Technical freshness fields should remain in raw disclosure: ${visibleFacts.join(" | ")}`);
+    }
+    await page.locator(".ai-inspector-tabs [role=tab]").first().click();
+    if (await page.locator(".ai-market-open-trading").count() !== 1) throw new Error("Default market overview should expose a Trading workspace shortcut");
+    await page.screenshot({ path: path.join(artifactDir, "ai-research-kline.png"), fullPage: false });
+    const skillTool = page.locator(".ai-tool-trace").filter({ hasText: "已读取交易哲学 Skill" }).first();
+    if (await skillTool.count() !== 1) throw new Error("Preview should include a completed Skill tool result");
+    if (await skillTool.getAttribute("open") === null) await skillTool.locator(":scope > summary").click();
+    await skillTool.locator(".ai-tool-open-artifact").click();
+    if (!/trading-philosophy/.test(await page.locator(".ai-research-inspector").textContent() || "")
+      || !/Never promise profits/.test(await page.locator(".ai-research-inspector").textContent() || "")) {
+      throw new Error("Skill artifacts should render the returned name and rules, not an empty tool payload");
+    }
+    const strategyTool = page.locator(".ai-tool-trace").filter({ hasText: "BTC 确认趋势" }).first();
+     if (await strategyTool.count() !== 1) throw new Error("Preview should include a completed strategy creation tool result");
+     if (await strategyTool.getAttribute("open") === null) await strategyTool.locator(":scope > summary").click();
+     if (await strategyTool.locator(".ai-tool-code-preview").count() !== 1 || !/def on_bar/.test(await strategyTool.locator(".ai-tool-code-preview").textContent() || "")) throw new Error("Strategy creation should expose returned source as a code block");
+     await strategyTool.locator(".ai-tool-open-artifact").click();
+      await page.waitForSelector(".ai-inspector-code-surface .systematic-python-editor", { timeout: 30_000 });
+     if (await page.locator(".ai-inspector-code-surface .systematic-python-editor").count() !== 1) throw new Error("Opening a strategy artifact should render its read-only code editor surface");
+      const evidenceReference = page.locator(".ai-evidence-references button").filter({ hasText: "BTC 确认趋势" });
+      if (await evidenceReference.count() !== 1) throw new Error("Assistant answers should expose reverse evidence references");
+      if (await page.locator(".ai-evidence-marker").count() !== 0) throw new Error("Inline paragraph evidence markers should be removed");
+      await evidenceReference.click();
+      if (!/BTC 确认趋势/.test(await page.locator(".ai-research-inspector").textContent() || "")) throw new Error("Evidence references should open the matching strategy artifact");
+      const backReference = page.locator(".ai-artifact-reference");
+      if (await backReference.count() !== 1) throw new Error("Inspector evidence should expose a back-reference to its answer");
+      await backReference.click();
+      if (await page.locator(".ai-message.ai-message-located").count() !== 1) throw new Error("Back-reference should locate and highlight the source answer");
+     await page.locator(".ai-inspector-shortcut[aria-label*='市场情报']").click();
+    if (await page.locator(".ai-intelligence-workspace").count() !== 1 || await page.locator(".ai-intelligence-nav button").count() !== 5) throw new Error("Market intelligence should expose five compact right-panel views");
+    const intelligenceLabels = await page.locator(".ai-intelligence-nav button").allTextContents();
+    if (!intelligenceLabels.some((label) => label.includes("新闻")) || !intelligenceLabels.some((label) => label.includes("衍生品"))) throw new Error(`Localized intelligence tabs are missing: ${intelligenceLabels.join("|")}`);
+    await page.locator(".ai-intelligence-nav button").filter({ hasText: "情绪" }).click();
+     const calendarScroll = page.locator(".ai-intel-calendar-scroll");
+     if (await calendarScroll.count() > 0) {
+       const geometry = await calendarScroll.evaluate((node) => ({ overflowX: getComputedStyle(node).overflowX, scrollWidth: node.scrollWidth, width: node.clientWidth }));
+       if (geometry.overflowX !== "auto" || geometry.scrollWidth <= geometry.width) throw new Error(`Economic calendar needs an explicit horizontal scroller: ${JSON.stringify(geometry)}`);
+     }
+     const calendarScrollerSource = await page.locator(".ai-intel-calendar-scroll").count();
+     if (calendarScrollerSource > 1) throw new Error("Economic calendar should expose one horizontal scroll container");
+     const railLabels = page.locator(".ai-inspector-sections button span");
+    for (let index = 0; index < await railLabels.count(); index += 1) {
+      const labelBox = await railLabels.nth(index).boundingBox();
+      if (labelBox && labelBox.width > 2 && labelBox.height > 2) throw new Error("Inspector rail labels should be tooltip-only");
+    }
+    const intelligenceShortcut = page.locator(".ai-inspector-shortcut[aria-label*='市场情报']");
+     await intelligenceShortcut.click();
+     if (await page.locator(".ai-research-inspector").count() !== 1 || await page.locator(".ai-intelligence-workspace").count() !== 1) throw new Error("Center rail intelligence shortcut should open the matching inspector section");
+     const radarShortcut = page.locator(".ai-inspector-shortcut[aria-label*='市场雷达']");
+     await radarShortcut.click();
+     if (await page.locator(".ai-radar-panel").count() !== 1 || await page.locator(".ai-radar-tabs button").count() !== 5) throw new Error("Center rail Market Radar shortcut should open five compact radar tabs");
+     if (await page.locator(".ai-inspector-sections").count() !== 0) throw new Error("The inspector must not duplicate center-rail section controls");
+     await intelligenceShortcut.click();
+      const expandIntelligence = page.locator(".ai-intelligence-expand");
+    if (await expandIntelligence.count() !== 1 || await expandIntelligence.isDisabled()) throw new Error("Full Market Intelligence action is missing");
+    await expandIntelligence.click();
+    await page.waitForSelector(".intelligence-page", { timeout: 30_000 });
+    await page.locator(".intelligence-tabs button").nth(1).click();
+    await page.waitForSelector(".intelligence-calendar-event-table", { timeout: 30_000 });
+    await page.reload({ waitUntil: "networkidle", timeout: 60_000 });
+    await page.waitForSelector(".ai-research-shell", { timeout: 30_000 });
+    await page.locator(".ai-inspector-shortcut[aria-label*='研究标签']").click();
 
-  const leftResize = page.locator(".ai-panel-resize-left");
-  const leftResizeBox = await leftResize.boundingBox();
-  if (!leftResizeBox) throw new Error("AI panel left resize edge is missing");
-  await page.mouse.move(leftResizeBox.x + 2, leftResizeBox.y + leftResizeBox.height / 2);
-  await page.mouse.down();
-  await page.mouse.move(leftResizeBox.x - 80, leftResizeBox.y + leftResizeBox.height / 2, { steps: 4 });
-  await page.mouse.up();
-  const widthResized = await readAiPreviewState(page);
-  if (!widthResized.panel || widthResized.panel.width < sessionsClosed.panel.width + 70) {
-    throw new Error(`AI panel width did not resize from its edge: ${JSON.stringify({ sessionsClosed, widthResized })}`);
-  }
+    const sessionResize = page.locator(".ai-column-resize-sessions");
+    const resizeStart = await sessionResize.boundingBox();
+    if (!resizeStart) throw new Error("Session column resize affordance is unavailable");
+    await page.mouse.move(resizeStart.x + 3, resizeStart.y + 60);
+    await page.mouse.down();
+    await page.mouse.move(resizeStart.x + 44, resizeStart.y + 60);
+    await page.mouse.up();
+    await page.waitForFunction(() => document.querySelector(".ai-research-shell")?.getAttribute("style")?.includes("--ai-sessions-width: 293px"));
+    const resizedColumns = await page.evaluate(() => document.querySelector(".ai-research-shell")?.getAttribute("style") || "");
+    if (!resizedColumns.includes("--ai-sessions-width: 293px")) throw new Error("Session resize drag should update the workspace width");
 
-  const topResize = page.locator(".ai-panel-resize-top");
-  const topResizeBox = await topResize.boundingBox();
-  if (!topResizeBox) throw new Error("AI panel top resize edge is missing");
-  await page.mouse.move(topResizeBox.x + topResizeBox.width / 2, topResizeBox.y + 2);
-  await page.mouse.down();
-  await page.mouse.move(topResizeBox.x + topResizeBox.width / 2, topResizeBox.y + 62, { steps: 4 });
-  await page.mouse.up();
-  const heightResized = await readAiPreviewState(page);
-  if (!heightResized.panel || heightResized.panel.height > widthResized.panel.height - 50) {
-    throw new Error(`AI panel height did not resize from its edge: ${JSON.stringify({ widthResized, heightResized })}`);
-  }
+    const contextIsolation = await page.evaluate(async () => {
+      const { applyAiEvent } = await import("/src/ui/AiMessageProcess.tsx");
+      let messages = [{ id: "assistant-completed", role: "assistant", text: "done", tools: [], completed: true }];
+      applyAiEvent({
+        type: "contextUsage",
+        sessionId: "session-context",
+        usage: { usedTokens: 42, measuredAt: 1, usedSource: "clineMessages" }
+      }, () => {}, (update) => {
+        messages = typeof update === "function" ? update(messages) : update;
+      });
+      return messages[0]?.contextUsage ?? null;
+    });
+    if (contextIsolation !== null) throw new Error(`Session context should not mutate an arbitrary assistant turn: ${JSON.stringify(contextIsolation)}`);
 
-  await page.locator(".ai-send.stop").click();
-  await page.waitForTimeout(120);
-  const stopped = await readAiPreviewState(page);
-  if (stopped.stopButton || !stopped.sendButton) {
-    throw new Error(`AI stop did not switch back to send button: ${JSON.stringify(stopped)}`);
-  }
-  if (!/已停止/.test(stopped.lastStatusText) || !/已停止/.test(stopped.floatLabel) || !/已停止/.test(stopped.headerText)) {
-    throw new Error(`AI stop did not update visible status: ${JSON.stringify(stopped)}`);
-  }
-  if (stopped.sendButtonDisabled !== true) {
-    throw new Error(`AI send button should be disabled with empty input after stop: ${JSON.stringify(stopped)}`);
-  }
+    const contextTrigger = page.locator(".ai-context-meter-trigger");
+    await contextTrigger.click();
+    if (await page.locator(".ai-context-popover").count() !== 1 || !/系统|System/.test(await page.locator(".ai-context-popover").textContent() || "") || !/最近一次|latest/i.test(await page.locator(".ai-context-popover").textContent() || "")) {
+      throw new Error("Context meter should open an estimated breakdown popover");
+    }
+    await page.keyboard.press("Escape");
 
-  await page.locator(".ai-input-row textarea").fill("检查 BTC 当前风险");
-  const readyToSend = await readAiPreviewState(page);
-  if (!readyToSend.sendButton || readyToSend.sendButtonDisabled) {
-    throw new Error(`AI send button should enable when input has text after stop: ${JSON.stringify(readyToSend)}`);
-  }
+    const commandComposer = page.locator(".ai-composer textarea");
+    await commandComposer.fill("/mar");
+    if (await page.locator(".ai-command-palette").count() !== 1 || await page.locator(".ai-command-palette button").count() === 0) {
+      throw new Error("Slash command palette should expose research commands and Skills");
+    }
+    await commandComposer.press("ArrowDown");
+    await commandComposer.press("Enter");
+    if ((await commandComposer.inputValue()).startsWith("/")) {
+      throw new Error("Selecting a research command should insert an editable prompt starter");
+    }
 
-  const actionableConsoleErrors = consoleErrors.filter((text) => !/WebSocket|ERR_|Failed to load resource/i.test(text));
-  if (pageErrors.length > 0 || actionableConsoleErrors.length > 0) {
-    throw new Error(`AI preview errors: ${JSON.stringify({ pageErrors, consoleErrors: actionableConsoleErrors })}`);
-  }
+    const taskToggle = page.locator(".ai-task-dock > button");
+    await taskToggle.click();
+    if (await taskToggle.getAttribute("aria-expanded") !== "true"
+      || await page.locator(".ai-task-dock p").count() !== 3
+      || await page.locator(".ai-task-dock p.in_progress").count() !== 1) {
+      throw new Error("Task dock should expand into structured todo states");
+    }
 
-  await browser.close();
-  process.stdout.write(
-    `[smoke] ai preview ok: messages=${initial.messageCount}, tools=${initial.toolCount}, stopped="${stopped.lastStatusText}"\n`
-  );
+    const queueToggle = page.locator(".ai-queue-dock > button");
+    await queueToggle.click();
+    const queueItem = page.locator(".ai-queue-item").first();
+    if (await queueToggle.getAttribute("aria-expanded") !== "true" || !await queueItem.isVisible()) {
+      throw new Error("Queued prompts should expand from the composer dock");
+    }
+    await queueItem.locator("button").first().click();
+    const queueEditor = queueItem.locator("input");
+    if (!await queueEditor.isVisible() || await queueEditor.inputValue() !== "补充比较 BTC 与 ETH 的资金费率结构。") {
+      throw new Error("Queued prompt should support inline editing");
+    }
+
+    await page.locator(".ai-send.stop").click();
+    await page.waitForTimeout(60);
+    if (await page.locator(".ai-send.stop").count() !== 0
+      || await page.locator(".ai-queue-dock").count() !== 0
+      || !/已停止/.test(await page.locator(".ai-panel-head").textContent() || "")) {
+      throw new Error("Stop should end streaming and clear pending prompts");
+    }
+    const composer = page.locator(".ai-composer textarea");
+    await composer.fill("检查 BTC 当前风险");
+    if (await page.locator(".ai-send").isDisabled()) {
+      throw new Error("Composer send action should enable when a stopped session has a draft");
+    }
+
+    const actionableConsoleErrors = consoleErrors.filter((text) => !/WebSocket|ERR_|Failed to load resource/i.test(text));
+    if (actionableConsoleErrors.length || pageErrors.length) {
+      throw new Error(`AI Research preview logged errors: ${JSON.stringify({ actionableConsoleErrors, pageErrors })}`);
+    }
+
+    console.log(JSON.stringify({ ok: true, baseUrl, viewports: viewports.map(({ width, height }) => `${width}x${height}`) }));
+    await page.close();
+  } finally {
+    await browser.close();
+  }
 }
 
-async function readAiPreviewState(page) {
-  return page.evaluate(() => {
-    const rect = (selector) => {
-      const item = document.querySelector(selector);
-      const box = item?.getBoundingClientRect();
-      return box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null;
-    };
-    const stopButton = document.querySelector(".ai-send.stop");
-    const sendButton = document.querySelector(".ai-send:not(.stop)");
-    const stopButtonBox = stopButton?.getBoundingClientRect();
-    const stopButtonStyle = stopButton ? getComputedStyle(stopButton) : null;
-    return {
-      panel: rect(".ai-panel"),
-      panelMain: rect(".ai-panel-main"),
-      sessionSidebar: rect(".ai-session-sidebar"),
-      float: rect(".ai-float"),
-      stopButton: Boolean(stopButton),
-      newSessionButton: Boolean(document.querySelector('.ai-panel-head button[title="新建会话"]')),
-      sendButton: Boolean(sendButton),
-      sendButtonDisabled: sendButton?.disabled ?? null,
-      stopButtonRect: stopButtonBox ? { width: stopButtonBox.width, height: stopButtonBox.height } : { width: 0, height: 0 },
-      stopButtonRadius: stopButtonStyle ? parseFloat(stopButtonStyle.borderTopLeftRadius) || 0 : 0,
-      headerText: document.querySelector(".ai-panel-head")?.textContent?.trim() || "",
-      providerText: document.querySelector(".ai-provider")?.textContent?.trim() || "",
-      floatText: document.querySelector(".ai-float")?.textContent?.trim() || "",
-      floatLabel: document.querySelector(".ai-float")?.getAttribute("aria-label") || "",
-      lastStatusText: Array.from(document.querySelectorAll(".ai-message-status")).at(-1)?.textContent?.trim() || "",
-      reasoningVisible: Boolean(document.querySelector(".ai-reasoning")),
-      allowedToolVisible: Boolean(document.querySelector(".ai-tool-trace.tool-done")),
-      resultToolVisible: Boolean(document.querySelector(".ai-tool-trace.tool-done .ai-tool-panel")),
-      blockedToolVisible: Boolean(document.querySelector(".ai-tool-trace.tool-blocked")),
-      markdownListVisible: Boolean(document.querySelector(".ai-markdown ul li")),
-      markdownTableVisible: Boolean(document.querySelector(".ai-markdown table th")),
-      markdownCodeVisible: Boolean(document.querySelector(".ai-markdown pre code")),
-      composerPermissionVisible: Boolean(document.querySelector('.ai-composer-options [role="combobox"][aria-label="AI 权限"]')),
-      composerPermissionText: document.querySelector('.ai-composer-options [role="combobox"][aria-label="AI 权限"] .terminal-select-value')?.textContent?.trim() || "",
-      composerModelVisible: Boolean(document.querySelector('.ai-composer-options [role="combobox"][aria-label="AI 模型"]')),
-      composerReasoningVisible: Boolean(document.querySelector('.ai-composer-options [role="combobox"][aria-label="思考深度"]')),
-      nativeSelectCount: document.querySelectorAll("select").length,
-      approvalCardVisible: Boolean(document.querySelector(".ai-approval-card.approval-pending")),
-      messageCount: document.querySelectorAll(".ai-message").length,
-      toolCount: document.querySelectorAll(".ai-tool").length,
-      bodyOverflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
-      bodyOverflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight
-    };
-  });
-}
-
-main().catch((error) => {
-  process.stderr.write(`[smoke] ai preview failed: ${error?.message || String(error)}\n`);
-  process.exit(1);
-});
+await main();

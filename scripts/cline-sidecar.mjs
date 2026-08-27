@@ -44,9 +44,16 @@ let AgentTeamsRuntime;
 let createAgentTeamsTools;
 let createSpawnAgentTool;
 let createTool;
+let getCurrentContextSize;
+let getModelsForProvider;
 const AI_EVENT_DEBUG = process.env.DESIC_AI_EVENT_DEBUG === "1";
-// Match DSH's default policy: two retries after the first provider attempt.
-const PROVIDER_NETWORK_MAX_ATTEMPTS = 3;
+// Match DSH's provider retry policy: five retries after the first attempt,
+// exponential backoff from 500ms to 10s, and 10% downward jitter.
+const PROVIDER_NETWORK_MAX_RETRIES = 5;
+const PROVIDER_NETWORK_MAX_ATTEMPTS = PROVIDER_NETWORK_MAX_RETRIES + 1;
+const PROVIDER_NETWORK_INITIAL_DELAY_MS = 500;
+const PROVIDER_NETWORK_MAX_DELAY_MS = 10_000;
+const PROVIDER_NETWORK_JITTER_RATIO = 0.1;
 // Bound continuous provider inactivity, not total turn duration. Concrete HTTP
 // failures surface immediately; a healthy long stream can run indefinitely as
 // long as Cline keeps publishing activity.
@@ -58,23 +65,55 @@ async function loadClineSdk() {
   if (!sdkPromise) {
     registerDesicCodexCliHandler();
     registerDesicClaudeCliHandler();
-    sdkPromise = import("@cline/sdk").then((sdk) => {
+    sdkPromise = Promise.all([import("@cline/sdk"), import("@cline/core"), import("@cline/llms")]).then(([sdk, core, llms]) => {
       AgentTeamsRuntime = sdk.AgentTeamsRuntime;
       createAgentTeamsTools = sdk.createAgentTeamsTools;
       createSpawnAgentTool = sdk.createSpawnAgentTool;
       createTool = sdk.createTool;
+      getCurrentContextSize = core.getCurrentContextSize;
+      getModelsForProvider = llms.getModelsForProvider;
       return sdk;
     });
   }
   return sdkPromise;
 }
 
+const diagnosticSecrets = new Set();
+
+function rememberDiagnosticSecret(value) {
+  const secret = typeof value === "string" ? value.trim() : "";
+  if (secret.length >= 6) diagnosticSecrets.add(secret);
+}
+
+function redactKnownDiagnosticSecrets(value) {
+  let text = String(value ?? "");
+  for (const secret of diagnosticSecrets) text = text.split(secret).join("[redacted]");
+  return text;
+}
+
+function sanitizeDiagnosticText(value) {
+  return redactKnownDiagnosticSecrets(value)
+    .replace(/\bsk-[A-Za-z0-9_-]{8,}\b/g, "[API key redacted]")
+    .replace(/(authorization\s*[:=]\s*bearer\s+)[^\s"']+/gi, "$1[redacted]")
+    .replace(/((?:api[_-]?key|access[_-]?token|secret|passphrase|password)\s*[=:]\s*)[^\s,;"'&}]+/gi, "$1[redacted]")
+    .replace(/([?&](?:api[_-]?key|access[_-]?token|token|secret)=)[^&\s]+/gi, "$1[redacted]");
+}
+
 function emit(event) {
-  process.stdout.write(`${JSON.stringify(event)}\n`);
+  const safeEvent = event && typeof event === "object"
+    && ["error", "pendingPromptError", "pendingPromptCommandResult", "status"].includes(event.type)
+    && typeof event.message === "string"
+    ? { ...event, message: sanitizeDiagnosticText(event.message) }
+    : event;
+  const payload = JSON.stringify(safeEvent, (_key, value) =>
+    typeof value === "string" ? redactKnownDiagnosticSecrets(value) : value
+  );
+  process.stdout.write(`${payload}\n`);
 }
 
 function isExpectedAgentAbort(error) {
   const message = String(error?.message || error || "");
+  if (/session_stop/i.test(message)) return true;
   if (!/AgentRuntimeAbortError|Run aborted|AbortError/i.test(message)) return false;
   const state = sessions.get(activeSessionId);
   return Boolean(state?.abortRequested || state?.cancelled || /AgentRuntimeAbortError|Run aborted/i.test(message));
@@ -82,7 +121,7 @@ function isExpectedAgentAbort(error) {
 
 function reportFatalProcessError(kind, error) {
   if (kind === "unhandledRejection" && isExpectedAgentAbort(error)) return;
-  const message = `${kind}: ${error?.stack || error?.message || String(error)}`;
+  const message = sanitizeDiagnosticText(`${kind}: ${error?.stack || error?.message || String(error)}`);
   try {
     emit({ type: "error", sessionId: activeSessionId, message });
   } catch {
@@ -98,7 +137,10 @@ process.on("unhandledRejection", (error) => reportFatalProcessError("unhandledRe
 function debugAiEvent(label, payload) {
   if (!AI_EVENT_DEBUG) return;
   try {
-    process.stderr.write(`[ai-event-debug] ${label} ${JSON.stringify(payload)}\n`);
+    const safePayload = JSON.stringify(payload, (_key, value) =>
+      typeof value === "string" ? redactKnownDiagnosticSecrets(value) : value
+    );
+    process.stderr.write(`[ai-event-debug] ${label} ${safePayload}\n`);
   } catch {
     process.stderr.write(`[ai-event-debug] ${label}\n`);
   }
@@ -214,8 +256,9 @@ function providerHttpError(response, body) {
   error.providerBody = detail;
   // The sidecar owns bounded retry policy. Do not let Cline's internal retry
   // loop hide a concrete provider response behind the outer request timeout.
-  error.isRetryable = false;
-  error.retryable = false;
+  const retryableStatus = status === 408 || status === 409 || status === 429 || status >= 500 && status <= 599;
+  error.isRetryable = retryableStatus;
+  error.retryable = retryableStatus;
   return error;
 }
 
@@ -313,6 +356,11 @@ function createProviderFetch(config, reasoningEffort, baseFetch = globalThis.fet
   };
 }
 
+const DEFAULT_CONTEXT_WINDOW = 256_000;
+const CONTEXT_COMPACTION_THRESHOLD = 0.9;
+const CONTEXT_COMPACTION_RESERVE_TOKENS = 16_384;
+const CONTEXT_COMPACTION_PRESERVE_TOKENS = 32_768;
+
 function knownModelsFor(config) {
   const model = String(config.model || "").trim();
   if (!model) return undefined;
@@ -320,12 +368,29 @@ function knownModelsFor(config) {
     [model]: {
       id: model,
       name: model,
-      contextWindow: 163840,
-      maxInputTokens: 163840,
+      contextWindow: positiveIntConfig(config.contextWindow, DEFAULT_CONTEXT_WINDOW),
+      maxInputTokens: positiveIntConfig(config.contextWindow, DEFAULT_CONTEXT_WINDOW),
       maxTokens: 32768,
       capabilities: ["tools", "reasoning", "temperature", "structured_output"]
     }
   };
+}
+
+async function catalogContextWindowFor(config) {
+  const providerId = normalizeProviderId(config);
+  const modelId = String(config.model || "").trim();
+  if (!modelId) return { contextWindow: DEFAULT_CONTEXT_WINDOW, contextWindowSource: "fallback" };
+  if (typeof getModelsForProvider === "function") {
+    const models = await getModelsForProvider(providerId).catch(() => null);
+    const contextWindow = models?.[modelId]?.contextWindow;
+    if (Number.isFinite(contextWindow) && contextWindow > 0) {
+      return { contextWindow, contextWindowSource: "clineModelCatalog" };
+    }
+  }
+  const configured = optionalPositiveIntConfig(config.contextWindow);
+  return configured
+    ? { contextWindow: configured, contextWindowSource: "customModelConfig" }
+    : { contextWindow: DEFAULT_CONTEXT_WINDOW, contextWindowSource: "fallback" };
 }
 
 function boolConfig(value, fallback) {
@@ -393,19 +458,21 @@ function isProviderRetryNotice(value) {
 
 function isTransientAiNetworkError(error) {
   const detail = providerErrorDetail(error);
-  if (!detail || isProviderHttpResponseError(error)) return false;
+  if (!detail) return false;
   if (/\b(?:401|403)\b|invalid[_ -]?credential|invalid api key|insufficient[_ -]?quota|quota exceeded|out of budget|billing|context (?:window|length)|too (?:large|long) for (?:this |the )?model/i.test(detail)) {
     return false;
   }
   const statusMatch = detail.match(/\bstatus[=: ]+(\d{3})\b|\bHTTP\s+(\d{3})\b/i);
-  const status = Number(statusMatch?.[1] || statusMatch?.[2] || 0);
+  const status = Number(error?.status || statusMatch?.[1] || statusMatch?.[2] || 0);
   if ([408, 409, 429].includes(status) || status >= 500 && status <= 599) return true;
-  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bECONNABORTED\b|\bETIMEDOUT\b|\bEPIPE\b|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|SocketError|other side closed|fetch failed|socket hang up|socket connection (?:was )?closed|stream disconnected|stream ended before|premature (?:stream|close)|connection (?:closed|lost|reset|refused)|upstream.?connect|servers are currently overloaded|service unavailable|temporarily unavailable|overloaded|rate.?limit|too many requests|\b(?:408|409|429|500|502|503|504|524)\b|timed? out|terminated/i.test(detail);
+  if (/^reconnecting(?:\.{3})?\s+\d+\/\d+$/i.test(detail)) return true;
+  if (isProviderHttpResponseError(error)) return false;
+  return /\bENOTFOUND\b|\bEAI_AGAIN\b|\bECONNRESET\b|\bECONNREFUSED\b|\bECONNABORTED\b|\bETIMEDOUT\b|\bEPIPE\b|UND_ERR_CONNECT_TIMEOUT|UND_ERR_SOCKET|SocketError|other side closed|fetch failed|socket hang up|socket connection (?:was )?closed|stream disconnected|stream ended before|premature (?:stream|close)|connection (?:closed|lost|reset|refused)|upstream.?connect|servers are currently overloaded|service unavailable|temporarily unavailable|overloaded|rate.?limit|too many requests|\b(?:408|409|429|500|502|503|504|524)\b|timed? out|terminated|network/i.test(detail);
 }
 
 function networkRetryDelay(attempt) {
-  const base = Math.min(8_000, 500 * (2 ** Math.max(0, attempt - 1)));
-  return Math.round(base * (1 - Math.random() * 0.1));
+  const base = Math.min(PROVIDER_NETWORK_MAX_DELAY_MS, PROVIDER_NETWORK_INITIAL_DELAY_MS * (2 ** Math.max(0, attempt - 1)));
+  return Math.round(base * (1 - Math.random() * PROVIDER_NETWORK_JITTER_RATIO));
 }
 
 function wait(ms) {
@@ -472,9 +539,13 @@ async function runProviderNetworkRetry({ sessionId, state, operation, abort, env
   let lastError = "";
   for (let attempt = 1; attempt <= PROVIDER_NETWORK_MAX_ATTEMPTS; attempt += 1) {
     if (state.abortController?.signal.aborted || state.cancelled) {
-      throw new Error("AI 请求已取消");
+      const cancelledError = new Error("AI 请求已取消");
+      cancelledError.name = "AgentRuntimeAbortError";
+      cancelledError.code = "session_stop";
+      throw cancelledError;
     }
     lastError = "";
+    state.abortRequested = false;
     let result;
     let rejectProviderError;
     const providerError = new Promise((_, reject) => {
@@ -493,12 +564,9 @@ async function runProviderNetworkRetry({ sessionId, state, operation, abort, env
         "Request timed out."
       );
     } catch (error) {
-      if (error?.message === "Request timed out.") {
-        await abortProviderAttempt(abort, state);
-        return requestTimedOutResult(envelope, state.retryableNetworkError);
-      }
-      lastError = providerErrorDetail(error);
-      if (!isTransientAiNetworkError(error)) throw error;
+      const timedOut = error?.message === "Request timed out.";
+      if (!timedOut && !isTransientAiNetworkError(error)) throw error;
+      lastError = timedOut ? "Request timed out." : providerErrorDetail(error);
       const failedResult = { finishReason: "error", errorMessage: lastError, text: lastError };
       result = envelope ? { result: failedResult } : failedResult;
     } finally {
@@ -507,7 +575,11 @@ async function runProviderNetworkRetry({ sessionId, state, operation, abort, env
     const resultValue = result?.result || result;
     const finishReason = String(resultValue?.finishReason || resultValue?.status || "").toLowerCase();
     const resultError = resultValue?.errorMessage || resultValue?.error || resultText(result);
-    const retryableError = lastError || (isTransientAiNetworkError(resultError) ? resultError : "");
+    const resultIsFailure = ["failed", "error"].includes(finishReason);
+    const resultRetryableError = resultIsFailure && /^reconnecting(?:\.{3})?\s+\d+\/\d+$/i.test(String(resultError || "").trim())
+      ? "Provider 返回重连中状态但未恢复，属于瞬态网络连接失败"
+      : isTransientAiNetworkError(resultError) ? resultError : "";
+    const retryableError = lastError || resultRetryableError;
     if (!retryableError) {
       state.retryableNetworkError = "";
       return result;
@@ -516,7 +588,8 @@ async function runProviderNetworkRetry({ sessionId, state, operation, abort, env
     // turn could duplicate side effects. Surface the transport failure instead.
     if (state.hasProviderProgress) {
       await abortProviderAttempt(abort, state);
-      return result;
+      const progressFailure = { finishReason: "error", errorMessage: retryableError, text: retryableError };
+      return envelope ? { result: progressFailure } : progressFailure;
     }
     if (attempt >= PROVIDER_NETWORK_MAX_ATTEMPTS) {
       await abortProviderAttempt(abort, state);
@@ -528,7 +601,7 @@ async function runProviderNetworkRetry({ sessionId, state, operation, abort, env
       type: "status",
       sessionId,
       status: "retrying",
-      message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_ATTEMPTS - 1}）`
+      message: `AI 网络连接失败，${delay}ms 后重试（${attempt}/${PROVIDER_NETWORK_MAX_RETRIES}）`
     });
     state.retryableNetworkError = retryableError;
     state.hasProviderProgress = false;
@@ -863,6 +936,14 @@ function toProviderToolReferenceValue(value) {
 function resultText(result) {
   const value = result?.result || result;
   return value?.text || value?.outputText || "";
+}
+
+function latestUserText(snapshot) {
+  const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.role === "user") return textFromMessage(messages[index]);
+  }
+  return "";
 }
 
 function reduceAssistantTextLifecycle(state, event) {
@@ -2649,7 +2730,40 @@ function codexReasoningDeltaFields(event) {
   return {};
 }
 
+function withPendingPromptSession(prompts, sessionId) {
+  return (Array.isArray(prompts) ? prompts : []).map((prompt) => ({ ...prompt, sessionId }));
+}
+
 function mapCoreEvent(sessionId, event) {
+  if (event?.type === "pending_prompts") {
+    return {
+      type: "pendingPrompts",
+      sessionId,
+      prompts: withPendingPromptSession(event.payload?.prompts, sessionId)
+    };
+  }
+  if (event?.type === "pending_prompt_submitted") {
+    const payload = event.payload || {};
+    return {
+      type: "pendingPromptSubmitted",
+      sessionId,
+      prompt: {
+        sessionId,
+        id: String(payload.id || ""),
+        prompt: String(payload.prompt || ""),
+        delivery: payload.delivery === "steer" ? "steer" : "queue",
+        attachmentCount: Number(payload.attachmentCount || 0)
+      }
+    };
+  }
+  if (event?.type === "run-started") {
+    return {
+      type: "runStarted",
+      sessionId,
+      prompt: latestUserText(event.snapshot),
+      startedAt: Date.now()
+    };
+  }
   if (event?.type === "assistant-text-delta") {
     debugAiEvent("assistant-text-delta", { channel: "turn-text", preview: previewText(event.text) });
     return event.text ? { type: "turnText", sessionId, mode: "delta", content: event.text, source: "assistant-text-delta" } : null;
@@ -2732,6 +2846,14 @@ function mapCoreEvent(sessionId, event) {
     const nestedAgentId = agentEvent?.subAgentId || agentEvent?.agentId || event.payload?.subAgentId || event.payload?.agentId;
     const nestedParentAgentId = agentEvent?.parentAgentId || event.payload?.parentAgentId;
     const nestedContext = { agentId: nestedAgentId, parentAgentId: nestedParentAgentId };
+    if (agentEvent?.type === "run-started" && !nestedAgentId) {
+      return {
+        type: "runStarted",
+        sessionId,
+        prompt: latestUserText(agentEvent.snapshot),
+        startedAt: Date.now()
+      };
+    }
     if (agentEvent?.type === "assistant-text-delta") {
       return agentEvent.text ? { type: "turnText", sessionId, mode: "delta", content: agentEvent.text, source: agentEvent.type } : null;
     }
@@ -2911,11 +3033,41 @@ function bindConfiguredAgentToolEvent(event, config = {}) {
   };
 }
 
+function consumeExpectedTurnStart(expectedTurnStarts, prompt) {
+  const exactPrompt = String(prompt || "");
+  const candidates = expectedTurnStarts
+    .map((item, index) => ({ item, index }))
+    .filter(({ item }) => exactPrompt ? item.prompt === exactPrompt : expectedTurnStarts.length === 1);
+  if (candidates.length === 0) return null;
+  const steerCandidates = candidates.filter(({ item }) => item.delivery === "steer");
+  const selected = (steerCandidates.length > 0 ? steerCandidates : candidates)
+    .reduce((latest, candidate) => candidate.item.submittedAt >= latest.item.submittedAt ? candidate : latest);
+  const duplicateIndexes = new Set(candidates.map(({ index }) => index));
+  const next = expectedTurnStarts.filter((_, index) => !duplicateIndexes.has(index));
+  expectedTurnStarts.splice(0, expectedTurnStarts.length, ...next);
+  return selected.item;
+}
+
 function emitMappedCoreEvent(state, sessionId, config, event) {
   if (!state.cancelled) state.lastProviderActivityAt = Date.now();
   const mapped = bindConfiguredAgentToolEvent(mapCoreEvent(sessionId, event), config);
   if (!mapped || state.cancelled) return;
   const policyMapped = annotateToolEvent(mapped, config);
+  if (policyMapped.type === "pendingPromptSubmitted") {
+    const submitted = policyMapped.prompt;
+    const submittedPrompt = String(submitted?.prompt || "");
+    const submittedDelivery = submitted?.delivery === "steer" ? "steer" : "queue";
+    const candidates = state.expectedTurnStarts.filter((item) =>
+      item.prompt === submittedPrompt && item.delivery === submittedDelivery
+    );
+    const unbound = candidates.filter((item) => !item.promptId);
+    const expected = (unbound.length > 0 ? unbound : candidates)
+      .reduce((latest, item) => !latest || item.submittedAt >= latest.submittedAt ? item : latest, null);
+    if (expected && submitted?.id) {
+      expected.promptId = submitted.id;
+      policyMapped.prompt = { ...submitted, localMessageId: expected.localMessageId };
+    }
+  }
   const delegated = String(config.agentRole || "main") !== "main";
   if (delegated && [
     "delta",
@@ -2923,12 +3075,36 @@ function emitMappedCoreEvent(state, sessionId, config, event) {
     "reasoningSnapshot",
     "iterationStart",
     "iterationEnd",
+    "runStarted",
     "finalText",
     "usage",
     "status",
     "error",
     "done"
   ].includes(policyMapped.type)) {
+    return;
+  }
+  if (policyMapped.type === "runStarted") {
+    if (!state.initialRunStartedSeen) {
+      state.initialRunStartedSeen = true;
+      return;
+    }
+    const prompt = String(policyMapped.prompt || "");
+    const expected = consumeExpectedTurnStart(state.expectedTurnStarts, prompt);
+    if (!expected) return;
+    state.currentPrompt = expected.prompt;
+    state.pendingTurnText = "";
+    state.iterationReasoningStreamed = false;
+    state.finalTextEmitted = false;
+    emit({
+      type: "turnStarted",
+      sessionId,
+      prompt: prompt || expected.prompt,
+      promptId: expected.promptId,
+      localMessageId: expected.localMessageId,
+      delivery: expected.delivery,
+      startedAt: policyMapped.startedAt || Date.now()
+    });
     return;
   }
   if (policyMapped.type === "status" && isProviderRetryNotice(policyMapped.message)) {
@@ -3086,6 +3262,16 @@ function createRuntimeConfig(
     // backend validation, and explicit iteration limits remain independent.
     execution: { loopDetection: false },
     checkpoint: { enabled: false },
+    // Cline compacts only the next provider request. The persistent Desic audit
+    // transcript remains intact; it is never rewritten or replaced locally.
+    compaction: {
+      enabled: true,
+      strategy: "basic",
+      thresholdRatio: CONTEXT_COMPACTION_THRESHOLD,
+      reserveTokens: CONTEXT_COMPACTION_RESERVE_TOKENS,
+      preserveRecentTokens: CONTEXT_COMPACTION_PRESERVE_TOKENS,
+      maxInputTokens: positiveIntConfig(command.config.contextWindow, DEFAULT_CONTEXT_WINDOW)
+    },
     extraTools: tools
   };
 }
@@ -3680,13 +3866,190 @@ function createDesicTeamTools(sessionId, command, state, runtimeSessionId = toCl
 }
 
 function normalizeCommand(input) {
+  rememberDiagnosticSecret(input?.config?.apiKey);
   const type = input.type || "sendMessage";
   return {
     type,
     sessionId: input.sessionId || `cline-${Date.now()}`,
     config: input.config || {},
-    messages: Array.isArray(input.messages) ? input.messages : []
+    messages: Array.isArray(input.messages) ? input.messages : [],
+    delivery: input.delivery === "steer" ? "steer" : input.delivery === "queue" ? "queue" : undefined,
+    requestId: typeof input.requestId === "string" ? input.requestId : undefined,
+    promptId: typeof input.promptId === "string" ? input.promptId : undefined,
+    prompt: typeof input.prompt === "string" ? input.prompt : undefined
   };
+}
+
+async function emitPendingPromptSnapshot(cline, sessionId, runtimeSessionId) {
+  const prompts = await cline.pendingPrompts.list({ sessionId: runtimeSessionId });
+  emit({ type: "pendingPrompts", sessionId, prompts: withPendingPromptSession(prompts, sessionId) });
+  return prompts;
+}
+
+function estimateContextBreakdown(messages) {
+  const list = Array.isArray(messages) ? messages : [];
+  const estimate = (value) => Math.max(0, Math.ceil(String(value ?? "").length / 4));
+  const systemTokens = list.filter((message) => message?.role === "system").reduce((sum, message) => sum + estimate(message.content), 0);
+  const toolsTokens = list.filter((message) => message?.role === "tool" || message?.type === "tool_use" || message?.type === "tool_result")
+    .reduce((sum, message) => sum + estimate(message.content || message.input || message.output), 0);
+  const conversationTokens = list.filter((message) => !["system", "tool"].includes(message?.role) && !["tool_use", "tool_result"].includes(message?.type))
+    .reduce((sum, message) => sum + estimate(message.content), 0);
+  return { systemTokens, toolsTokens, conversationTokens, estimated: true, breakdownSource: "heuristic" };
+}
+
+async function emitContextUsageSnapshot(cline, state, sessionId) {
+  if (typeof getCurrentContextSize !== "function") return;
+  const messages = await cline.readMessages(state.runtimeSessionId).catch(() => []);
+  const normalizedMessages = Array.isArray(messages) ? messages : [];
+  const usedTokens = getCurrentContextSize(normalizedMessages);
+  if (!Number.isFinite(usedTokens) || usedTokens < 0) return;
+  emit({
+    type: "contextUsage",
+    sessionId,
+    usage: {
+      usedTokens,
+      measuredAt: Date.now(),
+      usedSource: "clineMessages",
+      breakdown: estimateContextBreakdown(normalizedMessages),
+      ...(state.contextWindow
+        ? { contextWindow: state.contextWindow, contextWindowSource: state.contextWindowSource }
+        : {})
+    }
+  });
+}
+
+async function mutatePendingPrompts(cline, input) {
+  const command = normalizeCommand(input);
+  const sessionId = command.sessionId;
+  const runtimeSessionId = sessions.get(sessionId)?.runtimeSessionId || toClineRuntimeSessionId(sessionId);
+  const core = cline || await ensureCline();
+  if (command.type === "pendingPrompts") {
+    return emitPendingPromptSnapshot(core, sessionId, runtimeSessionId);
+  }
+  if (!command.promptId) throw new Error("pending prompt id is required");
+  const state = sessions.get(sessionId);
+  if (command.type === "updatePendingPrompt") {
+    const boundExpected = state?.expectedTurnStarts.filter((item) => item.promptId === command.promptId) ?? [];
+    const boundPrompts = new Set(boundExpected.map((item) => item.prompt));
+    const expectedItems = state?.expectedTurnStarts.filter((item) =>
+      item.promptId === command.promptId || boundPrompts.has(item.prompt)
+    ) ?? [];
+    const previousExpected = expectedItems.map((item) => ({ item, prompt: item.prompt, delivery: item.delivery }));
+    for (const expected of expectedItems) {
+      expected.prompt = command.prompt;
+      expected.delivery = command.delivery || expected.delivery;
+    }
+    try {
+      const result = await core.pendingPrompts.update({
+        sessionId: runtimeSessionId,
+        promptId: command.promptId,
+        prompt: command.prompt,
+        delivery: command.delivery
+      });
+      if (result?.updated === false) throw new Error(`pending prompt was not updated: ${command.promptId}`);
+    } catch (error) {
+      for (const previous of previousExpected) {
+        if (!state?.expectedTurnStarts.includes(previous.item)) continue;
+        previous.item.prompt = previous.prompt;
+        previous.item.delivery = previous.delivery;
+      }
+      throw error;
+    }
+  } else if (command.type === "deletePendingPrompt") {
+    const boundExpected = state?.expectedTurnStarts.filter((item) => item.promptId === command.promptId) ?? [];
+    const boundPrompts = new Set(boundExpected.map((item) => item.prompt));
+    const removedExpected = state?.expectedTurnStarts.filter((item) =>
+      item.promptId === command.promptId || boundPrompts.has(item.prompt)
+    ) ?? [];
+    if (state && removedExpected.length > 0) {
+      state.expectedTurnStarts = state.expectedTurnStarts.filter((item) => !removedExpected.includes(item));
+    }
+    try {
+      const result = await core.pendingPrompts.delete({ sessionId: runtimeSessionId, promptId: command.promptId });
+      if (result?.removed === false) throw new Error(`pending prompt was not removed: ${command.promptId}`);
+    } catch (error) {
+      if (state && removedExpected.length > 0) {
+        const retained = state.expectedTurnStarts.filter((item) => !removedExpected.includes(item));
+        state.expectedTurnStarts = [...retained, ...removedExpected]
+          .sort((left, right) => left.submittedAt - right.submittedAt);
+      }
+      throw error;
+    }
+  }
+  return emitPendingPromptSnapshot(core, sessionId, runtimeSessionId)
+    .catch((error) => emit({
+      type: "pendingPromptError",
+      sessionId,
+      prompt: command.prompt || "",
+      promptId: command.promptId,
+      delivery: command.delivery || "queue",
+      operation: "list",
+      message: error?.message || String(error)
+    }));
+}
+
+async function safelyMutatePendingPrompts(cline, input) {
+  const command = normalizeCommand(input);
+  try {
+    const prompts = await mutatePendingPrompts(cline, input);
+    if (command.requestId) {
+      emit({
+        type: "pendingPromptCommandResult",
+        sessionId: command.sessionId,
+        requestId: command.requestId,
+        ok: true,
+        ...(Array.isArray(prompts) ? { prompts: withPendingPromptSession(prompts, command.sessionId) } : {})
+      });
+    }
+  } catch (error) {
+    const expected = sessions.get(command.sessionId)?.expectedTurnStarts
+      .filter((item) => item.promptId === command.promptId)
+      .sort((left, right) => right.submittedAt - left.submittedAt)[0];
+    const operation = command.type === "pendingPrompts"
+      ? "list"
+      : command.type === "updatePendingPrompt" ? "update" : "delete";
+    const message = error?.message || String(error);
+    emit({
+      type: "pendingPromptError",
+      sessionId: command.sessionId,
+      prompt: command.prompt || expected?.prompt || "",
+      promptId: command.promptId,
+      localMessageId: expected?.localMessageId,
+      delivery: command.delivery || expected?.delivery || "queue",
+      operation,
+      message
+    });
+    if (command.requestId) {
+      emit({
+        type: "pendingPromptCommandResult",
+        sessionId: command.sessionId,
+        requestId: command.requestId,
+        ok: false,
+        message
+      });
+    }
+  }
+}
+
+async function generateTitle(cline, input) {
+  const command = normalizeCommand(input);
+  const requestId = command.requestId || `title-${Date.now()}`;
+  const runtimeSessionId = toClineRuntimeSessionId(`title-${requestId}`);
+  const rawPrompt = String(command.prompt || "").trim();
+  if (!rawPrompt) throw new Error("missing title prompt");
+  const titlePrompt = `Create a concise title for this perpetual-market research question. Return only one plain-text title, no markdown, no quotes, no explanation. Keep it under 60 characters.\n\nQuestion:\n${rawPrompt.slice(0, 1200)}`;
+  const state = { lastProviderActivityAt: Date.now() };
+  const titleCommand = { ...command, sessionId: runtimeSessionId, config: { ...command.config, permissionMode: "advisor", reasoningDepth: "none", enableSpawnAgent: false, enableAgentTeams: false, disableSkillsTool: true } };
+  const runtimeConfig = createRuntimeConfig(titleCommand, "advisor", [], runtimeSessionId, { onProviderActivity: () => { state.lastProviderActivityAt = Date.now(); } });
+  const core = cline || await withRejectTimeout(ensureCline(), 30_000, "ClineCore 初始化超时");
+  try {
+    const result = await withRejectTimeout(core.start({ config: runtimeConfig, prompt: titlePrompt, interactive: false }), 20_000, "AI 标题生成超时");
+    const title = resultText(result).trim();
+    if (!title) throw new Error("AI title response was empty");
+    emit({ type: "titleResult", requestId, ok: true, title: title.slice(0, 120) });
+  } finally {
+    await core.stop?.(runtimeSessionId).catch(() => {});
+  }
 }
 
 async function sendMessage(cline, input) {
@@ -3701,8 +4064,78 @@ async function sendMessage(cline, input) {
   activeSessionId = sessionId;
   let prompt = lastUserMessage(command.messages);
   if (!prompt) throw new Error("missing user prompt");
+  const localMessageId = [...command.messages]
+    .reverse()
+    .find((message) => message?.role === "user" && String(message?.content || "").trim())?.id;
 
   const previous = sessions.get(sessionId);
+  if (previous?.done && command.delivery) {
+    emit({
+      type: "pendingPromptError",
+      sessionId,
+      prompt,
+      localMessageId,
+      delivery: command.delivery,
+      operation: "submit",
+      message: "active turn completed before the pending prompt was accepted; retry the message"
+    });
+    return;
+  }
+  if (previous && command.delivery) {
+    if (previous.currentPrompt === prompt) {
+      emit({
+        type: "pendingPromptError",
+        sessionId,
+        prompt,
+        localMessageId,
+        delivery: command.delivery,
+        operation: "submit",
+        message: "the pending prompt duplicates the active turn and was not submitted"
+      });
+      return;
+    }
+    cline = cline || await ensureCline();
+    const expectedTurn = { prompt, delivery: command.delivery, submittedAt: Date.now(), localMessageId };
+    previous.expectedTurnStarts.push(expectedTurn);
+    const deliveryPromise = cline.send({
+      sessionId: previous.runtimeSessionId || runtimeSessionId,
+      prompt,
+      delivery: command.delivery
+    });
+    previous.pendingDeliveries.add(deliveryPromise);
+    try {
+      await deliveryPromise;
+    } catch (error) {
+      const expectedIndex = previous.expectedTurnStarts.indexOf(expectedTurn);
+      if (expectedIndex >= 0) previous.expectedTurnStarts.splice(expectedIndex, 1);
+      emit({
+        type: "pendingPromptError",
+        sessionId,
+        prompt,
+        promptId: expectedTurn.promptId,
+        localMessageId: expectedTurn.localMessageId,
+        delivery: command.delivery,
+        operation: "submit",
+        message: error?.message || String(error)
+      });
+      await emitPendingPromptSnapshot(cline, sessionId, previous.runtimeSessionId || runtimeSessionId).catch(() => {});
+      return;
+    } finally {
+      previous.pendingDeliveries.delete(deliveryPromise);
+    }
+    await emitPendingPromptSnapshot(cline, sessionId, previous.runtimeSessionId || runtimeSessionId)
+      .catch((error) => emit({
+        type: "pendingPromptError",
+        sessionId,
+        prompt,
+        promptId: expectedTurn.promptId,
+        localMessageId: expectedTurn.localMessageId,
+        delivery: command.delivery,
+        operation: "list",
+        message: error?.message || String(error)
+      }));
+    return;
+  }
   if (previous) {
     previous.cancelled = true;
     previous.abortController?.abort();
@@ -3718,10 +4151,16 @@ async function sendMessage(cline, input) {
     pendingTurnText: "",
     iterationReasoningStreamed: false,
     finalTextEmitted: false,
+    initialRunStartedSeen: false,
+    expectedTurnStarts: [],
+    pendingDeliveries: new Set(),
     cancelled: false,
     done: false,
     unsubscribe: null,
     runtimeSessionId,
+    currentPrompt: prompt,
+    contextWindow: null,
+    contextWindowSource: "unknown",
     preservesClineConversation: preserveConversation,
     conversationFingerprint,
     hasProviderProgress: false,
@@ -3737,6 +4176,9 @@ async function sendMessage(cline, input) {
   try {
     cline = await withRejectTimeout(ensureCline(), 30_000, "ClineCore 初始化超时");
     if (state.cancelled) return;
+    const contextCapacity = await catalogContextWindowFor(command.config);
+    state.contextWindow = contextCapacity.contextWindow;
+    state.contextWindowSource = contextCapacity.contextWindowSource;
     state.unsubscribe = cline.subscribe((event) => {
       emitMappedCoreEvent(state, sessionId, command.config, event);
     }, { sessionId: runtimeSessionId });
@@ -3779,6 +4221,7 @@ async function sendMessage(cline, input) {
         });
         emitAssistantTextOutputs(state, sessionId, lifecycle.outputs);
       }
+      await emitContextUsageSnapshot(cline, state, sessionId);
       if (!state.cancelled && !state.done) {
         state.done = true;
         emit({ type: "done", sessionId, finishReason });
@@ -3809,7 +4252,21 @@ async function sendMessage(cline, input) {
         status: "connecting",
         message: "恢复已有 AI 会话上下文"
       });
+    } else {
+      initialMessages = command.messages
+        .slice(0, -1)
+        .filter((message) => ["user", "assistant"].includes(message?.role) && String(message?.content || "").trim())
+        .map((message) => ({ role: message.role, content: toProviderToolReferences(String(message.content)) }));
+      if (initialMessages.length > 0) {
+        emit({
+          type: "status",
+          sessionId,
+          status: "connecting",
+          message: "载入分支会话上下文"
+        });
+      }
     }
+    const hasInitialMessages = Array.isArray(initialMessages) && initialMessages.length > 0;
 
     emit({ type: "status", sessionId, status: "connecting", message: "连接 ClineCore" });
     const permissionMode = normalizePermissionMode(command.config.permissionMode);
@@ -3819,7 +4276,7 @@ async function sendMessage(cline, input) {
       agentRole: "main",
       agentId: sessionId
     };
-    const orchestration = restoringConversation
+    const orchestration = restoringConversation || hasInitialMessages
       ? { prompt, veto: null }
       : await runConfiguredProfileAgents(
         sessionId,
@@ -3847,10 +4304,9 @@ async function sendMessage(cline, input) {
     if (describeToolPolicy("team_status", mainPolicyConfig).allowed) {
       mainTools.push(...createDesicTeamTools(sessionId, coordinatorCommand, state, runtimeSessionId));
     }
-    const hasPersistedMessages = restoringConversation && initialMessages.length > 0;
     const startInput = {
       config: createRuntimeConfig(
-        coordinatorCommand,
+        { ...coordinatorCommand, config: { ...coordinatorCommand.config, contextWindow: state.contextWindow } },
         permissionMode,
         mainTools,
         runtimeSessionId,
@@ -3879,9 +4335,9 @@ async function sendMessage(cline, input) {
       sessionMetadata: preserveConversation
         ? clineConversationMetadata(command.config, conversationFingerprint)
         : undefined,
-      ...(!hasPersistedMessages ? { prompt: toProviderToolReferences(prompt) } : {}),
+      ...(!hasInitialMessages ? { prompt: toProviderToolReferences(prompt) } : {}),
       interactive: preserveConversation,
-      ...(hasPersistedMessages ? { initialMessages } : {})
+      ...(hasInitialMessages ? { initialMessages } : {})
     };
     let startResult = await runProviderNetworkRetry({
       sessionId,
@@ -3895,7 +4351,7 @@ async function sendMessage(cline, input) {
     if (preserveConversation) {
       persistentClineConversationSessions.set(runtimeSessionId, conversationFingerprint);
     }
-    if (hasPersistedMessages && startResult.result?.finishReason !== "error") {
+    if (hasInitialMessages && startResult.result?.finishReason !== "error") {
       startResult.result = await runProviderNetworkRetry({
         sessionId,
         state,
@@ -3921,6 +4377,7 @@ async function sendMessage(cline, input) {
       });
       emitAssistantTextOutputs(state, sessionId, lifecycle.outputs);
     }
+    await emitContextUsageSnapshot(cline, state, sessionId);
     if (!state.cancelled && !state.done) {
       state.done = true;
       emit({ type: "done", sessionId, finishReason });
@@ -3958,6 +4415,11 @@ async function stopSession(cline, input) {
     state.unsubscribe?.();
   }
   if (cline) {
+    const pending = await cline.pendingPrompts.list({ sessionId: runtimeSessionId }).catch(() => []);
+    await Promise.allSettled((Array.isArray(pending) ? pending : []).map((item) =>
+      cline.pendingPrompts.delete({ sessionId: runtimeSessionId, promptId: item.id })
+    ));
+    emit({ type: "pendingPrompts", sessionId, prompts: [] });
     await cline.abort(runtimeSessionId).catch(() => {});
     if (!preserveConversation) {
       await cline.stop(runtimeSessionId).catch(() => {});
@@ -4089,10 +4551,21 @@ async function main() {
     try {
       const input = JSON.parse(payload);
       const type = input.type || "sendMessage";
-      if (type === "stop" || type === "abort") {
+      if (type === "generateTitle") {
+        trackTask(generateTitle(cline, input).catch((error) => {
+          emit({
+            type: "titleResult",
+            requestId: input.requestId || "",
+            ok: false,
+            message: error?.message || String(error)
+          });
+        }));
+      } else if (type === "stop" || type === "abort") {
         trackTask(stopSession(cline, input));
       } else if (type === "delete") {
         trackTask(deleteSession(cline, input));
+      } else if (["pendingPrompts", "updatePendingPrompt", "deletePendingPrompt"].includes(type)) {
+        trackTask(safelyMutatePendingPrompts(cline, input));
       } else if (type === "approvalDecision") {
         resolveApprovalDecision(input);
       } else if (type === "toolExecuteResult") {
@@ -4133,9 +4606,13 @@ export {
   bindConfiguredAgentToolEvent,
   bindProfileAccountInput,
   buildSystemPrompt,
+  catalogContextWindowFor,
+  estimateContextBreakdown,
   configuredProfileAgentSystemPrompt,
+  consumeExpectedTurnStart,
   createDesicTools,
   createProviderFetch,
+  createRuntimeConfig,
   invalidToolArgumentsResult,
   isTransientAiNetworkError,
   loadClineSdk,
@@ -4143,6 +4620,8 @@ export {
   mapCoreEvent,
   mapToolResult,
   multiAgentVetoBlocksTool,
+  mutatePendingPrompts,
+  normalizeCommand,
   normalizeProviderToolInput,
   canResumeClineConversation,
   canRehydrateClineConversation,
@@ -4155,6 +4634,7 @@ export {
   profileAgentToolEvidenceError,
   reduceAssistantTextLifecycle,
   runProviderNetworkRetry,
+  sanitizeDiagnosticText,
   rememberBackgroundOpportunityCommitResult,
   rememberDecisionContext,
   validateToolInput,

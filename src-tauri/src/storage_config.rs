@@ -368,6 +368,7 @@ pub(crate) fn ai_save_config(
         stream: Some(true),
         permission_mode: active_model.permission_mode.clone(),
         reasoning_depth: active_model.reasoning_depth.clone(),
+        context_window: active_model.context_window,
         active_model_id,
         models,
         system_prompt: update
@@ -2328,8 +2329,9 @@ fn resolve_ai_connection_test_model(
     {
         return Err("请补全选中模型的名称、Provider、Model ID 和 Base URL".to_string());
     }
-    let stored_key = stored
-        .and_then(|config| config.models.iter().find(|item| item.id == id))
+    let stored_model = stored
+        .and_then(|config| config.models.iter().find(|item| item.id == id));
+    let stored_key = stored_model
         .map(|item| item.api_key.trim())
         .filter(|value| !value.is_empty());
     let api_key = update
@@ -2352,6 +2354,9 @@ fn resolve_ai_connection_test_model(
         api_key,
         permission_mode: normalize_ai_permission_mode(update.permission_mode.as_deref()),
         reasoning_depth: normalize_ai_reasoning_depth(update.reasoning_depth.as_deref()),
+        context_window: normalize_context_window(
+            update.context_window.or_else(|| stored_model.and_then(|item| item.context_window)),
+        )?,
     })
 }
 
@@ -2405,6 +2410,7 @@ pub(crate) async fn ai_test_connection(
             name: selected.name,
             provider: selected.provider,
             model: selected.model,
+            context_window: selected.context_window,
         });
     }
     let protocol = ai_connection_probe_protocol(&selected.provider);
@@ -2475,6 +2481,7 @@ pub(crate) async fn ai_test_connection(
         name: selected.name,
         provider: selected.provider,
         model: selected.model,
+        context_window: selected.context_window,
     })
 }
 
@@ -3390,6 +3397,7 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
             configured: ai_model_is_configured(&model.provider, &model.api_key),
             permission_mode: normalize_ai_permission_mode(Some(&model.permission_mode)),
             reasoning_depth: normalize_ai_reasoning_depth(Some(&model.reasoning_depth)),
+            context_window: model.context_window,
         })
         .collect();
     AiConfigSummary {
@@ -3401,6 +3409,7 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
         configured,
         permission_mode: normalize_ai_permission_mode(Some(&config.permission_mode)),
         reasoning_depth: normalize_ai_reasoning_depth(Some(&config.reasoning_depth)),
+        context_window: config.context_window,
         active_model_id: config.active_model_id,
         models,
         system_prompt: config.system_prompt,
@@ -3422,6 +3431,7 @@ fn unconfigured_ai_config_summary() -> AiConfigSummary {
         stream: Some(true),
         permission_mode: "advisor".to_string(),
         reasoning_depth: "medium".to_string(),
+        context_window: None,
         active_model_id: String::new(),
         models: Vec::new(),
         system_prompt: desic_storage_config::default_ai_system_prompt(),
@@ -3584,10 +3594,10 @@ fn build_updated_ai_models(
     if let Some(items) = update.models.as_ref() {
         let models = items
             .iter()
-            .map(|item| {
+            .map(|item| -> Result<AiModelConfig, String> {
                 let existing_model = existing
                     .and_then(|config| config.models.iter().find(|model| model.id == item.id));
-                AiModelConfig {
+                Ok(AiModelConfig {
                     id: item.id.trim().to_string(),
                     name: item.name.trim().to_string(),
                     provider: item.provider.trim().to_string(),
@@ -3610,9 +3620,12 @@ fn build_updated_ai_models(
                             .as_deref()
                             .or_else(|| existing_model.map(|model| model.reasoning_depth.as_str())),
                     ),
-                }
+                    context_window: normalize_context_window(
+                        item.context_window.or_else(|| existing_model.and_then(|model| model.context_window)),
+                    )?,
+                })
             })
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         return Ok(models);
     }
 
@@ -3643,6 +3656,7 @@ fn build_updated_ai_models(
                 .unwrap_or_default(),
             permission_mode: normalize_ai_permission_mode(update.permission_mode.as_deref()),
             reasoning_depth: normalize_ai_reasoning_depth(update.reasoning_depth.as_deref()),
+            context_window: normalize_context_window(update.context_window)?,
         });
         return Ok(models);
     }
@@ -3684,6 +3698,9 @@ fn build_updated_ai_models(
         if let Some(depth) = update.reasoning_depth.as_deref() {
             active.reasoning_depth = normalize_ai_reasoning_depth(Some(depth));
         }
+        if update.context_window.is_some() {
+            active.context_window = normalize_context_window(update.context_window)?;
+        }
     }
     Ok(models)
 }
@@ -3708,6 +3725,7 @@ fn normalize_ai_models(mut config: AiConfig) -> AiConfig {
             api_key: config.api_key.clone(),
             permission_mode: normalize_ai_permission_mode(Some(&config.permission_mode)),
             reasoning_depth: normalize_ai_reasoning_depth(Some(&config.reasoning_depth)),
+            context_window: config.context_window,
         });
     }
     for model in &mut config.models {
@@ -3716,6 +3734,7 @@ fn normalize_ai_models(mut config: AiConfig) -> AiConfig {
         model.provider = model.provider.trim().to_string();
         model.model = model.model.trim().to_string();
         model.base_url = model.base_url.trim().to_string();
+        model.context_window = normalize_context_window(model.context_window).unwrap_or(None);
         model.permission_mode = normalize_ai_permission_mode(Some(&model.permission_mode));
         model.reasoning_depth = normalize_ai_reasoning_depth(Some(&model.reasoning_depth));
     }
@@ -3746,6 +3765,7 @@ fn ai_model_metadata_fingerprint(models: &[AiModelConfig]) -> String {
                     "baseUrl": model.base_url,
                     "permissionMode": model.permission_mode,
                     "reasoningDepth": model.reasoning_depth,
+                    "contextWindow": model.context_window,
                 })
             })
             .collect::<Vec<_>>(),
@@ -3766,6 +3786,7 @@ fn apply_active_ai_model(mut config: AiConfig) -> AiConfig {
         config.api_key = model.api_key;
         config.permission_mode = model.permission_mode;
         config.reasoning_depth = model.reasoning_depth;
+        config.context_window = model.context_window;
     }
     config.stream = Some(true);
     config
@@ -3806,6 +3827,9 @@ fn validate_ai_config(config: &AiConfig) -> Result<(), String> {
     {
         return Err("AI config missing model, baseUrl or apiKey".to_string());
     }
+    if let Some(value) = config.context_window {
+        normalize_context_window(Some(value))?;
+    }
     if config.models.is_empty() {
         return Err("至少需要配置一个 AI 模型".to_string());
     }
@@ -3829,6 +3853,9 @@ fn validate_ai_config(config: &AiConfig) -> Result<(), String> {
         }
         if !ai_model_is_configured(&model.provider, &model.api_key) {
             return Err(format!("AI 模型配置缺少 API Key：{}", model.name));
+        }
+        if let Some(value) = model.context_window {
+            normalize_context_window(Some(value))?;
         }
         if !model_ids.insert(model.id.clone()) {
             return Err(format!("AI 模型配置 ID 重复：{}", model.id));
@@ -3897,6 +3924,14 @@ fn normalize_ai_permission_mode(value: Option<&str>) -> String {
         "copilot" | "approval" | "full" => "copilot".to_string(),
         "advisor" | "readonly" => "advisor".to_string(),
         _ => "advisor".to_string(),
+    }
+}
+
+fn normalize_context_window(value: Option<u32>) -> Result<Option<u32>, String> {
+    match value {
+        None => Ok(None),
+        Some(value) if value > 0 => Ok(Some(value)),
+        Some(_) => Err("contextWindow 必须是正整数".to_string()),
     }
 }
 
@@ -4602,6 +4637,7 @@ wire_api = "responses"
             stream: Some(true),
             permission_mode: "advisor".to_string(),
             reasoning_depth: "medium".to_string(),
+            context_window: None,
             active_model_id: "model-test".to_string(),
             models: vec![AiModelConfig {
                 id: "model-test".to_string(),
@@ -4612,6 +4648,7 @@ wire_api = "responses"
                 api_key: "test-key".to_string(),
                 permission_mode: "advisor".to_string(),
                 reasoning_depth: "medium".to_string(),
+                context_window: None,
             }],
             system_prompt: "test".to_string(),
             custom_rules: String::new(),
@@ -4689,6 +4726,7 @@ wire_api = "responses"
             api_key: "secondary-test-key".to_string(),
             permission_mode: "copilot".to_string(),
             reasoning_depth: "high".to_string(),
+            context_window: Some(262_144),
         });
         let selected =
             select_ai_model(&config, Some("model-secondary")).expect("select configured model");
@@ -4696,6 +4734,18 @@ wire_api = "responses"
         assert_eq!(selected.model, "secondary-model");
         assert_eq!(selected.permission_mode, "copilot");
         assert_eq!(selected.reasoning_depth, "high");
+        assert_eq!(selected.context_window, Some(262_144));
+    }
+
+    #[test]
+    fn ai_model_context_window_validation_rejects_zero() {
+        let mut config = config_with_skills(
+            desic_storage_config::default_ai_skill_definitions(),
+            Vec::new(),
+        );
+        config.context_window = Some(0);
+        config.models[0].context_window = Some(0);
+        assert!(validate_ai_config(&config).is_err());
     }
 
     #[test]
@@ -4725,6 +4775,7 @@ wire_api = "responses"
             api_key: "placeholder-openai-key".to_string(),
             permission_mode: "advisor".to_string(),
             reasoning_depth: "medium".to_string(),
+            context_window: Some(128_000),
         });
         let request = AiModelConfigUpdate {
             id: "model-openai".to_string(),
@@ -4735,6 +4786,7 @@ wire_api = "responses"
             api_key: None,
             permission_mode: Some("advisor".to_string()),
             reasoning_depth: Some("medium".to_string()),
+            context_window: None,
         };
         let selected = resolve_ai_connection_test_model(Some(&config), &request)
             .expect("resolve selected model for connection test");
@@ -4742,6 +4794,7 @@ wire_api = "responses"
         assert_eq!(selected.name, "OpenAI edited");
         assert_eq!(selected.model, "gpt-test-model-new");
         assert_eq!(selected.api_key, "placeholder-openai-key");
+        assert_eq!(selected.context_window, Some(128_000));
         assert_eq!(config.active_model_id, "model-test");
     }
 
@@ -4760,6 +4813,7 @@ wire_api = "responses"
                 api_key: None,
                 permission_mode: Some("advisor".to_string()),
                 reasoning_depth: Some("medium".to_string()),
+                context_window: None,
             };
             let selected = resolve_ai_connection_test_model(None, &request)
                 .expect("local CLI model should not require copied credentials");
@@ -4807,6 +4861,7 @@ wire_api = "responses"
             api_key: "placeholder-provider-key".to_string(),
             permission_mode: "advisor".to_string(),
             reasoning_depth: "medium".to_string(),
+            context_window: None,
         };
         let openai = model(
             "openai-native",

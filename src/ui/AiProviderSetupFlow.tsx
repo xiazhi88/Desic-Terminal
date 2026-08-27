@@ -62,6 +62,7 @@ export type AiProviderSetupValue = Readonly<{
   model: string;
   baseUrl: string;
   apiKey: string;
+  contextWindow?: number;
 }>;
 
 const CUSTOM_MODEL_VALUE = "__custom_model_id__";
@@ -477,6 +478,7 @@ export function AiProviderSetupFlow({
     model: "",
     baseUrl: "",
     apiKey: "",
+    contextWindow: undefined,
   });
   const [validationMessage, setValidationMessage] = useState("");
   const [authMode, setAuthMode] = useState<"api-key" | "local-cli">("api-key");
@@ -508,6 +510,7 @@ export function AiProviderSetupFlow({
       model: template.modelOptions[0]?.value ?? "",
       baseUrl: template.baseUrl,
       apiKey: "",
+      contextWindow: undefined,
     });
     setValidationMessage("");
   };
@@ -553,6 +556,7 @@ export function AiProviderSetupFlow({
       model: draft.model.trim(),
       baseUrl: draft.baseUrl.trim(),
       apiKey: draft.apiKey.trim(),
+      contextWindow: draft.contextWindow,
     });
   };
 
@@ -668,6 +672,22 @@ export function AiProviderSetupFlow({
             onChange={(model) => updateDraft({ model })}
           />
           <small>{t("settings:modelSelectionHelp")}</small>
+        </label>
+        <label>
+          <span>Context window (tokens)</span>
+          <input
+            type="number"
+            min={1}
+            step={1}
+            value={draft.contextWindow ?? ""}
+            placeholder="例如 256000"
+            onChange={(event) => {
+              const value = event.target.value.trim();
+              const parsed = Number(value);
+              updateDraft({ contextWindow: value && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined });
+            }}
+          />
+          <small>{isCustom ? "填写正整数；留空时运行时按 256K 回退。" : "可填写未列出容量的回退值；Cline 精确目录匹配仍优先。"}</small>
         </label>
         <label className="wide">
           <span>Base URL</span>

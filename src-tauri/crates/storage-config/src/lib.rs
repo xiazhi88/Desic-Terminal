@@ -136,6 +136,8 @@ pub struct AiConfig {
     pub permission_mode: String,
     #[serde(default = "default_ai_reasoning_depth")]
     pub reasoning_depth: String,
+    #[serde(default, alias = "context_window", skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     #[serde(default)]
     pub active_model_id: String,
     #[serde(default)]
@@ -170,6 +172,8 @@ pub struct AiModelConfig {
     pub permission_mode: String,
     #[serde(default = "default_ai_reasoning_depth")]
     pub reasoning_depth: String,
+    #[serde(default, alias = "context_window", skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -198,6 +202,8 @@ pub struct AiConfigSummary {
     pub configured: bool,
     pub permission_mode: String,
     pub reasoning_depth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
     pub active_model_id: String,
     pub models: Vec<AiModelConfigSummary>,
     pub system_prompt: String,
@@ -239,6 +245,8 @@ pub struct AiModelConfigSummary {
     pub configured: bool,
     pub permission_mode: String,
     pub reasoning_depth: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -251,6 +259,8 @@ pub struct AiConfigUpdate {
     pub stream: Option<bool>,
     pub permission_mode: Option<String>,
     pub reasoning_depth: Option<String>,
+    #[serde(default, alias = "context_window")]
+    pub context_window: Option<u32>,
     pub active_model_id: Option<String>,
     pub models: Option<Vec<AiModelConfigUpdate>>,
     pub system_prompt: Option<String>,
@@ -272,6 +282,8 @@ pub struct AiModelConfigUpdate {
     pub api_key: Option<String>,
     pub permission_mode: Option<String>,
     pub reasoning_depth: Option<String>,
+    #[serde(default, alias = "context_window")]
+    pub context_window: Option<u32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -281,6 +293,8 @@ pub struct AiConnectionTestResult {
     pub name: String,
     pub provider: String,
     pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub context_window: Option<u32>,
 }
 
 fn default_ai_permission_mode() -> String {
@@ -467,6 +481,48 @@ pub struct Permissions {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ai_model_context_window_is_optional_and_accepts_legacy_snake_case() {
+        let legacy = serde_json::json!({
+            "id": "model-custom",
+            "name": "Custom",
+            "provider": "openai-compatible",
+            "model": "custom-model",
+            "baseUrl": "https://example.invalid/v1",
+            "context_window": 131072
+        });
+        let model: AiModelConfig = serde_json::from_value(legacy).expect("legacy model config");
+        assert_eq!(model.context_window, Some(131_072));
+
+        let persisted = serde_json::to_value(model).expect("serialize model config");
+        assert_eq!(persisted["contextWindow"], 131_072);
+        assert!(persisted.get("context_window").is_none());
+
+        let without_capacity: AiModelConfig = serde_json::from_value(serde_json::json!({
+            "id": "model-legacy",
+            "name": "Legacy",
+            "provider": "openai-compatible",
+            "model": "legacy-model",
+            "baseUrl": "https://example.invalid/v1"
+        }))
+        .expect("missing context window remains backward compatible");
+        assert_eq!(without_capacity.context_window, None);
+    }
+
+    #[test]
+    fn ai_model_context_window_deserializes_zero_for_domain_validation() {
+        let invalid = serde_json::json!({
+            "id": "model-invalid",
+            "name": "Invalid",
+            "provider": "openai-compatible",
+            "model": "invalid-model",
+            "baseUrl": "https://example.invalid/v1",
+            "contextWindow": 0
+        });
+        let parsed: AiModelConfig = serde_json::from_value(invalid).expect("schema accepts integer before domain validation");
+        assert_eq!(parsed.context_window, Some(0));
+    }
 
     #[test]
     fn proxy_defaults_to_direct_connection() {

@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.34"
+version = "0.1.35"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
@@ -64,6 +64,7 @@ csv = "1.3"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 aes-gcm = "0.10"
 rand = "0.8"
+regex = "1"
 semver = "1"
 desic-private-history = { path = "crates/private-history" }
 desic-agent-automation = { path = "crates/agent-automation" }

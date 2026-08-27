@@ -13,7 +13,10 @@ const isStartupPreview =
 const isChartPreview =
   window.location.pathname === "/chart-preview" || searchParams.get("preview") === "chart";
 const isAiPreview =
-  window.location.pathname === "/ai-preview" || searchParams.get("preview") === "ai";
+  window.location.pathname === "/ai-preview"
+  || window.location.pathname === "/ai-research-preview"
+  || searchParams.get("preview") === "ai"
+  || searchParams.get("preview") === "ai-research";
 const isAutomationPreview =
   window.location.pathname === "/automation-preview" || searchParams.get("preview") === "automation";
 const isTerminalPreview =

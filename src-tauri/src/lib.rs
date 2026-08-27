@@ -5,6 +5,7 @@ use chrono::{Datelike, SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
+use regex::Regex;
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -1021,7 +1022,36 @@ struct AiRuntime {
     sidecar: Arc<tokio::sync::Mutex<Option<AiSidecarHandle>>>,
     session_sinks: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AiEvent>>>>,
     session_cancelled: Arc<Mutex<HashMap<String, bool>>>,
+    sessions_completing: Arc<Mutex<HashSet<String>>>,
+    pending_prompt_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Option<Vec<Value>>, String>>>>>,
+    pending_title_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
+    title_generating: Arc<Mutex<HashSet<String>>>,
     shutdown_started: Arc<AtomicBool>,
+}
+
+struct AiSessionCompletionGuard {
+    sessions: Arc<Mutex<HashSet<String>>>,
+    session_id: String,
+}
+
+impl AiSessionCompletionGuard {
+    fn begin(runtime: &AiRuntime, session_id: &str) -> Self {
+        if let Ok(mut sessions) = runtime.sessions_completing.lock() {
+            sessions.insert(session_id.to_string());
+        }
+        Self {
+            sessions: runtime.sessions_completing.clone(),
+            session_id: session_id.to_string(),
+        }
+    }
+}
+
+impl Drop for AiSessionCompletionGuard {
+    fn drop(&mut self) {
+        if let Ok(mut sessions) = self.sessions.lock() {
+            sessions.remove(&self.session_id);
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1185,7 +1215,7 @@ struct AiSessionSnapshot {
     messages: Vec<AiStoredMessage>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 struct AiChatMessage {
     id: Option<String>,
@@ -1202,6 +1232,7 @@ struct AiSendRequest {
     model_id: Option<String>,
     permission_mode: Option<String>,
     reasoning_depth: Option<String>,
+    delivery: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1268,6 +1299,35 @@ struct AiSessionRenameRequest {
 #[serde(rename_all = "camelCase")]
 struct AiSessionDeleteRequest {
     session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiPendingPromptsRequest {
+    session_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiPendingPromptUpdateRequest {
+    session_id: String,
+    prompt_id: String,
+    prompt: String,
+    delivery: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiPendingPromptDeleteRequest {
+    session_id: String,
+    prompt_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AiSessionForkRequest {
+    session_id: String,
+    message_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1779,6 +1839,40 @@ enum AiEvent {
     Usage {
         session_id: String,
         usage: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    ContextUsage {
+        session_id: String,
+        usage: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    PendingPrompts {
+        session_id: String,
+        prompts: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    PendingPromptSubmitted {
+        session_id: String,
+        prompt: serde_json::Value,
+    },
+    #[serde(rename_all = "camelCase")]
+    PendingPromptError {
+        session_id: String,
+        prompt: String,
+        prompt_id: Option<String>,
+        local_message_id: Option<String>,
+        delivery: String,
+        operation: Option<String>,
+        message: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    TurnStarted {
+        session_id: String,
+        prompt: Option<String>,
+        prompt_id: Option<String>,
+        local_message_id: Option<String>,
+        delivery: Option<String>,
+        started_at: i64,
     },
     #[serde(rename_all = "camelCase")]
     AgentStart {
@@ -2461,6 +2555,209 @@ async fn ai_delete_session(
     delete_ai_session(&conn, &session_id)
 }
 
+async fn dispatch_ai_pending_prompt_command(
+    app: &tauri::AppHandle,
+    runtime: &AiRuntime,
+    mut payload: Value,
+) -> Result<Option<Vec<Value>>, String> {
+    let request_id = format!("pending-{}-{:016x}", now_ms(), rand::random::<u64>());
+    payload["requestId"] = json!(request_id);
+    let (result_tx, result_rx) = oneshot::channel();
+    runtime
+        .pending_prompt_commands
+        .lock()
+        .map_err(|error| error.to_string())?
+        .insert(request_id.clone(), result_tx);
+    if let Err(error) = send_ai_sidecar_command(app, runtime, payload).await {
+        if let Ok(mut pending) = runtime.pending_prompt_commands.lock() {
+            pending.remove(&request_id);
+        }
+        return Err(error);
+    }
+    match timeout(Duration::from_secs(10), result_rx).await {
+        Ok(Ok(result)) => result,
+        Ok(Err(_)) => Err("AI pending prompt command was interrupted".to_string()),
+        Err(_) => {
+            if let Ok(mut pending) = runtime.pending_prompt_commands.lock() {
+                pending.remove(&request_id);
+            }
+            Err("AI pending prompt command timed out".to_string())
+        }
+    }
+}
+
+#[tauri::command]
+async fn ai_pending_prompts(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiRuntime>,
+    request: AiPendingPromptsRequest,
+) -> Result<Vec<Value>, String> {
+    if request.session_id.trim().is_empty() {
+        return Err("AI session_id is required".to_string());
+    }
+    dispatch_ai_pending_prompt_command(
+        &app,
+        runtime.inner(),
+        json!({ "type": "pendingPrompts", "sessionId": request.session_id }),
+    )
+    .await?
+    .ok_or_else(|| "AI pending prompt snapshot was unavailable".to_string())
+}
+
+#[tauri::command]
+async fn ai_update_pending_prompt(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiRuntime>,
+    request: AiPendingPromptUpdateRequest,
+) -> Result<(), String> {
+    let delivery = match request.delivery.as_str() {
+        "queue" => "queue",
+        "steer" => "steer",
+        _ => return Err("AI delivery must be queue or steer".to_string()),
+    };
+    if request.session_id.trim().is_empty()
+        || request.prompt_id.trim().is_empty()
+        || request.prompt.trim().is_empty()
+    {
+        return Err("AI pending prompt requires session, id, and prompt".to_string());
+    }
+    dispatch_ai_pending_prompt_command(
+        &app,
+        runtime.inner(),
+        json!({
+            "type": "updatePendingPrompt",
+            "sessionId": request.session_id,
+            "promptId": request.prompt_id,
+            "prompt": request.prompt,
+            "delivery": delivery
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+#[tauri::command]
+async fn ai_delete_pending_prompt(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiRuntime>,
+    request: AiPendingPromptDeleteRequest,
+) -> Result<(), String> {
+    if request.session_id.trim().is_empty() || request.prompt_id.trim().is_empty() {
+        return Err("AI pending prompt requires session and id".to_string());
+    }
+    dispatch_ai_pending_prompt_command(
+        &app,
+        runtime.inner(),
+        json!({
+            "type": "deletePendingPrompt",
+            "sessionId": request.session_id,
+            "promptId": request.prompt_id
+        }),
+    )
+    .await
+    .map(|_| ())
+}
+
+fn ai_message_is_forkable(message: &AiStoredMessage) -> bool {
+    let status = message.status.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let terminal = status.is_empty()
+        || matches!(
+            status.as_str(),
+            "completed" | "failed" | "error" | "cancelled" | "stopped"
+        );
+    message.role == "assistant" && terminal
+}
+
+#[tauri::command]
+async fn ai_fork_session(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiRuntime>,
+    request: AiSessionForkRequest,
+) -> Result<AiSessionSnapshot, String> {
+    if request.session_id.trim().is_empty() || request.message_id.trim().is_empty() {
+        return Err("Fork requires a source session and completed message".to_string());
+    }
+    let completion_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let completing = runtime
+            .sessions_completing
+            .lock()
+            .map_err(|error| error.to_string())?
+            .contains(&request.session_id);
+        if !completing {
+            break;
+        }
+        if Instant::now() >= completion_deadline {
+            return Err("AI session is still finalizing; retry the branch shortly".to_string());
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    if runtime
+        .tasks
+        .lock()
+        .map_err(|error| error.to_string())?
+        .contains_key(&request.session_id)
+    {
+        return Err("Only completed AI messages can be branched".to_string());
+    }
+    let mut conn = open_database(&app)?;
+    let source = load_ai_session(&conn, &request.session_id)?;
+    if source.origin != AiSessionOrigin::User {
+        return Err("Only user AI sessions can be forked".to_string());
+    }
+    if matches!(
+        source.status.trim().to_ascii_lowercase().as_str(),
+        "running" | "streaming" | "connecting" | "tooling" | "retrying"
+    ) {
+        return Err("Only finalized AI sessions can be branched".to_string());
+    }
+    ensure_ai_message_usage_for_session(&mut conn, &source.id)?;
+    let messages = load_ai_messages(&conn, &source.id)?;
+    let cutoff = messages
+        .iter()
+        .position(|message| message.id == request.message_id)
+        .ok_or_else(|| "Fork message was not found in the AI session".to_string())?;
+    let cutoff_message = &messages[cutoff];
+    if !ai_message_is_forkable(cutoff_message) {
+        return Err("Only completed assistant messages can be branched".to_string());
+    }
+    let fork_id = format!(
+        "session-{}-{:016x}-fork",
+        now_ms(),
+        rand::random::<u64>()
+    );
+    let fork_title = format!("{} · 分支", source.title.trim());
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .map_err(|error| error.to_string())?;
+    upsert_ai_session(&tx, &fork_id, &fork_title, "idle")?;
+    for (index, message) in messages.into_iter().take(cutoff + 1).enumerate() {
+        let message_id = format!("{}-m-{}", fork_id, index);
+        upsert_ai_message(
+            &tx,
+            &message_id,
+            &fork_id,
+            &message.role,
+            &message.content,
+            message.reasoning.as_deref(),
+            message.tool_json.as_deref(),
+            message.status.as_deref(),
+        )?;
+        tx.execute(
+            "UPDATE ai_messages SET created_at=?2 WHERE id=?1",
+            params![message_id, message.created_at],
+        )
+        .map_err(|error| error.to_string())?;
+        if let Some(usage) = message.token_usage.as_ref() {
+            persist_ai_message_usage_summary(&tx, &message_id, usage)?;
+        }
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+    let session = load_ai_session(&conn, &fork_id)?;
+    let messages = load_ai_messages(&conn, &fork_id)?;
+    Ok(AiSessionSnapshot { session, messages })
+}
+
 #[tauri::command]
 async fn ai_send_message(
     app: tauri::AppHandle,
@@ -2473,16 +2770,50 @@ async fn ai_send_message(
     if request.messages.is_empty() {
         return Err("AI messages are required".to_string());
     }
+    let requested_delivery = match request.delivery.as_deref() {
+        Some("queue") => Some("queue"),
+        Some("steer") => Some("steer"),
+        Some(_) => return Err("AI delivery must be queue or steer".to_string()),
+        None => None,
+    };
+    let completion_deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let completing = runtime
+            .sessions_completing
+            .lock()
+            .map_err(|error| error.to_string())?
+            .contains(&request.session_id);
+        if !completing {
+            break;
+        }
+        if Instant::now() >= completion_deadline {
+            return Err("上一轮 AI 消息仍在完成持久化，请稍后重试".to_string());
+        }
+        sleep(Duration::from_millis(10)).await;
+    }
+    let session_is_active = runtime
+        .tasks
+        .lock()
+        .map_err(|error| error.to_string())?
+        .contains_key(&request.session_id);
+    let native_delivery = session_is_active.then_some(requested_delivery.unwrap_or("queue"));
     {
         let conn = open_database(&app)?;
-        let title = request
+        let latest_user_prompt = request
             .messages
             .iter()
             .rev()
             .find(|message| message.role == "user")
-            .map(|message| message.content.chars().take(28).collect::<String>())
-            .filter(|value| !value.trim().is_empty())
-            .unwrap_or_else(|| "AI 对话".to_string());
+            .map(|message| message.content.clone())
+            .filter(|value| !value.trim().is_empty());
+        let title = if ai_session_origin(&request.session_id) == AiSessionOrigin::User {
+            "AI 对话".to_string()
+        } else {
+            latest_user_prompt
+                .as_deref()
+                .map(fallback_ai_session_title)
+                .unwrap_or_else(|| "AI 对话".to_string())
+        };
         upsert_ai_session(&conn, &request.session_id, &title, "running")?;
         if let Some(user_message) = request
             .messages
@@ -2502,8 +2833,73 @@ async fn ai_send_message(
                 &user_message.content,
                 None,
                 None,
-                Some("sent"),
+                Some(match native_delivery {
+                    Some("steer") => "steering",
+                    Some("queue") => "queued",
+                    _ => "sent",
+                }),
             )?;
+        }
+    }
+    if let Some(delivery) = native_delivery {
+        let local_user_message = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user");
+        let local_message_id = local_user_message.and_then(|message| message.id.clone());
+        let local_prompt = local_user_message.map(|message| message.content.clone());
+        if let Err(message) = send_ai_sidecar_command(
+            &app,
+            runtime.inner(),
+            json!({
+                "type": "sendMessage",
+                "sessionId": request.session_id,
+                "messages": request.messages,
+                "delivery": delivery
+            }),
+        )
+        .await
+        {
+            if let Ok(conn) = open_database(&app) {
+                if let Some(message_id) = local_message_id.as_deref() {
+                    let _ = conn.execute(
+                        "UPDATE ai_messages SET status='superseded'
+                         WHERE id=?1 AND session_id=?2 AND role='user'
+                           AND status IN ('queued', 'steering')",
+                        params![message_id, request.session_id],
+                    );
+                } else if let Some(prompt) = local_prompt.as_deref() {
+                    let _ = conn.execute(
+                        "UPDATE ai_messages SET status='superseded' WHERE id = (
+                           SELECT id FROM ai_messages
+                           WHERE session_id=?1 AND role='user' AND content=?2
+                             AND status IN ('queued', 'steering')
+                           ORDER BY created_at DESC LIMIT 1
+                         )",
+                        params![request.session_id, prompt],
+                    );
+                }
+            }
+            return Err(message);
+        }
+        return Ok(());
+    }
+    if ai_session_origin(&request.session_id) == AiSessionOrigin::User {
+        if let Some(prompt) = request
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == "user")
+            .map(|message| message.content.clone())
+            .filter(|value| !value.trim().is_empty())
+        {
+            let title_app = app.clone();
+            let title_runtime = runtime.inner().clone();
+            let title_session_id = request.session_id.clone();
+            tauri::async_runtime::spawn(async move {
+                schedule_ai_session_title(title_app, title_runtime, title_session_id, prompt).await;
+            });
         }
     }
     if let Err(message) = stop_ai_session(&runtime, &request.session_id) {
@@ -2523,7 +2919,11 @@ async fn ai_send_message(
     let runtime_inner = runtime.inner().clone();
     let app_handle = app.clone();
     let task_session_id = session_id.clone();
+    let (task_registered_tx, task_registered_rx) = oneshot::channel::<()>();
     let task = tauri::async_runtime::spawn(async move {
+        if task_registered_rx.await.is_err() {
+            return;
+        }
         emit_ai(
             &app_handle,
             AiEvent::Status {
@@ -2580,6 +2980,7 @@ async fn ai_send_message(
         .lock()
         .map_err(|err| err.to_string())?
         .insert(session_id, task);
+    let _ = task_registered_tx.send(());
     Ok(())
 }
 
@@ -2634,7 +3035,11 @@ fn ai_generate_chart_indicator(
     let runtime_inner = runtime.inner().clone();
     let app_handle = app.clone();
     let task_session_id = session_id.clone();
+    let (task_registered_tx, task_registered_rx) = oneshot::channel::<()>();
     let task = tauri::async_runtime::spawn(async move {
+        if task_registered_rx.await.is_err() {
+            return;
+        }
         emit_ai(
             &app_handle,
             AiEvent::Status {
@@ -2705,6 +3110,7 @@ fn ai_generate_chart_indicator(
         .lock()
         .map_err(|err| err.to_string())?
         .insert(session_id, task);
+    let _ = task_registered_tx.send(());
     Ok(())
 }
 
@@ -2726,6 +3132,11 @@ async fn ai_stop(
     .await;
     stop_ai_session(&runtime, &session_id)?;
     if let Ok(conn) = open_database(&app) {
+        let _ = conn.execute(
+            "UPDATE ai_messages SET status='cancelled'
+             WHERE session_id=?1 AND status IN ('streaming', 'queued', 'steering')",
+            params![&session_id],
+        );
         let _ = set_ai_session_status(&conn, &session_id, "stopped");
     }
     emit_ai(
@@ -13458,7 +13869,9 @@ async fn run_ai_stream(
     let required_tool_satisfied = Arc::new(AtomicBool::new(required_tool_name.is_none()));
     let tool_read_semaphore = Arc::new(Semaphore::new(4));
     let tool_execution_gate = Arc::new(AsyncRwLock::new(()));
-    let persisted_message_id = format!("a-stream-{}-{}", session_id, now_ms());
+    let mut turn_started_at = now_ms();
+    let mut turn_first_token_at: Option<i64> = None;
+    let mut persisted_message_id = format!("a-stream-{}-{}", session_id, turn_started_at);
     let mut assistant_text = String::new();
     let mut assistant_draft_text = String::new();
     let mut assistant_reasoning = String::new();
@@ -13624,8 +14037,19 @@ async fn run_ai_stream(
 
     send_ai_sidecar_command(&app, &runtime, payload).await?;
     let mut done_emitted = false;
+    let mut deferred_done: Option<AiEvent> = None;
+    let mut completion_guard: Option<AiSessionCompletionGuard> = None;
     let mut error_message: Option<String> = None;
-    while let Some(event) = event_rx.recv().await {
+    loop {
+        let next_event = if done_emitted {
+            timeout(Duration::from_millis(150), event_rx.recv())
+                .await
+                .ok()
+                .flatten()
+        } else {
+            event_rx.recv().await
+        };
+        let Some(event) = next_event else { break };
         if ai_session_cancelled(&runtime, &session_id) {
             done_emitted = true;
             break;
@@ -13635,6 +14059,7 @@ async fn run_ai_stream(
         // duplicate diagnostic as terminal removes the session sink before
         // the repair request arrives, leaving the next tool pending forever.
         // The authoritative failed ToolResult remains visible and persisted.
+        let mut replacement_event: Option<AiEvent> = None;
         let recoverable_strategy_tool_error = matches!(
             &event,
             AiEvent::Error { message, .. }
@@ -13648,6 +14073,15 @@ async fn run_ai_stream(
                 reasoning_summary,
                 ..
             } => {
+                if turn_first_token_at.is_none()
+                    && !content.is_empty()
+                    && matches!(
+                        channel.as_str(),
+                        "text" | "text-preview" | "text-final" | "reasoning" | "reasoning-final"
+                    )
+                {
+                    turn_first_token_at = Some(now_ms());
+                }
                 if channel == "text-final" {
                     assistant_text.clone_from(content);
                     assistant_draft_text.clone_from(content);
@@ -13740,6 +14174,177 @@ async fn run_ai_stream(
                     "usage": usage
                 }));
             }
+            AiEvent::ContextUsage { usage, .. } => {
+                tool_events.push(json!({
+                    "type": "contextUsage",
+                    "usage": usage
+                }));
+            }
+            AiEvent::TurnStarted {
+                prompt,
+                local_message_id,
+                started_at,
+                ..
+            } => {
+                tool_events.push(json!({
+                    "type": "turnTiming",
+                    "startedAt": turn_started_at,
+                    "firstTokenAt": turn_first_token_at,
+                    "completedAt": started_at,
+                    "source": "desicHost"
+                }));
+                let completed_usage = append_ai_usage_summary_event(
+                    &mut tool_events,
+                    &usage_provider,
+                    &usage_model_id,
+                    &usage_model,
+                    &usage_model_name,
+                );
+                let completed_tool_json = serde_json::to_string(&tool_events)
+                    .map_err(|error| format!("序列化 AI 运行记录失败: {error}"))?;
+                let completed_text = if assistant_text.trim().is_empty() {
+                    assistant_draft_text.clone()
+                } else {
+                    assistant_text.clone()
+                };
+                let completed_reasoning =
+                    (!assistant_reasoning.is_empty()).then_some(assistant_reasoning.clone());
+                let completed_message_id = persisted_message_id.clone();
+                let completed_session_id = session_id.clone();
+                let completed_prompt = prompt.clone();
+                let completed_local_message_id = local_message_id.clone();
+                let completed_app = app.clone();
+                tokio::task::spawn_blocking(move || {
+                    let mut conn = open_database(&completed_app)?;
+                    let tx = conn
+                        .transaction_with_behavior(TransactionBehavior::Immediate)
+                        .map_err(|error| error.to_string())?;
+                    upsert_ai_message(
+                        &tx,
+                        &completed_message_id,
+                        &completed_session_id,
+                        "assistant",
+                        &completed_text,
+                        completed_reasoning.as_deref(),
+                        Some(&completed_tool_json),
+                        Some("completed"),
+                    )?;
+                    persist_ai_message_usage_summary(&tx, &completed_message_id, &completed_usage)?;
+                    let matched_by_id = if let Some(message_id) = completed_local_message_id.as_deref() {
+                        tx.execute(
+                            "UPDATE ai_messages SET status='sent'
+                             WHERE id=?1 AND session_id=?2 AND role='user'
+                               AND status IN ('queued', 'steering')",
+                            params![message_id, completed_session_id],
+                        )
+                        .map_err(|error| error.to_string())?
+                    } else {
+                        0
+                    };
+                    if matched_by_id == 0 {
+                        if let Some(prompt) = completed_prompt.as_deref() {
+                            tx.execute(
+                                "UPDATE ai_messages SET status='sent' WHERE id = (
+                                   SELECT id FROM ai_messages
+                                   WHERE session_id = ?1 AND role='user'
+                                     AND status IN ('queued', 'steering') AND content = ?2
+                                   ORDER BY created_at DESC LIMIT 1
+                                 )",
+                                params![completed_session_id, prompt],
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                    }
+                    tx.commit().map_err(|error| error.to_string())
+                })
+                .await
+                .map_err(|error| format!("保存 AI 队列分段任务失败: {error}"))??;
+
+                assistant_text.clear();
+                assistant_draft_text.clear();
+                assistant_reasoning.clear();
+                tool_events.clear();
+                tool_events.push(json!({
+                    "type": "usageScope",
+                    "scope": "session-cumulative"
+                }));
+                turn_started_at = *started_at;
+                turn_first_token_at = None;
+                persisted_message_id = format!(
+                    "a-stream-{}-{}-{}",
+                    session_id,
+                    started_at,
+                    now_ms()
+                );
+                ai_stream_checkpoint::persist_ai_stream_checkpoint(
+                    &app,
+                    &session_id,
+                    &persisted_message_id,
+                    "",
+                    "",
+                    &tool_events,
+                    "streaming",
+                )
+                .await?;
+                last_stream_checkpoint = Instant::now();
+            }
+            AiEvent::PendingPromptError {
+                prompt,
+                prompt_id,
+                local_message_id,
+                delivery,
+                operation,
+                message,
+                ..
+            } => {
+                let safe_message = sanitize_secret(message, &config.api_key);
+                replacement_event = Some(AiEvent::PendingPromptError {
+                    session_id: session_id.clone(),
+                    prompt: prompt.clone(),
+                    prompt_id: prompt_id.clone(),
+                    local_message_id: local_message_id.clone(),
+                    delivery: delivery.clone(),
+                    operation: operation.clone(),
+                    message: safe_message.clone(),
+                });
+                if operation.as_deref() == Some("submit") || operation.is_none() {
+                    let failed_session_id = session_id.clone();
+                    let failed_prompt = prompt.clone();
+                    let failed_local_message_id = local_message_id.clone();
+                    let failed_status = if delivery == "steer" { "steering" } else { "queued" }.to_string();
+                    let failed_tool_json = json!([{"type": "pendingPromptError", "message": safe_message}]).to_string();
+                    let failed_app = app.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let conn = open_database(&failed_app)?;
+                        let matched_by_id = if let Some(message_id) = failed_local_message_id.as_deref() {
+                            conn.execute(
+                                "UPDATE ai_messages SET status='superseded', tool_json=?3
+                                 WHERE id=?1 AND session_id=?2 AND role='user'
+                                   AND status IN ('queued', 'steering')",
+                                params![message_id, failed_session_id, failed_tool_json],
+                            )
+                            .map_err(|error| error.to_string())?
+                        } else {
+                            0
+                        };
+                        if matched_by_id == 0 {
+                            conn.execute(
+                                "UPDATE ai_messages SET status='superseded', tool_json=?4 WHERE id = (
+                                   SELECT id FROM ai_messages
+                                   WHERE session_id=?1 AND role='user' AND status=?2 AND content=?3
+                                   ORDER BY created_at DESC LIMIT 1
+                                 )",
+                                params![failed_session_id, failed_status, failed_prompt, failed_tool_json],
+                            )
+                            .map_err(|error| error.to_string())?;
+                        }
+                        Ok::<(), String>(())
+                    })
+                    .await
+                    .map_err(|error| format!("保存 AI 队列错误失败: {error}"))??;
+                }
+            }
+            AiEvent::PendingPrompts { .. } | AiEvent::PendingPromptSubmitted { .. } => {}
             AiEvent::AgentStart {
                 agent_id,
                 configured_agent_id,
@@ -13938,11 +14543,20 @@ async fn run_ai_stream(
                 });
             }
             AiEvent::Error { message, .. } if !recoverable_strategy_tool_error => {
-                error_message = Some(sanitize_secret(message, &config.api_key));
+                let safe_message = sanitize_secret(message, &config.api_key);
+                replacement_event = Some(AiEvent::Error {
+                    session_id: session_id.clone(),
+                    message: safe_message.clone(),
+                });
+                error_message = Some(safe_message);
             }
             AiEvent::Error { .. } => {}
             AiEvent::Done { .. } => {
                 done_emitted = true;
+                deferred_done = Some(event.clone());
+                if completion_guard.is_none() {
+                    completion_guard = Some(AiSessionCompletionGuard::begin(&runtime, &session_id));
+                }
             }
             AiEvent::Status { .. } => {}
         }
@@ -13952,6 +14566,7 @@ async fn run_ai_stream(
                 | AiEvent::ToolCall { .. }
                 | AiEvent::ToolResult { .. }
                 | AiEvent::Usage { .. }
+                | AiEvent::ContextUsage { .. }
                 | AiEvent::AgentStart { .. }
                 | AiEvent::AgentDone { .. }
                 | AiEvent::TeamEvent { .. }
@@ -13977,16 +14592,21 @@ async fn run_ai_stream(
             }
             last_stream_checkpoint = Instant::now();
         }
-        if !recoverable_strategy_tool_error {
-            emit_ai(&app, event);
+        if !recoverable_strategy_tool_error && !matches!(&event, AiEvent::Done { .. }) {
+            emit_ai(&app, replacement_event.unwrap_or(event));
         }
-        if done_emitted || error_message.is_some() {
+        if error_message.is_some() {
+            if completion_guard.is_none() {
+                completion_guard = Some(AiSessionCompletionGuard::begin(&runtime, &session_id));
+            }
             break;
         }
     }
     if let Ok(mut sinks) = runtime.session_sinks.lock() {
         sinks.remove(&session_id);
     }
+    let _completion_guard = completion_guard
+        .unwrap_or_else(|| AiSessionCompletionGuard::begin(&runtime, &session_id));
     let was_cancelled = ai_session_cancelled(&runtime, &session_id);
     if !done_emitted && error_message.is_none() {
         error_message = Some("Cline sidecar 连接中断，未收到完成事件".to_string());
@@ -13997,6 +14617,13 @@ async fn run_ai_stream(
     }
     let terminal_state =
         ai_stream_terminal_state(was_cancelled, done_emitted, error_message.is_some());
+    tool_events.push(json!({
+        "type": "turnTiming",
+        "startedAt": turn_started_at,
+        "firstTokenAt": turn_first_token_at,
+        "completedAt": now_ms(),
+        "source": "desicHost"
+    }));
     let final_usage = append_ai_usage_summary_event(
         &mut tool_events,
         &usage_provider,
@@ -14048,6 +14675,12 @@ async fn run_ai_stream(
             Some(message_status),
         )?;
         persist_ai_message_usage_summary(&tx, &persisted_message_id, &persisted_usage)?;
+        tx.execute(
+            "UPDATE ai_messages SET status='superseded'
+             WHERE session_id=?1 AND role='user' AND status IN ('queued', 'steering')",
+            params![persist_session_id],
+        )
+        .map_err(|error| error.to_string())?;
         if let Some(run_id) = metadata_run_id.as_deref() {
             crate::ai_automation::persist_ai_automation_run_metadata(
                 &tx,
@@ -14073,6 +14706,10 @@ async fn run_ai_stream(
         Err(_) => {}
     }
 
+    if let Some(message) = error_message {
+        clear_ai_session_runtime(&runtime, &session_id);
+        return Err(message);
+    }
     if let Some(finish_reason) = terminal_state.synthetic_finish_reason {
         emit_ai(
             &app,
@@ -14081,9 +14718,8 @@ async fn run_ai_stream(
                 finish_reason: Some(finish_reason.to_string()),
             },
         );
-    }
-    if let Some(message) = error_message {
-        return Err(message);
+    } else if let Some(done) = deferred_done {
+        emit_ai(&app, done);
     }
     clear_ai_session_runtime(&runtime, &session_id);
     Ok(())
@@ -14168,6 +14804,7 @@ async fn ensure_ai_sidecar(
     let app_for_stdout = app.clone();
     let runtime_for_wait = runtime.clone();
     let app_for_wait = app.clone();
+    let app_for_stderr = app.clone();
     let sidecar_id_for_wait = sidecar_id.clone();
     let stderr_tail = Arc::new(Mutex::new(Vec::<String>::new()));
     let stderr_tail_for_reader = stderr_tail.clone();
@@ -14206,9 +14843,52 @@ async fn ensure_ai_sidecar(
             let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;
             };
-            let Some(event) = cline_event_from_value("", &value) else {
+            if value.get("type").and_then(Value::as_str) == Some("titleResult") {
+                let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
+                let result_tx = runtime_for_stdout
+                    .pending_title_commands
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.remove(request_id));
+                if let Some(result_tx) = result_tx {
+                    let result = if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                        Ok(value.get("title").and_then(Value::as_str).unwrap_or_default().to_string())
+                    } else {
+                        Err(value.get("message").and_then(Value::as_str).unwrap_or("AI title generation failed").to_string())
+                    };
+                    let _ = result_tx.send(result);
+                }
+                continue;
+            }
+            if value.get("type").and_then(Value::as_str) == Some("pendingPromptCommandResult") {
+                let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
+                let result_tx = runtime_for_stdout
+                    .pending_prompt_commands
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.remove(request_id));
+                if let Some(result_tx) = result_tx {
+                    let result = if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                        Ok(value.get("prompts").and_then(Value::as_array).cloned())
+                    } else {
+                        Err(value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("AI pending prompt command failed")
+                            .to_string())
+                    };
+                    let _ = result_tx.send(result);
+                }
+                continue;
+            }
+            let Some(mut event) = cline_event_from_value("", &value) else {
                 continue;
             };
+            if let AiEvent::Error { message, .. } = &mut event {
+                if let Ok(config) = load_ai_config(&app_for_stdout) {
+                    *message = sanitize_secret(message, &config.api_key);
+                }
+            }
             if let AiEvent::Error { message, .. } = &event {
                 if let Ok(mut last_error) = last_sidecar_error_for_stdout.lock() {
                     *last_error = Some(message.clone());
@@ -14234,9 +14914,12 @@ async fn ensure_ai_sidecar(
     let stderr_reader = tauri::async_runtime::spawn(async move {
         let mut stderr_lines = BufReader::new(stderr).lines();
         while let Ok(Some(line)) = stderr_lines.next_line().await {
-            eprintln!("cline-sidecar: {}", line);
+            let safe_line = load_ai_config(&app_for_stderr)
+                .map(|config| sanitize_secret(&line, &config.api_key))
+                .unwrap_or_else(|_| "[sidecar diagnostic redacted]".to_string());
+            eprintln!("cline-sidecar: {}", safe_line);
             if let Ok(mut tail) = stderr_tail_for_reader.lock() {
-                tail.push(line.chars().take(500).collect());
+                tail.push(safe_line.chars().take(500).collect());
                 if tail.len() > 20 {
                     tail.remove(0);
                 }
@@ -14286,6 +14969,11 @@ async fn ensure_ai_sidecar(
                 exit_detail
             ),
         };
+        if let Ok(mut pending) = runtime_for_wait.pending_prompt_commands.lock() {
+            for (_, result_tx) in pending.drain() {
+                let _ = result_tx.send(Err(message.clone()));
+            }
+        }
         fail_ai_sidecar_sessions(&runtime_for_wait, &message);
         emit_ai(
             &app_for_wait,
@@ -14599,6 +15287,95 @@ async fn send_ai_sidecar_command(
     }
 }
 
+fn fallback_ai_session_title(prompt: &str) -> String {
+    let first_line = prompt.lines().next().unwrap_or(prompt).trim();
+    let first_sentence = first_line.split(['。', '.', '！', '!', '?', '？']).next().unwrap_or(first_line).trim();
+    let title: String = first_sentence.chars().take(36).collect();
+    if title.is_empty() { "AI 对话".to_string() } else { title }
+}
+
+fn sanitize_generated_ai_title(value: &str) -> Option<String> {
+    let title = value
+        .replace(['\n', '\r', '`', '"', '\''], " ")
+        .chars()
+        .filter(|ch| !ch.is_control())
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    let title: String = title.chars().take(60).collect();
+    (!title.trim().is_empty()).then_some(title)
+}
+
+async fn schedule_ai_session_title(
+    app: tauri::AppHandle,
+    runtime: AiRuntime,
+    session_id: String,
+    prompt: String,
+) {
+    if ai_session_origin(&session_id) != AiSessionOrigin::User || prompt.trim().is_empty() {
+        return;
+    }
+    let title_is_placeholder = open_database(&app)
+        .ok()
+        .and_then(|conn| conn.query_row(
+            "SELECT title FROM ai_sessions WHERE id=?1",
+            params![&session_id],
+            |row| row.get::<_, String>(0),
+        ).optional().ok().flatten())
+        .is_some_and(|title| matches!(title.as_str(), "AI 对话" | "新对话"));
+    if !title_is_placeholder { return; }
+    let reserved = runtime
+        .title_generating
+        .lock()
+        .map(|mut current| current.insert(session_id.clone()))
+        .unwrap_or(false);
+    if !reserved { return; }
+    let fallback = fallback_ai_session_title(&prompt);
+    let request_id = format!("title-{}-{}", session_id, now_ms());
+    let result = async {
+        let config = load_ai_config(&app)?;
+        let active = config.models.iter().find(|model| model.id == config.active_model_id).or_else(|| config.models.first());
+        let Some(model) = active else { return Err("AI model is not configured".to_string()); };
+        let (result_tx, result_rx) = oneshot::channel();
+        runtime.pending_title_commands.lock().map_err(|error| error.to_string())?.insert(request_id.clone(), result_tx);
+        let payload = json!({
+            "type": "generateTitle",
+            "requestId": request_id,
+            "sessionId": session_id,
+            "prompt": prompt,
+            "config": {
+                "provider": model.provider,
+                "model": model.model,
+                "baseUrl": model.base_url,
+                "apiKey": model.api_key,
+                "contextWindow": model.context_window,
+                "permissionMode": "advisor",
+                "reasoningDepth": "none"
+            }
+        });
+        send_ai_sidecar_command(&app, &runtime, payload).await?;
+        timeout(Duration::from_secs(24), result_rx)
+            .await
+            .map_err(|_| "AI title generation timeout".to_string())?
+            .map_err(|_| "AI title response channel closed".to_string())?
+    }.await;
+    if let Ok(mut pending) = runtime.pending_title_commands.lock() {
+        pending.remove(&request_id);
+    }
+    let title = result.ok().and_then(|value| sanitize_generated_ai_title(&value)).unwrap_or(fallback);
+    if let Ok(conn) = open_database(&app) {
+        let updated = conn.execute(
+            "UPDATE ai_sessions SET title=?2, updated_at=?3 WHERE id=?1 AND title IN ('AI 对话','新对话')",
+            params![&session_id, &title, now_ms()],
+        ).unwrap_or(0);
+        if updated == 1 {
+            let _ = app.emit("ai:session-title-updated", json!({ "sessionId": session_id, "title": title }));
+        }
+    }
+    if let Ok(mut current) = runtime.title_generating.lock() { current.remove(&session_id); }
+}
+
 async fn shutdown_ai_sidecar(runtime: &AiRuntime) {
     let handle = runtime.sidecar.lock().await.clone();
     let Some(handle) = handle else {
@@ -14645,6 +15422,11 @@ fn ai_event_session_id(event: &AiEvent) -> String {
         | AiEvent::ToolCall { session_id, .. }
         | AiEvent::ToolResult { session_id, .. }
         | AiEvent::Usage { session_id, .. }
+        | AiEvent::ContextUsage { session_id, .. }
+        | AiEvent::PendingPrompts { session_id, .. }
+        | AiEvent::PendingPromptSubmitted { session_id, .. }
+        | AiEvent::PendingPromptError { session_id, .. }
+        | AiEvent::TurnStarted { session_id, .. }
         | AiEvent::AgentStart { session_id, .. }
         | AiEvent::AgentDone { session_id, .. }
         | AiEvent::TeamEvent { session_id, .. }
@@ -14865,6 +15647,75 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
         "usage" => Some(AiEvent::Usage {
             session_id,
             usage: value.get("usage").cloned().unwrap_or_else(|| json!({})),
+        }),
+        "contextUsage" | "context_usage" => Some(AiEvent::ContextUsage {
+            session_id,
+            usage: value.get("usage").cloned().unwrap_or_else(|| json!({})),
+        }),
+        "pendingPrompts" | "pending_prompts" => Some(AiEvent::PendingPrompts {
+            session_id,
+            prompts: value.get("prompts").cloned().unwrap_or_else(|| json!([])),
+        }),
+        "pendingPromptSubmitted" | "pending_prompt_submitted" => {
+            Some(AiEvent::PendingPromptSubmitted {
+                session_id,
+                prompt: value.get("prompt").cloned().unwrap_or_else(|| json!({})),
+            })
+        }
+        "pendingPromptError" | "pending_prompt_error" => Some(AiEvent::PendingPromptError {
+            session_id,
+            prompt: value
+                .get("prompt")
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            prompt_id: value
+                .get("promptId")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            local_message_id: value
+                .get("localMessageId")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            delivery: value
+                .get("delivery")
+                .and_then(|item| item.as_str())
+                .unwrap_or("queue")
+                .to_string(),
+            operation: value
+                .get("operation")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            message: value
+                .get("message")
+                .and_then(|item| item.as_str())
+                .unwrap_or("AI pending prompt failed")
+                .to_string(),
+        }),
+        "turnStarted" | "turn_started" => Some(AiEvent::TurnStarted {
+            session_id,
+            prompt: value
+                .get("prompt")
+                .and_then(|item| item.as_str())
+                .filter(|item| !item.is_empty())
+                .map(str::to_string),
+            prompt_id: value
+                .get("promptId")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            local_message_id: value
+                .get("localMessageId")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            delivery: value
+                .get("delivery")
+                .and_then(|item| item.as_str())
+                .map(ToString::to_string),
+            started_at: value
+                .get("startedAt")
+                .or_else(|| value.get("started_at"))
+                .and_then(|item| item.as_i64())
+                .unwrap_or_else(now_ms),
         }),
         "agentStart" | "agent_start" => Some(AiEvent::AgentStart {
             session_id,
@@ -15627,6 +16478,9 @@ fn clear_ai_session_runtime(runtime: &AiRuntime, session_id: &str) {
     }
     if let Ok(mut tasks) = runtime.tasks.lock() {
         tasks.remove(session_id);
+    }
+    if let Ok(mut completing) = runtime.sessions_completing.lock() {
+        completing.remove(session_id);
     }
 }
 
@@ -21085,6 +21939,12 @@ fn upsert_ai_session_failure(
     message: &str,
 ) -> Result<(), String> {
     set_ai_session_status(conn, session_id, "failed")?;
+    conn.execute(
+        "UPDATE ai_messages SET status='failed'
+         WHERE session_id=?1 AND role='user' AND status IN ('queued', 'steering')",
+        params![session_id],
+    )
+    .map_err(|error| error.to_string())?;
     let latest_user_rowid = conn
         .query_row(
             "SELECT MAX(rowid) FROM ai_messages WHERE session_id = ?1 AND role = 'user'",
@@ -23672,10 +24532,39 @@ fn mask_key(value: &str) -> String {
 }
 
 fn sanitize_secret(value: &str, secret: &str) -> String {
-    if secret.is_empty() {
-        return value.to_string();
+    static CREDENTIAL_PATTERNS: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+    let patterns = CREDENTIAL_PATTERNS.get_or_init(|| {
+        vec![
+            (
+                Regex::new(r"(?i)\bsk-[A-Za-z0-9_-]{8,}\b").expect("valid API key pattern"),
+                "[API key redacted]",
+            ),
+            (
+                Regex::new(r#"(?i)(authorization\s*[:=]\s*bearer\s+)[^\s\"']+"#)
+                    .expect("valid bearer pattern"),
+                "$1[redacted]",
+            ),
+            (
+                Regex::new(r#"(?i)((?:api[_-]?key|access[_-]?token|secret|passphrase|password)\s*[=:]\s*)[^\s,;\"'&}]+"#)
+                    .expect("valid credential field pattern"),
+                "$1[redacted]",
+            ),
+            (
+                Regex::new(r"(?i)([?&](?:api[_-]?key|access[_-]?token|token|secret)=)[^&\s]+")
+                    .expect("valid credential query pattern"),
+                "$1[redacted]",
+            ),
+        ]
+    });
+    let mut sanitized = if secret.is_empty() {
+        value.to_string()
+    } else {
+        value.replace(secret, "[redacted]")
+    };
+    for (pattern, replacement) in patterns {
+        sanitized = pattern.replace_all(&sanitized, *replacement).into_owned();
     }
-    value.replace(secret, "[redacted]")
+    sanitized
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -23839,6 +24728,10 @@ pub fn run() {
             ai_list_sessions,
             ai_rename_session,
             ai_delete_session,
+            ai_pending_prompts,
+            ai_update_pending_prompt,
+            ai_delete_pending_prompt,
+            ai_fork_session,
             ai_send_message,
             ai_generate_chart_indicator,
             ai_approve_tool,
@@ -24684,6 +25577,16 @@ mod tests {
     }
 
     #[test]
+    fn generated_ai_titles_are_single_line_bounded_and_fallback_is_deterministic() {
+        assert_eq!(
+            sanitize_generated_ai_title("  ## BTC market structure\nwith extra detail  "),
+            Some("## BTC market structure with extra detail".to_string())
+        );
+        assert_eq!(fallback_ai_session_title("Review BTC funding? Include flow."), "Review BTC funding");
+        assert_eq!(fallback_ai_session_title("\n\n"), "AI 对话");
+    }
+
+    #[test]
     fn historical_fills_join_profiles_without_ambiguity() {
         let conn = Connection::open_in_memory().expect("open test database");
         conn.execute_batch(
@@ -24850,6 +25753,89 @@ mod tests {
         assert_eq!(events[0]["content"], "Inspecting inputs");
         assert_eq!(events[1]["id"], "reasoning-2");
         assert_eq!(events[1]["content"], "Planning output");
+    }
+
+    #[test]
+    fn ai_session_completion_guard_blocks_only_while_alive() {
+        let runtime = AiRuntime::default();
+        {
+            let _guard = AiSessionCompletionGuard::begin(&runtime, "session-finalizing");
+            assert!(runtime
+                .sessions_completing
+                .lock()
+                .unwrap()
+                .contains("session-finalizing"));
+        }
+        assert!(!runtime
+            .sessions_completing
+            .lock()
+            .unwrap()
+            .contains("session-finalizing"));
+    }
+
+    #[test]
+    fn ai_diagnostics_redact_exact_and_structured_credentials() {
+        let secret = "demo-sensitive-value";
+        let sanitized = sanitize_secret(
+            "key=demo-sensitive-value Authorization: Bearer token-value? api_key=query-value&x=1 sk-example123456",
+            secret,
+        );
+        assert!(!sanitized.contains(secret));
+        assert!(!sanitized.contains("token-value"));
+        assert!(!sanitized.contains("query-value"));
+        assert!(!sanitized.contains("sk-example123456"));
+    }
+
+    #[test]
+    fn ai_fork_requires_terminal_assistant_message() {
+        let message = |role: &str, status: Option<&str>| AiStoredMessage {
+            id: "message".to_string(),
+            session_id: "session".to_string(),
+            role: role.to_string(),
+            content: "content".to_string(),
+            reasoning: None,
+            tool_json: None,
+            token_usage: None,
+            status: status.map(str::to_string),
+            created_at: 1,
+        };
+        assert!(ai_message_is_forkable(&message("assistant", Some("completed"))));
+        assert!(ai_message_is_forkable(&message("assistant", Some("failed"))));
+        assert!(ai_message_is_forkable(&message("assistant", None)));
+        assert!(!ai_message_is_forkable(&message("assistant", Some("streaming"))));
+        assert!(!ai_message_is_forkable(&message("user", Some("sent"))));
+    }
+
+    #[test]
+    fn sidecar_pending_prompt_error_is_non_terminal_and_session_scoped() {
+        let event = cline_event_from_value(
+            "session-fallback",
+            &json!({
+                "type": "pendingPromptError",
+                "sessionId": "session-queue",
+                "prompt": "继续检查风险",
+                "delivery": "steer",
+                "operation": "submit",
+                "message": "pending prompt rejected"
+            }),
+        )
+        .expect("parse pending prompt error");
+        assert_eq!(ai_event_session_id(&event), "session-queue");
+        match event {
+            AiEvent::PendingPromptError {
+                prompt,
+                delivery,
+                operation,
+                message,
+                ..
+            } => {
+                assert_eq!(prompt, "继续检查风险");
+                assert_eq!(delivery, "steer");
+                assert_eq!(operation.as_deref(), Some("submit"));
+                assert_eq!(message, "pending prompt rejected");
+            }
+            event => panic!("unexpected event: {event:?}"),
+        }
     }
 
     #[test]

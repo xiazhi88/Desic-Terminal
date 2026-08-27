@@ -1,4 +1,4 @@
-import type { AiChatMessage, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiEvent, AiLocalAuthStatus, AiModelConfigUpdate, AiPermissionMode, AiReasoningDepth, AiSession, AiSessionSnapshot, AiTokenUsageDashboard } from "../types";
+import type { AiChatMessage, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiEvent, AiLocalAuthStatus, AiModelConfigUpdate, AiPendingPrompt, AiPermissionMode, AiPromptDelivery, AiReasoningDepth, AiSession, AiSessionSnapshot, AiTokenUsageDashboard } from "../types";
 import { invokeDesktop, invokeOptional, listenOptional } from "./tauri";
 
 export async function loadAiConfigSummary(): Promise<AiConfigSummary | null> {
@@ -19,6 +19,10 @@ export async function saveAiConfig(update: AiConfigUpdate): Promise<AiConfigSumm
 
 export async function loadAiLocalAuthStatus(): Promise<AiLocalAuthStatus | null> {
   return invokeOptional<AiLocalAuthStatus>("ai_local_auth_status");
+}
+
+export async function listenAiSessionTitleUpdates(handler: (update: { sessionId: string; title: string }) => void): Promise<() => void> {
+  return (await listenOptional<{ sessionId: string; title: string }>("ai:session-title-updated", handler)) ?? (() => {});
 }
 
 export async function listenAiConfigUpdates(handler: (summary: AiConfigSummary) => void): Promise<() => void> {
@@ -62,11 +66,27 @@ export async function sendAiMessage(
   sessionId: string,
   messages: AiChatMessage[],
   accountId?: string,
-  options?: { modelId?: string; permissionMode?: AiPermissionMode; reasoningDepth?: AiReasoningDepth }
+  options?: { modelId?: string; permissionMode?: AiPermissionMode; reasoningDepth?: AiReasoningDepth; delivery?: AiPromptDelivery }
 ) {
   return invokeDesktop("ai_send_message", {
     request: { sessionId, messages, accountId, ...options }
   });
+}
+
+export async function refreshAiPendingPrompts(sessionId: string): Promise<AiPendingPrompt[]> {
+  return (await invokeDesktop<AiPendingPrompt[]>("ai_pending_prompts", { request: { sessionId } })) ?? [];
+}
+
+export async function updateAiPendingPrompt(sessionId: string, promptId: string, prompt: string, delivery: AiPromptDelivery) {
+  return invokeDesktop("ai_update_pending_prompt", { request: { sessionId, promptId, prompt, delivery } });
+}
+
+export async function deleteAiPendingPrompt(sessionId: string, promptId: string) {
+  return invokeDesktop("ai_delete_pending_prompt", { request: { sessionId, promptId } });
+}
+
+export async function forkAiSession(sessionId: string, messageId: string): Promise<AiSessionSnapshot | null> {
+  return invokeDesktop<AiSessionSnapshot>("ai_fork_session", { request: { sessionId, messageId } });
 }
 
 export async function generateChartIndicatorWithAi(sessionId: string, prompt: string, messages: AiChatMessage[] = []) {
