@@ -1,0 +1,311 @@
+/*
+ * theme/data-voice.css — Phase 2 数据嗓音层（负责 agent：data-voice）
+ * ------------------------------------------------------------------
+ * 职责：行情数字启用 --font-market-display（行情显示字体）、微标签宽字距系统、
+ *       .bump 数字跳动 utility、.micro-label 微标签 utility。
+ * 边界：只允许修改本文件。不改动任何 TSX（.bump / .micro-label 仅作为 utility 暴露，接线后续统一做）。
+ * 本文件在 styles.css 之后导入：同特异性时本文件规则胜出。
+ * 设计基调：近黑 #020305 + 品牌紫 #955cff；所有颜色/时长/缓动取自 styles.css :root token，本文件不重复定义。
+ *
+ * ── .bump 建议接线位置（后续任务执行；颜色遵循 OKX 约定：--up=红涨 / --down=绿跌）──
+ *   - src/ui/App.tsx
+ *       .mid-price 主价（订单簿中间价，约 L9039）
+ *       .price-strip-tooltip-cell > strong（价格条悬浮报价，约 L1153-1173）
+ *       .market-picker__snapshot-quote strong（自选行最新价，约 L8940）
+ *       .episode-result-primary > strong（持仓复盘净收益大数字，约 L16311）
+ *       .instrument-operation-counts strong（严格模式预览计数，约 L13190）
+ *       .order-trigger-price b（触发单价格，约 L15070）
+ *   - src/ui/KlineChart.tsx
+ *       .ohlc-indicator-value（K 线图例 OHLC 值，约 L2784）
+ *       .chart-order-drag-readout em（拖单读数 PnL/百分比，约 L3539/L3555）
+ *   - src/ui/ChartWindowPage.tsx / src/ui/ChartWindowWorkspacePage.tsx
+ *       .chart-window-market strong（独立图表窗口主价，约 L655 / L224）
+ *   - src/ui/AiAutomationPanel.tsx
+ *       .automation-review-stats b（复盘统计，约 L3046-3051）
+ *       .automation-profile-card__pnl（Profile 卡盈亏，约 L899/L903）
+ *       .automation-run-stat-strip strong（运行统计，约 L1717-1722）
+ *   - src/ui/IntelligencePage.tsx
+ *       .intelligence-funding-summary strong（资金费率，约 L1895）
+ *       .intelligence-position-list article > header b（持仓盈亏，约 L1931）
+ *   接线方式：数据变化时移除 class → 强制 reflow → 重新添加（或改用 WAAPI）；
+ *   .bump-up / .bump-down 与 .bump 同元素组合使用（如 class="bump bump-up"）。
+ *
+ * ── .micro-label 建议接线位置 ──
+ *   - App.tsx：.depth-head / .depth-modal-head 栏头、.ticket-field-label（约 L14480）、
+ *     .data-headline__lead > span（约 L7421）、.instrument-operation-counts span（约 L13190）
+ *   - IntelligencePage.tsx：.intelligence-section-head 内小标题、分区标签
+ *   - KlineChart.tsx：新增图例 / 档位说明等 10px 级标签
+ * ────────────────────────────────────────────────────────────────
+ */
+
+:root {
+  /* 本文件局部补充 token：界面回退栈。中文/混排标签从行情窄体栈退回系统 UI 栈时使用，
+     避免拉丁窄体字形渗入中文标签；不覆盖任何既有 token。 */
+  --data-voice-ui-font: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", "Microsoft YaHei", sans-serif;
+}
+
+/* ==================================================================
+ * 1. 行情数字字体 —— 数字有自己的嗓音
+ *    入选原则：只作用于以数字为主的元素（价格/数量/百分比/盈亏/计数）；
+ *    不作用于中文正文、设置表单、说明文字。
+ *    注：--font-market-display 栈内无 CJK 字形，元素内偶发中文会按栈尾
+ *    "Microsoft YaHei" 回落（与全站回落一致，无字形缺失风险）。
+ *    styles.css 顶部已对 .price-strip / .symbol-quote / .depth-row /
+ *    .trade-row / .ticket-form input / .order-estimates / .bottom-panel
+ *    启用 tabular-nums（第一阶段基线），此处不重复声明。
+ * ================================================================ */
+
+/* —— 主价格：窄体 + 轻微正字距（0.2-0.4px 区间）强化"报价"气质 ——
+   权重说明：上游均已是 700-800，无需下调到 600，仅补字距。 */
+
+.mid-price {
+  /* 中间价大字（上游 24px/800）；本文件后置加载，覆盖其手写的
+     "Bahnschrift Condensed" 独苗栈，统一到 token 栈（macOS 得 Avenir Next Condensed）。 */
+  font-family: var(--font-market-display);
+  letter-spacing: 0.3px;
+}
+
+/* 中文小标签"实盘订单簿"退回系统栈，避免窄体拉丁混入 */
+.mid-price span {
+  font-family: var(--data-voice-ui-font);
+}
+
+.chart-window-market strong,
+.episode-result-primary > strong {
+  /* 独立图表窗主价（上游 22px/800）、复盘净收益大字（上游 25px/780） */
+  font-family: var(--font-market-display);
+  letter-spacing: 0.3px;
+}
+
+.data-headline__lead > strong {
+  /* 数据看板 40px 主答案字：只换字体。上游刻意使用 -0.02em 紧排，
+     大号窄体不加正字距，避免破坏既有排印意图。 */
+  font-family: var(--font-market-display);
+}
+
+/* —— 行内数字组：换嗓音，不动字号/字重/颜色 ——
+   逐条入选依据（均已核对 styles.css 与对应 TSX 渲染内容，纯数字为主）：
+   - .market-picker__snapshot-quote strong/em：自选行价格(11px/600)与涨跌%(9px)
+   - .price-strip-tooltip-cell > strong：价格条悬浮报价(12px)
+   - .ohlc-indicator-value：K 线图例 OHLC 数值
+   - .chart-order-drag-preview-line span：拖单预览价格(10px/800)
+   - .chart-order-drag-readout em：拖单读数盈亏/百分比
+   - .order-trigger-price b：触发单价格（仅 b 是数字，em/small 为标签不入选）
+   - .automation-profile-card__pnl：Profile 卡已实现盈亏(13px/700，is-gain/is-loss 色不变)
+   - .instrument-operation-counts strong：严格模式计数(17px)
+   - .instrument-operation-plan strong：杠杆目标倍数(18px)
+   - .episode-price-path strong：开/平均价(17px/750)
+   - .automation-metric strong：自动化指标值(16px，label 在同级 span 不受影响)
+   - .automation-run-stat-strip strong：运行统计计数(18px)。注意：覆盖上游手写的
+     JetBrains Mono 栈——计数改用窄体嗓音；若需保留等宽质感可删除本选择器
+   - .automation-review-stats b：复盘统计值(13px，含"数值+USDT"组合，数字为主)
+   - .intelligence-ratio-cell > span b/i：多空占比%(10px，b=多 i=空 成对入选保对称)
+   - .intelligence-position-list article > header b：持仓盈亏(10px/600)
+   - .intelligence-position-prices strong：开仓/现价(10px；同级中文标签不受影响)
+   - .intelligence-funding-summary strong：资金费率/溢价/基差(10px)
+   - .intelligence-risk-list strong：风险数值(11px；五格中一格为 ADL 状态文案，
+     数字为主仍成立，中文走栈尾 YaHei 回落)
+   - .intelligence-reaction-grid strong：反应速度/计数(13px) */
+.market-picker__snapshot-quote strong,
+.market-picker__snapshot-quote em,
+.price-strip-tooltip-cell > strong,
+.ohlc-indicator-value,
+.chart-order-drag-preview-line span,
+.chart-order-drag-readout em,
+.order-trigger-price b,
+.automation-profile-card__pnl,
+.instrument-operation-counts strong,
+.instrument-operation-plan strong,
+.episode-price-path strong,
+.automation-metric strong,
+.automation-run-stat-strip strong,
+.automation-review-stats b,
+.intelligence-ratio-cell > span b,
+.intelligence-ratio-cell > span i,
+.intelligence-position-list article > header b,
+.intelligence-position-prices strong,
+.intelligence-funding-summary strong,
+.intelligence-risk-list strong,
+.intelligence-reaction-grid strong {
+  font-family: var(--font-market-display);
+}
+
+/* ==================================================================
+ * 2. 微标签系统 —— 宽字距建立"栏目嗓音"
+ *    入选原则：字号 ≤11px 的栏头/字段/分区标签；只加 letter-spacing
+ *    （1.5-2px）与弱化色，不加大字号、不动布局；严禁全站 blanket 应用。
+ *    含多空/方向语义色的标签（.episode-context-line span、
+ *    .chart-alert-line-label）只加字距、不覆盖颜色。
+ * ================================================================ */
+
+/* 盘口/成交栏头（上游 11px weak） */
+.depth-head,
+.depth-modal-head {
+  letter-spacing: 1.6px;
+  color: var(--weak);
+}
+
+/* 下单票据字段标签（上游 11px weak，中文标签宽字距与参考项目手法一致） */
+.ticket-form label,
+.ticket-field-label {
+  letter-spacing: 1.6px;
+  color: var(--weak);
+}
+
+/* 严格模式预览计数标签（上游 10px/9px weak） */
+.instrument-operation-counts span,
+.instrument-operation-plan small {
+  letter-spacing: 1.8px;
+  color: var(--weak);
+}
+
+/* 持仓复盘：上下文行含多空 tone 色，仅加字距不动色 */
+.episode-context-line span {
+  letter-spacing: 1.6px;
+}
+
+.episode-price-path small {
+  /* 开/平仓时间戳（9px weak，数字为主） */
+  letter-spacing: 1.8px;
+  color: var(--weak);
+}
+
+/* 数据看板头条引导标签（上游 10px/750 weak，已 uppercase，宽字距归一到系统） */
+.data-headline__lead > span {
+  letter-spacing: 1.8px;
+  color: var(--weak);
+}
+
+/* 情报页小标签 */
+.intelligence-anomaly-list > header {
+  /* 异动列表栏头（9px weak） */
+  letter-spacing: 1.8px;
+  color: var(--weak);
+}
+
+.intelligence-risk-list span {
+  /* 风险条目标签（10px muted） */
+  letter-spacing: 1.8px;
+  color: var(--muted);
+}
+
+.intelligence-position-prices {
+  /* 开/现价标签条（9px weak；strong 价格数字继承字距，与标签同一节奏） */
+  letter-spacing: 1.5px;
+  color: var(--weak);
+}
+
+.intelligence-reaction-grid span,
+.intelligence-reaction-grid small {
+  /* 反应网格标签（9px weak） */
+  letter-spacing: 1.8px;
+  color: var(--weak);
+}
+
+/* 图表告警线标签（10px，红/绿/紫语义色保留，仅加字距） */
+.chart-alert-line-label {
+  letter-spacing: 1.5px;
+}
+
+/* 连接状态气泡标签：由近白降一档为 muted，纳入微标签色彩秩序 */
+.connection-tooltip-label {
+  letter-spacing: 1.6px;
+  color: var(--muted);
+}
+
+/* ==================================================================
+ * 3. .bump 数字跳动 utility —— 价格变化有跳动反馈
+ *    用法：<span class="bump">12345.6</span>；变体与 .bump 同元素组合：
+ *    <span class="bump bump-up">（闪 --up 红）、<span class="bump bump-down">（闪 --down 绿）。
+ *    注意 OKX 约定：--up=#f6465d 红（涨）、--down=#0ecb81 绿（跌）。
+ *    动画只使用 transform/filter；闪色变体动画 color 属于纯重绘属性
+ *    （不触发 layout），且为任务明确允许的实现路径。
+ * ================================================================ */
+
+.bump {
+  display: inline-block;
+  animation: numBump var(--dur-slow) var(--ease-out-soft);
+}
+
+@keyframes numBump {
+  0% {
+    transform: scale(1);
+  }
+
+  35% {
+    transform: scale(1.16);
+    filter: brightness(1.7);
+  }
+
+  100% {
+    transform: scale(1);
+    filter: brightness(1);
+  }
+}
+
+/* 闪色变体：keyframes 不写 100% 帧，动画结束后平滑回落元素本色 */
+.bump-up {
+  animation: bumpFlashUp var(--dur-slow) var(--ease-out-soft);
+}
+
+.bump-down {
+  animation: bumpFlashDown var(--dur-slow) var(--ease-out-soft);
+}
+
+/* 与 .bump 组合时合并两条动画，避免相互覆盖（特异性高于单类，且无需 !important） */
+.bump.bump-up {
+  animation:
+    numBump var(--dur-slow) var(--ease-out-soft),
+    bumpFlashUp var(--dur-slow) var(--ease-out-soft);
+}
+
+.bump.bump-down {
+  animation:
+    numBump var(--dur-slow) var(--ease-out-soft),
+    bumpFlashDown var(--dur-slow) var(--ease-out-soft);
+}
+
+@keyframes bumpFlashUp {
+  0%,
+  45% {
+    color: var(--up);
+  }
+  /* 100% 缺省：由浏览器插值回元素自身颜色 */
+}
+
+@keyframes bumpFlashDown {
+  0%,
+  45% {
+    color: var(--down);
+  }
+  /* 100% 缺省：由浏览器插值回元素自身颜色 */
+}
+
+/* ==================================================================
+ * 4. .micro-label utility —— 可复用微标签
+ *    用法：<span class="micro-label">FUNDING</span>；text-transform 仅对
+ *    拉丁字符生效，中文原样呈现。
+ * ================================================================ */
+
+.micro-label {
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 2px;
+  color: var(--weak);
+  text-transform: uppercase;
+}
+
+/* ==================================================================
+ * 5. 动效无障碍 —— 全部动画在 prefers-reduced-motion 下关闭
+ * ================================================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  .bump,
+  .bump-up,
+  .bump-down,
+  .bump.bump-up,
+  .bump.bump-down {
+    animation: none;
+  }
+}

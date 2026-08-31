@@ -50,6 +50,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { useDraggableSurface } from "./useDraggableSurface";
+import { useBump } from "./useBump";
 import type {
   AccountSummary,
   AiAgentProfile,
@@ -849,6 +850,8 @@ function ProfileCard({
     : profile.multiAgentMode === "auto"
       ? t("automation:profileCollaborationAuto", { count: profile.multiAgentMaxAgents || 4 })
       : t("automation:profileCollaborationCustom", { count: profile.multiAgents.filter((agent) => agent.enabled).length });
+  // Profile 卡已实现盈亏跳动：无成交数据时以 "--" 占位，netPnlUsdt 变化按数值升降定方向。
+  const pnlBump = useBump(performance && performance.fillCount > 0 ? performance.netPnlUsdt : "--");
 
   return (
     <article className={clsx("automation-profile-card", `is-${state}`, focused && "is-focused")} data-profile-id={profile.id}>
@@ -896,7 +899,7 @@ function ProfileCard({
         <span className="automation-profile-card__recent-values">
           {/* Net result leads; red is a gain and green a loss, as everywhere else. */}
           {performance && performance.fillCount > 0 ? (
-            <strong className={clsx("automation-profile-card__pnl", performance.netPnlUsdt >= 0 ? "is-gain" : "is-loss")}>
+            <strong className={clsx("automation-profile-card__pnl", performance.netPnlUsdt >= 0 ? "is-gain" : "is-loss", pnlBump.className)} onAnimationEnd={pnlBump.onAnimationEnd}>
               {formatSignedUsdtAmount(performance.netPnlUsdt)}
             </strong>
           ) : (

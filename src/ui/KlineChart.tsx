@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type
 import { useTranslation } from "react-i18next";
 import { i18n } from "../i18n/runtime";
 import clsx from "clsx";
+import { useBump } from "./useBump";
 import {
   AppWindow,
   BellRing,
@@ -636,6 +637,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const [hoverStats, setHoverStats] = useState<HoverStats | null>(null);
   const [draggingOrderLine, setDraggingOrderLine] = useState<OrderLineDrag | null>(null);
   const [draggingPositionLine, setDraggingPositionLine] = useState<PositionLineDrag | null>(null);
+  // 拖单读数预估 PnL 跳动：非拖拽/无估计值时以 "--" 占位，有估计值时按数值升降定方向。
+  const dragEstimate = draggingOrderLine ? orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price) : null;
+  const dragEstimateBump = useBump(dragEstimate ? dragEstimate.pnl : "--");
   const [fillTooltip, setFillTooltip] = useState<FillTooltip | null>(null);
   const [fillTooltipPinned, setFillTooltipPinned] = useState(false);
   const [visibleLogicalRange, setVisibleLogicalRange] = useState<ChartVisibleLogicalRange | null>(null);
@@ -2781,9 +2785,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         {hoverStats?.indicatorValues.length ? (
           <div className="ohlc-indicator-values" aria-label={t("chart:currentCandleValues")}>
             {hoverStats.indicatorValues.map((item) => (
-              <span className="ohlc-indicator-value" key={item.id} style={{ color: item.color }}>
-                {item.label} {formatChartNumber(item.value)}
-              </span>
+              <OhlcIndicatorValueChip key={item.id} item={item} />
             ))}
           </div>
         ) : null}
@@ -3540,7 +3542,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
           <strong>{orderLineDragTitle(draggingOrderLine.line)}</strong>
           <span>{t("chart:newPrice", { price: formatChartNumber(draggingOrderLine.price) })}</span>
           {orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price) && (
-            <em className={Number(orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)?.pnl) >= 0 ? "positive" : "negative"}>
+            <em className={`${Number(orderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)?.pnl) >= 0 ? "positive" : "negative"} ${dragEstimateBump.className}`.trim()} onAnimationEnd={dragEstimateBump.onAnimationEnd}>
               {formatOrderLineDragEstimate(draggingOrderLine.line, draggingOrderLine.price)}
             </em>
           )}
@@ -4951,4 +4953,14 @@ function formatVolume(value?: number) {
   if (Math.abs(numeric) >= 1_000_000) return `${(numeric / 1_000_000).toFixed(2)}M`;
   if (Math.abs(numeric) >= 1_000) return `${(numeric / 1_000).toFixed(2)}K`;
   return numeric.toLocaleString("en-US", { maximumFractionDigits: 2 });
+}
+
+function OhlcIndicatorValueChip({ item }: { item: HoverIndicatorValue }) {
+  // 图例值按 id 逐项 map 渲染，跳动状态逐项独立；value 为 number，方向按数值升降。
+  const bump = useBump(item.value);
+  return (
+    <span className={`ohlc-indicator-value ${bump.className}`.trim()} style={{ color: item.color }} onAnimationEnd={bump.onAnimationEnd}>
+      {item.label} {formatChartNumber(item.value)}
+    </span>
+  );
 }

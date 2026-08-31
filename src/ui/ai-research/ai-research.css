@@ -1,0 +1,4762 @@
+/* ============================================================
+   AI Research 指挥舱 —— 单一代际样式层（A1b CSS 收敛）
+   ============================================================
+   收敛说明：
+   - 本层由 src/styles.css 中四代 AI 样式回溯合并而成，每个最终选择器只出现一次，
+     声明按"后带覆盖前带"的源顺序拼接并去重（每属性取最后一代生效值），
+     最终计算结果与原四代叠加一致；唯一例外是紫色归一（#a18bd4/#a890da 家族
+     → var(--accent)/var(--accent-bright)/rgba(149,92,255,…) 指挥舱 token）。
+      复审补充归一：ai-message-locate 关键帧旧紫、rgba(139,92,246)/rgba(180,154,231)
+      过渡紫、高饱和淡紫文字（#c5b3ec/#d8cdf3/#c9b9ea/#cec1ee/#c7b6ee/#d5c9ec/
+      #c8b8e8/#d9c9f1/#cdbded/#c0b0dd/#d6cbe8）→ var(--accent-bright)；
+      有意保留：低饱和灰紫标签（#8f849f/#a99cbc）、发送轨道淡紫箭头
+      rgba(220,207,246,.48)（与中性箭头 rgba(220,229,238,.42) 成对）、
+      发送悬停深紫阴影 rgba(94,68,138,.3)。
+   - 合并的代际：遗留浮层层(13575-15320) → shell v1(27248-28088) → v2 静默流
+     (28089-28156) → v2 后段·工具轨道/发送核心(28165-28305) → 命令面板/欢迎页
+     (28463-28548) → Final 网格(28550-28573) → 工作台精修 G 代(28575-29056)
+     → Graphite Violet rebalance(29057-29230)。
+   - 留在 styles.css 不动的部分：
+     · 上下文计量组件全系统（.ai-context-meter-wrap/-trigger/-ring、
+       .ai-context-popover* 含未提交的 portal，28307-28461 及 28160/28543/28667
+       的响应式补充）——用户未提交改动，原地保留；
+     · 与 automation / 图表指标中心 / 策略实验室共用的基座（.ai-markdown、
+       .ai-process/.ai-tool/.ai-agent-*、.ai-message 基类、.ai-provider、
+       .ai-approval-*、.ai-skill-menu、.ai-token-usage 的遗留基础规则）；
+     · :root token 契约、滚动条共享选择器、:where(...) 弹层动效、rail-ai-status。
+   - .ai-command-palette 的进场动画由 src/theme/motion.css 提供，本层不声明 animation。
+   - 网格语义：5 列（252px 手柄列结构）+ --ai-sessions-width/--ai-inspector-width
+     + 56px/1fr/auto 行，响应式断点效果与原 Final(28550+) 优先的叠加结果一致。
+   ============================================================ */
+
+/* —— Shell 局部 token：变量名保留，值统一引用 :root 指挥舱契约 —— */
+/* v2 静默流+Graphite Violet ← 原 28090 / 28090 / 29058 */
+.ai-research-shell {
+  --ai-research-bg: #0a0c10;
+  --ai-research-line: rgba(174, 186, 210, 0.12);
+  --ai-research-muted: #7e8490;
+  --ai-research-text: #e7e9ed;
+  --ai-research-accent: var(--accent);
+  --ai-research-accent-soft: rgba(149, 92, 255, 0.16);
+  --ai-research-surface: #0b0d11;
+  --ai-research-surface-raised: #11141a;
+}
+
+/* 遗留浮层层+shell v1+v2 静默流+工作台精修 G 代 ← 原 13597 / 13597 / 27528 / 27748 / 28104 / 28857 */
+.ai-research-shell .ai-panel-main {
+  min-width: 0;
+  display: grid;
+  grid-template-rows: 56px minmax(0, 1fr) auto;
+  height: 100%;
+  border-right: 0;
+  background: #0b0d11;
+  position: relative;
+  max-height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* 遗留浮层层 ← 原 13604 / 13604 */
+.ai-research-shell .ai-session-sidebar {
+  width: 0;
+  min-width: 0;
+  flex: 0 0 0;
+  overflow: hidden;
+  opacity: 0;
+  transform: translateX(16px);
+  border-right: 1px solid transparent;
+  background: rgba(5, 6, 10, 0.78);
+  pointer-events: none;
+  transition: width 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    flex-basis 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 150ms ease-out,
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    border-color 180ms ease-out;
+}
+
+/* 遗留浮层层 ← 原 13622 / 13622 */
+.ai-research-shell .ai-session-sidebar.open {
+  width: var(--ai-session-sidebar-width);
+  flex-basis: var(--ai-session-sidebar-width);
+  opacity: 1;
+  transform: translateX(0);
+  border-right-color: var(--line-tinted);
+  pointer-events: auto;
+}
+
+/* 遗留浮层层+shell v1+Graphite Violet ← 原 13631 / 13631 / 27537 / 29059 */
+.ai-research-shell .ai-panel-head {
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 18px;
+  border-bottom: 1px solid var(--line);
+  border-bottom-color: var(--line-tinted);
+  background: var(--panel-grad-soft);
+}
+
+/* 遗留浮层层+工作台精修 G 代 ← 原 13641 / 13641 / 28856 */
+.ai-research-shell .ai-head-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 遗留浮层层 ← 原 14152 / 14152 */
+.ai-research-shell .ai-panel-head strong, .ai-research-shell .ai-panel-head span {
+  display: block;
+}
+
+/* 遗留浮层层 ← 原 14157 / 14157 */
+.ai-research-shell .ai-panel-head strong {
+  font-size: 15px;
+}
+
+/* 遗留浮层层 ← 原 14161 / 14161 */
+.ai-research-shell .ai-panel-head span {
+  margin-top: 4px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 遗留浮层层+shell v1+工作台精修 G 代 ← 原 14190 / 14190 / 27306 / 28874 */
+.ai-research-shell .ai-session-list {
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  overflow: hidden;
+  padding: 11px 9px;
+  background: transparent;
+}
+
+/* 遗留浮层层 ← 原 14201 / 14201 */
+.ai-research-shell .ai-session-list-head, .ai-research-shell .ai-session-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 遗留浮层层+shell v1 ← 原 14209 / 14209 / 27317 */
+.ai-research-shell .ai-session-list-head strong {
+  font-size: 12px;
+  color: #d8dce4;
+  font-weight: 650;
+}
+
+/* 遗留浮层层 ← 原 14213 / 14213 */
+.ai-research-shell .ai-session-list-head > div {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 遗留浮层层 ← 原 14219 / 14219 */
+.ai-research-shell .ai-session-list-head button, .ai-research-shell .ai-session-actions button {
+  height: 26px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--line-tinted);
+  border-radius: 7px;
+  background: rgba(15, 23, 42, 0.72);
+  color: var(--weak);
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+/* 遗留浮层层 ← 原 14233 / 14233 */
+.ai-research-shell .ai-session-list-head button:hover, .ai-research-shell .ai-session-actions button:hover {
+  border-color: rgba(149, 92, 255, 0.42);
+  color: var(--text);
+  background: rgba(149, 92, 255, 0.12);
+}
+
+/* 遗留浮层层 ← 原 14278 / 14278 */
+.ai-research-shell .ai-session-list > small, .ai-research-shell .ai-session-items > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+/* 遗留浮层层+工作台精修 G 代 ← 原 14285 / 14285 / 28875 */
+.ai-research-shell .ai-session-items {
+  min-height: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+  padding-right: 0;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(148, 163, 184, 0.28) transparent;
+}
+
+/* 遗留浮层层+shell v1+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 14297 / 14297 / 27323 / 28188 / 28876 */
+.ai-research-shell .ai-session-item {
+  min-height: 44px;
+  border: 1px solid rgba(148, 163, 184, 0.14);
+  border-radius: 8px;
+  background: transparent;
+  padding: 5px 7px;
+  border-color: transparent;
+  position: relative;
+  transition: transform var(--dur-fast) var(--ease-out-soft),
+    background-color var(--dur-fast) var(--ease-out-soft),
+    border-color var(--dur-fast) var(--ease-out-soft);
+}
+
+/* 遗留浮层层+shell v1+工作台精修 G 代 ← 原 14305 / 14305 / 27334 / 28877 */
+.ai-research-shell .ai-session-item.active {
+  border-color: var(--line-tinted);
+  background: var(--surface-selected);
+  min-height: 48px;
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+/* 遗留浮层层+工作台精修 G 代 ← 原 14310 / 14310 / 28878 */
+.ai-research-shell .ai-session-main {
+  min-width: 0;
+  flex: 1;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+  width: 100%;
+  padding: 0;
+}
+
+/* 遗留浮层层 ← 原 14320 / 14320 */
+.ai-research-shell .ai-session-main span, .ai-research-shell .ai-session-main small {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 遗留浮层层+shell v1+工作台精修 G 代 ← 原 14329 / 14329 / 27343 / 28879 */
+.ai-research-shell .ai-session-main span {
+  font-size: 12px;
+  font-weight: 560;
+  color: #dfe2e9;
+  line-height: 1.35;
+}
+
+/* 遗留浮层层+shell v1+工作台精修 G 代 ← 原 14334 / 14334 / 27349 / 28880 */
+.ai-research-shell .ai-session-main small {
+  margin-top: 1px;
+  color: #797f8a;
+  font-size: 9px;
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 14353 / 14353 / 28193 / 28881 */
+.ai-research-shell .ai-session-actions {
+  display: inline-flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 160ms ease-out;
+  position: absolute;
+  inset-inline-end: 5px;
+  top: 50%;
+  z-index: 1;
+  padding-inline-start: 13px;
+  transform: translateY(-50%);
+  background: linear-gradient(90deg, transparent, #0b0d11 20%);
+}
+
+/* 遗留浮层层+shell v1+v2 静默流+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 15117 / 15117 / 27607 / 27987 / 28138 / 28238 / 29016 */
+.ai-research-shell .ai-input-row {
+  position: relative;
+  display: block;
+  padding: 0;
+  border-top: 1px solid var(--line);
+  min-height: 0;
+  background: transparent;
+  bottom: auto;
+  width: min(calc(100% - 48px), 1240px);
+  margin: 0 auto 14px;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+  flex: 0 0 auto;
+  margin-bottom: 18px;
+  border-color: var(--line-tinted);
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心+Graphite Violet ← 原 15126 / 15126 / 28248 / 29184 */
+.ai-research-shell .ai-composer {
+  min-width: 0;
+  display: grid;
+  gap: 0;
+  border: 1px solid var(--line-tinted);
+  border-radius: 12px;
+  background: #111319;
+  padding: 9px 10px 8px;
+  box-shadow: 0 18px 42px rgba(0,0,0,.32), inset 0 1px rgba(255,255,255,.025);
+  transition: border-color 180ms ease-out, box-shadow 180ms ease-out, background 180ms ease-out;
+  position: relative;
+  overflow: hidden;
+}
+
+/* 遗留浮层层+shell v1+v2 后段·工具轨道/发送核心 ← 原 15136 / 15136 / 27623 / 28264 */
+.ai-research-shell .ai-input-row textarea {
+  width: 100%;
+  height: 48px;
+  max-height: 148px;
+  resize: none;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #e2e5eb;
+  padding: 10px 4px 8px 9px;
+  font-size: 12px;
+  line-height: 1.5;
+  min-height: 52px;
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心 ← 原 15150 / 15150 / 28257 */
+/* 聚焦态：按产品要求与未聚焦完全一致。不改变边框/背景/投影；聚焦反馈仅由 textarea 光标与 placeholder 表达。 */
+
+/* 遗留浮层层 ← 原 15154 / 15154 */
+.ai-research-shell .ai-composer-toolbar, .ai-research-shell .ai-composer-options {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+}
+
+/* 遗留浮层层+v2 静默流+v2 后段·工具轨道/发送核心 ← 原 15161 / 15161 / 28145 / 28266 */
+.ai-research-shell .ai-composer-toolbar {
+  justify-content: initial;
+  gap: 4px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  padding: 0 1px;
+}
+
+/* 遗留浮层层+v2 静默流 ← 原 15166 / 15166 / 28152 */
+.ai-research-shell .ai-composer-options {
+  gap: 4px;
+  overflow-x: auto;
+  min-width: 0;
+  overflow: hidden;
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心 ← 原 15171 / 15171 / 28269 */
+.ai-research-shell .ai-composer-options label {
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  border-radius: 7px;
+  padding: 0 5px;
+  color: var(--muted);
+  background: rgba(148,163,184,.055);
+  border: 1px solid var(--line-tinted);
+}
+
+/* 遗留浮层层 ← 原 15183 / 15183 */
+.ai-research-shell .ai-composer-options .terminal-select {
+  max-width: 128px;
+}
+
+/* 遗留浮层层 ← 原 15187 / 15187 */
+.ai-research-shell .ai-composer-options .terminal-select-trigger {
+  height: 24px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--weak);
+  font-size: 11px;
+  letter-spacing: 1.5px;
+}
+
+/* 遗留浮层层 ← 原 15196 / 15196 */
+.ai-research-shell .ai-composer-options label:first-child .terminal-select {
+  max-width: 156px;
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 15282 / 15282 / 28272 / 28901 */
+.ai-research-shell .ai-send {
+  width: 42px;
+  height: 42px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(182, 194, 218, .24);
+  border-radius: 50%;
+  background: radial-gradient(circle at 36% 28%, rgba(224, 232, 241, .2) 0 5%, #252b33 18%, #11171d 49%, #080c10 82%);
+  color: #fff;
+  cursor: pointer;
+  position: relative;
+  isolation: isolate;
+  padding: 0;
+  box-shadow: 0 0 0 1px rgba(4, 8, 11, .78), 0 6px 18px rgba(0,0,0,.32), inset 0 1px rgba(255,255,255,.12), inset 0 -7px 12px rgba(0,0,0,.28);
+  transition: transform 150ms cubic-bezier(.22, 1, .36, 1), border-color 160ms ease-out, box-shadow 160ms ease-out, filter 160ms ease-out;
+  overflow: visible;
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 15295 / 15295 / 28296 / 28912 */
+.ai-research-shell .ai-send.stop {
+  border-color: rgba(226, 141, 156, .52);
+  background: radial-gradient(circle at 36% 28%, rgba(246, 194, 202, .18) 0 5%, #352027 20%, #1b1115 52%, #0b080a 84%);
+}
+
+/* 遗留浮层层+v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 15300 / 15300 / 28295 / 28911 */
+.ai-research-shell .ai-send:disabled {
+  opacity: .38;
+  cursor: not-allowed;
+}
+
+
+/* —— 1. 宿主与画布 —— */
+/* shell v1 ← 原 27248 / 27248 */
+.ai-dock.ai-research-host {
+  position: relative;
+  inset: auto;
+  grid-row: 2;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  z-index: 1;
+  pointer-events: auto;
+  overflow: hidden;
+  background: #07090d;
+}
+
+/* shell v1 ← 原 27262 / 27262 */
+.ai-dock.ai-research-host[hidden] {
+  display: none;
+}
+
+
+/* —— 2. 网格语义（5 列 + 变量宽度，原 27266/27354/28098/28550 收敛）—— */
+/* shell v1+v2 静默流+Final 网格 ← 原 27266 / 27266 / 27354 / 28098 / 28551 */
+.ai-research-host > .ai-panel.ai-research-shell, .ai-research-host > .ai-panel.ai-research-shell.sessions-open {
+  position: relative;
+  inset: auto;
+  width: 100%;
+  height: 100%;
+  max-height: 100%;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: var(--ai-sessions-width) 8px minmax(480px, 1fr);
+  overflow: hidden;
+  border: 0;
+  border-radius: 0;
+  background: var(--ai-research-bg);
+  box-shadow: none;
+  backdrop-filter: none;
+  transition: none;
+  --ai-sessions-width: 252px;
+  --ai-inspector-width: 380px;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+
+/* —— 3. Shell 内隐藏的旧表层（provider 渲染但隐藏 / legacy 工具 IO）—— */
+/* shell v1 ← 原 27285 / 27285 */
+.ai-research-shell .ai-provider {
+  display: none;
+}
+
+
+/* —— 4. 会话栏（252px 手柄列结构）—— */
+/* shell v1 ← 原 27290 / 27290 */
+.ai-research-shell .ai-session-sidebar, .ai-research-shell .ai-session-sidebar.open {
+  width: auto;
+  min-width: 0;
+  height: 100%;
+  flex: none;
+  opacity: 1;
+  transform: none;
+  overflow: hidden;
+  border: 0;
+  border-right: 1px solid var(--line-tinted);
+  background: #090b0f;
+  pointer-events: auto;
+  transition: none;
+}
+
+/* shell v1 ← 原 27312 / 27312 */
+.ai-research-shell .ai-session-list-head {
+  min-height: 30px;
+  padding: 0 2px 4px;
+}
+
+/* shell v1 ← 原 27330 / 27330 */
+/* 指挥舱皮肤波次：会话条目 hover 紫调底 + 微抬（尺寸不变） */
+.ai-research-shell .ai-session-item:hover {
+  background: rgba(149, 92, 255, 0.07);
+  transform: translateY(-1px);
+}
+
+/* 指挥舱皮肤波次：active 会话 hover 保持选中底强度，仅随 hover 微抬 */
+.ai-research-shell .ai-session-item.active:hover {
+  background: var(--surface-selected);
+}
+
+/* shell v1 ← 原 27339 / 27339 */
+.ai-research-shell .ai-session-item.has-unread {
+  box-shadow: inset 2px 0 var(--accent);
+}
+
+/* shell v1+Final 网格 ← 原 27364 / 27364 / 28556 */
+.ai-research-host > .ai-panel.ai-research-shell.inspector-open {
+  grid-template-columns: var(--ai-sessions-width) 8px minmax(420px, 1fr) 8px var(--ai-inspector-width);
+}
+
+
+/* —— 5. 列宽拖拽手柄 —— */
+/* shell v1 ← 原 27368 / 27368 */
+.ai-research-shell .ai-column-resize {
+  position: relative;
+  z-index: 2;
+  display: grid;
+  place-items: center;
+  min-width: 8px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid var(--line-tinted);
+  border-right: 1px solid var(--line-tinted);
+  border-radius: 0;
+  background: #0b0d11;
+  color: #5e6570;
+  cursor: col-resize;
+}
+
+/* shell v1 ← 原 27385 / 27385 */
+.ai-research-shell .ai-column-resize:hover, .ai-research-shell .ai-column-resize:focus-visible {
+  background: #17131f;
+  color: var(--accent-bright);
+  outline: none;
+}
+
+/* shell v1 ← 原 27392 / 27392 */
+.ai-research-shell .ai-column-resize svg {
+  pointer-events: none;
+}
+
+
+/* —— 6. 研究栏（inspector）骨架与页签 —— */
+/* shell v1+工作台精修 G 代+Graphite Violet ← 原 27394 / 27394 / 28671 / 29065 / 29164 */
+.ai-research-shell .ai-research-inspector {
+  min-width: 0;
+  height: 100%;
+  display: grid;
+  grid-template-rows: 44px minmax(0, 1fr);
+  overflow: hidden;
+  background: #0a0c10;
+  border-left: 1px solid var(--line-tinted);
+  animation: ai-inspector-enter 220ms cubic-bezier(.22,1,.36,1);
+}
+
+/* shell v1+工作台精修 G 代+Graphite Violet ← 原 27404 / 27404 / 28672 / 29066 */
+.ai-research-shell .ai-inspector-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  padding: 0 10px;
+  border-bottom: 1px solid rgba(174, 186, 210, 0.1);
+  background: #0c0e13;
+}
+
+/* shell v1 ← 原 27414 / 27414 */
+.ai-research-shell .ai-inspector-head strong {
+  color: #e6e9ee;
+  font-size: 11px;
+  font-weight: 680;
+}
+
+/* shell v1 ← 原 27416 / 27416 */
+.ai-research-shell .ai-inspector-head button, .ai-research-shell .ai-inspector-tab-close {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #858c97;
+}
+
+/* shell v1 ← 原 27429 / 27429 */
+.ai-research-shell .ai-inspector-head button:hover, .ai-research-shell .ai-inspector-tab-close:hover {
+  background: rgba(174, 186, 210, 0.09);
+  color: #eef0f4;
+}
+
+/* shell v1+工作台精修 G 代+Graphite Violet ← 原 27432 / 27432 / 28679 / 29067 */
+.ai-research-shell .ai-inspector-tabs {
+  display: flex;
+  min-width: 0;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(174,186,210,.12);
+  background: #0f1116;
+  min-height: 38px;
+  height: 54px;
+}
+
+/* shell v1+工作台精修 G 代 ← 原 27440 / 27440 / 28680 */
+.ai-research-shell .ai-inspector-tabs > div {
+  position: relative;
+  flex: 0 1 152px;
+  min-width: 78px;
+  display: flex;
+  align-items: center;
+  border-right: 1px solid rgba(174, 186, 210, 0.07);
+  flex-basis: 132px;
+  border-right-color: rgba(174,186,210,.1);
+}
+
+/* shell v1+工作台精修 G 代+Graphite Violet ← 原 27449 / 27449 / 28681 / 28788 / 29068 */
+.ai-research-shell .ai-inspector-tabs > div.active {
+  background: #191522;
+  box-shadow: inset 0 -2px var(--accent-bright);
+}
+
+/* shell v1+工作台精修 G 代 ← 原 27451 / 27451 / 28682 / 28791 */
+.ai-research-shell .ai-inspector-tabs > div > button:first-child {
+  min-width: 0;
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 7px 7px 9px;
+  border: 0;
+  background: transparent;
+  color: #89959d;
+  font-size: 9px;
+  text-align: left;
+}
+
+/* shell v1+工作台精修 G 代 ← 原 27465 / 27465 / 28683 / 28789 */
+.ai-research-shell .ai-inspector-tabs > div.active > button:first-child {
+  color: #e6f1ee;
+}
+
+/* shell v1 ← 原 27466 / 27466 */
+.ai-research-shell .ai-inspector-tabs span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* shell v1 ← 原 27467 / 27467 */
+.ai-research-shell .ai-inspector-tab-close {
+  flex: 0 0 20px;
+  width: 20px;
+  height: 20px;
+  margin-right: 4px;
+}
+
+/* shell v1+工作台精修 G 代 ← 原 27468 / 27468 / 28685 */
+.ai-research-shell .ai-inspector-body {
+  min-height: 0;
+  overflow: auto;
+  background: #0a0c10;
+}
+
+/* shell v1 ← 原 27470 / 27470 */
+.ai-research-shell .ai-inspector-content {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 18px 16px 28px;
+}
+
+/* shell v1 ← 原 27477 / 27477 */
+.ai-research-shell .ai-inspector-kicker {
+  color: var(--accent);
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+/* shell v1 ← 原 27478 / 27478 */
+.ai-research-shell .ai-inspector-content h2 {
+  margin: -5px 0 0;
+  color: #eef0f4;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+/* shell v1 ← 原 27479 / 27479 */
+.ai-research-shell .ai-inspector-content > p, .ai-research-shell .ai-inspector-empty {
+  margin: -5px 0 0;
+  color: #8e95a0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+/* shell v1 ← 原 27482 / 27482 */
+.ai-research-shell .ai-inspector-facts, .ai-research-shell .ai-tool-facts {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  border-top: 1px solid rgba(174, 186, 210, 0.1);
+}
+
+/* shell v1 ← 原 27485 / 27485 */
+.ai-research-shell .ai-inspector-facts > div, .ai-research-shell .ai-tool-facts > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(82px, 0.8fr) minmax(0, 1.6fr);
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(174, 186, 210, 0.08);
+}
+
+/* shell v1 ← 原 27495 / 27495 */
+.ai-research-shell .ai-inspector-facts dt, .ai-research-shell .ai-tool-facts dt {
+  color: #727a86;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* shell v1 ← 原 27497 / 27497 */
+.ai-research-shell .ai-inspector-facts dd, .ai-research-shell .ai-tool-facts dd {
+  min-width: 0;
+  margin: 0;
+  color: #d9dde5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* shell v1 ← 原 27500 / 27500 */
+.ai-research-shell .ai-inspector-document, .ai-research-shell .ai-inspector-code, .ai-research-shell .ai-inspector-raw pre, .ai-research-shell .ai-tool-raw pre {
+  max-width: 100%;
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 11px;
+  border: 1px solid rgba(174, 186, 210, 0.12);
+  border-radius: 5px;
+  background: #101218;
+  color: #cbd1dc;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* shell v1 ← 原 27509 / 27509 */
+.ai-research-shell .ai-inspector-raw, .ai-research-shell .ai-tool-raw {
+  color: #89909a;
+  font-size: 10px;
+}
+
+/* shell v1 ← 原 27511 / 27511 */
+.ai-research-shell .ai-inspector-raw summary, .ai-research-shell .ai-tool-raw summary {
+  cursor: pointer;
+}
+
+/* shell v1 ← 原 27513 / 27513 */
+.ai-research-shell .ai-inspector-raw[open] pre, .ai-research-shell .ai-tool-raw[open] pre {
+  margin-top: 8px;
+}
+
+/* shell v1 ← 原 27516 / 27516 */
+.ai-research-shell .ai-inspector-open-workspace {
+  justify-self: start;
+  min-height: 29px;
+  padding: 0 10px;
+  border: 1px solid var(--line-tinted-strong);
+  border-radius: 5px;
+  background: rgba(149, 92, 255, 0.1);
+  color: var(--accent-bright);
+  font-size: 10px;
+}
+
+/* shell v1 ← 原 27520 / 27520 */
+.ai-research-shell .ai-inspector-open-workspace:hover {
+  background: rgba(149, 92, 255, 0.18);
+}
+
+/* shell v1+工作台精修 G 代 ← 原 27522 / 27522 / 28888 */
+.ai-research-shell .ai-tool-domain-details {
+  display: grid;
+  gap: 8px;
+  padding: 9px 0 2px;
+}
+
+/* shell v1 ← 原 27523 / 27523 */
+.ai-research-shell .ai-tool-open-artifact {
+  justify-self: start;
+  min-height: 26px;
+  padding: 0 8px;
+  border: 1px solid rgba(149, 92, 255, 0.28);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-bright);
+  font-size: 10px;
+}
+
+/* shell v1 ← 原 27524 / 27524 */
+.ai-research-shell .ai-tool-open-artifact:hover {
+  border-color: rgba(149, 92, 255, 0.52);
+  background: rgba(149, 92, 255, 0.09);
+}
+
+/* shell v1 ← 原 27525 / 27525 */
+.ai-research-shell .ai-tool-io.legacy, .ai-research-shell .ai-tool-panel.legacy {
+  display: none;
+}
+
+/* shell v1 ← 原 27544 / 27544 */
+.ai-research-shell .ai-panel-head > div:first-child {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+/* shell v1 ← 原 27550 / 27550 */
+.ai-research-shell .ai-panel-head > div:first-child strong, .ai-research-shell .ai-panel-head > div:first-child span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* shell v1 ← 原 27557 / 27557 */
+.ai-research-shell .ai-panel-head > div:first-child strong {
+  color: #eef0f4;
+  font-size: 13px;
+  font-weight: 680;
+}
+
+/* shell v1 ← 原 27563 / 27563 */
+.ai-research-shell .ai-panel-head > div:first-child span {
+  color: var(--ai-research-muted);
+  font-size: 10px;
+  letter-spacing: 1.5px;
+}
+
+/* shell v1+v2 静默流+工作台精修 G 代 ← 原 27568 / 27568 / 27756 / 28108 / 29014 */
+.ai-research-shell .ai-messages {
+  width: min(100%, 1240px);
+  margin: 0;
+  padding: 32px clamp(20px, 4vw, 56px) 34px;
+  gap: 30px;
+  scroll-padding-bottom: 138px;
+  padding-bottom: 30px;
+  margin-inline: auto;
+}
+
+/* shell v1 ← 原 27576 / 27576 */
+.ai-research-shell .ai-message {
+  width: 100%;
+  max-width: none;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  padding: 0;
+}
+
+/* shell v1+v2 静默流 ← 原 27586 / 27586 / 28114 */
+.ai-research-shell .ai-message.user {
+  width: fit-content;
+  max-width: min(78%, 720px);
+  margin-left: auto;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  padding: 8px 0 8px 14px;
+  border-inline-start: 2px solid rgba(149, 92, 255, 0.6);
+}
+
+/* shell v1+Graphite Violet ← 原 27596 / 27596 / 29175 */
+.ai-research-shell .ai-message.assistant {
+  color: #e5e7eb;
+  position: relative;
+  padding-inline-start: 13px;
+}
+
+/* shell v1+v2 静默流 ← 原 27600 / 27600 / 28132 */
+.ai-research-shell .ai-message-role {
+  margin-bottom: 7px;
+  color: #7d8490;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+/* shell v1 ← 原 27618 / 27618（聚焦态已按产品要求移除，与未聚焦一致） */
+
+/* shell v1+Final 网格 ← 原 27638 / 27638 / 28562 */
+@media (max-width: 1120px) {
+  .ai-research-host > .ai-panel.ai-research-shell.inspector-open {
+    grid-template-columns: var(--ai-sessions-width) 8px minmax(360px, 1fr) 8px minmax(300px, 34vw);
+  }
+}
+
+/* shell v1+Final 网格 ← 原 27642 / 27642 / 28566 */
+@media (max-width: 880px) {
+  .ai-research-host > .ai-panel.ai-research-shell, .ai-research-host > .ai-panel.ai-research-shell.inspector-open {
+    grid-template-columns: minmax(202px, 30vw) 8px minmax(0, 1fr);
+  }
+}
+
+/* shell v1 ← 原 27644 / 27644 */
+@media (max-width: 880px) {
+  .ai-research-host > .ai-panel.ai-research-shell .ai-research-inspector, .ai-research-host > .ai-panel.ai-research-shell .ai-column-resize-inspector {
+    display: none;
+  }
+}
+
+/* shell v1 ← 原 27646 / 27646 */
+@media (max-width: 880px) {
+  .ai-research-shell .ai-panel-main {
+    border-right: 0;
+  }
+}
+
+/* shell v1 ← 原 27647 / 27647 */
+@media (max-width: 880px) {
+  .ai-research-shell .ai-inspector-shortcuts {
+    display: none;
+  }
+}
+
+/* shell v1+Final 网格 ← 原 27651 / 27651 / 28571 */
+@media (max-width: 660px) {
+  .ai-research-host > .ai-panel.ai-research-shell, .ai-research-host > .ai-panel.ai-research-shell.inspector-open {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* shell v1 ← 原 27653 / 27653 */
+@media (max-width: 660px) {
+  .ai-research-shell .ai-session-sidebar, .ai-research-shell .ai-column-resize-sessions {
+    display: none;
+  }
+}
+
+/* shell v1 ← 原 27655 / 27655 */
+@media (max-width: 660px) {
+  .ai-research-shell .ai-messages {
+    padding-inline: 16px;
+  }
+}
+
+/* shell v1 ← 原 27656 / 27656 */
+@media (max-width: 660px) {
+  .ai-research-shell .ai-input-row {
+    width: calc(100% - 24px);
+  }
+}
+
+/* shell v1 ← 原 27760 / 27760 */
+.ai-research-shell .ai-message-actions {
+  min-height: 24px;
+  margin-top: 8px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #6f7681;
+  font-size: 10px;
+}
+
+/* shell v1 ← 原 27770 / 27770 */
+.ai-research-shell .ai-message.user .ai-message-actions {
+  justify-content: flex-end;
+}
+
+/* shell v1 ← 原 27774 / 27774 */
+.ai-research-shell .ai-message-actions time, .ai-research-shell .ai-message-actions span {
+  white-space: nowrap;
+}
+
+/* shell v1 ← 原 27779 / 27779 */
+.ai-research-shell .ai-message-actions button {
+  width: 25px;
+  height: 25px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #737a86;
+  cursor: pointer;
+}
+
+/* shell v1 ← 原 27792 / 27792 */
+.ai-research-shell .ai-message-actions button:hover, .ai-research-shell .ai-message-actions button:focus-visible {
+  background: #23262c;
+  color: #e3e6ec;
+  outline: none;
+}
+
+
+/* —— 9. Composer 栈与任务/队列 dock —— */
+/* shell v1 ← 原 27799 / 27799 */
+.ai-research-shell .ai-composer-stack {
+  min-width: 0;
+  max-height: min(48vh, 460px);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 0 24px 18px;
+  background: #0b0d11;
+}
+
+/* shell v1 ← 原 27809 / 27809 */
+.ai-research-shell .ai-composer-docks {
+  width: min(100%, 860px);
+  max-height: 220px;
+  margin: 0 auto;
+  display: grid;
+  gap: 6px;
+  overflow: auto;
+}
+
+/* shell v1 ← 原 27818 / 27818 */
+.ai-research-shell .ai-task-dock, .ai-research-shell .ai-queue-dock {
+  overflow: hidden;
+  border: 1px solid var(--line-tinted);
+  border-radius: 7px;
+  background: #111318;
+}
+
+/* shell v1 ← 原 27826 / 27826 */
+.ai-research-shell .ai-task-dock > button, .ai-research-shell .ai-queue-dock > button {
+  width: 100%;
+  min-height: 32px;
+  display: grid;
+  grid-template-columns: 18px auto 1fr;
+  align-items: center;
+  gap: 7px;
+  padding: 0 10px;
+  border: 0;
+  background: transparent;
+  color: #a9afb9;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* shell v1 ← 原 27842 / 27842 */
+.ai-research-shell .ai-task-dock > button strong, .ai-research-shell .ai-queue-dock > button strong {
+  color: #d9dce3;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+/* shell v1 ← 原 27849 / 27849 */
+.ai-research-shell .ai-task-dock > button span, .ai-research-shell .ai-queue-dock > button span {
+  justify-self: end;
+  color: #777e89;
+  font-size: 10px;
+}
+
+/* shell v1 ← 原 27856 / 27856 */
+.ai-research-shell .ai-task-dock > div, .ai-research-shell .ai-queue-dock > div {
+  max-height: 150px;
+  overflow: auto;
+  padding: 2px 10px 8px;
+  border-top: 1px solid rgba(149, 92, 255, .12);
+}
+
+/* shell v1 ← 原 27864 / 27864 */
+.ai-research-shell .ai-task-dock p {
+  min-height: 26px;
+  margin: 0;
+  display: grid;
+  grid-template-columns: 10px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  color: #aeb4be;
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+/* shell v1 ← 原 27876 / 27876 */
+.ai-research-shell .ai-task-dock p i {
+  width: 7px;
+  height: 7px;
+  border: 1px solid #626a76;
+  border-radius: 50%;
+}
+
+/* shell v1 ← 原 27883 / 27883 */
+.ai-research-shell .ai-task-dock p.in_progress i {
+  border-color: var(--accent-bright);
+  background: var(--accent-bright);
+}
+
+/* shell v1 ← 原 27888 / 27888 */
+.ai-research-shell .ai-task-dock p.completed {
+  color: #6f7782;
+  text-decoration: line-through;
+}
+
+/* shell v1 ← 原 27893 / 27893 */
+.ai-research-shell .ai-task-dock p.completed i {
+  border-color: #5f9a7f;
+  background: #5f9a7f;
+}
+
+/* shell v1 ← 原 27898 / 27898 */
+.ai-research-shell .ai-task-dock p.blocked i {
+  border-color: #ca6e72;
+  background: #ca6e72;
+}
+
+/* shell v1 ← 原 27903 / 27903 */
+.ai-research-shell .ai-queue-item {
+  min-height: 34px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto 26px 26px;
+  align-items: center;
+  gap: 6px;
+  border-bottom: 1px solid rgba(149, 92, 255, .12);
+}
+
+/* shell v1 ← 原 27912 / 27912 */
+.ai-research-shell .ai-queue-item:last-child {
+  border-bottom: 0;
+}
+
+/* shell v1 ← 原 27916 / 27916 */
+.ai-research-shell .ai-queue-item p, .ai-research-shell .ai-queue-item input {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: #c9cdd5;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* shell v1 ← 原 27927 / 27927 */
+.ai-research-shell .ai-queue-item input {
+  height: 26px;
+  padding: 0 7px;
+  border: 1px solid #514a64;
+  border-radius: 4px;
+  background: #0b0d11;
+  outline: none;
+}
+
+/* shell v1 ← 原 27936 / 27936 */
+.ai-research-shell .ai-queue-item > span {
+  color: var(--accent-bright);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+/* shell v1 ← 原 27942 / 27942 */
+.ai-research-shell .ai-queue-item > button {
+  width: 24px;
+  height: 24px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #747c87;
+  cursor: pointer;
+}
+
+/* shell v1 ← 原 27955 / 27955 */
+.ai-research-shell .ai-queue-item > button:hover:not(:disabled) {
+  background: #25272d;
+  color: #e4e6eb;
+}
+
+/* shell v1 ← 原 27960 / 27960 */
+.ai-research-shell .ai-queue-item > button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+/* shell v1 ← 原 27967 / 27967 */
+@media (pointer: coarse) {
+  .ai-research-shell .ai-message-actions button, .ai-research-shell .ai-queue-item > button, .ai-research-shell .ai-send {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* shell v1 ← 原 27974 / 27974 */
+@media (pointer: coarse) {
+  .ai-research-shell .terminal-select-trigger {
+    min-height: 44px;
+  }
+}
+
+/* shell v1 ← 原 27978 / 27978 */
+@media (pointer: coarse) {
+  .ai-research-shell .ai-queue-item {
+    min-height: 48px;
+    grid-template-columns: minmax(0, 1fr) auto 44px 44px;
+  }
+}
+
+/* shell v1 ← 原 27983 / 27983 */
+.ai-research-shell .ai-composer textarea {
+  font-family: inherit;
+}
+
+
+/* —— 10. 跳到最新 —— */
+/* shell v1 ← 原 28032 / 28032 */
+.ai-research-shell .ai-jump-latest {
+  position: absolute;
+  z-index: 7;
+  right: 50%;
+  bottom: 132px;
+  transform: translateX(50%);
+  min-height: 30px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid rgba(174, 186, 210, 0.17);
+  border-radius: 6px;
+  background: #1b1e24;
+  color: #b7bdc7;
+  font-size: 10px;
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.34);
+  cursor: pointer;
+}
+
+/* shell v1 ← 原 28052 / 28052 */
+.ai-research-shell .ai-jump-latest.has-unread::after {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+/* shell v1 ← 原 28066 / 28066 */
+@media (max-width: 980px) {
+  .ai-composer-stack {
+    padding-inline: 16px;
+  }
+}
+
+/* v2 静默流 ← 原 28123 / 28123 */
+.ai-research-shell .ai-message.user .ai-message-role {
+  color: var(--accent);
+}
+
+/* v2 静默流+工作台精修 G 代 ← 原 28127 / 28127 / 29015 */
+.ai-research-shell .ai-message.assistant .ai-answer {
+  max-width: min(100%, 112ch);
+  color: var(--ai-research-text);
+}
+
+/* v2 静默流 ← 原 28157 / 28157 */
+.ai-research-shell .ai-context-meter-wrap {
+  flex: 0 0 auto;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28166 / 28166 / 28600 */
+.ai-research-shell .ai-tool > summary {
+  display: flex;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28171 / 28171 */
+.ai-research-shell .ai-tool-title {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 22px minmax(120px, .8fr) minmax(150px, 1.2fr);
+  align-items: center;
+  gap: 8px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28178 / 28178 */
+.ai-research-shell .ai-tool-title > svg {
+  color: #9ba6b6;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28179 / 28179 */
+.ai-research-shell .ai-tool-title > code {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28180 / 28180 / 28609 */
+.ai-research-shell .ai-tool-trace > summary {
+  grid-template-columns: 10px 18px minmax(132px, .72fr) minmax(0, 1.28fr) auto;
+  display: grid;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  cursor: pointer;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28183 / 28183 */
+.ai-research-shell .ai-tool-direct-artifact {
+  cursor: pointer;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28184 / 28184 */
+.ai-research-shell .ai-tool-direct-artifact:hover {
+  color: #eee9f8;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28185 / 28185 */
+.ai-research-shell .ai-session-list-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28186 / 28186 */
+.ai-research-shell .ai-session-list-head-actions button {
+  display: grid;
+  place-items: center;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28187 / 28187 */
+.ai-research-shell .ai-new-session-center-legacy {
+  display: none;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28189 / 28189 */
+.ai-research-shell .ai-session-item.pinned {
+  background: rgba(149, 92, 255, 0.07);
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28190 / 28190 */
+.ai-research-shell .ai-session-item.pinned::before {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 8px;
+  bottom: 8px;
+  width: 2px;
+  background: var(--accent);
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28191 / 28191 */
+.ai-research-shell .ai-session-status-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-inline-end: 6px;
+  border-radius: 50%;
+  background: transparent;
+  vertical-align: 1px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28192 / 28192 */
+.ai-research-shell .ai-session-item.running .ai-session-status-dot {
+  background: #65e6b4;
+  box-shadow: 0 0 0 3px rgba(101, 230, 180, .12), 0 0 9px rgba(101, 230, 180, .5);
+  animation: ai-session-running-pulse 1.25s ease-in-out infinite;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28194 / 28194 / 28882 */
+.ai-research-shell .ai-session-item:hover .ai-session-actions, .ai-research-shell .ai-session-item:focus-within .ai-session-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代+Graphite Violet ← 原 28196 / 28196 / 28883 / 29138 */
+.ai-research-shell .ai-session-actions button {
+  display: grid;
+  place-items: center;
+  width: 25px;
+  height: 25px;
+  padding: 0;
+  border-color: var(--line-tinted);
+  border-radius: 4px;
+  background: #171922;
+  color: #b4bac5;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28200 / 28200 */
+.ai-research-shell .ai-market-title-row, .ai-research-shell .ai-skill-title-row {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28201 / 28201 */
+.ai-research-shell .ai-market-title-row > svg, .ai-research-shell .ai-skill-title-row > svg {
+  flex: 0 0 auto;
+  color: var(--accent);
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28202 / 28202 */
+.ai-research-shell .ai-market-title-row h2, .ai-research-shell .ai-skill-title-row h2 {
+  margin: 0;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28203 / 28203 */
+.ai-research-shell .ai-market-title-row small, .ai-research-shell .ai-skill-title-row small {
+  color: #777f8d;
+  font-size: 10px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28204 / 28204 */
+.ai-research-shell .ai-market-dashboard {
+  display: grid;
+  gap: 12px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28205 / 28205 */
+.ai-research-shell .ai-market-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28206 / 28206 */
+.ai-research-shell .ai-market-metric {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(174,186,210,.1);
+  background: #101218;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28207 / 28207 */
+.ai-research-shell .ai-market-metric small {
+  display: block;
+  overflow: hidden;
+  color: #747d8a;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28208 / 28208 */
+.ai-research-shell .ai-market-metric strong {
+  display: block;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #e1e5ec;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28215 / 28215 / 28223 */
+.ai-research-shell .ai-market-chart-empty {
+  border: 1px solid rgba(174,186,210,.1);
+  background: #0e1015;
+  padding: 10px;
+  color: #737c89;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28217 / 28217 */
+.ai-research-shell .ai-market-chart-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 7px;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28218 / 28218 / 28759 */
+.ai-research-shell .ai-market-chart-head strong {
+  color: #bfc6d1;
+  font-size: 10px;
+  font-weight: 600;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28219 / 28219 */
+.ai-research-shell .ai-market-chart-head small {
+  overflow: hidden;
+  color: #727b88;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28224 / 28224 */
+.ai-research-shell .ai-skill-rules h3, .ai-research-shell .ai-skill-resources h3 {
+  margin: 0 0 7px;
+  color: #b8bec9;
+  font-size: 10px;
+  font-weight: 650;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28225 / 28225 */
+.ai-research-shell .ai-skill-resources ul {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28226 / 28226 */
+.ai-research-shell .ai-skill-resources li {
+  min-width: 0;
+  padding: 7px 8px;
+  border-inline-start: 2px solid rgba(149, 92, 255, 0.4);
+  background: #101218;
+  color: #bdc3cd;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28230 / 28230 */
+.ai-research-shell .ai-inspector-loading, .ai-research-shell .ai-inspector-error {
+  color: #9299a5;
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28231 / 28231 */
+.ai-research-shell .ai-inspector-error {
+  color: #ef8d9f;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28234 / 28234 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-session-item.running .ai-session-status-dot {
+    animation: none;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28235 / 28235 */
+@media (max-width: 860px) {
+  .ai-research-shell .ai-tool-trace > summary {
+    grid-template-columns: 18px 24px minmax(110px,.8fr) minmax(120px,1.2fr) auto;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28236 / 28236 */
+@media (max-width: 620px) {
+  .ai-research-shell .ai-tool-trace > summary {
+    grid-template-columns: 18px 24px minmax(0,1fr) auto;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28236 / 28236 */
+@media (max-width: 620px) {
+  .ai-research-shell .ai-tool-trace > summary code {
+    grid-column: 3 / -1;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28236 / 28236 */
+@media (max-width: 620px) {
+  .ai-research-shell .ai-tool-title {
+    grid-template-columns: 20px minmax(0,1fr);
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28236 / 28236 */
+@media (max-width: 620px) {
+  .ai-research-shell .ai-tool-title > code {
+    grid-column: 2;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28262 / 28262 */
+.ai-research-shell .ai-composer-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+  min-width: 0;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28263 / 28263 */
+.ai-research-shell .ai-composer-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 2px 5px 0;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28265 / 28265 */
+.ai-research-shell .ai-input-row textarea::placeholder {
+  color: #6f7785;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28267 / 28267 */
+.ai-research-shell .ai-composer-context {
+  align-self: center;
+  min-width: 0;
+  overflow: hidden;
+  color: #6f8587;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28268 / 28268 */
+.ai-research-shell .ai-composer-context.has-content {
+  color: var(--accent-bright);
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28270 / 28270 */
+.ai-research-shell .ai-composer-options label:hover {
+  background: rgba(148,163,184,.09);
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28286 / 28286 / 28902 */
+.ai-research-shell .ai-send::before {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border: 1px solid rgba(218, 227, 236, .11);
+  border-radius: 50%;
+  box-shadow: inset 0 1px rgba(255,255,255,.08);
+  z-index: -2;
+  background: transparent;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28287 / 28287 / 28903 */
+.ai-research-shell .ai-send::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border: 1px solid transparent;
+  border-top-color: rgba(220, 229, 238, .42);
+  border-right-color: rgba(148, 163, 184, .24);
+  border-radius: 50%;
+  opacity: 0;
+  transform: rotate(-28deg);
+  transition: opacity 160ms ease-out;
+  z-index: -3;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28288 / 28288 / 28904 */
+.ai-research-shell .ai-send-core {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: #d5dde4;
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.72));
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28289 / 28289 / 28905 */
+.ai-research-shell .ai-send:hover:not(:disabled) {
+  transform: translateY(-1px);
+  border-color: rgba(222, 230, 239, .48);
+  box-shadow: 0 0 0 1px rgba(222,230,239,.16), 0 9px 24px rgba(0,0,0,.42), inset 0 1px rgba(255,255,255,.18), inset 0 -7px 12px rgba(0,0,0,.28);
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代+Graphite Violet ← 原 28290 / 28290 / 28906 / 29142 */
+.ai-research-shell .ai-send.is-ready {
+  border-color: rgba(149, 92, 255, 0.48);
+  color: #eee7fb;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代+Graphite Violet ← 原 28291 / 28291 / 28907 / 29144 / 29188 */
+.ai-research-shell .ai-send.is-ready::after {
+  animation: ai-send-orbit 2.1s linear infinite;
+  opacity: 1;
+  border-top-color: rgba(220,207,246,.48);
+  border-right-color: rgba(149, 92, 255, 0.28);
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代+Graphite Violet ← 原 28292 / 28292 / 28908 / 29187 */
+.ai-research-shell .ai-send.is-ready::before {
+  animation: ai-send-core-breathe 2.4s ease-in-out infinite;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代+Graphite Violet ← 原 28293 / 28293 / 28909 / 29143 */
+.ai-research-shell .ai-send.is-ready:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 0 0 1px rgba(149, 92, 255, 0.22), 0 10px 26px rgba(94,68,138,.3), inset 0 1px rgba(255,255,255,.18);
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28294 / 28294 */
+.ai-research-shell .ai-send:active:not(:disabled) {
+  transform: scale(.94);
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28297 / 28297 / 28913 */
+.ai-research-shell .ai-send.stop::after {
+  display: none;
+}
+
+/* v2 后段·工具轨道/发送核心+工作台精修 G 代 ← 原 28301 / 28301 / 28916 */
+@media (pointer: coarse) {
+  .ai-research-shell .ai-send {
+    width: 44px;
+    height: 44px;
+  }
+}
+
+/* v2 后段·工具轨道/发送核心 ← 原 28303 / 28303 */
+.ai-research-shell .ai-context-meter.legacy {
+  display: none;
+}
+
+
+/* —— 13. 命令面板（进场动画在 motion.css，此处不声明 animation）—— */
+/* 命令面板/欢迎页 ← 原 28463 / 28463 */
+.ai-research-shell .ai-command-palette {
+  position: absolute;
+  z-index: 11;
+  right: 0;
+  bottom: calc(100% + 8px);
+  width: min(440px, calc(100vw - 32px));
+  max-height: min(420px, 55vh);
+  overflow: auto;
+  padding: 7px;
+  border: 1px solid var(--line-tinted);
+  border-radius: 7px;
+  background: #14161b;
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.42);
+}
+
+/* 命令面板/欢迎页 ← 原 28478 / 28478 */
+.ai-research-shell .ai-command-palette-head {
+  display: flex;
+  justify-content: space-between;
+  padding: 5px 7px 8px;
+  color: #8b919c;
+  font-size: 10px;
+}
+
+/* 命令面板/欢迎页 ← 原 28486 / 28486 */
+.ai-research-shell .ai-command-palette-head strong {
+  color: #e2e5ea;
+  font-weight: 620;
+}
+
+/* 命令面板/欢迎页 ← 原 28487 / 28487 */
+.ai-research-shell .ai-command-palette-empty {
+  margin: 8px;
+  color: #8b919c;
+  font-size: 11px;
+}
+
+/* 命令面板/欢迎页 ← 原 28489 / 28489 */
+.ai-research-shell .ai-command-palette > button {
+  width: 100%;
+  min-height: 48px;
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  padding: 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: #aeb4bf;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 命令面板/欢迎页 ← 原 28505 / 28505 */
+.ai-research-shell .ai-command-palette > button.active, .ai-research-shell .ai-command-palette > button:hover {
+  background: rgba(149, 92, 255, 0.12);
+}
+
+/* 命令面板/欢迎页 ← 原 28507 / 28507 */
+.ai-research-shell .ai-command-palette-icon {
+  color: var(--ai-research-accent);
+}
+
+/* 命令面板/欢迎页 ← 原 28508 / 28508 */
+.ai-research-shell .ai-command-palette-copy {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+/* 命令面板/欢迎页 ← 原 28509 / 28509 */
+.ai-research-shell .ai-command-palette-copy strong {
+  color: #e4e6eb;
+  font-size: 11px;
+  font-weight: 620;
+}
+
+/* 命令面板/欢迎页 ← 原 28510 / 28510 */
+.ai-research-shell .ai-command-palette-copy small {
+  color: #b2b7c1;
+  font-size: 10px;
+}
+
+/* 命令面板/欢迎页 ← 原 28511 / 28511 */
+.ai-research-shell .ai-command-palette-copy em {
+  overflow: hidden;
+  color: #777f8c;
+  font-size: 9px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 命令面板/欢迎页 ← 原 28512 / 28512 */
+.ai-research-shell .ai-command-palette-kind {
+  color: #777f8c;
+  font-size: 9px;
+}
+
+
+/* —— 14. 欢迎页 —— */
+/* 命令面板/欢迎页 ← 原 28514 / 28514 */
+.ai-research-shell .ai-research-welcome {
+  max-width: 720px;
+  margin: auto;
+  padding: 40px 8px 54px;
+}
+
+/* 命令面板/欢迎页 ← 原 28520 / 28520 */
+.ai-research-shell .ai-research-welcome-kicker {
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+}
+
+/* 命令面板/欢迎页 ← 原 28521 / 28521 */
+.ai-research-shell .ai-research-welcome h1 {
+  margin: 9px 0 8px;
+  color: #eef0f4;
+  font-size: clamp(22px, 3vw, 34px);
+  font-weight: 650;
+  letter-spacing: 0;
+}
+
+/* 命令面板/欢迎页 ← 原 28522 / 28522 */
+.ai-research-shell .ai-research-welcome > p {
+  max-width: 620px;
+  margin: 0 0 24px;
+  color: #8c939e;
+  font-size: 12px;
+  line-height: 1.65;
+}
+
+/* 命令面板/欢迎页 ← 原 28523 / 28523 */
+.ai-research-shell .ai-research-welcome-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+/* 命令面板/欢迎页 ← 原 28524 / 28524 */
+.ai-research-shell .ai-research-welcome-actions button {
+  min-width: 0;
+  min-height: 64px;
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  align-items: start;
+  gap: 8px;
+  padding: 11px;
+  border: 1px solid rgba(174, 186, 210, 0.13);
+  border-radius: 6px;
+  background: #111318;
+  color: #cfd3db;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* 命令面板/欢迎页 ← 原 28525 / 28525 */
+.ai-research-shell .ai-research-welcome-actions button:hover, .ai-research-shell .ai-research-welcome-actions button:focus-visible {
+  border-color: rgba(149, 92, 255, 0.45);
+  background: #17151e;
+  outline: none;
+}
+
+/* 命令面板/欢迎页 ← 原 28526 / 28526 */
+.ai-research-shell .ai-research-welcome-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  color: var(--accent);
+}
+
+/* 命令面板/欢迎页 ← 原 28527 / 28527 */
+.ai-research-shell .ai-research-welcome-actions button span:last-child {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+/* 命令面板/欢迎页 ← 原 28528 / 28528 */
+.ai-research-shell .ai-research-welcome-actions strong {
+  font-size: 11px;
+  font-weight: 620;
+}
+
+/* 命令面板/欢迎页 ← 原 28529 / 28529 */
+.ai-research-shell .ai-research-welcome-actions small {
+  overflow-wrap: anywhere;
+  color: #7f8691;
+  font-size: 10px;
+  line-height: 1.35;
+}
+
+/* 命令面板/欢迎页 ← 原 28536 / 28536 */
+@media (max-width: 840px) {
+  .ai-research-shell .ai-messages {
+    padding-inline: 18px;
+  }
+}
+
+/* 命令面板/欢迎页 ← 原 28542 / 28542 */
+@media (max-width: 640px) {
+  .ai-research-shell .ai-session-sidebar {
+    display: none;
+  }
+}
+
+/* 命令面板/欢迎页 ← 原 28543 / 28543 */
+@media (max-width: 640px) {
+  .ai-research-shell .ai-research-welcome-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 命令面板/欢迎页 ← 原 28548 / 28548 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell *, .ai-research-shell *::before, .ai-research-shell *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* Final 网格 ← 原 28573 / 28573 */
+@media (max-width: 660px) {
+  .ai-research-shell .ai-inspector-shortcuts {
+    display: none;
+  }
+}
+
+
+/* —— 16. 过程/工具卡（G 代）—— */
+/* 工作台精修 G 代+Graphite Violet ← 原 28575 / 28575 / 29177 */
+.ai-research-shell .ai-process {
+  max-width: 76ch;
+  margin: 2px 0 12px;
+  padding: 0 0 0 13px;
+  border-top: 0;
+  border-inline-start: 1px solid rgba(174, 186, 210, 0.18);
+  overflow: hidden;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28583 / 28583 / 29178 */
+.ai-research-shell .ai-process > summary {
+  min-height: 24px;
+  color: #9ca3ae;
+  font-size: 10px;
+  transition: background 160ms ease-out, color 160ms ease-out;
+}
+
+/* 工作台精修 G 代 ← 原 28589 / 28589 */
+.ai-research-shell .ai-process-list {
+  gap: 6px;
+  margin-top: 5px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28590 / 28590 / 29127 / 29179 */
+.ai-research-shell .ai-tool, .ai-research-shell .ai-tool-trace {
+  display: grid;
+  gap: 5px;
+  padding: 7px 8px;
+  border: 1px solid rgba(174, 186, 210, 0.1);
+  border-radius: 5px;
+  background: #101116;
+  border-color: rgba(174,186,210,.09);
+  transition: border-color 160ms ease-out, background 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+/* 工作台精修 G 代 ← 原 28618 / 28618 */
+.ai-research-shell .ai-tool-title, .ai-research-shell .ai-tool-trace-action, .ai-research-shell .ai-tool-group-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: #d4d8df;
+  font-size: 11px;
+  font-weight: 590;
+}
+
+/* 工作台精修 G 代 ← 原 28629 / 28629 */
+.ai-research-shell .ai-tool-state-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #565d69;
+}
+
+/* 工作台精修 G 代 ← 原 28630 / 28630 */
+.ai-research-shell .ai-tool-state-dot.running {
+  background: var(--accent);
+  animation: ai-session-running-pulse 1.25s ease-in-out infinite;
+}
+
+/* 工作台精修 G 代 ← 原 28631 / 28631 */
+.ai-research-shell .ai-tool-state-dot.failed {
+  background: #e28d9c;
+  box-shadow: 0 0 0 3px rgba(226,141,156,.12);
+}
+
+/* 工作台精修 G 代 ← 原 28632 / 28632 */
+.ai-research-shell .ai-tool-trace .ai-tool-domain-icon {
+  color: #9aa1ad;
+}
+
+/* 工作台精修 G 代 ← 原 28633 / 28633 */
+.ai-research-shell .ai-tool-trace.result-failed .ai-tool-domain-icon {
+  color: #e28d9c;
+}
+
+/* 工作台精修 G 代 ← 原 28634 / 28634 */
+.ai-research-shell .ai-tool-trace > summary > strong {
+  opacity: 0;
+  transition: opacity 140ms ease-out;
+  color: #747d89;
+  font-size: 9px;
+  font-weight: 500;
+}
+
+/* 工作台精修 G 代 ← 原 28635 / 28635 */
+.ai-research-shell .ai-tool-trace:hover > summary > strong, .ai-research-shell .ai-tool-trace:focus-within > summary > strong, .ai-research-shell .ai-tool-trace[open] > summary > strong {
+  opacity: 1;
+}
+
+/* 工作台精修 G 代 ← 原 28636 / 28636 */
+.ai-research-shell .ai-tool-trace > summary > small {
+  overflow: hidden;
+  color: #858c98;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28637 / 28637 */
+.ai-research-shell .ai-tool-trace > summary > code {
+  overflow: hidden;
+  color: #68707d;
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28639 / 28639 */
+.ai-research-shell .ai-tool-title > span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28640 / 28640 */
+.ai-research-shell .ai-tool-title code {
+  overflow: hidden;
+  color: #707887;
+  font-size: 9px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28641 / 28641 */
+.ai-research-shell .ai-tool-summary {
+  color: #8d95a1;
+  font-size: 10px;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28642 / 28642 / 29129 */
+.ai-research-shell .tool-running {
+  border-color: rgba(149, 92, 255, 0.34);
+}
+
+/* 工作台精修 G 代 ← 原 28643 / 28643 */
+.ai-research-shell .tool-running .ai-tool-title {
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代 ← 原 28644 / 28644 */
+.ai-research-shell .tool-failed, .ai-research-shell .tool-blocked, .ai-research-shell .result-failed {
+  border-color: rgba(207, 100, 107, 0.42);
+}
+
+/* 工作台精修 G 代 ← 原 28647 / 28647 */
+.ai-research-shell .tool-failed .ai-tool-summary, .ai-research-shell .tool-blocked .ai-tool-summary {
+  color: #e29a9e;
+}
+
+/* 工作台精修 G 代 ← 原 28649 / 28649 */
+.ai-research-shell .ai-tool-io, .ai-research-shell .ai-tool-panel {
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(174, 186, 210, 0.1);
+}
+
+/* 工作台精修 G 代 ← 原 28651 / 28651 */
+.ai-research-shell .ai-tool-io summary, .ai-research-shell .ai-tool-panel summary {
+  color: #858d98;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+/* 工作台精修 G 代 ← 原 28653 / 28653 */
+.ai-research-shell .ai-tool-io-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  margin-top: 6px;
+}
+
+/* 工作台精修 G 代 ← 原 28654 / 28654 */
+.ai-research-shell .ai-tool-io-grid pre {
+  min-width: 0;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid rgba(174, 186, 210, 0.09);
+  border-radius: 4px;
+  background: #0b0d11;
+  color: #9ca4b0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+/* 工作台精修 G 代 ← 原 28655 / 28655 */
+.ai-research-shell .ai-tool-open-strategy {
+  justify-self: start;
+  padding: 4px 6px;
+  border: 1px solid rgba(149, 92, 255, 0.3);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--accent-bright);
+  font-size: 10px;
+  cursor: pointer;
+}
+
+/* 工作台精修 G 代 ← 原 28656 / 28656 */
+.ai-research-shell .ai-reasoning, .ai-research-shell .ai-reasoning-summary {
+  border-color: rgba(208, 166, 92, 0.2);
+  background: transparent;
+  color: #a8a098;
+}
+
+/* 工作台精修 G 代 ← 原 28658 / 28658 */
+.ai-research-shell .ai-reasoning summary {
+  color: #bdaa85;
+  font-size: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 28659 / 28659 */
+.ai-research-shell .ai-answer > strong {
+  display: block;
+  margin-bottom: 10px;
+  color: #e9ebef;
+  font-size: 12px;
+  font-weight: 650;
+}
+
+/* 工作台精修 G 代 ← 原 28660 / 28660 */
+.ai-research-shell .ai-markdown {
+  color: #d8dbe1;
+  font-size: 13px;
+  line-height: 1.72;
+}
+
+/* 工作台精修 G 代 ← 原 28661 / 28661 */
+.ai-research-shell .ai-markdown h1, .ai-research-shell .ai-markdown h2, .ai-research-shell .ai-markdown h3 {
+  color: #f0f1f4;
+  letter-spacing: 0;
+}
+
+/* 工作台精修 G 代 ← 原 28662 / 28662 */
+.ai-research-shell .ai-markdown blockquote {
+  border-inline-start-color: #7b889a;
+  color: #aeb5c0;
+}
+
+/* 工作台精修 G 代 ← 原 28663 / 28663 */
+.ai-research-shell .ai-markdown table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+}
+
+/* 工作台精修 G 代 ← 原 28667 / 28667 */
+@media (max-width: 640px) {
+  .ai-research-shell .ai-tool-io-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28673 / 28673 / 28781 / 29023 */
+.ai-research-shell .ai-inspector-workspace {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 工作台精修 G 代 ← 原 28678 / 28678 / 28787 / 29024 */
+.ai-research-shell .ai-inspector-workspace-main {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+/* 工作台精修 G 代 ← 原 28684 / 28684 / 28790 */
+.ai-research-shell .ai-inspector-tabs > div.active > button:first-child svg {
+  color: #77d2bc;
+}
+
+
+/* —— 18. 情报工作台 —— */
+/* 工作台精修 G 代+Graphite Violet ← 原 28687 / 28687 / 28792 / 29074 */
+.ai-research-shell .ai-intelligence-workspace {
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  display: block;
+  grid-template-columns: 58px minmax(0, 1fr);
+  background: #0a0c10;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28688 / 28688 / 28793 / 29075 */
+.ai-research-shell .ai-intelligence-nav {
+  display: flex;
+  flex-direction: row;
+  gap: 2px;
+  padding: 4px 8px 0;
+  border-right: 0;
+  background: #0f1116;
+  align-items: stretch;
+  min-height: 39px;
+  overflow-x: auto;
+  border-bottom: 1px solid rgba(116, 169, 181, .18);
+  scrollbar-width: thin;
+  border-bottom-color: rgba(174,186,210,.12);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28689 / 28689 / 28794 / 29076 */
+.ai-research-shell .ai-intelligence-nav button {
+  min-height: 34px;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: #858c98;
+  font-size: 10px;
+  line-height: 1.1;
+  cursor: pointer;
+  flex: 0 0 auto;
+  min-width: 74px;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28690 / 28690 / 28795 / 29077 */
+.ai-research-shell .ai-intelligence-nav button:hover {
+  color: var(--accent-bright);
+  background: rgba(149, 92, 255, 0.06);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28691 / 28691 / 28796 / 29078 */
+.ai-research-shell .ai-intelligence-nav button.active {
+  color: #f1edfa;
+  border-color: rgba(149, 92, 255, 0.24);
+  background: #17141f;
+  box-shadow: inset 0 -2px var(--accent-bright);
+  border-bottom-color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28692 / 28692 / 28797 / 29079 */
+.ai-research-shell .ai-intelligence-nav button.active svg {
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28693 / 28693 / 28799 / 29080 */
+.ai-research-shell .ai-intelligence-main {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  background: #0a0c10;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28694 / 28694 / 28800 / 29081 */
+.ai-research-shell .ai-intelligence-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px 15px 11px;
+  border-bottom: 1px solid rgba(174,186,210,.1);
+  background: linear-gradient(90deg, rgba(149, 92, 255, 0.08), transparent 66%);
+  border-bottom-color: rgba(174,186,210,.1);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28695 / 28695 / 28801 / 29082 */
+.ai-research-shell .ai-intelligence-head h2 {
+  margin: 4px 0 2px;
+  color: #f0f1f5;
+  font-size: 17px;
+}
+
+/* 工作台精修 G 代 ← 原 28696 / 28696 */
+.ai-research-shell .ai-intelligence-head p {
+  margin: 0;
+  color: #7d8592;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28697 / 28697 */
+.ai-research-shell .ai-intelligence-head > svg {
+  flex: 0 0 auto;
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代 ← 原 28698 / 28698 / 28805 */
+.ai-research-shell .ai-intel-view {
+  display: grid;
+  align-content: start;
+  gap: 14px;
+  padding: 14px 15px 26px;
+}
+
+/* 工作台精修 G 代 ← 原 28699 / 28699 */
+.ai-research-shell .ai-intel-view-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28700 / 28700 / 28806 */
+.ai-research-shell .ai-intel-view-head h2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  color: #e8f0f0;
+  font-size: 13px;
+}
+
+/* 工作台精修 G 代 ← 原 28701 / 28701 / 28807 */
+.ai-research-shell .ai-intel-view-head h2 svg {
+  color: #76c8bb;
+}
+
+/* 工作台精修 G 代 ← 原 28702 / 28702 / 28808 */
+.ai-research-shell .ai-intel-view-head p {
+  margin: 4px 0 0;
+  color: #8b9ba2;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28703 / 28703 / 28810 / 29085 */
+.ai-research-shell .ai-intel-subtabs {
+  display: flex;
+  gap: 3px;
+  padding: 3px;
+  border: 1px solid rgba(174,186,210,.12);
+  border-radius: 5px;
+  background: #101218;
+  border-color: rgba(174,186,210,.12);
+}
+
+/* 工作台精修 G 代 ← 原 28704 / 28704 */
+.ai-research-shell .ai-intel-subtabs button {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: #858d9a;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28705 / 28705 / 28811 / 29086 */
+.ai-research-shell .ai-intel-subtabs button.active {
+  background: var(--accent);
+  color: #fff;
+  box-shadow: inset 0 -1px var(--accent-bright);
+}
+
+/* 工作台精修 G 代 ← 原 28706 / 28706 */
+.ai-research-shell .ai-intel-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  color: #737d8b;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28707 / 28707 / 28809 */
+.ai-research-shell .ai-intel-meta span:first-child {
+  color: #79c5b7;
+}
+
+/* 工作台精修 G 代 ← 原 28708 / 28708 */
+.ai-research-shell .ai-intel-list {
+  display: grid;
+  gap: 5px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28709 / 28709 / 28812 / 29087 */
+.ai-research-shell .ai-intel-list-item {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 24px minmax(0,1fr) 14px;
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  padding: 9px 8px;
+  border: 1px solid rgba(174,186,210,.1);
+  border-left: 0;
+  border-radius: 4px;
+  background: #111319;
+  color: #c8cdd6;
+  text-align: left;
+  cursor: pointer;
+  border-color: rgba(174,186,210,.1);
+  border-left-color: rgba(149, 92, 255, 0.48);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28710 / 28710 / 28813 / 29088 */
+.ai-research-shell .ai-intel-list-item:hover {
+  border-color: rgba(149, 92, 255, 0.42);
+  background: #171522;
+  transform: none;
+}
+
+/* 工作台精修 G 代 ← 原 28711 / 28711 */
+.ai-research-shell .ai-intel-list-item > span:nth-child(2) {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28712 / 28712 / 28814 / 29089 */
+.ai-research-shell .ai-intel-list-marker {
+  color: var(--accent-bright);
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28713 / 28713 */
+.ai-research-shell .ai-intel-list-item strong {
+  overflow: hidden;
+  color: #e0e3e9;
+  font-size: 10px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28714 / 28714 */
+.ai-research-shell .ai-intel-list-item small, .ai-research-shell .ai-intel-list-item em {
+  overflow: hidden;
+  color: #78818e;
+  font-size: 8px;
+  font-style: normal;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28715 / 28715 */
+.ai-research-shell .ai-intel-list-item em {
+  color: #9b91ad;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28716 / 28716 / 28815 / 29090 */
+.ai-research-shell .ai-intel-list-item > svg {
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代 ← 原 28717 / 28717 */
+.ai-research-shell .ai-intel-section {
+  display: grid;
+  gap: 7px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28718 / 28718 / 28816 / 29091 */
+.ai-research-shell .ai-intel-section h3, .ai-research-shell .ai-intel-chart-stack h3 {
+  margin: 1px 0 0;
+  color: #aaa2ba;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: .02em;
+}
+
+/* 工作台精修 G 代 ← 原 28719 / 28719 */
+.ai-research-shell .ai-intel-metric-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 5px;
+}
+
+/* 工作台精修 G 代 ← 原 28720 / 28720 / 28817 */
+.ai-research-shell .ai-intel-metric-grid > div {
+  min-width: 0;
+  padding: 8px;
+  border: 1px solid rgba(174,186,210,.1);
+  background: #11191d;
+  border-color: rgba(116, 169, 181, .15);
+}
+
+/* 工作台精修 G 代 ← 原 28721 / 28721 */
+.ai-research-shell .ai-intel-metric-grid small {
+  display: block;
+  color: #737c89;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28722 / 28722 / 28818 */
+.ai-research-shell .ai-intel-metric-grid strong {
+  display: block;
+  margin-top: 4px;
+  color: #e5eeee;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28723 / 28723 */
+.ai-research-shell .ai-intel-ranking {
+  display: grid;
+  gap: 6px;
+}
+
+/* 工作台精修 G 代 ← 原 28724 / 28724 */
+.ai-research-shell .ai-intel-ranking-row {
+  display: grid;
+  grid-template-columns: 56px minmax(0,1fr) 50px;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(174,186,210,.07);
+}
+
+/* 工作台精修 G 代 ← 原 28725 / 28725 */
+.ai-research-shell .ai-intel-ranking-row > strong {
+  color: #d9dce3;
+  font-size: 9px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28726 / 28726 */
+.ai-research-shell .ai-intel-ranking-row > small {
+  color: #707987;
+  font-size: 8px;
+  text-align: right;
+}
+
+/* 工作台精修 G 代 ← 原 28727 / 28727 */
+.ai-research-shell .ai-intel-ratio {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 28px minmax(0,1fr) 38px;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 工作台精修 G 代 ← 原 28728 / 28728 */
+.ai-research-shell .ai-intel-ratio span {
+  overflow: hidden;
+  color: #7d8793;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28729 / 28729 / 28819 / 29093 */
+.ai-research-shell .ai-intel-ratio i {
+  height: 4px;
+  overflow: hidden;
+  background: #252833;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28730 / 28730 / 28820 / 29094 */
+.ai-research-shell .ai-intel-ratio b {
+  display: block;
+  height: 100%;
+  background: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28731 / 28731 / 28821 / 29095 */
+.ai-research-shell .ai-intel-ratio strong {
+  color: var(--accent-bright);
+  font: 8px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}
+
+/* 工作台精修 G 代 ← 原 28732 / 28732 */
+.ai-research-shell .ai-intel-trend-strip {
+  display: grid;
+  gap: 5px;
+}
+
+/* 工作台精修 G 代 ← 原 28733 / 28733 */
+.ai-research-shell .ai-intel-chart-stack {
+  display: grid;
+  gap: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 28734 / 28734 */
+.ai-research-shell .ai-intel-chart-stack > div {
+  display: grid;
+  gap: 5px;
+}
+
+/* 工作台精修 G 代 ← 原 28735 / 28735 */
+.ai-research-shell .ai-intel-chart-stack .intelligence-evidence-chart {
+  min-height: 138px;
+  border: 1px solid rgba(174,186,210,.1);
+  background: #101218;
+}
+
+/* 工作台精修 G 代 ← 原 28736 / 28736 */
+.ai-research-shell .ai-intel-trader-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 5px;
+}
+
+/* 工作台精修 G 代 ← 原 28737 / 28737 / 28822 */
+.ai-research-shell .ai-intel-trader-grid > div {
+  display: grid;
+  gap: 4px;
+  padding: 8px;
+  border: 1px solid rgba(174,186,210,.1);
+  background: #11191d;
+  border-color: rgba(116, 169, 181, .15);
+}
+
+/* 工作台精修 G 代 ← 原 28738 / 28738 */
+.ai-research-shell .ai-intel-trader-grid strong {
+  overflow: hidden;
+  color: #dfe2e8;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28739 / 28739 */
+.ai-research-shell .ai-intel-trader-grid span, .ai-research-shell .ai-intel-trader-grid small {
+  color: #858e9b;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28740 / 28740 */
+.ai-research-shell .ai-intel-history-list {
+  display: grid;
+  gap: 0;
+}
+
+/* 工作台精修 G 代 ← 原 28741 / 28741 */
+.ai-research-shell .ai-intel-history-list > div {
+  display: grid;
+  grid-template-columns: 64px minmax(0,1fr);
+  gap: 2px 7px;
+  padding: 8px 0;
+  border-bottom: 1px solid rgba(174,186,210,.08);
+}
+
+/* 工作台精修 G 代 ← 原 28742 / 28742 */
+.ai-research-shell .ai-intel-history-list time, .ai-research-shell .ai-intel-history-list small {
+  color: #737c8a;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28743 / 28743 */
+.ai-research-shell .ai-intel-history-list strong {
+  overflow: hidden;
+  color: #d4d8df;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28744 / 28744 */
+.ai-research-shell .ai-intel-history-list small {
+  grid-column: 2;
+}
+
+/* 工作台精修 G 代 ← 原 28745 / 28745 */
+.ai-research-shell .ai-intel-modal-backdrop {
+  position: fixed;
+  z-index: 30;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(2,3,7,.72);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28746 / 28746 / 28823 / 29096 */
+.ai-research-shell .ai-intel-modal {
+  width: min(620px, 100%);
+  max-height: min(680px, calc(100vh - 36px));
+  overflow: auto;
+  padding: 16px;
+  border: 1px solid var(--line-tinted-strong);
+  border-radius: 8px;
+  background: #12141b;
+  box-shadow: 0 24px 80px rgba(0,0,0,.6);
+  border-color: var(--line-tinted-strong);
+}
+
+/* 工作台精修 G 代 ← 原 28747 / 28747 */
+.ai-research-shell .ai-intel-modal header {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid rgba(174,186,210,.1);
+}
+
+/* 工作台精修 G 代 ← 原 28748 / 28748 */
+.ai-research-shell .ai-intel-modal header small {
+  color: var(--accent-bright);
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28749 / 28749 */
+.ai-research-shell .ai-intel-modal h2 {
+  margin: 5px 0 0;
+  color: #f0f1f4;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+/* 工作台精修 G 代 ← 原 28750 / 28750 */
+.ai-research-shell .ai-intel-modal header button {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #939aa6;
+}
+
+/* 工作台精修 G 代 ← 原 28751 / 28751 */
+.ai-research-shell .ai-intel-modal header button:hover {
+  background: rgba(174,186,210,.1);
+  color: #fff;
+}
+
+/* 工作台精修 G 代 ← 原 28752 / 28752 */
+.ai-research-shell .ai-intel-modal > p {
+  margin: 14px 0;
+  color: #d0d4dc;
+  font-size: 11px;
+  line-height: 1.7;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 工作台精修 G 代 ← 原 28753 / 28753 */
+.ai-research-shell .ai-intel-modal-meta {
+  margin-top: 12px;
+  color: #78818e;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28754 / 28754 */
+.ai-research-shell .ai-intel-modal a {
+  color: var(--accent-bright);
+  font-size: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 28755 / 28755 */
+.ai-research-shell .ai-intel-related {
+  display: grid;
+  gap: 6px;
+  padding-top: 10px;
+  border-top: 1px solid rgba(174,186,210,.1);
+  color: #aeb5c1;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28756 / 28756 / 28825 / 29098 */
+.ai-research-shell .ai-intel-related strong {
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28757 / 28757 / 28826 / 29099 */
+.ai-research-shell .ai-market-kline {
+  display: grid;
+  gap: 7px;
+  padding: 9px;
+  border: 1px solid rgba(174,186,210,.12);
+  background: #0f1116;
+  border-color: rgba(174,186,210,.12);
+}
+
+/* 工作台精修 G 代 ← 原 28758 / 28758 */
+.ai-research-shell .ai-market-kline-canvas {
+  height: 210px;
+  min-height: 150px;
+}
+
+/* 工作台精修 G 代 ← 原 28760 / 28760 / 28827 */
+.ai-research-shell .ai-market-chart-head b.positive {
+  color: #5fd2aa;
+}
+
+/* 工作台精修 G 代 ← 原 28761 / 28761 / 28828 */
+.ai-research-shell .ai-market-chart-head b.negative {
+  color: #e58a98;
+}
+
+/* 工作台精修 G 代 ← 原 28764 / 28764 / 28940 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-inspector-workspace {
+    grid-template-columns: 52px minmax(0, 1fr);
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28765 / 28765 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intelligence-workspace {
+    grid-template-columns: 52px minmax(0,1fr);
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28766 / 28766 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intelligence-nav button span {
+    max-width: 45px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28767 / 28767 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intel-view {
+    padding-inline: 10px;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28768 / 28768 */
+.ai-research-shell .ai-intel-section > h3 {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+/* 工作台精修 G 代 ← 原 28769 / 28769 / 28934 */
+.ai-research-shell .ai-intel-evidence-rows {
+  display: grid;
+  gap: 0;
+  border-top: 1px solid rgba(174,186,210,.1);
+  border-top-color: rgba(116, 169, 181, .15);
+}
+
+/* 工作台精修 G 代 ← 原 28770 / 28770 / 28935 */
+.ai-research-shell .ai-intel-evidence-rows > div {
+  display: grid;
+  grid-template-columns: 52px repeat(3, minmax(0,1fr));
+  gap: 5px;
+  align-items: center;
+  padding: 7px 0;
+  border-bottom: 1px solid rgba(174,186,210,.07);
+  border-bottom-color: rgba(116, 169, 181, .1);
+}
+
+/* 工作台精修 G 代 ← 原 28771 / 28771 */
+.ai-research-shell .ai-intel-evidence-rows time {
+  color: #727b89;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28772 / 28772 / 28936 */
+.ai-research-shell .ai-intel-evidence-rows span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  color: #c7d9d5;
+  font: 8px ui-monospace, SFMono-Regular, Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28773 / 28773 / 28937 */
+.ai-research-shell .ai-intel-evidence-rows span b {
+  color: #789198;
+  font-size: 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28774 / 28774 */
+.ai-research-shell .ai-intel-list.compact .ai-intel-list-item.static {
+  cursor: default;
+}
+
+/* 工作台精修 G 代 ← 原 28775 / 28775 */
+.ai-research-shell .ai-intel-list.compact .ai-intel-list-item.static:hover {
+  transform: none;
+}
+
+/* 工作台精修 G 代 ← 原 28778 / 28778 */
+@media (max-width: 520px) {
+  .ai-research-shell .ai-intel-evidence-rows > div {
+    grid-template-columns: 45px repeat(3, minmax(0,1fr));
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28798 / 28798 */
+.ai-research-shell .ai-intelligence-nav button span {
+  max-width: none;
+  overflow: visible;
+  text-overflow: clip;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28802 / 28802 / 29083 */
+.ai-research-shell .ai-intelligence-head > .ai-intelligence-expand {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(116, 169, 181, .22);
+  border-radius: 5px;
+  background: #17141f;
+  color: var(--accent-bright);
+  cursor: pointer;
+  border-color: rgba(149, 92, 255, 0.28);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28803 / 28803 / 29084 */
+.ai-research-shell .ai-intelligence-head > .ai-intelligence-expand:hover {
+  border-color: var(--accent-bright);
+  background: #201a2c;
+  color: #eee7fb;
+}
+
+/* 工作台精修 G 代 ← 原 28804 / 28804 */
+.ai-research-shell .ai-intelligence-head > .ai-intelligence-expand:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28824 / 28824 / 29097 */
+.ai-research-shell .ai-intel-modal header small, .ai-research-shell .ai-intel-modal a {
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代 ← 原 28829 / 28829 */
+.ai-research-shell .ai-market-overview {
+  display: grid;
+  gap: 12px;
+  margin-top: 2px;
+}
+
+/* 工作台精修 G 代 ← 原 28830 / 28830 */
+.ai-research-shell .ai-market-overview-head, .ai-research-shell .ai-market-sentiment header, .ai-research-shell .ai-market-linechart header, .ai-research-shell .ai-market-depth header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28831 / 28831 */
+.ai-research-shell .ai-market-overview-head strong, .ai-research-shell .ai-market-sentiment header strong {
+  color: #dceae8;
+  font-size: 11px;
+}
+
+/* 工作台精修 G 代 ← 原 28832 / 28832 */
+.ai-research-shell .ai-market-overview-head small, .ai-research-shell .ai-market-sentiment header small, .ai-research-shell .ai-market-linechart header small, .ai-research-shell .ai-market-depth header small {
+  color: #7f9298;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28833 / 28833 */
+.ai-research-shell .ai-market-overview-head > span {
+  font: 11px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28834 / 28834 */
+.ai-research-shell .ai-market-overview-head > span.positive {
+  color: #5fd2aa;
+}
+
+/* 工作台精修 G 代 ← 原 28835 / 28835 */
+.ai-research-shell .ai-market-overview-head > span.negative {
+  color: #e58a98;
+}
+
+/* 工作台精修 G 代 ← 原 28836 / 28836 */
+.ai-research-shell .ai-market-overview-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28837 / 28837 / 29104 */
+.ai-research-shell .ai-market-open-trading {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 1px solid rgba(116, 169, 181, .24);
+  border-radius: 5px;
+  background: #17141f;
+  color: var(--accent-bright);
+  cursor: pointer;
+  border-color: rgba(149, 92, 255, 0.28);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28838 / 28838 / 29105 */
+.ai-research-shell .ai-market-open-trading:hover {
+  border-color: var(--accent-bright);
+  background: #201a2c;
+  color: #eee7fb;
+}
+
+/* 工作台精修 G 代 ← 原 28839 / 28839 */
+.ai-research-shell .ai-market-open-trading:disabled {
+  opacity: .45;
+  cursor: default;
+}
+
+/* 工作台精修 G 代 ← 原 28840 / 28840 */
+.ai-research-shell .ai-market-overview .ai-market-metric-grid {
+  margin: 0;
+}
+
+/* 工作台精修 G 代 ← 原 28841 / 28841 */
+.ai-research-shell .ai-market-overview .ai-market-kline {
+  margin: 0;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28842 / 28842 / 29100 */
+.ai-research-shell .ai-market-sentiment, .ai-research-shell .ai-market-linechart, .ai-research-shell .ai-market-depth {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(116, 169, 181, .16);
+  background: #111319;
+  border-color: rgba(174,186,210,.1);
+}
+
+/* 工作台精修 G 代 ← 原 28843 / 28843 */
+.ai-research-shell .ai-market-sentiment > div {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) 48px;
+  gap: 8px;
+  align-items: center;
+}
+
+/* 工作台精修 G 代 ← 原 28844 / 28844 */
+.ai-research-shell .ai-market-sentiment > div b {
+  color: #c7d8d5;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28845 / 28845 / 29101 */
+.ai-research-shell .ai-market-sentiment > div span {
+  height: 6px;
+  overflow: hidden;
+  background: #262a35;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28846 / 28846 / 29102 */
+.ai-research-shell .ai-market-sentiment > div span i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #d98a9c, #d5ad78 50%, var(--accent));
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28847 / 28847 / 29103 */
+.ai-research-shell .ai-market-sentiment > div em {
+  color: var(--accent-bright);
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-style: normal;
+  text-align: right;
+}
+
+/* 工作台精修 G 代 ← 原 28848 / 28848 */
+.ai-research-shell .ai-market-sentiment > p {
+  margin: 0;
+  color: #788b91;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28849 / 28849 */
+.ai-research-shell .ai-market-linechart svg, .ai-research-shell .ai-market-depth svg {
+  width: 100%;
+  height: 180px;
+  display: block;
+  background: #0a1114;
+}
+
+/* 工作台精修 G 代 ← 原 28850 / 28850 */
+.ai-research-shell .ai-market-chart-grid {
+  fill: none;
+  stroke: rgba(139, 173, 178, .13);
+  stroke-width: 1;
+}
+
+/* 工作台精修 G 代 ← 原 28851 / 28851 */
+.ai-research-shell .ai-market-depth-mid {
+  fill: none;
+  stroke: rgba(227, 179, 106, .55);
+  stroke-dasharray: 4 4;
+}
+
+/* 工作台精修 G 代 ← 原 28852 / 28852 */
+.ai-research-shell .ai-market-depth-base {
+  fill: none;
+  stroke: rgba(139, 173, 178, .28);
+  stroke-width: 1;
+}
+
+/* 工作台精修 G 代 ← 原 28853 / 28853 */
+.ai-research-shell .ai-context-popover-formula {
+  margin: 8px 0 4px;
+  color: #b6c6c5;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28858 / 28858 / 29060 / 29166 */
+.ai-research-shell .ai-inspector-shortcuts {
+  position: absolute;
+  z-index: 3;
+  top: 56px;
+  right: 0;
+  bottom: 0;
+  display: grid;
+  align-content: start;
+  gap: 3px;
+  width: 34px;
+  height: auto;
+  padding: 7px 3px;
+  border-inline-start: 1px solid rgba(116, 169, 181, .16);
+  background: #0c0e13;
+  box-shadow: -8px 0 20px rgba(0,0,0,.16);
+  border-inline-start-color: rgba(174, 186, 210, .14);
+  padding-top: 8px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28859 / 28859 / 29061 / 29167 */
+.ai-research-shell .ai-inspector-shortcut {
+  display: grid;
+  place-items: center;
+  width: 27px;
+  height: 27px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: #89909c;
+  position: relative;
+  overflow: hidden;
+  transition: transform 160ms cubic-bezier(.22,1,.36,1), border-color 160ms ease-out, background 160ms ease-out, color 160ms ease-out, box-shadow 160ms ease-out;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28860 / 28860 / 29062 / 29169 */
+.ai-research-shell .ai-inspector-shortcut:hover {
+  border-color: rgba(149, 92, 255, 0.26);
+  background: rgba(149, 92, 255, 0.07);
+  color: #d9cfee;
+  transform: translateX(-2px);
+}
+
+/* 工作台精修 G 代 ← 原 28861 / 28861 */
+.ai-research-shell .ai-inspector-shortcut.active {
+  border-color: rgba(95, 210, 170, .34);
+  background: #17302e;
+  color: #83dac4;
+  box-shadow: inset 0 2px #5fd2aa;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28862 / 28862 / 29064 */
+.ai-research-shell .ai-inspector-shortcut:focus-visible {
+  outline: 2px solid rgba(95, 210, 170, .68);
+  outline-offset: 2px;
+  outline-color: rgba(149, 92, 255, 0.68);
+}
+
+/* 工作台精修 G 代 ← 原 28864 / 28864 */
+@media (max-width: 760px) {
+  .ai-research-shell .ai-inspector-shortcuts {
+    top: 56px;
+    width: 32px;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28864 / 28864 */
+@media (max-width: 760px) {
+  .ai-research-shell .ai-inspector-shortcut {
+    width: 26px;
+    height: 26px;
+  }
+}
+
+
+/* —— 19. 日历横向滚动与日历表 —— */
+/* 工作台精修 G 代 ← 原 28866 / 28866 */
+.ai-research-shell .ai-intel-calendar-scroll {
+  width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  overscroll-behavior-inline: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: thin;
+  scrollbar-color: #497a78 #0d1216;
+}
+
+/* 工作台精修 G 代 ← 原 28867 / 28867 */
+.ai-research-shell .ai-intel-calendar-scroll:focus-visible {
+  outline: 1px solid rgba(95, 210, 170, .65);
+  outline-offset: 2px;
+}
+
+/* 工作台精修 G 代 ← 原 28868 / 28868 */
+.ai-research-shell .ai-intel-calendar-scroll::-webkit-scrollbar {
+  height: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28869 / 28869 */
+.ai-research-shell .ai-intel-calendar-scroll::-webkit-scrollbar-track {
+  background: #0d1216;
+}
+
+/* 工作台精修 G 代 ← 原 28870 / 28870 */
+.ai-research-shell .ai-intel-calendar-scroll::-webkit-scrollbar-thumb {
+  border: 2px solid #0d1216;
+  border-radius: 5px;
+  background: #497a78;
+}
+
+/* 工作台精修 G 代 ← 原 28871 / 28871 / 28924 */
+.ai-research-shell .ai-intel-calendar-table {
+  width: max-content;
+  min-width: 620px;
+  overflow: auto;
+  border-top: 1px solid rgba(116, 169, 181, .15);
+}
+
+/* 工作台精修 G 代 ← 原 28884 / 28884 */
+.ai-research-shell .ai-session-item.active .ai-session-actions {
+  background: linear-gradient(90deg, transparent, var(--surface-selected) 20%);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28885 / 28885 / 29139 */
+.ai-research-shell .ai-session-actions button:hover {
+  border-color: rgba(149, 92, 255, 0.42);
+  background: #201a2c;
+  color: #e7def8;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28889 / 28889 / 29131 */
+.ai-research-shell .ai-tool-result-brief {
+  display: grid;
+  gap: 3px;
+  padding: 8px 9px;
+  border-left: 2px solid #62cdb3;
+  background: #13111a;
+  border-left-color: var(--accent);
+}
+
+/* 工作台精修 G 代 ← 原 28890 / 28890 */
+.ai-research-shell .ai-tool.result-failed .ai-tool-result-brief, .ai-research-shell .ai-tool-trace.result-failed .ai-tool-result-brief {
+  border-left-color: #e28d9c;
+  background: #211519;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28891 / 28891 / 29132 */
+.ai-research-shell .ai-tool-result-brief > span {
+  color: var(--accent-bright);
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+/* 工作台精修 G 代 ← 原 28892 / 28892 */
+.ai-research-shell .ai-tool.result-failed .ai-tool-result-brief > span, .ai-research-shell .ai-tool-trace.result-failed .ai-tool-result-brief > span {
+  color: #e8a1ad;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28893 / 28893 / 29133 */
+.ai-research-shell .ai-tool-result-brief > strong {
+  color: #d9dbe4;
+  font-size: 10px;
+  font-weight: 560;
+  line-height: 1.45;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28894 / 28894 / 29134 */
+.ai-research-shell .ai-tool-facts {
+  border: 1px solid rgba(116, 169, 181, .13);
+  border-top: 0;
+  background: #0e1015;
+  border-color: rgba(174,186,210,.1);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28895 / 28895 / 29135 */
+.ai-research-shell .ai-tool-facts > div {
+  grid-template-columns: minmax(84px, .7fr) minmax(0, 1.3fr);
+  min-height: 27px;
+  padding: 5px 8px;
+  border-top-color: rgba(174,186,210,.08);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28896 / 28896 / 29136 */
+.ai-research-shell .ai-tool-facts dt {
+  color: #7d8490;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 28897 / 28897 / 29137 */
+.ai-research-shell .ai-tool-facts dd {
+  color: #d9dde5;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28898 / 28898 */
+.ai-research-shell .ai-tool-raw {
+  padding: 4px 1px 0;
+}
+
+/* 工作台精修 G 代 ← 原 28910 / 28910 */
+.ai-research-shell .ai-send.is-ready:active {
+  transform: scale(.94);
+}
+
+/* 工作台精修 G 代 ← 原 28917 / 28917 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-send.is-ready::after, .ai-research-shell .ai-send.is-ready::before {
+    animation: none;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28917 / 28917 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-send {
+    transition: none;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28917 / 28917 */
+.ai-research-shell .ai-market-chart-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: #8ea2a5;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28918 / 28918 */
+.ai-research-shell .ai-market-chart-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* 工作台精修 G 代 ← 原 28919 / 28919 */
+.ai-research-shell .ai-market-chart-legend i {
+  width: 8px;
+  height: 3px;
+  display: inline-block;
+  background: #67d6bd;
+}
+
+/* 工作台精修 G 代 ← 原 28920 / 28920 */
+.ai-research-shell .ai-market-chart-legend i.bid {
+  background: #4cc9a0;
+}
+
+/* 工作台精修 G 代 ← 原 28921 / 28921 */
+.ai-research-shell .ai-market-chart-legend i.ask {
+  background: #e87d91;
+}
+
+/* 工作台精修 G 代 ← 原 28922 / 28922 */
+.ai-research-shell .ai-intel-calendar {
+  min-width: 0;
+}
+
+/* 工作台精修 G 代 ← 原 28923 / 28923 */
+.ai-research-shell .ai-intel-calendar > h3 small {
+  margin-left: auto;
+  color: #789198;
+  font: 8px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 400;
+}
+
+/* 工作台精修 G 代 ← 原 28925 / 28925 */
+.ai-research-shell .ai-intel-calendar-table > .ai-intel-calendar-row {
+  display: grid;
+  grid-template-columns: 54px minmax(130px, 1.4fr) 55px 48px 58px 58px 58px;
+  gap: 6px;
+  align-items: center;
+  min-height: 38px;
+  padding: 5px 0;
+  border-bottom: 1px solid rgba(116, 169, 181, .1);
+  color: #bcccca;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28926 / 28926 */
+.ai-research-shell .ai-intel-calendar-table > .ai-intel-calendar-row.head {
+  min-height: 28px;
+  color: #789198;
+  font-weight: 600;
+}
+
+/* 工作台精修 G 代 ← 原 28927 / 28927 */
+.ai-research-shell .ai-intel-calendar-row > * {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28928 / 28928 */
+.ai-research-shell .ai-intel-calendar-row time {
+  color: #80949a;
+  font: 8px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28929 / 28929 */
+.ai-research-shell .ai-intel-calendar-row strong {
+  color: #d5e4e1;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28930 / 28930 */
+.ai-research-shell .ai-intel-calendar-row b {
+  width: max-content;
+  padding: 2px 4px;
+  border-radius: 3px;
+  font-size: 8px;
+  font-weight: 600;
+}
+
+/* 工作台精修 G 代 ← 原 28931 / 28931 */
+.ai-research-shell .ai-intel-calendar-row b.impact-3 {
+  color: #ffd9a1;
+  background: rgba(227, 179, 106, .16);
+}
+
+/* 工作台精修 G 代 ← 原 28932 / 28932 */
+.ai-research-shell .ai-intel-calendar-row b.impact-2 {
+  color: #bde1ed;
+  background: rgba(94, 185, 232, .13);
+}
+
+/* 工作台精修 G 代 ← 原 28933 / 28933 */
+.ai-research-shell .ai-intel-calendar-row b.impact-1 {
+  color: #9caeb0;
+  background: rgba(139, 173, 178, .12);
+}
+
+/* 工作台精修 G 代 ← 原 28942 / 28942 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intelligence-nav {
+    padding-inline: 5px;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28943 / 28943 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intelligence-nav button {
+    min-width: 68px;
+    padding-inline: 8px;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28944 / 28944 */
+@media (max-width: 720px) {
+  .ai-research-shell .ai-intel-calendar-table {
+    min-width: 580px;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 28947 / 28947 */
+.ai-research-shell .ai-risk-visual {
+  display: grid;
+  gap: 11px;
+  padding: 12px;
+  border: 1px solid rgba(116, 169, 181, .2);
+  background: #10191d;
+}
+
+/* 工作台精修 G 代 ← 原 28948 / 28948 */
+.ai-research-shell .ai-risk-visual > header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 28949 / 28949 */
+.ai-research-shell .ai-risk-visual h3 {
+  margin: 0;
+  color: #e2eeeb;
+  font-size: 12px;
+}
+
+/* 工作台精修 G 代 ← 原 28950 / 28950 */
+.ai-research-shell .ai-risk-visual header p {
+  max-width: 32ch;
+  margin: 4px 0 0;
+  color: #82949a;
+  font-size: 9px;
+  line-height: 1.5;
+}
+
+/* 工作台精修 G 代 ← 原 28951 / 28951 */
+.ai-research-shell .ai-risk-visual header > strong {
+  flex: 0 0 auto;
+  color: #91d7c5;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28952 / 28952 */
+.ai-research-shell .ai-liquidation-split {
+  display: flex;
+  min-height: 92px;
+  overflow: hidden;
+  border: 1px solid rgba(116, 169, 181, .15);
+  background: #0a1114;
+}
+
+/* 工作台精修 G 代 ← 原 28953 / 28953 */
+.ai-research-shell .ai-liquidation-split > div {
+  display: grid;
+  align-content: center;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px;
+  overflow: hidden;
+}
+
+/* 工作台精修 G 代 ← 原 28954 / 28954 */
+.ai-research-shell .ai-liquidation-split > div.sell {
+  background: rgba(232, 125, 145, .12);
+  border-inline-end: 1px solid rgba(232, 125, 145, .28);
+}
+
+/* 工作台精修 G 代 ← 原 28955 / 28955 */
+.ai-research-shell .ai-liquidation-split > div.buy {
+  background: rgba(76, 201, 160, .12);
+  border-inline-end: 1px solid rgba(76, 201, 160, .28);
+}
+
+/* 工作台精修 G 代 ← 原 28956 / 28956 */
+.ai-research-shell .ai-liquidation-split > div.unknown {
+  flex: 0 0 auto;
+  color: #b8c1bd;
+  background: rgba(139, 173, 178, .1);
+}
+
+/* 工作台精修 G 代 ← 原 28957 / 28957 */
+.ai-research-shell .ai-liquidation-split span {
+  overflow: hidden;
+  color: #d7e4e0;
+  font-size: 9px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28958 / 28958 */
+.ai-research-shell .ai-liquidation-split b {
+  color: #f1f6f3;
+  font: 22px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28959 / 28959 */
+.ai-research-shell .ai-liquidation-split small {
+  overflow: hidden;
+  color: #9aa9a8;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28960 / 28960 */
+.ai-research-shell .ai-liquidation-split > div.sell span, .ai-research-shell .ai-liquidation-split > div.sell b {
+  color: #ef9aaa;
+}
+
+/* 工作台精修 G 代 ← 原 28961 / 28961 */
+.ai-research-shell .ai-liquidation-split > div.buy span, .ai-research-shell .ai-liquidation-split > div.buy b {
+  color: #70d4b8;
+}
+
+/* 工作台精修 G 代 ← 原 28962 / 28962 */
+.ai-research-shell .ai-liquidation-volume {
+  display: grid;
+  gap: 6px;
+  padding: 9px 0 1px;
+  border-top: 1px solid rgba(116, 169, 181, .12);
+}
+
+/* 工作台精修 G 代 ← 原 28963 / 28963 */
+.ai-research-shell .ai-liquidation-volume > span, .ai-research-shell .ai-liquidation-volume small {
+  color: #819397;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28964 / 28964 */
+.ai-research-shell .ai-liquidation-volume > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28965 / 28965 */
+.ai-research-shell .ai-liquidation-volume b.sell, .ai-research-shell .ai-risk-legend .sell {
+  color: #e890a0;
+}
+
+/* 工作台精修 G 代 ← 原 28966 / 28966 */
+.ai-research-shell .ai-liquidation-volume b.buy, .ai-research-shell .ai-risk-legend .buy {
+  color: #6bcfb2;
+}
+
+/* 工作台精修 G 代 ← 原 28967 / 28967 */
+.ai-research-shell .ai-liquidation-timeline {
+  display: flex;
+  align-items: end;
+  gap: 3px;
+  height: 82px;
+  padding: 8px 5px 0;
+  border-top: 1px solid rgba(116, 169, 181, .12);
+  overflow: hidden;
+  background: #0b1215;
+}
+
+/* 工作台精修 G 代 ← 原 28968 / 28968 */
+.ai-research-shell .ai-liquidation-timeline > div {
+  position: relative;
+  display: grid;
+  align-content: end;
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 100%;
+  gap: 4px;
+}
+
+/* 工作台精修 G 代 ← 原 28969 / 28969 */
+.ai-research-shell .ai-liquidation-timeline i {
+  display: block;
+  min-height: 5px;
+  border-radius: 2px 2px 0 0;
+  background: #e58a98;
+  opacity: .9;
+}
+
+/* 工作台精修 G 代 ← 原 28970 / 28970 */
+.ai-research-shell .ai-liquidation-timeline > div.buy i {
+  background: #5fd2aa;
+}
+
+/* 工作台精修 G 代 ← 原 28971 / 28971 */
+.ai-research-shell .ai-liquidation-timeline > div.unknown i {
+  background: #a9b8b5;
+}
+
+/* 工作台精修 G 代 ← 原 28972 / 28972 */
+.ai-research-shell .ai-liquidation-timeline span {
+  display: block;
+  overflow: hidden;
+  color: #697e82;
+  font-size: 7px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  transform: rotate(-42deg);
+  transform-origin: left top;
+}
+
+/* 工作台精修 G 代 ← 原 28973 / 28973 */
+.ai-research-shell .ai-risk-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px 12px;
+  color: #859699;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+/* 工作台精修 G 代 ← 原 28974 / 28974 */
+.ai-research-shell .ai-system-risk-visual {
+  border-color: rgba(227, 179, 106, .24);
+}
+
+/* 工作台精修 G 代 ← 原 28975 / 28975 */
+.ai-research-shell .ai-system-risk-visual header > strong.warning {
+  color: #f0bd79;
+}
+
+/* 工作台精修 G 代 ← 原 28976 / 28976 */
+.ai-research-shell .ai-system-risk-visual header > strong.neutral {
+  color: #a8b7b5;
+}
+
+/* 工作台精修 G 代 ← 原 28977 / 28977 */
+.ai-research-shell .ai-system-risk-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) minmax(0, 1fr);
+  gap: 6px;
+}
+
+/* 工作台精修 G 代 ← 原 28978 / 28978 */
+.ai-research-shell .ai-system-risk-metrics > div {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 9px;
+  border: 1px solid rgba(116, 169, 181, .14);
+  background: #0c1417;
+}
+
+/* 工作台精修 G 代 ← 原 28979 / 28979 */
+.ai-research-shell .ai-system-risk-metrics small {
+  color: #83979a;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 28980 / 28980 */
+.ai-research-shell .ai-system-risk-metrics strong {
+  overflow: hidden;
+  color: #e1ece8;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 28981 / 28981 */
+.ai-research-shell .ai-system-risk-metrics span {
+  color: #738589;
+  font-size: 8px;
+  line-height: 1.35;
+}
+
+/* 工作台精修 G 代 ← 原 28982 / 28982 */
+.ai-research-shell .ai-system-risk-metrics > div.warning {
+  border-color: rgba(227, 179, 106, .38);
+  background: rgba(227, 179, 106, .08);
+}
+
+/* 工作台精修 G 代 ← 原 28983 / 28983 */
+.ai-research-shell .ai-system-risk-metrics > div.warning strong {
+  color: #f0bd79;
+}
+
+/* 工作台精修 G 代 ← 原 28984 / 28984 */
+.ai-research-shell .ai-system-risk-metrics > div.neutral strong {
+  color: #b7c3c0;
+}
+
+/* 工作台精修 G 代 ← 原 28985 / 28985 */
+.ai-research-shell .ai-price-limits {
+  display: grid;
+  gap: 8px;
+  padding: 10px 0 2px;
+  border-top: 1px solid rgba(116, 169, 181, .12);
+}
+
+/* 工作台精修 G 代 ← 原 28986 / 28986 */
+.ai-research-shell .ai-price-limits > div:first-child {
+  display: grid;
+  gap: 3px;
+}
+
+/* 工作台精修 G 代 ← 原 28987 / 28987 */
+.ai-research-shell .ai-price-limits strong {
+  color: #d5e5e1;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 28988 / 28988 */
+.ai-research-shell .ai-price-limits small {
+  color: #7d9094;
+  font-size: 8px;
+  line-height: 1.4;
+}
+
+/* 工作台精修 G 代 ← 原 28989 / 28989 */
+.ai-research-shell .ai-price-limits-track {
+  position: relative;
+  height: 12px;
+  border: 1px solid rgba(227, 179, 106, .3);
+  background: #172023;
+}
+
+/* 工作台精修 G 代 ← 原 28990 / 28990 */
+.ai-research-shell .ai-price-limits-track::before, .ai-research-shell .ai-price-limits-track::after {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  width: 3px;
+  content: "";
+  background: #e2b36a;
+}
+
+/* 工作台精修 G 代 ← 原 28991 / 28991 */
+.ai-research-shell .ai-price-limits-track::before {
+  left: 4px;
+}
+
+/* 工作台精修 G 代 ← 原 28992 / 28992 */
+.ai-research-shell .ai-price-limits-track::after {
+  right: 4px;
+}
+
+/* 工作台精修 G 代 ← 原 28993 / 28993 */
+.ai-research-shell .ai-price-limits-track i {
+  position: absolute;
+  top: 4px;
+  right: 7px;
+  left: 7px;
+  height: 2px;
+  background: rgba(227, 179, 106, .72);
+}
+
+/* 工作台精修 G 代 ← 原 28994 / 28994 */
+.ai-research-shell .ai-price-limits-values {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: #dce8e4;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+/* 工作台精修 G 代 ← 原 28995 / 28995 */
+.ai-research-shell .ai-price-limits-values span {
+  display: grid;
+  gap: 3px;
+}
+
+/* 工作台精修 G 代 ← 原 28996 / 28996 */
+.ai-research-shell .ai-price-limits-values span:last-child {
+  text-align: right;
+}
+
+/* 工作台精修 G 代 ← 原 28997 / 28997 */
+.ai-research-shell .ai-price-limits-values b {
+  color: #b08b55;
+  font: 8px ui-sans-serif, system-ui, sans-serif;
+}
+
+/* 工作台精修 G 代 ← 原 28998 / 28998 */
+.ai-research-shell .ai-system-risk-note {
+  margin: 0;
+  padding-top: 2px;
+  color: #9aaba8;
+  font-size: 8px;
+  line-height: 1.55;
+}
+
+/* 工作台精修 G 代 ← 原 28999 / 28999 */
+.ai-research-shell .ai-risk-empty {
+  padding: 12px;
+  border: 1px solid rgba(116, 169, 181, .15);
+  background: #10191d;
+}
+
+/* 工作台精修 G 代 ← 原 29000 / 29000 */
+.ai-research-shell .ai-risk-empty h3 {
+  margin: 0 0 4px;
+  color: #d8e5e1;
+  font-size: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 29001 / 29001 */
+.ai-research-shell .ai-risk-empty p {
+  margin: 0;
+  color: #839397;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 29002 / 29002 */
+.ai-research-shell .ai-risk-history {
+  color: #829397;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 29003 / 29003 */
+.ai-research-shell .ai-risk-history summary {
+  cursor: pointer;
+}
+
+/* 工作台精修 G 代 ← 原 29006 / 29006 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active {
+  grid-template-rows: minmax(0, 1fr);
+  min-height: 0;
+}
+
+/* 工作台精修 G 代 ← 原 29007 / 29007 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active .ai-intelligence-workspace {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+}
+
+/* 工作台精修 G 代 ← 原 29008 / 29008 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active .ai-intelligence-main {
+  min-height: 0;
+  height: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: #497a78 #0d1216;
+}
+
+/* 工作台精修 G 代 ← 原 29009 / 29009 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active .ai-intelligence-main::-webkit-scrollbar {
+  width: 8px;
+}
+
+/* 工作台精修 G 代 ← 原 29010 / 29010 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active .ai-intelligence-main::-webkit-scrollbar-track {
+  background: #0d1216;
+}
+
+/* 工作台精修 G 代 ← 原 29011 / 29011 */
+.ai-research-shell .ai-inspector-workspace-main.intelligence-active .ai-intelligence-main::-webkit-scrollbar-thumb {
+  border: 2px solid #0d1216;
+  border-radius: 5px;
+  background: #497a78;
+}
+
+/* 工作台精修 G 代 ← 原 29019 / 29019 */
+@media (max-width: 980px) {
+  .ai-research-shell .ai-messages {
+    width: 100%;
+  }
+}
+
+/* 工作台精修 G 代 ← 原 29020 / 29020 */
+@media (max-width: 980px) {
+  .ai-research-shell .ai-input-row {
+    width: calc(100% - 24px);
+  }
+}
+
+/* 工作台精修 G 代 ← 原 29025 / 29025 */
+.ai-research-shell .ai-inspector-workspace-main.radar-active {
+  grid-template-rows: minmax(0, 1fr);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29026 / 29026 / 29106 */
+.ai-research-shell .ai-radar-panel {
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto auto auto minmax(0, 1fr);
+  overflow: hidden;
+  background: #0a0c10;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29027 / 29027 / 29107 / 29190 */
+.ai-research-shell .ai-radar-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 14px 14px 11px;
+  border-bottom: 1px solid rgba(116, 169, 181, .16);
+  border-bottom-color: rgba(174,186,210,.12);
+  background: linear-gradient(90deg, rgba(149, 92, 255, 0.07), transparent 72%);
+  position: relative;
+  overflow: hidden;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29028 / 29028 / 29108 */
+.ai-research-shell .ai-radar-panel-head h2 {
+  margin: 2px 0 3px;
+  color: #eef0f5;
+  font-size: 15px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29029 / 29029 / 29109 */
+.ai-research-shell .ai-radar-panel-head p {
+  margin: 0;
+  color: #7c8591;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29030 / 29030 / 29110 */
+.ai-research-shell .ai-radar-panel-head > svg {
+  flex: 0 0 auto;
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29031 / 29031 / 29111 */
+.ai-research-shell .ai-radar-tabs {
+  display: flex;
+  gap: 2px;
+  overflow-x: auto;
+  padding: 6px 8px 0;
+  border-bottom: 1px solid rgba(116, 169, 181, .16);
+  scrollbar-width: thin;
+  border-bottom-color: rgba(174,186,210,.12);
+  background: #0f1116;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29032 / 29032 / 29112 */
+.ai-research-shell .ai-radar-tabs button {
+  flex: 0 0 auto;
+  min-height: 29px;
+  padding: 0 8px;
+  border: 1px solid transparent;
+  border-radius: 4px 4px 0 0;
+  background: transparent;
+  color: #858c98;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29033 / 29033 / 29113 */
+.ai-research-shell .ai-radar-tabs button:hover {
+  color: var(--accent-bright);
+  background: rgba(149, 92, 255, 0.06);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29034 / 29034 / 29114 */
+.ai-research-shell .ai-radar-tabs button.active {
+  border-color: rgba(149, 92, 255, 0.24);
+  border-bottom-color: var(--accent-bright);
+  background: #17141f;
+  box-shadow: inset 0 -2px var(--accent-bright);
+  color: #f1edfa;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29035 / 29035 / 29115 */
+.ai-research-shell .ai-radar-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 12px;
+  color: #737d89;
+  font-size: 8px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29036 / 29036 / 29193 */
+.ai-research-shell .ai-radar-list {
+  min-height: 0;
+  overflow-y: auto;
+  padding: 2px 0 12px;
+  scrollbar-width: thin;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29037 / 29037 / 29116 / 29194 */
+.ai-research-shell .ai-radar-row {
+  display: grid;
+  grid-template-columns: 22px 24px minmax(0, 1fr) 64px;
+  align-items: center;
+  gap: 8px;
+  min-height: 48px;
+  padding: 4px 12px;
+  border: 0;
+  border-bottom: 1px solid rgba(174,186,210,.07);
+  background: transparent;
+  border-top-color: rgba(174,186,210,.08);
+  position: relative;
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 170ms ease-out;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29038 / 29038 / 29117 */
+.ai-research-shell .ai-radar-row > b {
+  color: #747d8a;
+  font: 10px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 500;
+}
+
+/* 工作台精修 G 代 ← 原 29039 / 29039 */
+.ai-research-shell .ai-radar-row > span {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29040 / 29040 / 29118 */
+.ai-research-shell .ai-radar-row strong {
+  color: #dfe3ea;
+  font-size: 10px;
+  font-weight: 600;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29041 / 29041 / 29119 */
+.ai-research-shell .ai-radar-row small {
+  overflow: hidden;
+  color: #75808c;
+  font-size: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 工作台精修 G 代 ← 原 29042 / 29042 */
+.ai-research-shell .ai-radar-row em {
+  color: #8b94a1;
+  font: 9px ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-style: normal;
+  text-align: right;
+}
+
+/* 工作台精修 G 代 ← 原 29043 / 29043 */
+.ai-research-shell .ai-radar-row em.positive {
+  color: #6dd4ad;
+}
+
+/* 工作台精修 G 代 ← 原 29044 / 29044 */
+.ai-research-shell .ai-radar-row em.negative {
+  color: #e28d9c;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29045 / 29045 / 29120 */
+.ai-research-shell .ai-radar-row i {
+  position: relative;
+  grid-column: 2 / -1;
+  display: block;
+  height: 2px;
+  overflow: hidden;
+  background: #252a35;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29046 / 29046 / 29121 / 29197 */
+.ai-research-shell .ai-radar-row i span {
+  display: block;
+  height: 100%;
+  background: var(--accent);
+  opacity: .72;
+  transition: width 360ms cubic-bezier(.22,1,.36,1);
+}
+
+/* 工作台精修 G 代 ← 原 29047 / 29047 */
+.ai-research-shell .ai-inspector-strategy-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+/* 工作台精修 G 代 ← 原 29048 / 29048 */
+.ai-research-shell .ai-inspector-strategy-head h2 {
+  margin: 0;
+}
+
+/* 工作台精修 G 代 ← 原 29049 / 29049 */
+.ai-research-shell .ai-inspector-strategy-head small {
+  display: block;
+  margin-top: 4px;
+  color: #7c9290;
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 29050 / 29050 */
+.ai-research-shell .ai-inspector-strategy-head > svg {
+  flex: 0 0 auto;
+  color: var(--accent-bright);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29051 / 29051 / 29215 */
+.ai-research-shell .ai-inspector-code-surface {
+  min-height: 210px;
+  height: min(390px, 44vh);
+  display: grid;
+  grid-template-rows: 30px minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid rgba(116, 169, 181, .16);
+  background: #090c11;
+  box-shadow: inset 0 1px rgba(255,255,255,.025), 0 12px 28px rgba(0,0,0,.18);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29052 / 29052 / 29124 */
+.ai-research-shell .ai-inspector-code-surface > header, .ai-research-shell .ai-tool-code-preview > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 9px;
+  border-bottom: 1px solid rgba(116, 169, 181, .13);
+  background: #101118;
+  color: #858c98;
+  font-size: 8px;
+  border-bottom-color: rgba(174,186,210,.1);
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29053 / 29053 / 29125 */
+.ai-research-shell .ai-inspector-code-surface > header strong, .ai-research-shell .ai-tool-code-preview > header strong {
+  color: var(--accent-bright);
+  font-size: 9px;
+}
+
+/* 工作台精修 G 代 ← 原 29054 / 29054 */
+.ai-research-shell .ai-inspector-code-surface .systematic-python-editor {
+  min-height: 0;
+  height: 100%;
+}
+
+/* 工作台精修 G 代 ← 原 29055 / 29055 */
+.ai-research-shell .ai-tool-code-preview {
+  margin-top: 8px;
+  overflow: hidden;
+  border: 1px solid rgba(116, 169, 181, .15);
+  background: #090c11;
+}
+
+/* 工作台精修 G 代+Graphite Violet ← 原 29056 / 29056 / 29126 / 29213 */
+.ai-research-shell .ai-tool-code-preview pre {
+  max-height: 280px;
+  margin: 0;
+  overflow: auto;
+  padding: 10px;
+  color: #d9dbe4;
+  font: 10px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre;
+  scrollbar-width: thin;
+  position: relative;
+}
+
+/* Graphite Violet ← 原 29063 / 29063 */
+.ai-research-shell .ai-inspector-shortcut.active, .ai-research-shell .ai-inspector-shortcut.shortcut-intelligence.active, .ai-research-shell .ai-inspector-shortcut.shortcut-radar.active {
+  border-color: rgba(149, 92, 255, 0.34);
+  background: #17141f;
+  box-shadow: inset 2px 0 var(--accent-bright);
+  color: #f0ebfa;
+}
+
+/* Graphite Violet ← 原 29069 / 29069 / 29198 */
+.ai-research-shell .ai-current-research {
+  padding: 11px 12px;
+  border-bottom-color: rgba(174,186,210,.1);
+  background: linear-gradient(180deg, #0f1519, #0d1216);
+  display: grid;
+  gap: 8px;
+  border-bottom: 1px solid rgba(116, 169, 181, .13);
+}
+
+/* Graphite Violet ← 原 29070 / 29070 / 29199 */
+.ai-research-shell .ai-current-research-card {
+  display: grid;
+  align-items: stretch;
+  gap: 1px;
+  border-color: rgba(174,186,210,.1);
+  background: rgba(116, 169, 181, .12);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  overflow: hidden;
+  border: 1px solid rgba(116, 169, 181, .14);
+}
+
+/* Graphite Violet ← 原 29071 / 29071 / 29200 */
+.ai-research-shell .ai-current-research-card > div {
+  flex: 1 1 0;
+  background: #10161a;
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+}
+
+/* Graphite Violet ← 原 29072 / 29072 / 29201 */
+.ai-research-shell .ai-current-research-card small {
+  color: #748a8c;
+  font-size: 8px;
+}
+
+/* Graphite Violet ← 原 29073 / 29073 / 29202 */
+.ai-research-shell .ai-current-research-card strong {
+  color: #dce8e3;
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 570;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Graphite Violet ← 原 29092 / 29092 */
+.ai-research-shell .ai-intel-metric-grid > div, .ai-research-shell .ai-intel-trader-grid > div {
+  border-color: rgba(174,186,210,.1);
+  background: #111319;
+}
+
+/* Graphite Violet ← 原 29122 / 29122 / 29196 */
+.ai-research-shell .ai-radar-row:hover {
+  background: rgba(149, 92, 255, 0.045);
+}
+
+/* Graphite Violet ← 原 29123 / 29123 */
+.ai-research-shell .ai-inspector-code-surface, .ai-research-shell .ai-tool-code-preview {
+  border-color: rgba(149, 92, 255, 0.18);
+  background: #090b10;
+}
+
+/* Graphite Violet ← 原 29128 / 29128 / 29180 */
+.ai-research-shell .ai-tool:hover, .ai-research-shell .ai-tool-trace:hover {
+  border-color: rgba(116, 169, 181, .22);
+  box-shadow: 0 7px 18px rgba(0,0,0,.13);
+}
+
+/* Graphite Violet ← 原 29130 / 29130 / 29182 */
+.ai-research-shell .ai-tool.tool-running > summary::after, .ai-research-shell .ai-tool-trace.tool-running > summary::after {
+  background: linear-gradient(90deg, transparent, #73cfb8, transparent);
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  content: "";
+  animation: ai-running-scan 1.8s ease-in-out infinite;
+}
+
+/* Graphite Violet ← 原 29140 / 29140 / 29176 */
+.ai-research-shell .ai-message.assistant::before {
+  background: linear-gradient(#4b5260, #1e252b 70%, transparent);
+  position: absolute;
+  top: 5px;
+  bottom: 7px;
+  left: 0;
+  width: 1px;
+  border-radius: 1px;
+  content: "";
+}
+
+/* Graphite Violet ← 原 29141 / 29141 / 29185 */
+.ai-research-shell .ai-composer::after {
+  background: linear-gradient(90deg, transparent, var(--accent-dim), transparent);
+  position: absolute;
+  inset: auto 10px 0;
+  height: 1px;
+  content: "";
+  opacity: 0;
+  transform: scaleX(.5);
+  transition: opacity 180ms ease-out, transform 260ms cubic-bezier(.22,1,.36,1);
+}
+
+/* Graphite Violet ← 原 29145 / 29145 */
+.ai-research-shell .ai-evidence-references {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 9px;
+  border-top: 1px solid rgba(174,186,210,.09);
+}
+
+/* Graphite Violet ← 原 29146 / 29146 */
+.ai-research-shell .ai-evidence-references > small {
+  color: #7f7693;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+}
+
+/* Graphite Violet ← 原 29147 / 29147 */
+.ai-research-shell .ai-evidence-references button {
+  max-width: 180px;
+  min-height: 24px;
+  overflow: hidden;
+  padding: 0 8px;
+  border: 1px solid rgba(149, 92, 255, 0.18);
+  border-radius: 4px;
+  background: #121018;
+  color: #c9c1dc;
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Graphite Violet ← 原 29148 / 29148 */
+.ai-research-shell .ai-evidence-references button:hover, .ai-research-shell .ai-evidence-references button:focus-visible {
+  border-color: rgba(149, 92, 255, 0.44);
+  background: #1a1623;
+  color: #eee8f8;
+  outline: none;
+}
+
+/* Graphite Violet ← 原 29149 / 29149 */
+.ai-research-shell .ai-evidence-references .ai-evidence-anchor {
+  border-style: dashed;
+  color: #8f849f;
+}
+
+/* Graphite Violet ← 原 29151 / 29151 */
+.ai-research-shell .ai-artifact-reference {
+  justify-self: start;
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px dashed rgba(149, 92, 255, 0.24);
+  border-radius: 4px;
+  background: transparent;
+  color: #a99cbc;
+  font-size: 9px;
+}
+
+/* Graphite Violet ← 原 29152 / 29152 */
+.ai-research-shell .ai-artifact-reference:hover, .ai-research-shell .ai-artifact-reference:focus-visible {
+  border-color: rgba(149, 92, 255, 0.5);
+  background: rgba(149, 92, 255, 0.08);
+  color: #eee7fb;
+  outline: none;
+}
+
+/* Graphite Violet ← 原 29153 / 29153 */
+.ai-research-shell .ai-strategy-plan {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0,1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid rgba(149, 92, 255, 0.14);
+  background: rgba(149, 92, 255, 0.08);
+}
+
+/* Graphite Violet ← 原 29154 / 29154 */
+.ai-research-shell .ai-strategy-plan > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+  background: #111018;
+}
+
+/* Graphite Violet ← 原 29155 / 29155 */
+.ai-research-shell .ai-strategy-plan small {
+  color: #807793;
+  font-size: 8px;
+}
+
+/* Graphite Violet ← 原 29156 / 29156 */
+.ai-research-shell .ai-strategy-plan strong {
+  overflow: hidden;
+  color: #ded9e8;
+  font-size: 10px;
+  font-weight: 560;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Graphite Violet ← 原 29157 / 29157 */
+.ai-research-shell .ai-strategy-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 7px;
+}
+
+/* Graphite Violet ← 原 29158 / 29158 */
+.ai-research-shell .ai-strategy-actions .ai-artifact-reference {
+  min-height: 29px;
+}
+
+/* Graphite Violet ← 原 29159 / 29159 */
+.ai-research-shell .ai-message.ai-message-located {
+  position: relative;
+}
+
+/* Graphite Violet ← 原 29160 / 29160 */
+.ai-research-shell .ai-message.ai-message-located::after {
+  position: absolute;
+  inset: -5px -8px;
+  border: 1px solid rgba(149, 92, 255, 0.48);
+  border-radius: 7px;
+  content: "";
+  pointer-events: none;
+  animation: ai-message-locate 1.6s ease-out forwards;
+}
+
+/* Graphite Violet ← 原 29168 / 29168 */
+.ai-research-shell .ai-inspector-shortcut::before {
+  position: absolute;
+  inset: 0;
+  content: "";
+  background: linear-gradient(135deg, rgba(255,255,255,.14), transparent 42%);
+  opacity: 0;
+  transform: translateX(-18px);
+  transition: opacity 160ms ease-out, transform 220ms ease-out;
+}
+
+/* Graphite Violet ← 原 29170 / 29170 */
+.ai-research-shell .ai-inspector-shortcut:hover::before {
+  opacity: .35;
+  transform: translateX(0);
+}
+
+/* Graphite Violet ← 原 29171 / 29171 */
+.ai-research-shell .ai-inspector-shortcut:active {
+  transform: translateX(-1px) scale(.94);
+}
+
+/* Graphite Violet ← 原 29172 / 29172 */
+.ai-research-shell .ai-inspector-shortcut svg {
+  filter: drop-shadow(0 1px 1px rgba(0,0,0,.45));
+}
+
+/* Graphite Violet ← 原 29173 / 29173 */
+.ai-research-shell .ai-inspector-shortcut.shortcut-artifacts.active {
+  box-shadow: inset 2px 0 var(--accent-bright), 0 0 14px rgba(149, 92, 255, 0.12);
+}
+
+/* Graphite Violet ← 原 29174 / 29174 */
+.ai-research-shell .ai-inspector-shortcut.shortcut-radar.active {
+  box-shadow: inset 2px 0 #70d2bc, 0 0 14px rgba(112,210,188,.12);
+}
+
+/* Graphite Violet ← 原 29181 / 29181 */
+.ai-research-shell .ai-tool.tool-running > summary, .ai-research-shell .ai-tool-trace.tool-running > summary {
+  position: relative;
+  overflow: hidden;
+}
+
+/* Graphite Violet ← 原 29186 / 29186 */
+/* Graphite Violet ← 原 29191 / 29191 */
+.ai-research-shell .ai-radar-panel-head::after {
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  content: "";
+  background: linear-gradient(90deg, transparent, rgba(112, 210, 188, .85), transparent);
+  animation: ai-radar-sweep 3.8s ease-in-out infinite;
+}
+
+/* Graphite Violet ← 原 29195 / 29195 */
+.ai-research-shell .ai-radar-row:focus-visible {
+  outline: 2px solid rgba(149, 92, 255, 0.62);
+  outline-offset: -2px;
+}
+
+/* Graphite Violet ← 原 29203 / 29203 */
+.ai-research-shell .ai-inspector-tab-group {
+  min-width: 0;
+  flex: 1 1 0;
+  min-height: 0;
+}
+
+/* Graphite Violet ← 原 29204 / 29204 */
+.ai-research-shell .ai-inspector-tab-group > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 6px 9px 3px;
+  color: #8a829d;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+}
+
+/* Graphite Violet ← 原 29205 / 29205 */
+.ai-research-shell .ai-inspector-tab-group > header span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Graphite Violet ← 原 29206 / 29206 */
+.ai-research-shell .ai-inspector-tab-group > header small {
+  color: #6f7280;
+  font-size: 8px;
+}
+
+/* Graphite Violet ← 原 29207 / 29207 */
+.ai-research-shell .ai-inspector-tab-group > div {
+  min-width: 0;
+  display: flex;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+/* Graphite Violet ← 原 29208 / 29208 */
+.ai-research-shell .ai-inspector-tab-group > div > div {
+  position: relative;
+  flex: 0 0 136px;
+  min-width: 0;
+  display: flex;
+  border-right: 1px solid rgba(174,186,210,.08);
+}
+
+/* Graphite Violet ← 原 29209 / 29209 */
+.ai-research-shell .ai-inspector-tab-group > div > div.active {
+  background: #17141f;
+  box-shadow: inset 0 -2px var(--accent-bright);
+}
+
+/* Graphite Violet ← 原 29210 / 29210 */
+.ai-research-shell .ai-inspector-tab-group > div > div > button:first-child {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 6px 7px;
+  border: 0;
+  background: transparent;
+  color: #8d939f;
+  font-size: 9px;
+}
+
+/* Graphite Violet ← 原 29211 / 29211 */
+.ai-research-shell .ai-inspector-tab-group > div > div.active > button:first-child {
+  color: #f1edfa;
+}
+
+/* Graphite Violet ← 原 29212 / 29212 */
+.ai-research-shell .ai-inspector-tab-group > div > div.active > button:first-child svg {
+  color: var(--accent-bright);
+}
+
+/* Graphite Violet ← 原 29214 / 29214 */
+.ai-research-shell .ai-tool-code-preview code {
+  display: block;
+  min-width: max-content;
+}
+
+/* Graphite Violet ← 原 29218 / 29218 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-research-inspector, .ai-research-shell .ai-inspector-shortcut, .ai-research-shell .ai-inspector-shortcut::before, .ai-research-shell .ai-process > summary, .ai-research-shell .ai-tool, .ai-research-shell .ai-tool-trace, .ai-research-shell .ai-composer, .ai-research-shell .ai-composer::after, .ai-research-shell .ai-send, .ai-research-shell .ai-send::before, .ai-research-shell .ai-send::after, .ai-research-shell .ai-radar-row, .ai-research-shell .ai-radar-row i span {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* —— 动效关键帧（源 28232/28298-28299/29161/29165/29183/29192，重名定义去重）—— */
+@keyframes ai-session-running-pulse { 50% { opacity: .38; transform: scale(.7); }
+}
+
+@keyframes ai-send-orbit { to { transform: rotate(332deg); }
+}
+
+@keyframes ai-send-core-breathe { 50% { filter: brightness(1.08) saturate(1.05); }
+}
+
+@keyframes ai-message-locate { 0% { opacity: 0; box-shadow: 0 0 0 0 rgba(149, 92, 255, 0.2); } 24% { opacity: 1; } 100% { opacity: 0; box-shadow: 0 0 0 8px rgba(149, 92, 255, 0); }
+}
+
+@keyframes ai-inspector-enter { from { opacity: .2; transform: translateX(10px); }
+}
+
+@keyframes ai-running-scan { 0% { transform: translateX(-70%); opacity: 0; } 20%, 80% { opacity: .9; } 100% { transform: translateX(70%); opacity: 0; }
+}
+
+@keyframes ai-radar-sweep { 0%, 100% { transform: translateX(-65%); opacity: 0; } 22%, 72% { opacity: .9; } 50% { transform: translateX(65%); }
+}
+
+/* ===== A2 波次集成补充：头部状态词独立着色（A2a 移交项）===== */
+.ai-research-shell .ai-panel-head .ai-head-status { color: var(--accent-bright); }
+
+/* ===== C2 波次集成补充：slash 参数化命令提示 + 聚焦模式 ===== */
+
+/* —— C2a 命令面板参数提示：弱色小字（≤11px），单行溢出省略，键盘行为不变 —— */
+/* C2 ← aiResearchCommands params 元数据展示 */
+.ai-research-shell .ai-command-palette-copy .ai-command-palette-params {
+  overflow: hidden;
+  color: #777f8c;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* —— C2b 聚焦模式：会话栏 / 两个拖拽手柄列 / 研究栏全部收起，主区满宽 —— */
+/* 所有规则都在 .ai-focus-mode 前缀下；默认网格（smoke:ai-preview 断言的 grid-template-columns）一个字节不变。 */
+/* 尺寸切换为瞬时变化：禁止 transition width/grid（不动画布局尺寸），进入时仅内容 opacity 120ms 淡入。 */
+
+/* 聚焦态网格：仅主区一列（带 host 前缀覆盖 sessions-open / inspector-open 及各媒体查询变体） */
+.ai-research-host > .ai-panel.ai-research-shell.ai-focus-mode {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+/* 聚焦态收起会话栏、两个列宽拖拽手柄与研究栏（display:none，不参与网格轨道） */
+.ai-research-shell.ai-focus-mode .ai-session-sidebar,
+.ai-research-shell.ai-focus-mode .ai-column-resize-sessions,
+.ai-research-shell.ai-focus-mode .ai-research-inspector,
+.ai-research-shell.ai-focus-mode .ai-column-resize-inspector {
+  display: none;
+}
+
+/* 聚焦态主区满宽 + 进入时内容 120ms 淡入（仅 opacity；退出为瞬时，无布局动画） */
+.ai-research-host > .ai-panel.ai-research-shell.ai-focus-mode .ai-panel-main {
+  min-width: 0;
+  animation: ai-focus-mode-fade 120ms ease-out;
+}
+
+/* C2 聚焦淡入关键帧（省略 to，回到计算值 opacity:1） */
+@keyframes ai-focus-mode-fade {
+  from { opacity: 0; }
+}
+
+/* 聚焦切换钮激活态：沿用研究栏快捷钮的 active 视觉语言 */
+.ai-research-shell .ai-head-actions .ai-focus-toggle.active {
+  border-color: rgba(95, 210, 170, 0.34);
+  background: #17302e;
+  color: #83dac4;
+  box-shadow: inset 0 2px #5fd2aa;
+}
+
+/* reduced-motion：聚焦切换无动画 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-host > .ai-panel.ai-research-shell.ai-focus-mode .ai-panel-main {
+    animation: none;
+  }
+}
+
+/* ===== 作曲家聚焦态 =====
+ * 产品要求：输入框聚焦后与未聚焦完全一致。此前已移除 .ai-composer:focus-within /
+ * .ai-input-row:focus-within 的边框与内环；theme 层 atmosphere.css 的全局
+ * textarea:focus-visible 仍会叠加一层 2px 紫色 box-shadow 环 + 辉光（outline:0 拦不住，
+ * 因为那是 box-shadow）。用更高特异性在此覆盖为无环，仅保留光标/placeholder 作为聚焦反馈。
+ * 仅作用于 AI 研究 composer，不影响应用其余组件的全局焦点环。 */
+.ai-research-shell .ai-composer textarea:focus-visible,
+.ai-research-shell .ai-input-row textarea:focus-visible {
+  box-shadow: none;
+}

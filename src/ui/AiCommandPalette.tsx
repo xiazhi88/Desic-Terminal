@@ -20,10 +20,18 @@ export function AiCommandPalette({ entries, activeIndex, onSelect, uiText }: { e
         const isCommand = entry.kind === "command";
         const id = entry.value.id;
         const commandCopy = isCommand ? COMMAND_COPY[id] : undefined;
+        const commandParams = isCommand && entry.value.params?.length ? entry.value.params : undefined;
         return (
           <button type="button" role="option" aria-selected={index === activeIndex} className={index === activeIndex ? "active" : ""} key={`${entry.kind}:${id}`} onMouseDown={(event) => { event.preventDefault(); onSelect(entry); }}>
             <span className="ai-command-palette-icon">{isCommand ? <Command size={14} /> : <Sparkles size={14} />}</span>
-            <span className="ai-command-palette-copy"><strong>/{id}</strong><small>{isCommand ? (commandCopy ? uiText(commandCopy[0], commandCopy[1]) : entry.value.label) : entry.value.name}</small><em>{entry.value.description}</em></span>
+            <span className="ai-command-palette-copy">
+              <strong>/{id}</strong><small>{isCommand ? (commandCopy ? uiText(commandCopy[0], commandCopy[1]) : entry.value.label) : entry.value.name}</small><em>{entry.value.description}</em>
+              {commandParams ? (
+                <span className="ai-command-palette-params" title={commandParams.map((param) => `${param.name} — ${param.description}`).join(" · ")}>
+                  {uiText("参数：", "Params: ")}{commandParams.map((param) => param.name).join(" · ")}
+                </span>
+              ) : null}
+            </span>
             <span className="ai-command-palette-kind">{isCommand ? uiText("命令", "Command") : "Skill"}</span>
           </button>
         );

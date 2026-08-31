@@ -1,0 +1,760 @@
+/*
+ * ai-research-inspector.css — A2c 证据甲板层
+ * ------------------------------------------------------------------
+ * 职责：右栏从产物抽屉升级为证据甲板（卡片描边/悬停/分区微标签/Tab 统一/空态）。
+ * 级联位置：在 ai-research.css（基座）与 ai-research-messages.css 之后导入，同特异性时本层胜出。
+ * 边界：A2c agent 独占；禁碰其他文件。不触碰消息流（.ai-message* / footer / 过程条）与
+ *       NewsDetailDialog / RadarPanel / IntelligenceSection 的内部实现，仅从外部级联影响。
+ *
+ * 分节索引：
+ *   0. 甲板底色 —— 右栏体感氛围（不改变网格/宽度）
+ *   1. 卡片体系 —— 统一 1px var(--line-tinted) 描边 + hover 描边增强与 1px 上浮（普通卡片不发光）
+ *   2. 激活/选中态 —— var(--surface-selected) 底 + var(--accent-bright) 文字（Tab 品牌紫统一）
+ *   3. 微标签语言 —— 分区头/卡头/字段标签 ≤11px + letter-spacing 1.5px（字号经基座确认后沿用/收敛）
+ *   4. 市场图卡 —— 仪表卡容器（仅外观描边/底色，不改 SVG 渲染逻辑）
+ *   5. 空态 —— 虚线提示卡（全部复用现有文案，零新增 i18n key）
+ *   6. 交互热区与 hover —— 头部/关闭/收起/页签按钮，可点高度 ≥28px，只增不减
+ *   7. 证据链序号/引用标记 —— 统一 var(--accent-bright)
+ *   8. 动效降级 —— prefers-reduced-motion
+ */
+
+/* —— 0. 甲板底色 —— */
+/* 证据工作台氛围：页签带紫调、正文顶部一层极浅紫晕（不影响 inspector 宽度网格与列结构） */
+.ai-research-shell .ai-inspector-head {
+  background: linear-gradient(90deg, rgba(149, 92, 255, 0.07), transparent 62%), #0c0e13;
+}
+
+.ai-research-shell .ai-inspector-tabs {
+  background: #100d17;
+}
+
+.ai-research-shell .ai-inspector-body {
+  background: linear-gradient(180deg, #0d0b13, #0a0c10 240px);
+}
+
+/* —— 1. 卡片体系 —— */
+/* 统一卡：1px var(--line-tinted) 描边；hover 描边 → var(--line-tinted-strong) + translateY(-1px)；
+   过渡统一 var(--dur-fast) + var(--ease-out-soft)；普通卡片 hover 不发光。 */
+.ai-research-shell .ai-market-metric,
+.ai-research-shell .ai-intel-metric-grid > div,
+.ai-research-shell .ai-intel-trader-grid > div,
+.ai-research-shell .ai-skill-resources li,
+.ai-research-shell .ai-current-research-card,
+.ai-research-shell .ai-strategy-plan {
+  border: 1px solid var(--line-tinted);
+  border-radius: 6px;
+  transition: border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft);
+}
+
+/* Skill 资源行保留紫色侧脊（基座为 0.4 透明度，收敛到 token） */
+.ai-research-shell .ai-skill-resources li {
+  border-inline-start: 2px solid var(--accent-dim);
+}
+
+/* 当前研究卡：格线与单元格从青调收敛到品牌紫调，与策略方案卡同语言 */
+.ai-research-shell .ai-current-research-card {
+  background: rgba(149, 92, 255, 0.08);
+}
+
+.ai-research-shell .ai-current-research-card > div {
+  background: #100e17;
+}
+
+/* 统一卡 hover：描边增强 + 1px 上浮（无辉光） */
+.ai-research-shell .ai-market-metric:hover,
+.ai-research-shell .ai-intel-metric-grid > div:hover,
+.ai-research-shell .ai-intel-trader-grid > div:hover,
+.ai-research-shell .ai-skill-resources li:hover,
+.ai-research-shell .ai-current-research-card:hover,
+.ai-research-shell .ai-strategy-plan:hover {
+  border-color: var(--line-tinted-strong);
+  transform: translateY(-1px);
+}
+
+/* 证据列表项：补上真实的紫色证据脊（基座 border-left 宽度为 0 不可见），选中底用 token */
+.ai-research-shell .ai-intel-list-item {
+  border: 1px solid var(--line-tinted);
+  border-inline-start: 2px solid var(--accent-dim);
+  border-radius: 6px;
+  transition: border-color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-intel-list-item:hover {
+  border-color: var(--line-tinted-strong);
+  border-inline-start-color: var(--accent-bright);
+  background: var(--surface-selected);
+  transform: translateY(-1px);
+}
+
+/* 风险可视化大卡同语言；系统风险卡保留基座琥珀色语义，仅 hover 提亮 */
+.ai-research-shell .ai-risk-visual {
+  border: 1px solid var(--line-tinted);
+  border-radius: 8px;
+  background: var(--panel-grad-soft);
+  transition: border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-risk-visual:hover {
+  border-color: var(--line-tinted-strong);
+  transform: translateY(-1px);
+}
+
+.ai-research-shell .ai-risk-visual.ai-system-risk-visual {
+  border-color: rgba(227, 179, 106, 0.24);
+}
+
+.ai-research-shell .ai-risk-visual.ai-system-risk-visual:hover {
+  border-color: rgba(227, 179, 106, 0.45);
+}
+
+/* 代码面：描边 token 化；大面积阅读区不做位移，仅描边响应 */
+.ai-research-shell .ai-inspector-code-surface {
+  border: 1px solid var(--line-tinted);
+  transition: border-color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-code-surface:hover {
+  border-color: var(--line-tinted-strong);
+}
+
+/* Skill 规则/原始载荷等文档面：描边收敛到 token */
+.ai-research-shell .ai-inspector-document,
+.ai-research-shell .ai-inspector-code,
+.ai-research-shell .ai-inspector-raw pre {
+  border-color: var(--line-tinted);
+}
+
+/* —— 2. 激活/选中态（Tab 品牌紫统一）—— */
+/* 证据链 / 产物页签：选中 = surface-selected 底 + accent-bright 文字（保留基座紫色下划线） */
+.ai-research-shell .ai-inspector-tab-group > div > div {
+  transition: background var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-tab-group > div > div.active {
+  background: var(--surface-selected);
+  box-shadow: inset 0 -2px var(--accent-bright);
+}
+
+.ai-research-shell .ai-inspector-tab-group > div > div.active > button:first-child {
+  color: var(--accent-bright);
+  font-weight: 650;
+}
+
+.ai-research-shell .ai-inspector-tab-group > div > div > button:first-child {
+  transition: color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-tab-group > div > div > button:first-child:hover {
+  color: var(--accent-bright);
+}
+
+/* 市场情报导航页签 */
+.ai-research-shell .ai-intelligence-nav button.active {
+  color: var(--accent-bright);
+  border-color: var(--line-tinted-strong);
+  border-bottom-color: var(--accent-bright);
+  background: var(--surface-selected);
+  box-shadow: inset 0 -2px var(--accent-bright);
+}
+
+/* 市场雷达页签 */
+.ai-research-shell .ai-radar-tabs button.active {
+  color: var(--accent-bright);
+  border-color: var(--line-tinted-strong);
+  border-bottom-color: var(--accent-bright);
+  background: var(--surface-selected);
+  box-shadow: inset 0 -2px var(--accent-bright);
+}
+
+/* 情报子页签（新闻/事件）：由实心紫改为统一选中语言 */
+.ai-research-shell .ai-intel-subtabs button.active {
+  background: var(--surface-selected);
+  color: var(--accent-bright);
+  box-shadow: inset 0 0 0 1px var(--line-tinted-strong);
+}
+
+/* —— 3. 微标签语言 —— */
+/* 确认字号：基座 kicker 9px / 页签组头 8px / 情报 h3 9px / 图卡头 10-11px / 代码头 9px。
+   统一收敛为 ≤11px + letter-spacing 1.5px（kicker 2px 强调），全部只在此层覆盖。 */
+.ai-research-shell .ai-inspector-kicker {
+  color: var(--accent-bright);
+  font-size: 9px;
+  letter-spacing: 2px;
+  text-transform: uppercase;
+}
+
+.ai-research-shell .ai-inspector-head strong {
+  letter-spacing: 1.5px;
+}
+
+.ai-research-shell .ai-inspector-tab-group > header {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  color: #9d94b5;
+}
+
+.ai-research-shell .ai-inspector-tab-group > header small {
+  color: var(--accent-bright);
+}
+
+.ai-research-shell .ai-intel-section h3,
+.ai-research-shell .ai-intel-chart-stack h3 {
+  font-size: 9px;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+  color: #a89fc0;
+}
+
+.ai-research-shell .ai-market-chart-head strong,
+.ai-research-shell .ai-market-linechart header strong,
+.ai-research-shell .ai-market-depth header strong,
+.ai-research-shell .ai-market-sentiment header strong,
+.ai-research-shell .ai-market-overview-head strong {
+  color: #c3bcd6;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.ai-research-shell .ai-inspector-code-surface > header strong {
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.ai-research-shell .ai-intel-modal header small {
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* 卡内字段标签：同一微标签语气（市场指标 / 情报指标 / 策略方案 / 当前研究） */
+.ai-research-shell .ai-market-metric small,
+.ai-research-shell .ai-intel-metric-grid small,
+.ai-research-shell .ai-strategy-plan small,
+.ai-research-shell .ai-current-research-card small {
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* —— 4. 市场图卡（仪表卡）—— */
+/* K 线 / 指标 / 深度 / 情绪四类图区已是带描边容器，这里统一为仪表卡：
+   token 描边 + 渐变底 + 圆角 + hover 描边增强与 1px 上浮；不改 SVG 内部渲染逻辑。 */
+.ai-research-shell .ai-market-kline,
+.ai-research-shell .ai-market-linechart,
+.ai-research-shell .ai-market-depth,
+.ai-research-shell .ai-market-sentiment {
+  border: 1px solid var(--line-tinted);
+  border-radius: 8px;
+  background: var(--panel-grad-soft);
+  transition: border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-market-kline:hover,
+.ai-research-shell .ai-market-linechart:hover,
+.ai-research-shell .ai-market-depth:hover,
+.ai-research-shell .ai-market-sentiment:hover {
+  border-color: var(--line-tinted-strong);
+  transform: translateY(-1px);
+}
+
+/* 仪表内衬：折线/深度 SVG 底与 K 线宿主同底色；K 线宿主用 outline 画内框（零布局位移，
+   避免图表库初始化测量受 border 影响） */
+.ai-research-shell .ai-market-linechart svg,
+.ai-research-shell .ai-market-depth svg {
+  border-radius: 5px;
+  background: #0d0a15;
+}
+
+.ai-research-shell .ai-market-kline-canvas {
+  border-radius: 5px;
+  outline: 1px solid var(--line-tinted);
+  outline-offset: -1px;
+  background: #0d0a15;
+}
+
+/* —— 5. 空态（虚线提示卡，复用现有文案）—— */
+/* p.ai-inspector-empty 与基座 .ai-inspector-content > p 同特异性，靠层序胜出以重置负 margin */
+.ai-research-shell p.ai-inspector-empty,
+.ai-research-shell .ai-inspector-empty {
+  margin: 0;
+  padding: 16px 14px;
+  border: 1px dashed var(--line-tinted-strong);
+  border-radius: 8px;
+  background: rgba(149, 92, 255, 0.035);
+  color: #948aad;
+  font-size: 11px;
+  line-height: 1.65;
+  text-align: center;
+}
+
+/* 雷达列表内的空态卡与列表留白对齐 */
+.ai-research-shell .ai-radar-list .ai-inspector-empty {
+  margin: 8px 12px;
+}
+
+/* K 线等待/单点快照提示 */
+.ai-research-shell .ai-market-chart-empty {
+  border: 1px dashed var(--line-tinted-strong);
+  border-radius: 8px;
+  background: rgba(149, 92, 255, 0.035);
+  color: #948aad;
+}
+
+/* 清算样本空态 */
+.ai-research-shell .ai-risk-empty {
+  border: 1px dashed var(--line-tinted-strong);
+  border-radius: 8px;
+  background: rgba(149, 92, 255, 0.035);
+}
+
+.ai-research-shell .ai-risk-empty p {
+  color: #948aad;
+}
+
+/* 情报详情弹层：甲板语言收尾（描边 token 已在基座，补辉光克制的柔光阴影） */
+.ai-research-shell .ai-intel-modal {
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55), var(--glow-accent-soft);
+}
+
+/* —— 6. 交互热区与 hover —— */
+/* 收起钮：26→28px（只增不减），hover 紫调 + 1px 上浮 */
+.ai-research-shell .ai-inspector-head button {
+  width: 28px;
+  height: 28px;
+  border-radius: 5px;
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-head button:hover {
+  background: rgba(149, 92, 255, 0.12);
+  color: var(--accent-bright);
+  transform: translateY(-1px);
+}
+
+/* 页签关闭钮：视觉 20px 不变，::after 命中区扩展到 28×28（不挤压 136px 页签布局） */
+.ai-research-shell .ai-inspector-tab-close {
+  position: relative;
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-tab-close::after {
+  position: absolute;
+  inset: -4px;
+  content: "";
+}
+
+.ai-research-shell .ai-inspector-tab-close:hover {
+  background: rgba(149, 92, 255, 0.14);
+  color: var(--accent-bright);
+}
+
+/* 页签/子页签按钮：统一过渡与 hover 微动效；情报子页签 24→28px（只增不减） */
+.ai-research-shell .ai-intelligence-nav button,
+.ai-research-shell .ai-radar-tabs button,
+.ai-research-shell .ai-intel-subtabs button {
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-intelligence-nav button:hover,
+.ai-research-shell .ai-radar-tabs button:hover {
+  transform: translateY(-1px);
+}
+
+.ai-research-shell .ai-intel-subtabs button {
+  min-height: 28px;
+}
+
+.ai-research-shell .ai-intel-subtabs button:hover {
+  background: rgba(149, 92, 255, 0.06);
+  color: var(--accent-bright);
+}
+
+/* 引用/跳转按钮：24→28px（只增不减；策略区实例基座 29px 不受影响） */
+.ai-research-shell .ai-artifact-reference {
+  min-height: 28px;
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-artifact-reference:hover {
+  transform: translateY(-1px);
+}
+
+.ai-research-shell .ai-inspector-open-workspace {
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-open-workspace:hover {
+  border-color: var(--accent-bright);
+  transform: translateY(-1px);
+}
+
+/* 情报展开钮 / 打开交易面板钮（基座 30px 达标）：补 hover 上浮 */
+.ai-research-shell .ai-intelligence-head > .ai-intelligence-expand,
+.ai-research-shell .ai-market-open-trading {
+  transition: color var(--dur-fast) var(--ease-out-soft),
+    background var(--dur-fast) var(--ease-out-soft),
+    border-color var(--dur-fast) var(--ease-out-soft),
+    transform var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-intelligence-head > .ai-intelligence-expand:hover,
+.ai-research-shell .ai-market-open-trading:hover {
+  transform: translateY(-1px);
+}
+
+/* 原始数据/历史采样折叠头：::after 命中区扩展（零布局位移，不挤压内容网格 gap） */
+.ai-research-shell .ai-inspector-raw summary,
+.ai-research-shell .ai-risk-history summary {
+  position: relative;
+  transition: color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-inspector-raw summary::after,
+.ai-research-shell .ai-risk-history summary::after {
+  position: absolute;
+  inset: -7px -8px;
+  content: "";
+}
+
+.ai-research-shell .ai-inspector-raw summary:hover,
+.ai-research-shell .ai-risk-history summary:hover {
+  color: var(--accent-bright);
+}
+
+/* —— 7. 证据链序号 / 引用标记 → --accent-bright —— */
+/* 雷达行序号（情报列表序号 .ai-intel-list-marker 基座已是 accent-bright，此处锚定防漂移） */
+.ai-research-shell .ai-radar-row > b,
+.ai-research-shell .ai-intel-list-marker {
+  color: var(--accent-bright);
+}
+
+/* 引用标记（查看引用它的回答 / 创建回测计划）：文字统一 accent-bright */
+.ai-research-shell .ai-artifact-reference {
+  color: var(--accent-bright);
+}
+
+/* —— 8. 动效降级 —— */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-market-metric,
+  .ai-research-shell .ai-intel-metric-grid > div,
+  .ai-research-shell .ai-intel-trader-grid > div,
+  .ai-research-shell .ai-skill-resources li,
+  .ai-research-shell .ai-current-research-card,
+  .ai-research-shell .ai-strategy-plan,
+  .ai-research-shell .ai-intel-list-item,
+  .ai-research-shell .ai-risk-visual,
+  .ai-research-shell .ai-inspector-code-surface,
+  .ai-research-shell .ai-market-kline,
+  .ai-research-shell .ai-market-linechart,
+  .ai-research-shell .ai-market-depth,
+  .ai-research-shell .ai-market-sentiment,
+  .ai-research-shell .ai-inspector-tab-group > div > div,
+  .ai-research-shell .ai-inspector-tab-group > div > div > button:first-child,
+  .ai-research-shell .ai-inspector-head button,
+  .ai-research-shell .ai-inspector-tab-close,
+  .ai-research-shell .ai-intelligence-nav button,
+  .ai-research-shell .ai-radar-tabs button,
+  .ai-research-shell .ai-intel-subtabs button,
+  .ai-research-shell .ai-artifact-reference,
+  .ai-research-shell .ai-inspector-open-workspace,
+  .ai-research-shell .ai-intelligence-head > .ai-intelligence-expand,
+  .ai-research-shell .ai-market-open-trading,
+  .ai-research-shell .ai-inspector-raw summary,
+  .ai-research-shell .ai-risk-history summary {
+    transition: none;
+  }
+
+  .ai-research-shell .ai-market-metric:hover,
+  .ai-research-shell .ai-intel-metric-grid > div:hover,
+  .ai-research-shell .ai-intel-trader-grid > div:hover,
+  .ai-research-shell .ai-skill-resources li:hover,
+  .ai-research-shell .ai-current-research-card:hover,
+  .ai-research-shell .ai-strategy-plan:hover,
+  .ai-research-shell .ai-intel-list-item:hover,
+  .ai-research-shell .ai-risk-visual:hover,
+  .ai-research-shell .ai-market-kline:hover,
+  .ai-research-shell .ai-market-linechart:hover,
+  .ai-research-shell .ai-market-depth:hover,
+  .ai-research-shell .ai-market-sentiment:hover,
+  .ai-research-shell .ai-inspector-head button:hover,
+  .ai-research-shell .ai-intelligence-nav button:hover,
+  .ai-research-shell .ai-radar-tabs button:hover,
+  .ai-research-shell .ai-artifact-reference:hover,
+  .ai-research-shell .ai-inspector-open-workspace:hover,
+  .ai-research-shell .ai-intelligence-head > .ai-intelligence-expand:hover,
+  .ai-research-shell .ai-market-open-trading:hover {
+    transform: none;
+  }
+}
+
+/* —— 9. 图表悬停交互与数值徽标（问题 A/B 修复层）——
+ * 职责：技术指标/K 线/深度/情绪四类图卡的悬停十字线 + 浮动 tooltip、序列最新值徽标、
+ *       图例联动高亮、稀疏 K 线（2-4 点）线点渲染、网格弱色统一。
+ * 纪律：动画只动 transform/opacity；tooltip 出现 ≤120ms opacity；触屏 pointer 可用
+ *       （touch-action: pan-y，纵向滚动不被吞）。全部只在本层追加，不改基座规则。
+ */
+
+/* 9.1 网格弱色：基座青灰 → var(--line-tinted) 级紫调弱色（只调色，不改密度与线宽） */
+.ai-research-shell .ai-market-chart-grid {
+  stroke: var(--line-tinted);
+}
+
+/* 9.2 悬停热区：tooltip 的定位锚点；svg 放行纵向滚动手势，横向拖动驱动十字线 */
+.ai-research-shell .ai-chart-hover-zone {
+  position: relative;
+  min-width: 0;
+}
+
+.ai-research-shell .ai-chart-hover-zone > svg {
+  touch-action: pan-y;
+}
+
+/* 悬停定位竖线（十字线的竖臂）：虚线弱描边，属性直改坐标，无过渡 */
+.ai-research-shell .ai-chart-crosshair {
+  stroke: var(--line-tinted-strong);
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+/* 9.3 浮动 tooltip：left 由 TS 按 clamp(…, calc(100% - 180px)) 封边，max-width 与之匹配，
+   右缘/左缘均不越出热区；翻转靠 .flip + translateX(-100%) */
+.ai-research-shell .ai-chart-tooltip {
+  position: absolute;
+  top: 8px;
+  left: 0;
+  z-index: 6;
+  min-width: 104px;
+  max-width: 168px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-tinted-strong);
+  border-radius: 6px;
+  background: var(--surface-raised);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  font-size: 10px;
+  line-height: 1.5;
+  pointer-events: none;
+  transform: translateX(10px);
+  opacity: 0.96;
+  transition: opacity 100ms var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-chart-tooltip.flip {
+  transform: translateX(calc(-100% - 10px));
+}
+
+.ai-research-shell .ai-chart-tooltip-head {
+  margin-bottom: 3px;
+  color: var(--muted);
+  font-size: 9px;
+  letter-spacing: 1px;
+}
+
+.ai-research-shell .ai-chart-tooltip-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-research-shell .ai-chart-tooltip-row i {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 2px;
+}
+
+.ai-research-shell .ai-chart-tooltip-row span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--muted);
+  text-overflow: ellipsis;
+}
+
+.ai-research-shell .ai-chart-tooltip-row b {
+  padding-left: 10px;
+  margin-left: auto;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 9.4 图表主体 + 序列最新值徽标（图右侧）：窄列时徽标自然换行到图下方 */
+.ai-research-shell .ai-market-chart-body {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: stretch;
+  min-width: 0;
+}
+
+.ai-research-shell .ai-market-chart-body .ai-chart-hover-zone {
+  flex: 1 1 190px;
+}
+
+.ai-research-shell .ai-market-series-badges {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  flex: 0 0 auto;
+  min-width: 72px;
+}
+
+.ai-research-shell .ai-market-series-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 7px;
+  border: 1px solid var(--line-tinted);
+  border-radius: 999px;
+  background: var(--surface-selected);
+  color: var(--text);
+  font-size: 10px;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-research-shell .ai-market-series-badge i {
+  width: 7px;
+  height: 7px;
+  flex: none;
+  border-radius: 50%;
+}
+
+/* 9.5 图例联动：十字线最近序列 hot、图例悬停 focus、其余序列 dim（仅 opacity/色，无位移） */
+.ai-research-shell .ai-market-chart-legend span {
+  transition: opacity var(--dur-fast) var(--ease-out-soft),
+    color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-market-chart-legend span.focus {
+  color: var(--text);
+}
+
+.ai-research-shell .ai-market-chart-legend span.hot {
+  color: var(--text);
+}
+
+.ai-research-shell .ai-market-chart-legend span.dim {
+  opacity: 0.35;
+}
+
+.ai-research-shell .ai-market-linechart polyline {
+  transition: opacity var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-market-linechart polyline.dim {
+  opacity: 0.18;
+}
+
+.ai-research-shell .ai-market-linechart polyline.hot {
+  stroke-width: 2.8;
+}
+
+/* 9.6 稀疏 K 线（2-4 点 / 仅收盘价）：SVG 线 + 点标记，内衬与 K 线宿主同底色 */
+.ai-research-shell .ai-market-kline-spark {
+  width: 100%;
+  height: 180px;
+  display: block;
+  border-radius: 5px;
+  background: #0d0a15;
+}
+
+.ai-research-shell .ai-market-kline-spark-line {
+  fill: none;
+  stroke: var(--accent-bright);
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.ai-research-shell .ai-market-kline-spark-dot {
+  fill: var(--accent-bright);
+  stroke: #0d0a15;
+  stroke-width: 1.5;
+}
+
+/* 9.7 K 线 OHLC 悬停读数行（图表库 crosshair 联动）：tabular-nums 对齐，收涨跌着色 */
+.ai-research-shell .ai-market-kline-ohlc {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 10px;
+  color: var(--muted);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}
+
+.ai-research-shell .ai-market-kline-ohlc b {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.ai-research-shell .ai-market-kline-ohlc b.positive {
+  color: #5fd2aa;
+}
+
+.ai-research-shell .ai-market-kline-ohlc b.negative {
+  color: #e58a98;
+}
+
+/* 深度图悬停取样点：买绿/卖红描边圆点（沿用图例 bid/ask 语义色） */
+.ai-research-shell .ai-market-depth-marker {
+  stroke: #0d0a15;
+  stroke-width: 1.5;
+}
+
+.ai-research-shell .ai-market-depth-marker.bid {
+  fill: #4cc9a0;
+}
+
+.ai-research-shell .ai-market-depth-marker.ask {
+  fill: #e87d91;
+}
+
+/* 9.8 情绪条 hover 数值反馈：行级高亮（数值已由 em 常显，title 补提及数） */
+.ai-research-shell .ai-market-sentiment > div {
+  border-radius: 4px;
+  transition: background var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-market-sentiment > div:hover {
+  background: var(--surface-selected);
+}
+
+/* 9.9 单点快照一致性：快照值随同一解析结果显示 */
+.ai-research-shell .ai-market-chart-empty small {
+  display: block;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 9.10 动效降级：悬停层全部去掉过渡，信息不变 */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-chart-tooltip,
+  .ai-research-shell .ai-market-chart-legend span,
+  .ai-research-shell .ai-market-linechart polyline,
+  .ai-research-shell .ai-market-sentiment > div {
+    transition: none;
+  }
+}

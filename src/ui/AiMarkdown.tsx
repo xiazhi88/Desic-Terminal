@@ -1,5 +1,7 @@
 import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+// CommonMark 对 CJK 相邻加粗（**事实：**最新报价）的闭合分隔符判定会失败，此插件专门修复
+import remarkCjkFriendly from "remark-cjk-friendly";
 
 function safeHref(href: string | undefined) {
   if (!href) return undefined;
@@ -25,5 +27,5 @@ const components: Components = {
 };
 
 export function AiMarkdown({ content }: { content: string }) {
-  return <div className="ai-markdown" data-i18n-skip><ReactMarkdown remarkPlugins={[remarkGfm]} components={components}>{content}</ReactMarkdown></div>;
+  return <div className="ai-markdown" data-i18n-skip><ReactMarkdown remarkPlugins={[remarkGfm, remarkCjkFriendly]} components={components}>{content}</ReactMarkdown></div>;
 }

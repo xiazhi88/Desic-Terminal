@@ -633,6 +633,7 @@ Object.assign(enUS.automation, {
   subtask: "Subtask", modelError: "Model error", modelServiceError: "Model service error", subtaskFailed: "Subtask failed", runError: "AI run error",
   tokenUsage: "Token usage for this turn", tokenInputOutput: "Input {{input}} · Output {{output}}", subagentCount: "{{count}} subagents", usageNotReported: "Usage was not reported by the model",
   processed: "Processed", processing: "Processing", processItemCount: "{{count}} items", process: "Process", reasoningProcess: "Reasoning",
+  executionProcess: "Execution process", processToolCount: "{{count}} tools",
   teamTaskUpdates: "Team task updates", approval: "Approval", parameters: "Parameters", approveExecution: "Approve execution", rejectExecution: "Reject",
   executionDuration: "Execution {{duration}}", queueDuration: "Queued {{duration}}", toolBlocked: "Blocked", failed: "Failed", toolReturned: "Returned", running: "Running", pendingAudit: "Pending audit",
   read: "Read", create: "Create", update: "Update", delete: "Delete", execute: "Execute", run: "Run",
@@ -652,7 +653,9 @@ Object.assign(enUS.automation, {
   tradeRiskBlocked: "Trade risk control blocked the request", tradeRiskBlockedMessage: "{{base}} did not pass the pre-trade risk check.",
   tradeOperationFailed: "{{operation}} failed", tradeOperationRejectedMessage: "{{base}} was rejected by OKX or the local trading layer.",
   leverageChangeRecordedMessage: "{{base}}, operator {{operator}}.", tradeOperationSubmitted: "{{operation}} submitted",
-  tradeAuditSubmittedMessage: "{{base}}, order {{order}}, operator {{operator}}."
+  tradeAuditSubmittedMessage: "{{base}}, order {{order}}, operator {{operator}}.",
+  processCurrentTool: "Current tool: {{name}}", toolIoRaw: "Raw", toolIoStructured: "Structured",
+  toolIoArrayCount: "{{count}} items", toolIoPayloadHint: "Full data is available in the raw payload", inlineEvidenceTime: "Data time", tokenTotal: "Total {{total}}"
 });
 
 Object.assign(enUS.settings, {
@@ -1107,6 +1110,7 @@ Object.assign(zhCN.automation, {
   subtask: "子任务", modelError: "模型错误", modelServiceError: "模型服务错误", subtaskFailed: "子任务失败", runError: "AI 运行错误",
   tokenUsage: "本轮 Token 用量", tokenInputOutput: "输入 {{input}} · 输出 {{output}}", subagentCount: "{{count}} 个子 Agent", usageNotReported: "模型未报告用量",
   processed: "已处理", processing: "处理中", processItemCount: "{{count}} 项", process: "过程", reasoningProcess: "思考过程", teamTaskUpdates: "团队任务更新",
+  executionProcess: "执行过程", processToolCount: "{{count}} 工具",
   approval: "审批", parameters: "参数", approveExecution: "批准执行", rejectExecution: "拒绝", executionDuration: "执行 {{duration}}", queueDuration: "排队 {{duration}}",
   toolBlocked: "已阻断", failed: "失败", toolReturned: "已返回", running: "运行中", pendingAudit: "待审计", read: "读取", create: "创建", update: "更新", delete: "删除", execute: "执行", run: "运行",
   approved: "已批准", rejected: "已拒绝", expired: "已失效", pendingApproval: "待批准", queued: "排队中", cancelled: "已取消", completed: "已完成",
@@ -1125,7 +1129,9 @@ Object.assign(zhCN.automation, {
   tradeRiskBlocked: "交易风控已拦截", tradeRiskBlockedMessage: "{{base}} 未通过下单前风控。",
   tradeOperationFailed: "{{operation}}失败", tradeOperationRejectedMessage: "{{base}} 已被 OKX 或本地交易层拒绝。",
   leverageChangeRecordedMessage: "{{base}}，操作员 {{operator}}。", tradeOperationSubmitted: "{{operation}}已提交",
-  tradeAuditSubmittedMessage: "{{base}}，订单 {{order}}，操作员 {{operator}}。"
+  tradeAuditSubmittedMessage: "{{base}}，订单 {{order}}，操作员 {{operator}}。",
+  processCurrentTool: "当前工具：{{name}}", toolIoRaw: "原始", toolIoStructured: "结构化",
+  toolIoArrayCount: "共 {{count}} 项", toolIoPayloadHint: "原始载荷含完整数据", inlineEvidenceTime: "数据时间", tokenTotal: "合计 {{total}}"
 });
 
 Object.assign(zhCN.settings, {

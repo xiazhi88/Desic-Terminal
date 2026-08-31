@@ -236,8 +236,14 @@ async function main() {
 
     const contextTrigger = page.locator(".ai-context-meter-trigger");
     await contextTrigger.click();
-    if (await page.locator(".ai-context-popover").count() !== 1 || !/系统|System/.test(await page.locator(".ai-context-popover").textContent() || "") || !/最近一次|latest/i.test(await page.locator(".ai-context-popover").textContent() || "")) {
+    const contextPopover = page.locator(".ai-context-popover");
+     if (await contextPopover.count() !== 1 || !/系统|System/.test(await contextPopover.textContent() || "") || !/最近一次|latest/i.test(await contextPopover.textContent() || "")) {
       throw new Error("Context meter should open an estimated breakdown popover");
+    }
+    const contextGeometry = await contextPopover.evaluate((node) => { const rect = node.getBoundingClientRect(); const style = getComputedStyle(node); return { top: rect.top, bottom: rect.bottom, left: rect.left, right: rect.right, height: rect.height, width: rect.width, zIndex: style.zIndex, position: style.position, innerHeight: window.innerHeight }; });
+    await page.waitForFunction(() => { const node = document.querySelector(".ai-context-popover"); return node && node.getBoundingClientRect().height > 200; }, { timeout: 5_000 });
+    if (contextGeometry.position !== "fixed" || contextGeometry.zIndex !== "420" || contextGeometry.top < 0 || contextGeometry.bottom > contextGeometry.innerHeight || contextGeometry.width < 200) {
+      throw new Error(`Context popover should be an unclipped viewport layer: ${JSON.stringify(contextGeometry)}`);
     }
     await page.keyboard.press("Escape");
 

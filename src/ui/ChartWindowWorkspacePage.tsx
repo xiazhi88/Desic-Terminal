@@ -13,6 +13,7 @@ import {
   updateChartWindowState,
 } from "../lib/okx";
 import { fmtPrice } from "../lib/format";
+import { useBump } from "./useBump";
 import { isTauriRuntime } from "../lib/tauri";
 import { logger } from "../lib/logger";
 import {
@@ -76,6 +77,8 @@ export function ChartWindowWorkspacePage({ initialWindowLabel }: { initialWindow
   const [ready, setReady] = useState(false);
   const [paneStatuses, setPaneStatuses] = useState<Record<string, string>>({});
   const [activeTicker, setActiveTicker] = useState<Ticker | null>(null);
+  // 工作区图表窗主价跳动：activeTicker.last 为 OKX 字符串报价，取数值以获得涨跌方向。
+  const marketPriceBump = useBump(Number(activeTicker?.last));
   const [synchronizedCrosshairPosition, setSynchronizedCrosshairPosition] = useState<ChartCrosshairPosition | null>(null);
   const [synchronizedVisibleRange, setSynchronizedVisibleRange] = useState<{ from: number; to: number } | null>(null);
   const [paneSizing, setPaneSizing] = useState<ChartPaneLayoutSizing>(() => defaultChartPaneLayoutSizing());
@@ -222,7 +225,7 @@ export function ChartWindowWorkspacePage({ initialWindowLabel }: { initialWindow
           <span data-tauri-drag-region>{workspace.layout} 图 · {selected?.timeframe || DEFAULT_TIMEFRAME} · 永续合约图表</span>
         </div>
         <div className="chart-window-market" data-tauri-drag-region>
-          <strong className={Number(activeTicker?.last) >= Number(activeTicker?.open24h) ? "up" : "down"}>{fmtPrice(activeTicker?.last)}</strong>
+          <strong className={`${Number(activeTicker?.last) >= Number(activeTicker?.open24h) ? "up" : "down"} ${marketPriceBump.className}`.trim()} onAnimationEnd={marketPriceBump.onAnimationEnd}>{fmtPrice(activeTicker?.last)}</strong>
           <span className="chart-window-live-state"><i />{status}</span>
         </div>
         <div className="chart-window-title-menus" onPointerDown={(event) => event.stopPropagation()}>

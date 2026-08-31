@@ -1,0 +1,174 @@
+/*
+ * theme/signature.css — Phase 4 签名时刻层（负责 agent：signature）
+ * ------------------------------------------------------------------
+ * 职责：三个有记忆点的视觉签名，全部纯 CSS 实现（本次无 TSX 改动）：
+ *   1) .corners 四角括号 —— 应用在市场雷达主舞台 .market-radar-page
+ *      与排行面板 .market-radar-table（纯 CSS 追加 ::before）。
+ *      注意：主舞台根元素同时挂有 styles.css 的 workspace-surface 类，
+ *      其 ::before（顶辉层）与括号共用同一伪元素，需按特异性接管（见下方补丁规则）。
+ *   2) AI 入口旋转环 —— 应用在左侧导航 AI 研究入口 .rail-item[data-workspace="ai"]。
+ *   3) 启动屏编排 —— .startup-original 内真实类名的 staggered fadeUp + logo 一次性呼吸光晕。
+ * 边界：只改本文件；styles.css / startup-original.css / AiContextMeter.tsx 等一律不碰。
+ * 约定：所有 keyframes 以 sig- 前缀命名，避免污染全局关键帧命名空间；
+ *      本文件在 styles.css / startup-original.css 之后导入，同特异性时本文件规则胜出；
+ *      所有动画在 @media (prefers-reduced-motion: reduce) 下关闭（见文件末尾）。
+ */
+
+/* ============================================================
+ * 签名 1 · 四角括号（.corners）
+ * pulse 的八段 linear-gradient 手法：每角一条 12px 横臂 + 一条 12px 竖臂，
+ * 用不重复定位的多层渐变拼出四角；颜色取品牌紫 dim 档。
+ * .corners 作为工具类保留；两个雷达容器按同名伪元素直接并入（纯 CSS 追加）。
+ * ============================================================ */
+
+.corners,
+.market-radar-page,
+.market-radar-table {
+  /* 括号锚点需要定位上下文；三者原本均未定位，relative 不改变布局流 */
+  position: relative;
+}
+
+.corners::before,
+.market-radar-page::before,
+.market-radar-table::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  opacity: 0.55;
+  /* 八段臂：0/90deg 方向的 12px 长短臂 × 四角，no-repeat 定位到各角 */
+  background:
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 0 0 / 12px 1px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 0 0 / 1px 12px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 100% 0 / 12px 1px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 100% 0 / 1px 12px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 0 100% / 12px 1px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 0 100% / 1px 12px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 100% 100% / 12px 1px,
+    linear-gradient(var(--accent-dim), var(--accent-dim)) 100% 100% / 1px 12px;
+  background-repeat: no-repeat;
+}
+
+/* 主舞台根元素同时携带 styles.css 的 workspace-surface 类：
+ * .workspace-surface--market::before 对同一伪元素设了 display:none（0,2,1 特异性），
+ * .workspace-surface::before 还残留 112px 顶辉高度。此处以同等特异性、
+ * 更晚的级联顺序接管该伪元素：恢复显示并清掉顶辉高度，四角括号才能满幅定位。 */
+.workspace-surface--market.market-radar-page::before {
+  display: block;
+  height: auto;
+}
+
+/* ============================================================
+ * 签名 2 · AI 入口旋转环
+ * 目标：左侧导航唯一的 AI 研究入口 .rail-item[data-workspace="ai"]
+ *（44×44、圆角 5px 的方形按钮，styles.css 不可改）。
+ * 与 pulse #coBtn 的两处结构性适配（视觉等价，缘由如下）：
+ *   a) rail-item 的 ::before 已被"激活态左侧指示条"占用，环放空闲的 ::after；
+ *   b) 方形环带若随元素整体旋转，对角线会扫出按钮边界，故环带做成
+ *      内切圆形（旋转不变，转动的只是渐变光弧）；环心挖空不用盖片伪元素，
+ *      改用 mask 留出 2px 环带——中心全透明，默认/激活背景与图标不受遮挡。
+ * ============================================================ */
+
+.rail-item[data-workspace="ai"]::after {
+  content: "";
+  position: absolute;
+  inset: 2px;          /* 内切圆环：与方形按钮边缘留 2px 呼吸空隙 */
+  border-radius: 50%;
+  padding: 2px;        /* 环带厚度（pulse 为 2.5px，44px 小按钮上收一档更克制） */
+  background: conic-gradient(from 0deg, transparent, var(--accent-bright), rgba(149, 92, 255, 0.5), transparent);
+  /* content-box 内缩 + xor/exclude 复合遮罩 = 只留外圈 2px 环带，环心透明 */
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: sig-ring-spin 4.5s linear infinite;
+  pointer-events: none;
+}
+
+/* 悬停 / 键盘聚焦时环加速：4.5s → 1.5s，"待机慢旋、注视快转" */
+.rail-item[data-workspace="ai"]:hover::after,
+.rail-item[data-workspace="ai"]:focus-visible::after {
+  animation-duration: 1.5s;
+}
+
+@keyframes sig-ring-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+ * 签名 3 · 启动屏编排
+ * 真实结构（src/ui/App.tsx StartupGate）：
+ *   .startup-shell > .startup-original > .stage
+ *     ├─ .chrome            品牌栏（logo 图标 + 代理按钮 + 状态 pill）
+ *     ├─ .hero > .copy      文案列：.version → h1 → .subtitle → .metrics
+ *     ├─ .hero > .visual    轨道画布 + 行情终端小窗
+ *     └─ .loading           进度区
+ * 每个主要块一次性 staggered fadeUp：opacity 0→1、translateY(10px)→0，
+ * 640ms var(--ease-out-soft)；延迟按 DOM 顺序逐个指定真实类名（不用 nth-child 盲猜）。
+ * CSS animation 天然"每次挂载播一遍"；不触碰 body/html，
+ * body:has(.startup-shell) 的 transparent 背景约束不受影响。
+ * ============================================================ */
+
+.startup-original .chrome,
+.startup-original .copy .version,
+.startup-original .copy h1,
+.startup-original .copy .subtitle,
+.startup-original .copy .metrics,
+.startup-original .visual,
+.startup-original .loading {
+  animation: sig-fade-up 640ms var(--ease-out-soft) both;
+}
+
+/* 逐块延迟（与上方选择器一一对应，便于将来对照 DOM 增删） */
+.startup-original .chrome { animation-delay: 0ms; }
+.startup-original .copy .version { animation-delay: 120ms; }
+.startup-original .copy h1 { animation-delay: 240ms; }
+.startup-original .copy .subtitle { animation-delay: 360ms; }
+.startup-original .copy .metrics { animation-delay: 480ms; }
+.startup-original .visual { animation-delay: 600ms; }
+.startup-original .loading { animation-delay: 720ms; }
+
+@keyframes sig-fade-up {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+/* logo 一次性呼吸光晕：4.2s 单次呼吸（暗 → 峰值 → 回落），
+ * 幅度克制（scale ≤ 1.045）；100% 帧精确回落到 startup-original.css
+ * 中 .brand-icon 的自然投影（0 0 18px rgba(183,146,255,.3)），
+ * both 填充使结束态与原始样式完全一致，不产生永久覆盖。 */
+.startup-original .brand-icon {
+  animation: sig-logo-breathe 4.2s ease-in-out 200ms 1 both;
+}
+
+@keyframes sig-logo-breathe {
+  0% { opacity: 0.35; transform: scale(0.95); box-shadow: 0 0 0 rgba(149, 92, 255, 0); }
+  35% { opacity: 1; transform: scale(1.045); box-shadow: 0 0 32px rgba(149, 92, 255, 0.5); }
+  65% { opacity: 0.85; transform: scale(0.99); box-shadow: 0 0 14px rgba(149, 92, 255, 0.28); }
+  100% { opacity: 1; transform: scale(1); box-shadow: 0 0 18px rgba(183, 146, 255, 0.3); }
+}
+
+/* ============================================================
+ * 无障碍 · prefers-reduced-motion：全部签名动画关闭
+ * .corners 为静态装饰，无动画可关。
+ * 旋转环退化为静态品牌色细环（保留 AI 入口标识，去掉运动）；
+ * fadeUp 各块与 logo 直接呈自然可见态，不隐藏内容。
+ * ============================================================ */
+@media (prefers-reduced-motion: reduce) {
+  .rail-item[data-workspace="ai"]::after {
+    animation: none;
+    background: var(--line-tinted-strong);
+  }
+
+  .startup-original .chrome,
+  .startup-original .copy .version,
+  .startup-original .copy h1,
+  .startup-original .copy .subtitle,
+  .startup-original .copy .metrics,
+  .startup-original .visual,
+  .startup-original .loading,
+  .startup-original .brand-icon {
+    animation: none;
+  }
+}

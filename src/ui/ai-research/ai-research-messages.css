@@ -1,0 +1,426 @@
+/*
+ * ai-research/messages.css（实际文件名 ai-research-messages.css）— A2b 消息流层
+ * ------------------------------------------------------------------
+ * 职责：消息元数据纪律（7 段元数据 → 单行 footer + 悬停操作）、过程折叠条、证据 chips。
+ * 级联位置：在 ai-research.css（基座）之后导入，同特异性时本层胜出。
+ * 边界：A2b agent 独占；禁碰其他文件。
+ * ------------------------------------------------------------------
+ * 元数据纪律落点（本层规则索引）：
+ *   1. 答案正文为主角 —— 正文全亮舒展；"分析结果"标签降权为小号眉题。
+ *   2. .ai-message-footer —— 单行 meta footer：时间·耗时·TTFT·吞吐·token·状态
+ *      合并为 facts 行（· 分隔）；复制/分支/重试 收进 tools 组，hover /
+ *      focus-within / 复制反馈时显现（opacity 过渡，键盘可达，触屏常显）。
+ *   3. .ai-process:not([open]) —— 完成后折叠为一行紧凑条（details 语义保留，
+ *      展开箭头沿用遗留 ▸/▾）；流式/失败保持 [open]，走基座自动展开布局。
+ *   4. .ai-evidence-references —— 证据 chips 紧凑化（点击开 inspector 功能不变）。
+ *   5. .ai-tool-trace —— 工具行轻度收敛：统一间距、状态点对齐
+ *      （阶段步进器是下一阶段，本层不做）。
+ */
+
+/* —— 1. 答案正文为主角 —— */
+.ai-research-shell .ai-message.assistant .ai-answer {
+  margin-top: 2px;
+  line-height: 1.68;
+}
+
+/* "分析结果" 眉题：降权为小号标签，让位给正文 */
+.ai-research-shell .ai-message.assistant .ai-answer > strong {
+  margin-bottom: 8px;
+  color: #9aa2b0;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* —— 2. 单行 meta footer —— */
+.ai-research-shell .ai-message .ai-message-actions.ai-message-footer {
+  margin-top: 10px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.ai-research-shell .ai-message.user .ai-message-actions.ai-message-footer {
+  justify-content: flex-end;
+}
+
+/* facts 行：时间 · 耗时 · TTFT · 吞吐 · token · 状态 */
+.ai-research-shell .ai-message-footer .ai-footer-facts {
+  min-width: 0;
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 2px;
+  color: #6f7681;
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.015em;
+}
+
+.ai-research-shell .ai-message-footer .ai-footer-facts > * + *::before {
+  content: "·";
+  margin: 0 7px;
+  color: var(--line-tinted-strong);
+  font-weight: 700;
+}
+
+/* 空值段（如耗时为空串）整段隐藏，避免孤立分隔点 */
+.ai-research-shell .ai-message-footer .ai-footer-facts > span:empty,
+.ai-research-shell .ai-message-footer .ai-footer-facts > time:empty {
+  display: none;
+}
+
+/* 状态并入 footer 后的字级归一（覆盖遗留 .ai-message-status 全局规则） */
+.ai-research-shell .ai-message-footer .ai-message-status {
+  color: #6f7681;
+  font-size: 10px;
+}
+
+/* token 紧凑段：统计不完整时给出暖色提示 */
+.ai-research-shell .ai-message-footer .ai-meta-token.is-partial {
+  color: #bdaa85;
+}
+
+/* tools 组：hover / focus-within / 复制反馈显现；触屏（无 hover）常显 */
+.ai-research-shell .ai-message-footer .ai-footer-tools {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 1;
+  transition: opacity var(--dur-fast) var(--ease-out-soft);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .ai-research-shell .ai-message-footer .ai-footer-tools {
+    opacity: 0;
+  }
+
+  .ai-research-shell .ai-message:hover .ai-message-footer .ai-footer-tools,
+  .ai-research-shell .ai-message-footer .ai-footer-tools:focus-within,
+  .ai-research-shell .ai-message-footer.is-copied .ai-footer-tools {
+    opacity: 1;
+  }
+}
+
+.ai-research-shell .ai-message-actions.ai-message-footer button:hover,
+.ai-research-shell .ai-message-actions.ai-message-footer button:focus-visible {
+  background: var(--surface-selected);
+  color: #e3e6ec;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-message-footer .ai-footer-tools {
+    transition: none;
+  }
+}
+
+/* —— 3. 过程折叠条：完成后一行紧凑条 —— */
+.ai-research-shell .ai-message .ai-process:not([open]) {
+  margin: 2px 0 10px;
+  border-inline-start-color: var(--line-tinted);
+}
+
+.ai-research-shell .ai-message .ai-process:not([open]) > summary {
+  min-height: 20px;
+  color: #767d89;
+  font-size: 10px;
+  letter-spacing: 0.02em;
+  transition: color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-message .ai-process:not([open]) > summary:hover {
+  color: var(--accent-bright);
+}
+
+.ai-research-shell .ai-message .ai-process:not([open]) > summary strong {
+  color: #666d79;
+  font-weight: 560;
+}
+
+.ai-research-shell .ai-message .ai-process > summary::before {
+  transition: color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-message .ai-process:not([open]) > summary::before {
+  color: #565d69;
+}
+
+.ai-research-shell .ai-message .ai-process:not([open]) > summary:hover::before {
+  color: var(--accent-bright);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-message .ai-process > summary,
+  .ai-research-shell .ai-message .ai-process > summary::before {
+    transition: none;
+  }
+}
+
+/* —— 4. 证据 chips 紧凑化（功能不变：点击开 inspector artifact） —— */
+.ai-research-shell .ai-message .ai-evidence-references {
+  gap: 4px;
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top-color: rgba(149, 92, 255, 0.1);
+}
+
+.ai-research-shell .ai-message .ai-evidence-references button {
+  max-width: 160px;
+  min-height: 22px;
+  padding: 0 7px;
+  border-radius: 3px;
+  border-color: var(--line-tinted);
+  background: rgba(149, 92, 255, 0.05);
+  color: #b3a8cc;
+  font-size: 9px;
+}
+
+.ai-research-shell .ai-message .ai-evidence-references button:hover,
+.ai-research-shell .ai-message .ai-evidence-references button:focus-visible {
+  border-color: var(--line-tinted-strong);
+  background: var(--surface-selected);
+  color: #eee8f8;
+}
+
+/* —— 5. 工具行轻度收敛：统一间距 / 状态点对齐（阶段步进器不在本阶段） —— */
+.ai-research-shell .ai-tool-trace > summary {
+  align-items: center;
+}
+
+.ai-research-shell .ai-tool-trace > summary .ai-tool-state-dot {
+  align-self: center;
+  justify-self: center;
+}
+
+.ai-research-shell .ai-tool-trace > summary strong {
+  white-space: nowrap;
+}
+
+.ai-research-shell .ai-tool-trace-list {
+  gap: 4px;
+  margin-top: 4px;
+}
+
+/*
+ * —— B2 波次追加：流式生命感（文件尾分节，以上 A2b 分节 1-5 保持不动） ——
+ * 数据源：工作区 status（流式集合 = connecting/running/streaming/tooling/retrying，
+ * 由 AiResearchWorkspace 的 isStreaming 判定）与消息级字段
+ * （message.error = 失败，最后一条 assistant 消息 = 本轮流式）。
+ * 类名映射（TSX 侧只做条件拼接，不改状态逻辑）：
+ *   .ai-head-status.is-running / .is-failed         —— 头部实时状态点
+ *   .ai-message.assistant.is-streaming / .is-failed —— 消息左侧脊
+ *   .ai-answer.is-streaming                          —— 流式光标
+ * 约束：动画只用 opacity/transform；全部提供 prefers-reduced-motion 降级；
+ *       不做打字机逐字动画，绝不与行情刷新竞争主线程。
+ */
+
+/* —— 6. 流式光标：品牌紫 ▍ 硬闪烁（1s steps）——
+ * MarkdownMessage DOM：.ai-answer > .ai-markdown > 一组块级子元素（p/ul/pre/table-wrap…），
+ * 故光标挂 .ai-markdown 最后一个块的行尾（inline，零布局位移）；列表改挂最后一个 li，
+ * 避免光标在列表后独占一行。 */
+.ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > :last-child:not(ul):not(ol)::after,
+.ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > ul:last-child > li:last-child::after,
+.ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > ol:last-child > li:last-child::after {
+  content: "▍";
+  margin-left: 2px;
+  color: var(--accent-bright);
+  animation: ai-stream-caret-blink 1s steps(1, end) infinite;
+}
+
+@keyframes ai-stream-caret-blink {
+  0% { opacity: 1; }
+  50% { opacity: 0; }
+  100% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > :last-child:not(ul):not(ol)::after,
+  .ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > ul:last-child > li:last-child::after,
+  .ai-research-shell .ai-message.assistant .ai-answer.is-streaming .ai-markdown > ol:last-child > li:last-child::after {
+    animation: none;
+    opacity: 0.55;
+  }
+}
+
+/* —— 7. 头部实时状态点：6px 呼吸紫点（辉光为静态 box-shadow，随元素透明度同步呼吸）——
+ * 失败转红色稳定点（呼应全局 --danger）；完成/空闲/已停止不渲染任何点。 */
+.ai-research-shell .ai-panel-head .ai-head-status.is-running::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 7px rgba(166, 120, 255, 0.75);
+  display: inline-block;
+  vertical-align: middle;
+  animation: ai-head-status-breathe 2s var(--ease-out-soft) infinite;
+}
+
+@keyframes ai-head-status-breathe {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.4; transform: scale(0.82); }
+}
+
+.ai-research-shell .ai-panel-head .ai-head-status.is-failed::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  margin-right: 6px;
+  border-radius: 50%;
+  background: var(--danger);
+  box-shadow: 0 0 7px rgba(255, 77, 79, 0.55);
+  display: inline-block;
+  vertical-align: middle;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-panel-head .ai-head-status.is-running::before {
+    animation: none;
+    opacity: 0.85;
+  }
+}
+
+/* —— 8. 消息侧脊：复用基座 .ai-message.assistant::before（1px 石墨竖线）——
+ * 流式中加宽为 2px 品牌紫呼吸脊（opacity 动画，辉光随整体透明度同步）；
+ * 失败为 2px 红色稳定脊（同特异性下声明顺序靠后，失败优先于流式）；
+ * 完成后状态类移除，自动回落基座静态描边。 */
+.ai-research-shell .ai-message.assistant.is-streaming::before {
+  width: 2px;
+  background: linear-gradient(180deg, var(--accent-bright), rgba(149, 92, 255, 0.28));
+  box-shadow: 0 0 8px rgba(149, 92, 255, 0.4);
+  animation: ai-message-spine-breathe 1.8s var(--ease-out-soft) infinite;
+}
+
+@keyframes ai-message-spine-breathe {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.35; }
+}
+
+.ai-research-shell .ai-message.assistant.is-failed::before {
+  width: 2px;
+  background: linear-gradient(180deg, var(--danger), rgba(255, 77, 79, 0.24));
+  box-shadow: 0 0 8px rgba(255, 77, 79, 0.35);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-message.assistant.is-streaming::before {
+    animation: none;
+    opacity: 0.7;
+  }
+}
+
+/* —— 9. jump-latest 浮 pill：微抬 hover（保留基座 translateX(50%) 居中）+ has-unread 紫调强化——
+ * 基座已有 .has-unread::after 紫点变体，本层只做轻度统一：描边/底色/字色紫调与 hover 抬升。
+ * 触控热区不变（不改 padding / min-height）。 */
+.ai-research-shell .ai-jump-latest {
+  transition: transform var(--dur-fast) var(--ease-out-soft), border-color var(--dur-fast) var(--ease-out-soft), color var(--dur-fast) var(--ease-out-soft), background-color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-jump-latest:hover,
+.ai-research-shell .ai-jump-latest:focus-visible {
+  transform: translateX(50%) translateY(-2px);
+  border-color: var(--line-tinted-strong);
+  color: #e3e6ec;
+}
+
+.ai-research-shell .ai-jump-latest.has-unread {
+  border-color: var(--line-tinted-strong);
+  background: rgba(149, 92, 255, 0.1);
+  color: #cfc2ec;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-jump-latest {
+    transition: none;
+  }
+}
+
+/*
+ * —— B2 波次追加：简单工具内联证据卡（文件尾分节，以上分节 1-9 保持不动） ——
+ * 数据源：AiMessageProcess.AiInlineEvidenceCards（只读简单工具完成后渲染，
+ * 挂载点在 .ai-answer 之后、.ai-message-footer 之前，由 AiResearchWorkspace 一行接线）。
+ * 家族语言与证据 chips（分节 4）一致：紫调细分隔线 + 弱底 + 9-10px 字族。
+ * 约束：纯展示卡，无浮层、无交互、无动画（故无 reduced-motion 分节）；
+ *       完整载荷仍在过程时间轴工具卡的"原始"视图内。
+ */
+
+/* —— 10. 简单工具内联证据卡：答案之后、footer 之上的"结果落地"形态 —— */
+.ai-research-shell .ai-message .ai-inline-evidence {
+  margin-top: 6px;
+  padding-top: 7px;
+  border-top: 1px solid rgba(149, 92, 255, 0.1);
+  display: grid;
+  gap: 4px;
+}
+
+/* 卡片：微标签 + 键值组 + 数据时间单行流式排布，窄容器自动换行 */
+.ai-research-shell .ai-message .ai-inline-evidence-card {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 10px;
+  padding: 6px 8px 7px;
+  border: 1px solid var(--line-tinted);
+  border-radius: 4px;
+  background: rgba(149, 92, 255, 0.05);
+}
+
+/* 工具名微标签：与工具行标题同字族（11px + 1.5px 字距），紫调弱化 */
+.ai-research-shell .ai-message .ai-inline-evidence-tool {
+  flex: 0 0 auto;
+  color: #b3a8cc;
+  font-size: 10px;
+  font-weight: 650;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+/* 键值组：label 弱色 + 值亮色 tabular-nums（与 .ai-tool-kv 同族） */
+.ai-research-shell .ai-message .ai-inline-evidence-kv {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 3px 10px;
+  margin: 0;
+}
+
+.ai-research-shell .ai-message .ai-inline-evidence-item {
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+}
+
+.ai-research-shell .ai-message .ai-inline-evidence-item dt {
+  color: #7d8490;
+  font-size: 9px;
+  white-space: nowrap;
+}
+
+/* 值封顶宽度防长值撑破卡片；截断值完整内容见悬停 title 与过程时间轴"原始"视图 */
+.ai-research-shell .ai-message .ai-inline-evidence-item dd {
+  max-width: 180px;
+  overflow: hidden;
+  margin: 0;
+  color: #d9dde5;
+  font-size: 10px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 数据时间锚点：右对齐弱色，帮助判断数据新鲜度 */
+.ai-research-shell .ai-message .ai-inline-evidence-time {
+  flex: 0 0 auto;
+  margin-left: auto;
+  color: #6f7681;
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+}

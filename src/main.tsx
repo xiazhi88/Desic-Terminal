@@ -2,6 +2,10 @@ import { createRoot } from "react-dom/client";
 import type { ReactNode } from "react";
 import "./startup-original.css";
 import "./styles.css";
+import "./theme/atmosphere.css";
+import "./theme/data-voice.css";
+import "./theme/motion.css";
+import "./theme/signature.css";
 import { i18n, initializeI18n } from "./i18n/runtime";
 
 const searchParams = new URLSearchParams(window.location.search);

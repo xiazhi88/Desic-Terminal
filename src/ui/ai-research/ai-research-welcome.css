@@ -1,0 +1,109 @@
+/*
+ * AI 研究 · 欢迎页样式层（第五层）· 简约版 v4
+ * 级联位置：在 ai-research.css → messages → inspector → process 四层之后加载。
+ * 设计基准：ChatGPT Work 空态——单轴居中构图、单一焦点、静默灰阶、hover 才出现强调色。
+ */
+
+/* —— 空态滚动区：基座 .ai-messages 是 grid+align-content:start，空态时切换为 flex 列，
+   让居中宿主能撑满剩余高度（:has 判定仅在甲板存在时生效，常规会话布局零影响） —— */
+.ai-research-shell .ai-messages:has(.ai-research-welcome-host) {
+  display: flex;
+  flex-direction: column;
+}
+
+/* —— 居中宿主：填满滚动区剩余高度，内容单轴垂直居中（甲板挂在 .ai-messages 内） —— */
+.ai-research-shell .ai-research-welcome-host {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  text-align: center;
+  padding: 24px 0;
+}
+
+.ai-research-shell .ai-research-welcome {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  max-width: min(100%, 760px);
+}
+
+/* —— 标题：空态唯一的声量（对应基座 h1 的放大覆盖） —— */
+.ai-research-shell .ai-research-welcome h1 {
+  margin: 0;
+  font-size: 26px;
+  font-weight: 640;
+  letter-spacing: 0.01em;
+  color: #e8eaf0;
+  text-align: center;
+}
+
+/* —— 快捷建议：静默胶囊，hover 才亮——空态不与标题争夺注意力 —— */
+.ai-research-shell .ai-research-welcome-quick {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
+  margin-top: 26px;
+}
+
+.ai-research-shell .ai-research-welcome-quick button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 36px;
+  padding: 6px 14px;
+  border: 1px solid rgba(174, 186, 210, 0.15);
+  border-radius: 999px;
+  background: transparent;
+  color: #a4aab6;
+  font-size: 12px;
+  line-height: 1.4;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease-out-soft),
+    background-color var(--dur-fast) var(--ease-out-soft),
+    color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-research-welcome-quick button::before {
+  content: "▸";
+  color: #6d7480;
+  font-size: 10px;
+  transition: color var(--dur-fast) var(--ease-out-soft);
+}
+
+.ai-research-shell .ai-research-welcome-quick button:hover,
+.ai-research-shell .ai-research-welcome-quick button:focus-visible {
+  border-color: var(--line-tinted-strong);
+  background: rgba(149, 92, 255, 0.09);
+  color: var(--accent-bright);
+  outline: none;
+}
+
+.ai-research-shell .ai-research-welcome-quick button:hover::before,
+.ai-research-shell .ai-research-welcome-quick button:focus-visible::before {
+  color: var(--accent-dim);
+}
+
+.ai-research-shell .ai-research-welcome-quick button:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+/* —— 动效降级 —— */
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-research-welcome-quick button {
+    transition: none;
+  }
+}
+
+/* —— composer 空态居中变体：收窄到构图列宽（760px），与标题/快捷建议同轴；
+   常规态底部停靠样式由基座层负责，本变体仅在 .ai-research-welcome-host 内生效 —— */
+.ai-research-shell .ai-research-welcome-host .ai-composer-stack {
+  width: min(100%, 760px);
+  margin-top: 28px;
+  background: transparent;
+  padding-bottom: 8px;
+}

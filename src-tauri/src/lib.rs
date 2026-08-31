@@ -4818,8 +4818,14 @@ fn market_icon_data_url(app: tauri::AppHandle, path: String) -> Result<String, S
         return Err("仅支持 PNG 图标缓存".to_string());
     }
     let bytes = fs::read(&icon_path).map_err(|err| format!("读取图标失败: {}", err))?;
+    if image_mime(&bytes).is_none() {
+        // 缓存损坏（误存 HTML 等）：清除并当作未命中，让前端走 ensure_market_icon_data_url 重新下载
+        let _ = std::fs::remove_file(&icon_path);
+        return Ok(String::new());
+    }
     Ok(format!(
-        "data:image/png;base64,{}",
+        "data:{};base64,{}",
+        image_mime(&bytes).unwrap_or("application/octet-stream"),
         general_purpose::STANDARD.encode(bytes)
     ))
 }
@@ -24416,7 +24422,13 @@ async fn download_market_icon(
     path: &PathBuf,
 ) -> Result<(), String> {
     if path.exists() {
-        return Ok(());
+        if let Ok(existing) = std::fs::read(path) {
+            if image_mime(&existing).is_some() {
+                return Ok(());
+            }
+        }
+        // 缓存损坏（如误存的 HTML 挑战页）：删除后重新下载，避免 path.exists() 永久短路
+        let _ = std::fs::remove_file(path);
     }
     let url = format!("{}/{}.png", OKX_ICON_BASE, base);
     let response = client
@@ -24428,17 +24440,34 @@ async fn download_market_icon(
         return Err(format!("icon {} HTTP {}", base, response.status()));
     }
     let bytes = response.bytes().await.map_err(|err| err.to_string())?;
-    const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
-    if bytes.len() < PNG_SIGNATURE.len()
-        || bytes.len() > 2 * 1024 * 1024
-        || &bytes[..PNG_SIGNATURE.len()] != PNG_SIGNATURE
-    {
-        return Err(format!("icon {} did not return a valid PNG", base));
+    if bytes.len() < 8 || bytes.len() > 2 * 1024 * 1024 || image_mime(&bytes).is_none() {
+        return Err(format!("icon {} did not return a recognized image", base));
     }
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|err| err.to_string())?;
     }
     fs::write(path, bytes).map_err(|err| err.to_string())
+}
+
+/// 依据字节魔数识别常见网页图片格式。此前仅接受 PNG，导致 OKX 返回 WebP/AVIF 等
+/// 现代格式时下载被拒、前端落回首字母；现改为格式无关，mime 由实际内容判定。
+fn image_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.len() >= 8 && &bytes[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return Some("image/png");
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return Some("image/webp");
+    }
+    if bytes.len() >= 3 && &bytes[0..3] == b"\xff\xd8\xff" {
+        return Some("image/jpeg");
+    }
+    if bytes.len() >= 4 && &bytes[0..4] == b"GIF8" {
+        return Some("image/gif");
+    }
+    if bytes.len() >= 12 && &bytes[4..8] == b"ftyp" && &bytes[8..12] == b"avif" {
+        return Some("image/avif");
+    }
+    None
 }
 
 async fn download_market_icon_with_retry(

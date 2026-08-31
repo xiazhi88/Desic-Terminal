@@ -1,0 +1,294 @@
+/*
+ * ai-research-process.css — B1 过程可视化层
+ * ------------------------------------------------------------------
+ * 职责：执行过程分段进度条、流式当前工具指示、工具 IO 结构化键值卡与"原始"兜底、工具卡收敛。
+ * 级联位置：在 ai-research.css（基座）/ messages / inspector 之后导入，同特异性时本层胜出。
+ * 边界：B1 agent 独占；流式光标与活动指示归 B2（messages 层/工作区）。
+ * 数据来源：
+ *   - 进度条分段 = AiProcessTimeline 从 message.timeline(kind=tool) 顺序映射到
+ *     AiToolRun.status（done/running/failed/blocked/pending），无时间轴时回退 tools+agents；
+ *   - 键值卡字段 = aiToolPresentation.ts PRESENTATIONS 高频工具 + ai-research/fixtures.ts 实测形状；
+ *   - 动画仅 transform/opacity，reduced-motion 全部降级；触控热区 ≥28px。
+ */
+
+/* —— 1. 过程摘要行：允许换行，进度条独占第二行（展开态与折叠条共用 summary，details 语义不变） —— */
+
+/* 基座 .ai-process > summary 为 inline-flex（styles.css 14328），本层仅开启换行，不改布局方向 */
+.ai-research-shell .ai-process > summary {
+  flex-wrap: wrap;
+  row-gap: 4px;
+}
+
+/* 分段进度条：每个工具调用一段；flex-basis 100% 强制独占摘要文字行下方一行 */
+.ai-research-shell .ai-process > summary .ai-process-progress {
+  min-width: 0;
+  height: 4px;
+  flex-basis: 100%;
+  display: flex;
+  gap: 2px;
+}
+
+.ai-research-shell .ai-process-progress > i {
+  min-width: 5px;
+  flex: 1 1 0;
+  border-radius: 2px;
+  background: #3d424e; /* pending：与基座状态点默认色同族 */
+}
+
+/* 完成 = 紫色实心（var(--accent) 与基座 tool-running 描边同源） */
+.ai-research-shell .ai-process-progress > i.is-done {
+  background: var(--accent);
+}
+
+/* 运行中 = 呼吸（transform/opacity，无布局位移） */
+.ai-research-shell .ai-process-progress > i.is-running {
+  background: var(--accent-bright);
+  animation: ai-process-segment-breathe 1.25s ease-in-out infinite;
+}
+
+/* 失败/阻断 = 红（与基座 .ai-tool-state-dot.failed 同色） */
+.ai-research-shell .ai-process-progress > i.is-failed {
+  background: #e28d9c;
+}
+
+.ai-research-shell .ai-process-progress > i.is-pending {
+  opacity: 0.75;
+}
+
+/* 呼吸：scaleY + opacity，transform-origin 居中，4px 条内收缩不挤占布局 */
+@keyframes ai-process-segment-breathe {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scaleY(0.62);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scaleY(1);
+  }
+}
+
+/* 流式当前工具名：摘要行内的强调 pill，前置呼吸圆点（仅 opacity） */
+.ai-research-shell .ai-process-current-tool {
+  min-width: 0;
+  max-width: 220px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  overflow: hidden;
+  color: var(--accent-bright);
+  font-size: 10px;
+  font-weight: 590;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-research-shell .ai-process-current-tool::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  animation: ai-process-current-pulse 1.25s ease-in-out infinite;
+}
+
+@keyframes ai-process-current-pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+
+  50% {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-research-shell .ai-process-progress > i.is-running,
+  .ai-research-shell .ai-process-current-tool::before {
+    animation: none;
+  }
+}
+
+/* —— 2. 工具 IO 键值卡（AiToolIoSection/AiToolIoCard）与"原始"兜底 —— */
+/* 容器基线对齐基座 .ai-tool-io（ai-research.css 2126：padding-top 6px + 顶部细分隔线） */
+
+.ai-research-shell .ai-tool-io-cards {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(174, 186, 210, 0.1);
+}
+
+/* 头部：微标签"详情" + 右侧"原始/结构化"切换 chip；min-height 28px 保证触控热区 */
+.ai-research-shell .ai-tool-io-cards-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-height: 28px;
+}
+
+.ai-research-shell .ai-tool-io-cards-title {
+  color: #7d8490;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.ai-research-shell .ai-tool-io-toggle {
+  min-height: 28px;
+  padding: 0 9px;
+  border: 1px solid rgba(174, 186, 210, 0.16);
+  border-radius: 4px;
+  background: transparent;
+  color: #9aa1ad;
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  cursor: pointer;
+  transition: border-color 160ms ease-out, color 160ms ease-out, background 160ms ease-out;
+}
+
+.ai-research-shell .ai-tool-io-toggle:hover,
+.ai-research-shell .ai-tool-io-toggle:focus-visible {
+  border-color: rgba(149, 92, 255, 0.45);
+  background: rgba(149, 92, 255, 0.08);
+  color: #eee9f8;
+}
+
+/* 原始视图激活态：chip 常亮提示当前处于 JSON 兜底视图 */
+.ai-research-shell .ai-tool-io-toggle.is-raw {
+  border-color: rgba(149, 92, 255, 0.3);
+  color: var(--accent-bright);
+}
+
+/* 输入/输出双卡：窄容器（inspector、640px 以下）退化为单列 */
+.ai-research-shell .ai-tool-io-cards-grid {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+}
+
+.ai-research-shell .ai-tool-io-card {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 7px 8px;
+  border: 1px solid rgba(174, 186, 210, 0.09);
+  border-radius: 4px;
+  background: #0b0d11; /* 与基座 .ai-tool-io-grid pre 底色一致 */
+}
+
+.ai-research-shell .ai-tool-io-card.is-empty {
+  opacity: 0.72;
+}
+
+.ai-research-shell .ai-tool-io-card-title {
+  color: #767d89;
+  font-size: 8px;
+  font-weight: 650;
+  letter-spacing: 1.5px;
+  text-transform: uppercase;
+}
+
+.ai-research-shell .ai-tool-io-empty {
+  color: #68707d;
+  font-size: 9px;
+}
+
+/* 键值卡：label 弱色 + 值亮色 tabular-nums；每行最多 3 组自动换行
+   —— 列宽 min 取 max(128px, 三分之一行宽)，宽容器封顶 3 列，窄容器自动降为 2/1 列 */
+.ai-research-shell .ai-tool-kv {
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  grid-template-columns: repeat(auto-fill, minmax(max(128px, calc((100% - 12px) / 3)), 1fr));
+  margin: 0;
+}
+
+.ai-research-shell .ai-tool-kv-item {
+  min-width: 0;
+  display: grid;
+  gap: 1px;
+  align-content: start;
+}
+
+.ai-research-shell .ai-tool-kv dt {
+  overflow: hidden;
+  color: #7d8490; /* label 弱色（与 .ai-tool-facts dt 同族） */
+  font-size: 9px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-research-shell .ai-tool-kv dd {
+  margin: 0;
+  color: #d9dde5; /* 值亮色 */
+  font-size: 10px;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* 截断值：文本以 … 结尾（TSX 侧截断），完整内容在"原始"视图，title 悬停可见全文 */
+.ai-research-shell .ai-tool-kv dd.is-truncated {
+  cursor: help;
+}
+
+/* "原始"JSON 兜底视图：对齐基座 .ai-tool-io-grid pre（ai-research.css 2148） */
+.ai-research-shell .ai-tool-io-raw {
+  min-width: 0;
+  max-height: 220px;
+  overflow: auto;
+  margin: 0;
+  padding: 7px;
+  border: 1px solid rgba(174, 186, 210, 0.09);
+  border-radius: 4px;
+  background: #0b0d11;
+  color: #9ca4b0;
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+@media (max-width: 640px) {
+  .ai-research-shell .ai-tool-io-cards-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* —— 3. 工具卡收敛：状态点对齐 + 标题行微标签 —— */
+
+/* AiToolCard 标题内新增状态点：与 .ai-tool-trace 摘要行状态点同尺寸（基座 6px）、垂直居中、贴左对齐 */
+.ai-research-shell .ai-tool-title > .ai-tool-state-dot {
+  flex: 0 0 auto;
+}
+
+/* 标题行微标签语言：≤11px + letter-spacing 1.5px（字号与基座 G 代一致，本层补字距） */
+.ai-research-shell .ai-tool-title > span,
+.ai-research-shell .ai-tool-trace-action {
+  font-size: 11px;
+  letter-spacing: 1.5px;
+}
+
+/* 技术名 code 不继承微标签字距，保持 9px 紧排 */
+.ai-research-shell .ai-tool-title > code {
+  letter-spacing: 0.02em;
+}
+
+/* 扫描线动画 ai-running-scan（基座 4360/4702）保留，本层不覆盖、不删除。 */
+
+/* —— 4. B2 工具 IO 递归扁平化：条目触顶提示行 ——
+ * 递归扁平化达到 AI_TOOL_IO_ROW_CAP 上限时，卡片底部追加一行弱提示，
+ * 指向"原始"视图（数据不丢，卡片不承担展开职责）。无交互、无动画。 */
+.ai-research-shell .ai-tool-io-note {
+  color: #68707d;
+  font-size: 9px;
+  letter-spacing: 0.02em;
+}

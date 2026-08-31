@@ -3,6 +3,7 @@ import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
 import { Activity, Copy, Loader2, Maximize2, Minus, RefreshCw, X } from "lucide-react";
 import clsx from "clsx";
+import { useBump } from "./useBump";
 import type {
   Candle,
   ChartOrderLine,
@@ -336,6 +337,8 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
   const [marketAssets, setMarketAssets] = useState<MarketAssetsSummary | null>(null);
   const [candles, setCandles] = useState<Candle[]>([]);
   const [ticker, setTicker] = useState<Ticker | null>(null);
+  // 独立图表窗主价跳动：ticker.last 为 OKX 字符串报价，取数值以获得涨跌方向。
+  const marketPriceBump = useBump(Number(ticker?.last));
   const [orderBook, setOrderBook] = useState<OrderBook | null>(null);
   const [trades, setTrades] = useState<Trade[]>([]);
   const [fundingRate, setFundingRate] = useState<FundingRate | null>(null);
@@ -653,7 +656,7 @@ function LegacySingleChartWindowPage({ initialWindowLabel }: { initialWindowLabe
           <span data-tauri-drag-region>{timeframe} · {t("chart:perpetualChart")}</span>
         </div>
         <div className="chart-window-market" data-tauri-drag-region>
-          <strong className={Number(ticker?.last) >= Number(ticker?.open24h) ? "up" : "down"}>{fmtPrice(ticker?.last)}</strong>
+          <strong className={`${Number(ticker?.last) >= Number(ticker?.open24h) ? "up" : "down"} ${marketPriceBump.className}`.trim()} onAnimationEnd={marketPriceBump.onAnimationEnd}>{fmtPrice(ticker?.last)}</strong>
           <span>{t("trading:fundingRate")} {fundingRate ? `${(Number(fundingRate.fundingRate) * 100).toFixed(4)}%` : "--"}</span>
           <span className="chart-window-live-state"><i />{statusLabel}</span>
         </div>

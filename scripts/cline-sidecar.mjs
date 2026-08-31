@@ -1017,7 +1017,7 @@ const PLACE_ORDER_SCHEMA = {
     action: { type: "string", enum: ["long", "short", "close-long", "close-short"] },
     price: { type: "string" },
     size: { type: "string" },
-    lever: { type: "string", description: "Must equal the Profile target leverage. Runtime overwrites any different model value with the immutable Profile target." },
+    lever: { type: "string", description: "Must equal the Profile target leverage. Runtime overwrites any different model value with that immutable Profile target." },
     environment: { type: "string", enum: ["demo", "live"] },
     confirmedLive: { type: "boolean" },
     opportunityId: { type: "string" },
@@ -1086,11 +1086,11 @@ const SET_LEVERAGE_SCHEMA = {
   required: ["instId", "mgnMode", "lever", "environment", "reason"],
   properties: {
     accountId: { type: "string", description: "Profile-bound account id. Runtime overwrites this value." },
-    instId: { type: "string", description: "Instrument from the current Profile scope, for example BTC-USDT-SWAP." },
+    instId: { type: "string", description: "Instrument from the current Profile scope." },
     mgnMode: { type: "string", enum: ["cross", "isolated"], description: "Use the same margin mode that produced the leverage mismatch in trade.precheck." },
-    lever: { type: "string", description: "Profile target leverage written as a decimal string, for example \"20\". Runtime overwrites any different value with the immutable Run target." },
+    lever: { type: "string", description: "Profile target leverage as a decimal string. Runtime overwrites any different value with the immutable Run target." },
     environment: { type: "string", enum: ["demo", "live"], description: "Profile-bound environment. Runtime overwrites this value." },
-    reason: { type: "string", minLength: 1, description: "Briefly state that precheck found the current leverage different from the Profile target." }
+    reason: { type: "string", minLength: 1, description: "State that precheck found the current leverage different from the Profile target." }
   }
 };
 
@@ -1112,7 +1112,7 @@ const CLOSE_POSITION_SCHEMA = {
 
 const TRADE_OPPORTUNITY_SCHEMA = {
   type: "object",
-  description: "Create a saved trade opportunity. In limited_auto profiles the backend may approve and execute it automatically. Use intent=cancel/amend for order-management opportunities instead of direct cancel/amend tools.",
+  description: "Saved trade opportunity. Use intent=cancel/amend for order-management opportunities instead of direct cancel/amend tools.",
   additionalProperties: false,
   required: ["environment", "instId", "tdMode", "intent", "direction", "orderType", "reason"],
   properties: {
@@ -1128,19 +1128,19 @@ const TRADE_OPPORTUNITY_SCHEMA = {
     exitKind: {
       type: "string",
       enum: ["take_profit", "stop_loss", "strategy_exit", "emergency"],
-      description: "Required for intent=close. Distinguishes profit-taking from invalidation protection."
+      description: "Required for intent=close; distinguishes profit-taking from invalidation protection."
     },
     closeFraction: { type: "string", description: "Optional fraction of the current position represented by this close opportunity; size remains the authoritative contract quantity." },
     direction: { type: "string", enum: ["long", "short"] },
     size: {
       type: "string",
       pattern: "^(?:0*[1-9]\\d*(?:\\.\\d+)?|0*\\.\\d*[1-9]\\d*)$",
-      description: "Open/close order size in OKX contract units (张), strictly greater than 0. Never use 0 as a no-action placeholder. For amend, this can be the new order size. Not required for cancel."
+      description: "Open/close order size in OKX contract units (张), strictly greater than 0; never use 0 as a no-action placeholder. For amend, this can be the new order size. Not required for cancel."
     },
     orderType: {
       type: "string",
       enum: ["limit", "market", "trigger", "cancel", "amend"],
-      description: "Use limit/market/trigger for open/close. For intent=close, pair exitKind=take_profit with limit/market, exitKind=stop_loss with trigger/market, and exitKind=emergency with market. A trigger is its own planned entry or protective exit and cannot carry takeProfit/stopLoss. Use cancel for intent=cancel and amend for intent=amend."
+      description: "Use limit/market/trigger for open/close. For intent=close, pair exitKind=take_profit with limit/market, exitKind=stop_loss with trigger/market and exitKind=emergency with market. A trigger is its own planned entry or protective exit and cannot carry takeProfit/stopLoss. Use cancel for intent=cancel and amend for intent=amend."
     },
     price: {
       type: "string",
@@ -1150,8 +1150,8 @@ const TRADE_OPPORTUNITY_SCHEMA = {
     clientOrderId: { type: "string", description: "Target regular OKX clOrdId for cancel/amend opportunity." },
     algoId: { type: "string", description: "Target OKX algoId for cancelling an algo order." },
     algoClientOrderId: { type: "string", description: "Target OKX algoClOrdId for cancelling an algo order." },
-    newPrice: { type: "string", description: "Alias for amend new order price. Backend stores it as opportunity price." },
-    newSize: { type: "string", description: "Alias for amend new order size. Backend stores it as opportunity size." },
+    newPrice: { type: "string", description: "Amend alias for the new order price; the backend stores it as opportunity price." },
+    newSize: { type: "string", description: "Amend alias for the new order size; the backend stores it as opportunity size." },
     lever: { type: "string" },
     entryCondition: { type: "string" },
     takeProfit: {
@@ -1188,7 +1188,7 @@ const TRADE_OPPORTUNITY_SCHEMA = {
     reason: { type: "string" },
     expiresAt: {
       type: "integer",
-      description: "Unix epoch milliseconds (13 digits), in the same unit as Date.now(). Example: 1783947801000. Do not use 10-digit epoch seconds."
+      description: "Unix epoch milliseconds (13 digits, Date.now() units). Do not use 10-digit epoch seconds."
     },
     relatedOpportunityId: { type: "string" },
     duplicateResolution: { type: "string", enum: ["reuse", "revise", "create_new"] },
@@ -1311,7 +1311,7 @@ const TRADE_OPPORTUNITY_MUTATION_SCHEMA = {
         riskNotes: { type: "array", items: { type: "string" } },
         expiresAt: {
           type: ["integer", "null"],
-          description: "Unix epoch milliseconds (13 digits), in the same unit as Date.now(). Do not use 10-digit epoch seconds."
+          description: "Unix epoch milliseconds (13 digits, Date.now() units). Do not use 10-digit epoch seconds."
         }
       }
     }
@@ -1339,7 +1339,7 @@ const WAKE_CONDITION_SCHEMA = {
         type: { const: "timer" },
         atMs: {
           type: ["integer", "null"],
-          description: "Future Unix epoch time in milliseconds (13 digits), in the same unit as Date.now(). Example: 1783947801000. Do not use 10-digit epoch seconds."
+          description: "Future Unix epoch time in milliseconds (13 digits, Date.now() units)."
         },
         intervalMinutes: { type: ["integer", "null"], minimum: 1, maximum: 1440 }
       }
@@ -1463,7 +1463,7 @@ const BACKGROUND_FINISH_RUN_SCHEMA = {
         mode: { type: "string", enum: ["any", "all"] },
         expiresAt: {
           type: ["integer", "null"],
-          description: "Optional wake-plan expiry as Unix epoch milliseconds (13 digits), in the same unit as Date.now(). Example: 1783947801000. Omit or use null for no expiry; never use 10-digit epoch seconds."
+          description: "Optional wake-plan expiry as Unix epoch milliseconds (13 digits, Date.now() units). Omit or use null for no expiry."
         },
         conditions: {
           type: "array",
@@ -1608,7 +1608,7 @@ const RADAR_RANKING_SCHEMA = {
     category: {
       type: "string",
       enum: ["all", "crypto", "stock", "commodity", "fx", "bond", "1", "3", "4", "5", "6"],
-      description: "Optional market category. Omit it or use all for the complete cross-market universe."
+      description: "Omit or use all for the complete cross-market universe."
     },
     savedFilterId: {
       type: ["string", "null"],
@@ -1726,9 +1726,9 @@ const READ_INDICATORS_SCHEMA = {
   additionalProperties: false,
   required: ["instId", "bar", "indicators"],
   properties: {
-    instId: { type: "string", description: "OKX perpetual instrument id, for example BTC-USDT-SWAP." },
-    bar: { type: "string", description: "Candle interval used for every requested indicator, for example 1m, 5m, 1H, 4H or 1D." },
-    limit: { type: "integer", minimum: 30, maximum: 1000, description: "Number of confirmed candles to load. Use at least several times the longest requested period." },
+    instId: { type: "string", description: "OKX perpetual instrument id." },
+    bar: { type: "string", description: "Candle interval used for every requested indicator." },
+    limit: { type: "integer", minimum: 30, maximum: 1000, description: "Confirmed candles to load. Use at least several times the longest requested period." },
     startTime: { type: "integer", description: "Inclusive window start in Unix epoch milliseconds." },
     endTime: { type: "integer", description: "Inclusive window end in Unix epoch milliseconds." },
     indicators: {
@@ -1773,8 +1773,8 @@ const TRADE_PRECHECK_SCHEMA = {
     orderType: { type: "string", enum: ["limit", "market", "trigger"] },
     ticketMode: { type: "string", enum: ["open", "close"] },
     price: { type: "string", description: "Actual planned order or reference price used for precheck calculations." },
-    stopPrice: { type: "string", description: "Technical invalidation or stop trigger price. For long it must be below entry; for short it must be above entry. The backend calculates contract-value-aware stop loss when provided." },
-    targetPrice: { type: "string", description: "Planned take-profit price. For long it must be above entry; for short it must be below entry. When provided, precheck returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
+    stopPrice: { type: "string", description: "Technical invalidation or stop trigger price; below entry for long, above for short. When provided the backend calculates contract-value-aware stop loss." },
+    targetPrice: { type: "string", description: "Planned take-profit price; above entry for long, below for short. When provided, precheck returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
     atr: { type: "string", description: "Optional ATR price distance. The backend converts it into oneAtrPriceLossUsdt and oneAtrRiskPctOfEquity for the requested size." },
     size: { type: "string", description: "OKX contract count. May be fractional; use minSz exactly and align to lotSz without rounding to a whole contract." },
     lever: { type: "string", description: "Current planned or OKX-synced leverage, not the instrument maximum leverage." }
@@ -1789,10 +1789,10 @@ const TRADE_EVALUATE_PLAN_SCHEMA = {
     accountId: { type: "string" },
     instId: { type: "string" },
     orderType: { type: "string", enum: ["limit", "market", "trigger"] },
-    action: { type: "string", enum: ["long", "short"], description: "Trade direction. Required when targetPrice is provided so long/short net target economics are not inferred from prices." },
+    action: { type: "string", enum: ["long", "short"], description: "Required when targetPrice is provided, so long/short net target economics are not inferred from prices." },
     price: { type: "string", description: "Planned entry price. Omit to use the current memory ticker." },
     stopPrice: { type: "string", description: "Optional technical invalidation price." },
-    targetPrice: { type: "string", description: "Optional planned take-profit price. With action, returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
+    targetPrice: { type: "string", description: "Optional take-profit price. With action, returns fee-adjusted break-even, target net profit, fee drag and net reward/risk." },
     atr: { type: "string", description: "Optional ATR price distance from market.readIndicators. The backend converts it into account PnL for the selected contract size." },
     size: { type: "string", description: "Optional OKX contract count. Omit to evaluate minSz." },
     lever: { type: "string", description: "Planned leverage. Background Profiles inject their frozen target leverage." }
@@ -2093,9 +2093,9 @@ const INTELLIGENCE_SMART_MONEY_BASE_PROPERTIES = {
   topInstruments: { type: "integer", minimum: 1, maximum: 100 },
   updateTime: { type: "string" },
   ts: { type: "string", pattern: "^[0-9]{13}$", description: "Historical cutoff as a 13-digit Unix epoch millisecond string. Runtime converts it to OKX UTC+8-hour dataVersion and never sends ts upstream." },
-  dataVersion: { type: "string", pattern: "^[0-9]{10}$", description: "Optional OKX UTC+8-hour version in yyyyMMddHH format. Use only for signal history, never for overview." },
+  dataVersion: { type: "string", pattern: "^[0-9]{10}$", description: "Optional OKX UTC+8-hour version in yyyyMMddHH format. Signal history only, never for overview." },
   granularity: { type: "string", enum: ["1h", "1d"] },
-  period: { type: "string", enum: ["3", "7", "30", "90"], description: "Trader win-rate calculation window in days. It does not select the signal history time range." },
+  period: { type: "string", enum: ["3", "7", "30", "90"], description: "Trader win-rate window in days. It does not select the signal history time range." },
   lmtNum: { type: "integer", minimum: 1, maximum: 2000 },
   after: { type: "string" },
   before: { type: "string" },
@@ -2108,9 +2108,9 @@ const INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA = {
   properties: {
     ...INTELLIGENCE_SMART_MONEY_BASE_PROPERTIES,
     sortType: { type: "string", enum: ["pnl", "pnl_ratio"], description: "Leaderboard ranking field." },
-    pnl: { type: "string", pattern: "^-?[0-9]+(?:\\.[0-9]+)?$", description: "Minimum trader PnL in USD as a numeric string, for example \"10000\"." },
-    winRatio: { type: "string", pattern: "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$", description: "Minimum trader win ratio from 0 to 1, for example \"0.8\" means 80%." },
-    maxRetreat: { type: "string", pattern: "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$", description: "Maximum trader drawdown ratio from 0 to 1, for example \"0.1\" means 10%." },
+    pnl: { type: "string", pattern: "^-?[0-9]+(?:\\.[0-9]+)?$", description: "Minimum trader PnL in USD as a numeric string." },
+    winRatio: { type: "string", pattern: "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$", description: "Minimum trader win ratio from 0 to 1." },
+    maxRetreat: { type: "string", pattern: "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$", description: "Maximum trader drawdown ratio from 0 to 1." },
     asset: { type: "string", pattern: "^[0-9]+(?:\\.[0-9]+)?$", description: "Minimum trader assets in USD as a numeric string." }
   },
   required: []
@@ -2123,8 +2123,8 @@ const INTELLIGENCE_SMART_MONEY_SIGNAL_SCHEMA = {
     ...INTELLIGENCE_SMART_MONEY_BASE_PROPERTIES,
     sortType: { type: "string", enum: ["pnl", "pnlRatio"], description: "Signal-pool ranking basis." },
     pnl: { type: "string", pattern: "^PNL_[A-Z0-9_]+$", description: "Signal-pool PnL percentile enum, such as PNL_TOP20. It is not a USD amount." },
-    winRatio: { type: "string", pattern: "^WR_[A-Z0-9_]+$", description: "Signal-pool win-rate threshold enum, such as WR_GE_80. It is not 0.8." },
-    maxRetreat: { type: "string", pattern: "^MR_[A-Z0-9_]+$", description: "Signal-pool drawdown threshold enum, such as MR_LE_20. It is not 0.2." },
+    winRatio: { type: "string", pattern: "^WR_[A-Z0-9_]+$", description: "Signal-pool win-rate threshold enum, such as WR_GE_80. Not 0.8." },
+    maxRetreat: { type: "string", pattern: "^MR_[A-Z0-9_]+$", description: "Signal-pool drawdown threshold enum, such as MR_LE_20. Not 0.2." },
     asset: { type: "string", pattern: "^AUM_[A-Z0-9_]+$", description: "Signal-pool AUM percentile enum, such as AUM_TOP20. It is not a USD amount." }
   },
   required: []
@@ -2160,7 +2160,7 @@ const INTELLIGENCE_DERIVATIVES_SCHEMA = {
   additionalProperties: false,
   required: ["instId"],
   properties: {
-    instId: { type: "string", description: "USDT or USDS linear perpetual instrument id, for example BTC-USDT-SWAP." },
+    instId: { type: "string", description: "USDT or USDS linear perpetual instrument id." },
     period: { type: "string", enum: ["5m", "1H", "4H", "1D"] },
     startTime: { type: "integer", description: "Unix epoch milliseconds." },
     endTime: { type: "integer", description: "Unix epoch milliseconds." },
@@ -2173,7 +2173,7 @@ const INTELLIGENCE_DERIVATIVE_DECISION_CONTEXT_SCHEMA = {
   additionalProperties: false,
   required: ["instId"],
   properties: {
-    instId: { type: "string", description: "USDT or USDS linear perpetual instrument id, for example BTC-USDT-SWAP." },
+    instId: { type: "string", description: "USDT or USDS linear perpetual instrument id." },
     endTime: { type: "integer", description: "Decision cutoff as Unix epoch milliseconds. Defaults to the current time." }
   }
 };
@@ -2318,7 +2318,7 @@ function createDesicTools(sessionId, options = {}) {
     const modelInputSchema = toProviderToolReferenceValue(providerInputSchema);
     return createTool({
       name: providerName,
-      description: `${toProviderToolReferences(description)}\nCallable tool name: ${providerName}. Use this exact name.`,
+      description: `${toProviderToolReferences(description)}\nCallable tool name: ${providerName}.`,
       inputSchema: modelInputSchema,
       execute: async (input, context) => {
         const normalizedInput = normalizeProviderToolInput(name, input);
@@ -2356,32 +2356,32 @@ function createDesicTools(sessionId, options = {}) {
 
   const tools = [
     tool("market.readTicker", "Read the latest OKX ticker for an instrument.", READ_TICKER_SCHEMA),
-    tool("market.readInstrument", "Read OKX swap contract specifications for an instrument, including contract value, minSz, lotSz, tickSz, max sizes, max leverage and trading state. minSz and lotSz may be fractional contracts; never round them up to a whole contract.", READ_INSTRUMENT_SCHEMA),
-    tool("market.readOrderBook", "Read one live OKX order-book snapshot for an instrument. Always cite observedAt and snapshotId/seqId. Results with different snapshotId/seqId are different observations and may only be described as market changes, never as proof that an earlier snapshot was calculated incorrectly.", READ_ORDER_BOOK_SCHEMA),
+    tool("market.readInstrument", "Read OKX swap contract specifications for an instrument: contract value, minSz, lotSz, tickSz, max sizes, max leverage and trading state. minSz and lotSz may be fractional contracts; never round them up to a whole contract.", READ_INSTRUMENT_SCHEMA),
+    tool("market.readOrderBook", "Read one live OKX order-book snapshot for an instrument. Always cite observedAt and snapshotId/seqId. Snapshots with different snapshotId/seqId are different observations and may only be described as market changes, never as proof that an earlier snapshot was calculated incorrectly.", READ_ORDER_BOOK_SCHEMA),
     tool("market.readRecentTrades", "Read recent OKX public trades for an instrument.", READ_RECENT_TRADES_SCHEMA),
-    tool("market.readCandles", "Read candlesticks merged by 1m timestamp from local SQLite and the recent Business WebSocket memory buffer; memory updates override older local values without regressing confirm=true. Non-1m bars are aggregated after that merge. Current-window reads verify the recent confirmed 1m tail and return local evidence immediately; when gaps exist, one per-instrument deduplicated public OKX repair is queued in the background. Inspect latestConfirmedAt, expectedLatestConfirmedAt, stale, staleReason and refreshStatus; never describe stale candles as current. All returned time/openTimeMs/closeTimeMs/observedAt and input startTime/endTime values use Unix epoch milliseconds. confirm=true means that candle is closed; derivative bucketStatus does not change candle confirmation.", READ_CANDLES_SCHEMA),
+    tool("market.readCandles", "Read candlesticks merged by 1m timestamp from local SQLite and the recent Business WebSocket memory buffer; memory updates override older local values without regressing confirm=true, and non-1m bars aggregate after that merge. Current-window reads verify the confirmed 1m tail, return local evidence immediately and queue one deduplicated per-instrument public OKX background repair when gaps exist. Inspect latestConfirmedAt, expectedLatestConfirmedAt, stale, staleReason and refreshStatus; never describe stale candles as current. All times are Unix epoch milliseconds. confirm=true means the candle is closed; derivative bucketStatus never changes confirmation.", READ_CANDLES_SCHEMA),
     tool("market.readFundingRate", "Read OKX swap funding rate for an instrument.", READ_FUNDING_RATE_SCHEMA),
-    tool("market.readDecisionContext", "Create a unique 60-second final decision context only for a complete, executable candidate that is about to be submitted through background tradeOpportunity.create. It reads the latest ticker, order book, recent trades, current candle, account state, leverage and open orders, reruns trade.precheck, and returns objective differences from the Run's initial snapshot. It never tells you whether to trade and is never shared or cached across calls. Do not call it for wait/abandon when there is no new candidate; never pass size=0 or omit price for limit/trigger. Call it again after any candidate change.", DECISION_CONTEXT_SCHEMA),
+    tool("market.readDecisionContext", "Create a unique 60-second final decision context only for a complete, executable candidate about to be submitted via background tradeOpportunity.create. Reads the latest ticker, order book, recent trades, current candle, account state, leverage and open orders, reruns trade.precheck, and returns objective differences from the Run's initial snapshot. Never advises whether to trade and is never shared or cached across calls. Do not call for wait/abandon with no new candidate; never pass size=0 or omit price for limit/trigger. Call again after any candidate change.", DECISION_CONTEXT_SCHEMA),
     tool("market.scanWatchlist", "Scan watchlist or specified OKX swap instruments with ticker, funding, order-book pressure and candle summaries.", MARKET_SCAN_SCHEMA),
-    tool("market.readIndicators", "Calculate indicators from local OKX candles. Example input: {\"instId\":\"BTC-USDT-SWAP\",\"bar\":\"1H\",\"limit\":240,\"indicators\":[\"ema20\",\"ema50\",\"rsi14\",\"bb20\",\"atr14\",\"macd\",\"vwap\"]}. The numeric suffix is the lookback period from 1 to 500. Unsuffixed defaults are sma20, ema21, rsi14, boll20 and atr14. MACD, VWAP and Volume Profile currently use fixed internal parameters.", READ_INDICATORS_SCHEMA),
-    radarEnabled ? tool("radar.readRanking", "Read one persisted Market Radar cross-market ranking. Call this with radar.readBreadth for broad current-market analysis or market-overview work that does not name one instrument. For the latest all-market ranking, omit asOf and category, and send savedFilterId as null or omit it. Use savedFilterId only with an exact id returned by radar.listSavedFilters; do not synthesize a placeholder string. globalRank is the saved all-market composite rank; scopeRank is recomputed for the requested category, saved deterministic filter and rankingBasis. This is low-frequency research priority, not a trading signal.", RADAR_RANKING_SCHEMA) : null,
+    tool("market.readIndicators", "Calculate indicators from local OKX candles. The numeric suffix is the lookback period (1-500), e.g. ema20; unsuffixed defaults are sma20, ema21, rsi14, boll20 and atr14. MACD, VWAP and Volume Profile currently use fixed internal parameters.", READ_INDICATORS_SCHEMA),
+    radarEnabled ? tool("radar.readRanking", "Read one persisted Market Radar cross-market ranking. Pair with radar.readBreadth for broad current-market or overview work that does not name one instrument. Latest all-market ranking: omit asOf and category; send savedFilterId null or omit it. Use savedFilterId only with an exact id returned by radar.listSavedFilters; do not synthesize a placeholder. globalRank is the saved all-market composite rank; scopeRank is recomputed for the requested category, saved deterministic filter and rankingBasis. Low-frequency research priority, not a trading signal.", RADAR_RANKING_SCHEMA) : null,
     radarEnabled ? tool("radar.readInstrumentEvidence", "Read one instrument from the latest or point-in-time Market Radar snapshot, including weighted component contributions and 1h/24h/7d global-rank changes. Positive rank deltas mean improvement.", RADAR_INSTRUMENT_SCHEMA) : null,
     radarEnabled ? tool("radar.compareMarkets", "Compare 2 to 4 instruments against the same persisted Market Radar snapshot. Do not compare values from different snapshotAt timestamps as if contemporaneous.", RADAR_COMPARE_SCHEMA) : null,
-    radarEnabled ? tool("radar.readBreadth", "Default first evidence call for broad current-market analysis, market overview, market condition or participation-strength questions that do not name one instrument. Read all-market and category breadth from the latest persisted Market Radar snapshot, including advancing share, history coverage, median change, median composite score and category strength rank.", EMPTY_OBJECT_SCHEMA) : null,
+    radarEnabled ? tool("radar.readBreadth", "Default first evidence call for broad current-market, overview, market-condition or participation-strength questions that do not name one instrument. Reads all-market and category breadth from the latest persisted Market Radar snapshot: advancing share, history coverage, median change, median composite score and category strength rank.", EMPTY_OBJECT_SCHEMA) : null,
     radarEnabled ? tool("radar.readRankHistory", "Read an instrument's persisted hourly Market Radar rank and score history for up to 90 days. Rows are returned newest first and include modelVersion for reproducibility.", RADAR_HISTORY_SCHEMA) : null,
-    radarEnabled ? tool("radar.readValidationReport", "Read the point-in-time Market Radar effectiveness report using only saved historical universes and later confirmed daily candles. Inspect status, snapshotDates, observations, modelVersions and limitations before interpreting IC or quantile spreads.", RADAR_VALIDATION_SCHEMA) : null,
+    radarEnabled ? tool("radar.readValidationReport", "Read the point-in-time Market Radar effectiveness report, built only from saved historical universes and later confirmed daily candles. Inspect status, snapshotDates, observations, modelVersions and limitations before interpreting IC or quantile spreads.", RADAR_VALIDATION_SCHEMA) : null,
     radarEnabled ? tool("radar.listSavedFilters", "List persisted deterministic Market Radar filter definitions. This tool is read-only and cannot create, update or delete filters.", EMPTY_OBJECT_SCHEMA) : null,
     tool("account.readSnapshot", "Read the configured OKX balances, positions and open orders. For USDT perpetual risk, use balanceSemantics.usdtEquity/availableUsdt; other currency quantities are informational and explicitly excluded.", READ_ACCOUNT_SCHEMA),
     tool("account.readBalances", "Read configured OKX balances. For USDT perpetual risk, use usdtEquity/availableUsdt and never add raw quantities from different currencies.", READ_ACCOUNT_SCHEMA),
     tool("account.readPositions", "Read configured OKX account positions only.", READ_ACCOUNT_SCHEMA),
     tool("account.readOpenOrders", "Read configured OKX open regular and algo orders only.", READ_ACCOUNT_SCHEMA),
     tool("account.readOrderStatus", "Read one OKX order status by ordId/clOrdId or algoId/algoClOrdId, using memory, local history and OKX fallback.", READ_ORDER_STATUS_SCHEMA),
-    tool("account.readRisk", "Read a compact account risk view for USDT perpetual trading. totalEq/usdtEquity and availableUsdt include USDT only; non-USDT dust is excluded metadata and must not affect opening capacity or risk budget. Background Profiles also receive per-instrument minimum-order evaluations from the deterministic trade domain. effectiveExposureMultiple is gross notional/equity and the approximate equity-percent sensitivity to a 1% underlying move; notionalPctOfEquity is that multiple times 100, not margin occupancy or a tolerance conclusion.", READ_ACCOUNT_SCHEMA),
-    tool("account.readHistoricalOrders", "Read synchronized local OKX order history with optional filters. startTime/endTime are Unix epoch milliseconds. An empty local result is not proof that the remote OKX account has never placed orders; inspect the returned source and synchronization context.", HISTORICAL_READ_SCHEMA),
-    tool("account.readHistoricalFills", "Read synchronized local OKX fill history with optional filters. startTime/endTime are Unix epoch milliseconds. An empty local result is not proof that the remote OKX account has never traded; inspect the returned source and synchronization context.", HISTORICAL_READ_SCHEMA),
+    tool("account.readRisk", "Compact USDT perpetual account risk view. totalEq/usdtEquity and availableUsdt include USDT only; non-USDT dust is excluded metadata and must not affect opening capacity or risk budget. Background Profiles also get per-instrument minimum-order evaluations from the deterministic trade domain. effectiveExposureMultiple is gross notional/equity and the approximate equity-percent sensitivity to a 1% underlying move; notionalPctOfEquity is that times 100, not margin occupancy or a tolerance conclusion.", READ_ACCOUNT_SCHEMA),
+    tool("account.readHistoricalOrders", "Read synchronized local OKX order history with optional filters. startTime/endTime are Unix epoch milliseconds. An empty local result does not prove the remote OKX account has never placed orders; inspect the returned source and synchronization context.", HISTORICAL_READ_SCHEMA),
+    tool("account.readHistoricalFills", "Read synchronized local OKX fill history with optional filters. startTime/endTime are Unix epoch milliseconds. An empty local result does not prove the remote OKX account has never traded; inspect the returned source and synchronization context.", HISTORICAL_READ_SCHEMA),
     tool("account.readBills", "Read locally stored OKX account bills with optional filters.", HISTORICAL_READ_SCHEMA),
     tool("account.readPositionEpisodes", "Read locally built position episodes with optional filters.", HISTORICAL_READ_SCHEMA),
-    intelligenceEnabled ? tool("intelligence.news.list", "Read the current local news snapshot. The result includes dataAt, fetchedAt, ageMs, staleReason, coverage, limitations and background refresh status. Missing or stale data is queued for refresh without blocking this Agent.", INTELLIGENCE_NEWS_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.news.list", "Read the current local news snapshot: dataAt, fetchedAt, ageMs, staleReason, coverage, limitations and background refresh status. Missing or stale data is queued for refresh without blocking this Agent.", INTELLIGENCE_NEWS_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.news.search", "Search the current local news snapshot by keyword, coin, source, sentiment and time window. This tool never performs synchronous HTTP; inspect freshness metadata and limitations.", INTELLIGENCE_NEWS_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.news.readDetail", "Read a cached full news article by record id. A cache miss is returned as a data gap and queued for background refresh.", INTELLIGENCE_NEWS_DETAIL_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.news.listSources", "List available OKX news sources.", { type: "object", properties: {}, required: [] }) : null,
@@ -2394,51 +2394,51 @@ function createDesicTools(sessionId, options = {}) {
     intelligenceEnabled ? tool("intelligence.news.readMarketReaction", "Read per-instrument +5m, +30m, +2h and +24h market reaction evidence; multi-coin events return separate linear perpetual reactions and all-market events explicitly use a BTC market proxy.", INTELLIGENCE_NEWS_EVENT_DETAIL_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.news.listAnomalies", "Read stored derivatives anomalies related to a linear perpetual instrument.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.news.readDailyBriefing", "Read optional, pre-generated daily market briefings and their evidence metadata. Empty items mean no briefing was generated, not that source market data failed.", INTELLIGENCE_BRIEFING_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.listTradersByFilter", "Read the local Smart Money trader snapshot. This never waits for HTTP; inspect dataAt, fetchedAt, ageMs, staleReason, refreshStatus, coverage and limitations. pnl/asset are numeric USD thresholds and winRatio/maxRetreat are numeric ratios; do not pass signal-pool enums.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.listTradersByFilter", "Read the local Smart Money trader snapshot; never waits for HTTP. Inspect dataAt, fetchedAt, ageMs, staleReason, refreshStatus, coverage and limitations. pnl/asset are numeric USD thresholds and winRatio/maxRetreat numeric ratios; do not pass signal-pool enums.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.searchTrader", "Resolve an OKX Smart Money trader nickname to authorId.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readPerformanceByTrader", "Read performance for known Smart Money trader ids.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readTraderPositions", "Read a Smart Money trader's current full position book.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readTraderPositionHistory", "Read a Smart Money trader's closed-position history.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readTraderOrderHistory", "Read a Smart Money trader's order and fill history.", INTELLIGENCE_SMART_MONEY_TRADER_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalOverviewByFilter", "Read the current-hour linear-contract Smart Money consensus for a filtered trader pool. Do not pass ts or dataVersion; OKX overview always returns the current hour. Signal filters use enums such as PNL_TOP20 and WR_GE_80, not numeric leaderboard thresholds.", INTELLIGENCE_SMART_MONEY_SIGNAL_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalOverviewByFilter", "Read current-hour linear-contract Smart Money consensus for a filtered trader pool. Do not pass ts or dataVersion; OKX overview always returns the current hour. Signal filters use enums such as PNL_TOP20 and WR_GE_80, not numeric leaderboard thresholds.", INTELLIGENCE_SMART_MONEY_SIGNAL_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readSignalOverviewByTrader", "Read current-hour linear-contract consensus for selected trader ids. Pass authorIds, but do not pass ts or dataVersion.", INTELLIGENCE_SMART_MONEY_SIGNAL_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalTrendByFilter", "Read historical linear-contract Smart Money consensus for a filtered pool. Pass full instId, a 13-digit cutoff ts, granularity and limit; runtime converts ts to OKX UTC+8-hour dataVersion and never sends ts upstream. Example: {\"instId\":\"BTC-USDT-SWAP\",\"ts\":\"1784808000000\",\"granularity\":\"1h\",\"limit\":24,\"period\":\"7\"}.", INTELLIGENCE_SMART_MONEY_TREND_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalTrendByTrader", "Read historical linear-contract consensus for selected trader ids. Pass authorIds with full instId, 13-digit cutoff ts, granularity and limit; runtime converts the cutoff to OKX UTC+8-hour dataVersion.", INTELLIGENCE_SMART_MONEY_TREND_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalTrendByFilter", "Read historical linear-contract Smart Money consensus for a filtered pool. Pass full instId, a 13-digit cutoff ts, granularity and limit.", INTELLIGENCE_SMART_MONEY_TREND_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readSignalTrendByTrader", "Read historical linear-contract consensus for selected trader ids. Pass authorIds with full instId, a 13-digit cutoff ts, granularity and limit.", INTELLIGENCE_SMART_MONEY_TREND_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readMarketPositioning", "Read synchronized price and open-interest evidence. The resulting position state is an inference, not a trading signal.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readTakerFlow", "Read contract taker buy volume, sell volume and net active flow. This is not trade-level CVD.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readDerivativeDecisionContext", "Read one cutoff-aligned 5m, 1H and 4H positioning and taker-flow context with per-series bucket and freshness metadata. bucketStatus=partial is a usable provisional observation accumulated inside the current period, not a closed-period confirmation; incomplete means a closed bucket lacks expected source points.", INTELLIGENCE_DERIVATIVE_DECISION_CONTEXT_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readCrowdingComparison", "Compare long/short ratios. accountRatio and topAccountRatio are long-account-count / short-account-count; topPositionRatio is top-trader total-long-position-value / total-short-position-value. Values above 1 are long, below 1 are short. If topAccountBias and topPositionBias differ, describe elite account-count/position-value divergence; never reinterpret topPositionRatio as position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readDerivativeDecisionContext", "Read one cutoff-aligned 5m, 1H and 4H positioning and taker-flow context with per-series bucket and freshness metadata. bucketStatus=partial is a usable provisional observation within the current period, not a closed-period confirmation; incomplete means a closed bucket lacks expected source points.", INTELLIGENCE_DERIVATIVE_DECISION_CONTEXT_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readCrowdingComparison", "Compare long/short ratios. accountRatio and topAccountRatio are long-account-count / short-account-count; topPositionRatio is top-trader total-long / total-short position value. Above 1 is long, below 1 is short. If topAccountBias and topPositionBias differ, describe elite account-count/position-value divergence; never reinterpret topPositionRatio as position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readFundingBasis", "Read predicted and settled funding, premium, mark price, index price and basis.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readLiquidationSamples", "Read OKX platform liquidation event samples. Never describe these samples as total market liquidations.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readSystemStress", "Read the locally accumulated insurance fund, price-limit and ADL evidence for the requested window. It never waits for HTTP; stale or missing data is queued for background refresh and earlier history may be impossible to backfill.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readSystemStress", "Read locally accumulated insurance fund, price-limit and ADL evidence for the requested window. Never waits for HTTP; stale or missing data is queued for background refresh and earlier history may be impossible to backfill.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readPositionChanges", "Read historical open-interest and price changes for positioning analysis.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
-    intelligenceEnabled ? tool("intelligence.smartMoney.readConsensusDivergence", "Read divergence between ordinary account count, top-trader account count and top-trader position value. Use accountBias/topAccountBias/topPositionBias and eliteInternalDivergence from the response; topPositionRatio is long-position-value / short-position-value, not position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
+    intelligenceEnabled ? tool("intelligence.smartMoney.readConsensusDivergence", "Read divergence between ordinary account count, top-trader account count and top-trader position value. Use accountBias/topAccountBias/topPositionBias and eliteInternalDivergence from the response; topPositionRatio is long / short position value, not position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     tool("journal.createNote", "Create a conversation-scoped trading journal note from analysis or execution results.", JOURNAL_NOTE_SCHEMA),
     tool("tradeOpportunity.list", "List saved trade opportunities. This never submits an order.", TRADE_OPPORTUNITY_LIST_SCHEMA),
     tool("tradeOpportunity.get", "Read one saved trade opportunity by id. This never submits an order.", TRADE_OPPORTUNITY_GET_SCHEMA),
     tool("tradeOpportunity.create", boolConfig(policyConfig.backgroundRun, false)
-      ? "Commit the exact candidate frozen by the most recent successful market.readDecisionContext call. Do not repeat candidate fields or provide a decisionContextId; the runtime owns both. Optional fields only resolve a detected duplicate. In limited_auto profiles the backend may auto-approve and execute the committed opportunity."
-      : "Create a trade opportunity for backend workflow handling. In limited_auto profiles the backend may auto-approve and execute it. Use intent=cancel/amend for order-management actions. evidence and riskNotes are separate top-level arrays containing strings only; never place one field or its array inside the other. If the result has errorCode=invalid_tool_arguments, correct the full input and retry this tool before finishing the run.", TRADE_OPPORTUNITY_SCHEMA),
+      ? "Commit the exact candidate frozen by the most recent successful market.readDecisionContext call. Do not repeat candidate fields or provide a decisionContextId; the runtime owns both. Optional fields only resolve a detected duplicate; in limited_auto profiles the backend may auto-approve and execute the committed opportunity."
+      : "Create a trade opportunity for backend workflow handling; in limited_auto profiles the backend may auto-approve and execute it. Use intent=cancel/amend for order-management actions. evidence and riskNotes are separate top-level string arrays; never place one field or its array inside the other. If the result has errorCode=invalid_tool_arguments, correct the full input and retry this tool before finishing the run.", TRADE_OPPORTUNITY_SCHEMA),
     tool("tradeOpportunity.revise", "Revise a saved trade opportunity without submitting an order. Background runs use tradeOpportunity.create with duplicateResolution=revise instead.", TRADE_OPPORTUNITY_MUTATION_SCHEMA),
     tool("tradeOpportunity.reuse", "Reuse an existing valid trade opportunity and record the resolution without submitting an order. Background runs use tradeOpportunity.create with duplicateResolution=reuse instead.", TRADE_OPPORTUNITY_MUTATION_SCHEMA),
     tool("tradeOpportunity.close", "Close or archive a saved trade opportunity without submitting an order.", TRADE_OPPORTUNITY_MUTATION_SCHEMA),
     tool("notification.feishu.send", "Send a Feishu notification through the configured Desic Terminal notification channel.", FEISHU_NOTIFICATION_SCHEMA),
     tool(
       "background.finishRun",
-      "Finish a background agent run with a durable summary, semantic outcome/reason/reasonCodes and next wake plan. This must be the final successful tool call. If validation rejects the input, correct the reported fields and call this tool again. Do not submit opportunity ids, accountAssessment or decision context ids: the backend derives them from this Run's persisted tool results and prechecks. The summary must not infer narrow account tolerance from balance, minSz or gross notional exposure; use effectiveExposureMultiple, stop/ATR risk, margin buffer and authoritative blockers. All absolute times such as nextWakePlan.expiresAt and timer.atMs must be 13-digit Unix epoch milliseconds (Date.now() units), never 10-digit epoch seconds.",
+      "Finish a background agent run with a durable summary, semantic outcome/reason/reasonCodes and next wake plan; must be the final successful tool call. On validation rejection, correct the reported fields and call again. Never submit opportunity ids, accountAssessment or decision context ids — the backend derives them from this Run's persisted tool results and prechecks. The summary must not infer narrow account tolerance from balance, minSz or gross notional exposure; use effectiveExposureMultiple, stop/ATR risk, margin buffer and authoritative blockers. Absolute times such as nextWakePlan.expiresAt and timer.atMs are 13-digit Unix epoch milliseconds (Date.now() units), never 10-digit seconds.",
       BACKGROUND_FINISH_RUN_SCHEMA
     ),
     tool(
       "review.complete",
-      "Complete a review run with structured findings and optional suggestions. The summary's first non-empty line must copy evidence.canonicalFacts.summaryHeader exactly; never convert epoch timestamps or infer environment from accountId. An empty suggestions array is correct when evidence does not justify a reusable Skill change. This must be the final successful tool call; correct and retry any rejected input.",
+      "Complete a review run with structured findings and optional suggestions. The summary's first non-empty line must copy evidence.canonicalFacts.summaryHeader exactly; never convert epoch timestamps or infer environment from accountId. An empty suggestions array is correct when evidence does not justify a reusable Skill change. Must be the final successful tool call; correct and retry any rejected input.",
       REVIEW_COMPLETE_SCHEMA
     ),
     tool("review.readSkillVersion", "Read the exact immutable Skill version used by this reviewed position. Call only after evidence indicates that a reusable Skill rule may need a cautious change.", REVIEW_READ_SKILL_VERSION_SCHEMA),
     tool("optimizationSuggestion.create", "Create a review-backed candidate Skill change for human preview. This is optional: call only when evidence identifies a reusable Skill-level defect, never merely because one trade lost money. Read the exact baseline first with review.readSkillVersion and submit a complete minimally changed proposedSkill.", OPTIMIZATION_SUGGESTION_SCHEMA),
-    tool("trade.evaluatePlan", "Evaluate a USDT linear perpetual plan locally with the deterministic trade domain. It distinguishes contract count, base quantity, effectiveExposureMultiple, notional exposure, initial margin, stop risk and one-ATR account risk. With action and targetPrice it also returns fee-adjusted break-even, target gross/net profit, fee drag, net reward/risk and return on margin/equity. Its fee rates are conservative defaults and explicitly exclude slippage and funding. Fixed-size leverage changes margin ratios, not absolute fees or price PnL. Omit size to evaluate minSz. This tool never creates an execution blocker; use trade.precheck for authoritative exchange/account eligibility and account fee rates.", TRADE_EVALUATE_PLAN_SCHEMA),
-    tool("trade.precheck", "Run a read-only order precheck before placing a trade. For background Profiles the backend injects the frozen maximum single-trade margin percentage and returns one perpetualEvaluation object plus compatibility fields derived from it. effectiveExposureMultiple is gross notional/equity; notionalPctOfEquity is that multiple times 100 and must never be described as margin occupancy or used alone to infer narrow tolerance. marginPctOfEquity is estimated initial margin occupancy. Pass action, targetPrice, stopPrice and atr when available; feeRateSource identifies OKX versus fallback rates, and target economics exclude slippage and funding. Fixed-size leverage changes margin ratios, not absolute fees or price PnL. timing reports total/instrument/account/limits milliseconds, snapshot source and account-config cache hit. Does not submit an order.", TRADE_PRECHECK_SCHEMA),
+    tool("trade.evaluatePlan", "Evaluate a USDT linear perpetual plan locally with the deterministic trade domain: contract count vs base quantity, effectiveExposureMultiple, notional, initial margin, stop risk and one-ATR account risk. With action and targetPrice it also returns fee-adjusted break-even, target gross/net profit, fee drag, net reward/risk and return on margin/equity. Fee rates are conservative defaults excluding slippage and funding; fixed-size leverage changes margin ratios, not absolute fees or price PnL. Omit size to evaluate minSz. Never creates an execution blocker; trade.precheck is authoritative for eligibility and account fee rates.", TRADE_EVALUATE_PLAN_SCHEMA),
+    tool("trade.precheck", "Read-only order precheck. Background Profiles get the frozen max single-trade margin percentage and one perpetualEvaluation with derived compatibility fields. effectiveExposureMultiple is gross notional/equity; notionalPctOfEquity is that times 100 — never margin occupancy, never alone a narrow-tolerance conclusion. marginPctOfEquity is estimated initial margin occupancy. Pass action, targetPrice, stopPrice and atr when available. feeRateSource flags OKX vs fallback rates; target economics exclude slippage and funding. Fixed-size leverage changes margin ratios, not absolute fees or price PnL. timing gives total/instrument/account/limits ms, snapshot source and account-config cache hit. Never submits an order.", TRADE_PRECHECK_SCHEMA),
     tool("research.webSearch", "Search public web pages and return titles, URLs, snippets and freshness metadata. Use this for general web research, public strategy references and sources outside the OKX news snapshot.", WEB_SEARCH_SCHEMA),
-    profileLeverageEnabled ? tool("trade.setLeverage", "Synchronize the bound Profile account to its immutable target leverage for the requested instrument and margin mode. Call only after trade.precheck reports a leverage mismatch, then rerun trade.precheck. In hedge mode omit posSide so both long and short are synchronized.", SET_LEVERAGE_SCHEMA) : null,
+    profileLeverageEnabled ? tool("trade.setLeverage", "Synchronize the bound Profile account to its immutable target leverage for the requested instrument and margin mode. Call only after trade.precheck reports a leverage mismatch, then rerun it. In hedge mode omit posSide so both long and short are synchronized.", SET_LEVERAGE_SCHEMA) : null,
     tool("chart.createDrawing", "Create a local chart drawing such as a trend line, horizontal line, vertical line or rectangle.", CHART_TOOL_SCHEMA),
     tool("chart.updateDrawing", "Update a local chart drawing.", CHART_TOOL_SCHEMA),
     tool("chart.deleteDrawing", "Delete a local chart drawing by id.", CHART_TOOL_SCHEMA),
@@ -2451,12 +2451,12 @@ function createDesicTools(sessionId, options = {}) {
     tool("script.enable", "Enable or disable a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.delete", "Delete a local chart script.", SCRIPT_TOOL_SCHEMA),
     tool("script.list", "List local chart scripts.", SCRIPT_TOOL_SCHEMA),
-    tool("skill.readResource", "Read one bundled reference document belonging to a Skill already loaded in this turn, using the relative path listed in that Skill's SKILL.md. Use it to load an on-demand contract such as docs/pre-write-audit.md before writing source. It reads only files inside that Skill's own directory: it is not a general file reader, it cannot reach an arbitrary path, market data, an account, credentials, or another strategy, and it is not a way to read a Skill's own body — load that with the skills tool instead.", SKILL_READ_RESOURCE_SCHEMA),
+    tool("skill.readResource", "Read one bundled reference document of a Skill already loaded in this turn, using the relative path from that Skill's SKILL.md — e.g. an on-demand contract such as docs/pre-write-audit.md before writing source. Reads only files inside that Skill's own directory: not a general file reader; cannot reach arbitrary paths, market data, accounts, credentials or other strategies; cannot read the Skill's own body — use the skills tool for that.", SKILL_READ_RESOURCE_SCHEMA),
     tool("skill.run", "Run one declared entrypoint from an enabled and user-trusted Skill bundle. Pass only its Skill ID, named entrypoint, and JSON input. The host verifies the immutable bundle, chooses the fixed runtime, and returns validated JSON output. This is unavailable to subagents, teams, and background Profile Runs.", SKILL_RUN_SCHEMA),
     tool("strategy.readDevelopmentDocs", "Optionally read the complete versioned Desic Python strategy development document when protocol details are needed. Source writes do not require this read-only reference.", STRATEGY_READ_DEVELOPMENT_DOCS_SCHEMA),
     tool("strategy.readCurrentSource", "Read the real-time source and revision of the current Python strategy editor. Call this at the start of every turn before discussing or editing the current buffer.", STRATEGY_READ_CURRENT_SOURCE_SCHEMA),
     tool("strategy.testCurrentSource", "Inspect every discovered action call in the current unsaved Python strategy source, then run bounded deterministic fixtures. This is a source-contract test, not a historical backtest or live execution check.", STRATEGY_TEST_CURRENT_SOURCE_SCHEMA),
-    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call after strategy.readCurrentSource and send expectedRevision. The host validates source policy and protocol before changing only the unsaved editor buffer.", STRATEGY_APPLY_SOURCE_SCHEMA),
+    tool("strategy.applySource", "Replace the current selected Python strategy editor buffer with one complete source file. Call after strategy.readCurrentSource and send expectedRevision. The host validates source policy and protocol; only the unsaved editor buffer changes.", STRATEGY_APPLY_SOURCE_SCHEMA),
     tool("strategy.create", "Create and persist a new immutable-versioned local Python research strategy. Choose its name, description, source, and saved parameters. This cannot activate a Profile or submit an order.", STRATEGY_CREATE_SCHEMA),
     tool("strategy.saveVersion", "Persist a new immutable version of the current or session-created strategy. It never overwrites prior versions and cannot activate a Profile or submit an order.", STRATEGY_SAVE_VERSION_SCHEMA),
     tool("strategy.listVersions", "List immutable versions and their saved backtest/Profile usage counts for a session strategy.", STRATEGY_VERSION_SCHEMA),
@@ -2465,7 +2465,7 @@ function createDesicTools(sessionId, options = {}) {
     tool("strategy.inspectDataCoverage", "Read local confirmed 1m K-line coverage, counts, and gaps for a session strategy research instrument. It never accesses exchange accounts or credentials.", STRATEGY_MARKET_DATA_SCHEMA),
     tool("strategy.sampleMarketData", "Read up to 500 local 1m OHLCV bars for a session strategy research instrument and time window. It never accesses network or account data.", STRATEGY_MARKET_DATA_SCHEMA),
     tool("strategy.backtest", "Queue a host-owned local historical backtest for one immutable strategy version. It pins source and local K-line snapshot, uses normal research assumptions, and cannot activate a Profile or submit an order.", STRATEGY_BACKTEST_SCHEMA),
-    tool("strategy.getBacktestResult", "Wait inside the host for a session strategy backtest, then return structured status, metrics, snapshot identity, and timing. The host polls without model calls. If timedOut=true, call again in the same turn until the run completes, fails, or is cancelled.", STRATEGY_BACKTEST_RESULT_SCHEMA),
+    tool("strategy.getBacktestResult", "Wait inside the host for a session strategy backtest, then return structured status, metrics, snapshot identity and timing. The host polls without model calls. If timedOut=true, call again in the same turn until the run completes, fails or is cancelled.", STRATEGY_BACKTEST_RESULT_SCHEMA),
     tool("strategy.getBacktestTrades", "Read a bounded recent sample of fills and closed trades from a completed session strategy backtest.", STRATEGY_BACKTEST_SLICE_SCHEMA),
     tool("strategy.getBacktestDiagnostics", "Read frozen request metadata, source/data identity, errors, and phase timing for a session strategy backtest.", STRATEGY_BACKTEST_SLICE_SCHEMA),
     tool("strategy.compareBacktests", "Compare two backtests of the same session strategy, including return, drawdown, Sharpe, fees, trade counts, and snapshot compatibility.", STRATEGY_COMPARE_BACKTESTS_SCHEMA),

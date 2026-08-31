@@ -1,4 +1,4 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import {
   Activity,
   BarChart3,
@@ -140,7 +140,19 @@ function primitiveRows(value: unknown, limit = 12) {
     .map(([key, item]) => [key, String(item)] as const);
 }
 
-const HIDDEN_FACT_KEYS = new Set(["ageMs", "asOf", "dataAt", "fetchedAt", "observedAt", "expectedLatestConfirmedAt", "expectedPoints", "seqId", "sourceEventSeqs"]);
+/* 事实噪声段：任一路径分段（去 [n] 索引）命中即整键隐藏——裸 epoch、内部元数据、消息载荷本体。
+   消息流侧 toolFactRows 已升级为递归扁平化路径键（ticker.last、markets[0].instId、markets 计数），
+   这里按"分段"而非"整键"匹配：ticker.ageMs / result.content / source.path 等中段噪声同样滤净，
+   用户在事实卡里看到的全是有意义字段。 */
+const HIDDEN_FACT_KEYS = new Set([
+  "ageMs", "asOf", "dataAt", "fetchedAt", "observedAt", "expectedLatestConfirmedAt", "expectedPoints",
+  "seqId", "sourceEventSeqs", "content", "contentSha256", "sha256", "source", "sourceVersion",
+  "modelVersion", "universeSize", "snapshotAt", "ts", "time", "confirm", "openTimeMs", "closeTimeMs"
+]);
+
+function isHiddenFactKey(key: string) {
+  return key.split(/[.\[\]]+/).some((segment) => HIDDEN_FACT_KEYS.has(segment));
+}
 
 function factLabel(key: string, uiText: InspectorProps["uiText"]) {
   const labels: Record<string, [string, string]> = {
@@ -163,17 +175,78 @@ function factLabel(key: string, uiText: InspectorProps["uiText"]) {
     fundingRate: ["资金费率", "Funding rate"],
     nextFundingRate: ["预测资金费率", "Next funding"],
     basis: ["基差", "Basis"],
-    latencyMs: ["延迟", "Latency"]
+    latencyMs: ["延迟", "Latency"],
+    markets: ["市场", "Markets"],
+    summary: ["摘要", "Summary"],
+    state: ["状态", "State"],
+    ctVal: ["合约面值", "Contract value"],
+    lever: ["杠杆", "Leverage"],
+    tickSz: ["价格步长", "Tick size"],
+    lotSz: ["下单步长", "Lot size"],
+    settleCcy: ["结算币种", "Settlement"],
+    askPx: ["卖一价", "Ask price"],
+    bidPx: ["买一价", "Bid price"],
+    volCcy24h: ["24h 成交量", "24h volume"],
+    vol24h: ["24h 成交量", "24h volume"],
+    // 路径键前缀名词与 OHLC 尾段：ticker.last → "行情 · 最新价"、instrument.ctVal → "合约规格 · 合约面值"
+    ticker: ["行情", "Ticker"],
+    instrument: ["合约规格", "Instrument"],
+    candles: ["K 线", "Candles"],
+    indicators: ["指标", "Indicators"],
+    open: ["开盘价", "Open"],
+    high: ["最高价", "High"],
+    low: ["最低价", "Low"],
+    close: ["收盘价", "Close"]
   };
   const label = labels[key];
   return label ? uiText(label[0], label[1]) : null;
 }
 
+/* 段名人类化：先查 labels 映射，未命中按 camelCase 与字母-数字边界拆词（volCcy24h → Vol Ccy 24h、ema20 → Ema 20） */
+function humanizeFactSegment(segment: string, uiText: InspectorProps["uiText"]) {
+  const mapped = factLabel(segment, uiText);
+  if (mapped) return mapped;
+  const words = segment.replace(/([a-z\d])([A-Z])/g, "$1 $2").replace(/([A-Za-z])(\d)/g, "$1 $2");
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+/* 嵌套路径键标签：segments 去索引后逐段人类化，相邻重复标签去重（fundingRate.fundingRate → 资金费率） */
+function pathFactLabel(key: string, uiText: InspectorProps["uiText"]) {
+  const segments = key.split(/[.\[\]]+/).filter((part) => part && !/^\d+$/.test(part));
+  const rendered: string[] = [];
+  for (const segment of segments) {
+    const label = humanizeFactSegment(segment, uiText);
+    if (rendered[rendered.length - 1] !== label) rendered.push(label);
+  }
+  return rendered.join(" · ");
+}
+
+/* [object Object] 兜底：上游把纯对象值 String 化后只剩不可读占位——整行丢弃；
+   混有可读片段的（如 csv 中夹杂）保留原样，交给 dd 的 CSS 省略号 */
+function isUnreadableFactValue(value: string) {
+  return /^(?:\[object Object\][,，、]?\s*)+$/.test(value.trim());
+}
+
 function presentFactRows(rows: ReadonlyArray<readonly [string, string]>, uiText: InspectorProps["uiText"]) {
-  return rows.flatMap(([key, value]) => {
-    if (HIDDEN_FACT_KEYS.has(key)) return [];
-    const label = factLabel(key, uiText);
-    return label ? [[label, value] as [string, string]] : [];
+  const seen = new Set<string>();
+  return rows.flatMap(([key, rawValue]) => {
+    // 噪声过滤对平铺键与路径键统一生效（任一分段命中即整键隐藏）
+    if (isHiddenFactKey(key)) return [];
+    // 运行时兜底：数组值 → "共 N 项" 计数文案（不渲染成 [object Object]）；对象值 String 化后走占位过滤
+    const raw = rawValue as unknown;
+    const value = typeof raw === "string"
+      ? raw
+      : Array.isArray(raw)
+        ? uiText(`共 ${raw.length} 项`, `${raw.length} items`)
+        : String(raw ?? "");
+    if (isUnreadableFactValue(value)) return [];
+    /* 嵌套路径键按路径人类化（消息流侧 toolFactRows 已改供扁平路径键），平铺键保持旧白名单 */
+    const label = key.includes(".") || key.includes("[") ? pathFactLabel(key, uiText) : factLabel(key, uiText);
+    if (!label) return [];
+    const dedupeKey = `${label}:${value}`;
+    if (seen.has(dedupeKey)) return [];
+    seen.add(dedupeKey);
+    return [[label, value] as [string, string]];
   });
 }
 
@@ -217,85 +290,375 @@ function artifactTitle(artifact: AiResearchArtifact, symbol: string | undefined,
   return artifact.id === "market-overview" ? `${symbol || uiText("市场", "Market")} ${uiText("行情", "overview")}` : artifact.title;
 }
 
-function marketSeries(data: unknown) {
-  const { source, result, nested } = payloadSources(data);
-  const candidates = [source.candles, result.candles, nested.candles, source.history, result.history, source.series, result.series, source.items, result.items];
-  for (const candidate of candidates) {
-    if (!Array.isArray(candidate)) continue;
-    const values = candidate.map((item) => {
-      const row = record(item);
-      const time = numberValue(row, "time", "openTimeMs", "openTime", "ts");
-      const open = numberValue(row, "open", "o");
-      const high = numberValue(row, "high", "h");
-      const low = numberValue(row, "low", "l");
-      const close = numberValue(row, "close", "c", "price", "value", "last");
-      return time !== null && open !== null && high !== null && low !== null && close !== null
-        ? { time: time < 10_000_000_000 ? time : Math.floor(time / 1000), open, high, low, close }
-        : null;
-    }).filter((value): value is ChartCandlePoint => value !== null);
-    if (values.length >= 2) {
-      const unique = new Map(values.map((value) => [value.time, value]));
-      return [...unique.values()].sort((left, right) => left.time - right.time).slice(-120);
-    }
-  }
-  return [];
+type ParsedCandleSeries = {
+  candles: ChartCandlePoint[];
+  // 是否每个点都带真实 OHLC；false 表示仅收盘价可用（稀疏序列，走"线 + 点标记"渲染）
+  complete: boolean;
+  // 命中的周期标签（如 "5m"），来自 bars 包装键或顶层 bar 字段
+  bar: string | null;
+};
+
+function normalizeCandleTime(time: number) {
+  return time < 10_000_000_000 ? time : Math.floor(time / 1000);
 }
 
-function MarketKlineChart({ candles, uiText }: { candles: ChartCandlePoint[]; uiText: InspectorProps["uiText"] }) {
+function coerceFiniteNumber(value: unknown): number | null {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const next = Number(value.replaceAll(",", ""));
+    return Number.isFinite(next) ? next : null;
+  }
+  return null;
+}
+
+// 实际工具返回形状（对照 src-tauri/src/lib.rs 的 ai_read_candles / ai_read_multi_candles）：
+// - 单周期调用：{ instId, bar, candles: [{ time(13 位 ms), openTimeMs, closeTimeMs, open, high, low, close, volume, confirm }] }
+// - 多周期调用：{ summary: "… 已读取 N 个周期 K 线", instId, bars: { "5m": { candles: […] }, "15m": {…}, … } }
+//   多周期返回的 candles 嵌在 bars.<周期> 之下，顶层没有任何候选键——旧实现只找顶层
+//   candles/history/series/items，因此解析得 0 点、图表落到"单点快照"兜底，而卡片描述仍写
+//   "已读取 3 个周期"，观感自相矛盾（3 指的是 3 个周期/时间框架，不是 3 根 K 线）。
+//   这里做防御性多形状解析：bars 包装、OKX REST 数组行 [ts, o, h, l, c, vol]、
+//   time/timestamp/ts 等键名、字符串数字，以及只有收盘价可用的稀疏行（{ time, value/close }）。
+function parseCandleRow(item: unknown): { time: number; open: number | null; high: number | null; low: number | null; close: number | null } | null {
+  if (Array.isArray(item)) {
+    const cells = item.map(coerceFiniteNumber);
+    if (cells.length >= 5 && cells[0] !== null) {
+      return { time: cells[0]!, open: cells[1] ?? null, high: cells[2] ?? null, low: cells[3] ?? null, close: cells[4] ?? null };
+    }
+    return null;
+  }
+  const row = record(item);
+  if (Object.keys(row).length === 0) return null;
+  const time = numberValue(row, "time", "openTimeMs", "openTime", "timestamp", "ts");
+  if (time === null) return null;
+  return {
+    time,
+    open: numberValue(row, "open", "o", "openPx"),
+    high: numberValue(row, "high", "h", "highPx"),
+    low: numberValue(row, "low", "l", "lowPx"),
+    close: numberValue(row, "close", "c", "closePx", "price", "value", "last")
+  };
+}
+
+function collectCandlePoints(candidate: unknown): { candles: ChartCandlePoint[]; complete: boolean } {
+  if (!Array.isArray(candidate)) return { candles: [], complete: false };
+  const candles: ChartCandlePoint[] = [];
+  let complete = true;
+  for (const item of candidate) {
+    const row = parseCandleRow(item);
+    if (!row || row.close === null) {
+      complete = false;
+      continue;
+    }
+    const { time, close } = row;
+    if (row.open === null || row.high === null || row.low === null) {
+      // 缺 OHLC 的稀疏点：只保留收盘价，按平值占位，由图表层降级为"线 + 点标记"
+      complete = false;
+      candles.push({ time: normalizeCandleTime(time), open: close, high: close, low: close, close });
+      continue;
+    }
+    candles.push({ time: normalizeCandleTime(time), open: row.open, high: row.high, low: row.low, close });
+  }
+  const unique = new Map(candles.map((value): [number, ChartCandlePoint] => [value.time, value]));
+  return { candles: [...unique.values()].sort((left, right) => left.time - right.time), complete };
+}
+
+function parseMarketCandles(data: unknown): ParsedCandleSeries {
+  const { source, result, nested } = payloadSources(data);
+  // best：≥2 点的真实序列；single：仅 1 点的单点快照（保底同源展示，避免图表与计数各说各话）
+  let best: ParsedCandleSeries | null = null;
+  let single: ParsedCandleSeries | null = null;
+  // 1) 多周期包装：bars.<bar> 下挂 candles（或直接是数组 / 再包一层 data/list）
+  for (const root of [source, result, nested]) {
+    for (const [bar, group] of Object.entries(record(root.bars))) {
+      const groupRecord = record(group);
+      const candidates = [groupRecord.candles, groupRecord.data, groupRecord.list, Array.isArray(group) ? group : null];
+      for (const candidate of candidates) {
+        const parsed = collectCandlePoints(candidate);
+        // 多周期返回含多组序列：一张图画同一条周期序列才诚实——取样本最多的一组，
+        // 其余周期组保留在"原始数据"里可查
+        if (parsed.candles.length >= 2 && (!best || parsed.candles.length > best.candles.length)) {
+          best = { ...parsed, bar };
+        }
+        if (parsed.candles.length === 1 && !single) {
+          single = { ...parsed, bar };
+        }
+      }
+    }
+  }
+  if (best) return best;
+  // 2) 顶层别名键（旧单周期形状与第三方包装）
+  for (const root of [source, result, nested]) {
+    for (const key of ["candles", "history", "series", "items", "data", "list"]) {
+      const parsed = collectCandlePoints(root[key]);
+      if (parsed.candles.length >= 2) return { ...parsed, bar: text(root.bar) || null };
+      if (parsed.candles.length === 1 && !single) {
+        single = { ...parsed, bar: text(root.bar) || null };
+      }
+    }
+  }
+  if (single) return single;
+  return { candles: [], complete: true, bar: text(source.bar) || text(result.bar) || null };
+}
+
+// —— 图表悬停公共件（问题 A）——
+// 客户端坐标 → SVG viewBox 坐标（getScreenCTM 自带等比缩放与 letterbox 平移，无需手算）。
+function svgChartPoint(svg: SVGSVGElement, clientX: number, clientY: number): { x: number; y: number } | null {
+  const ctm = svg.getScreenCTM();
+  if (!ctm || !ctm.a || !ctm.d) return null;
+  return { x: (clientX - ctm.e) / ctm.a, y: (clientY - ctm.f) / ctm.d };
+}
+
+// 指标/深度等序列数值的紧凑格式：量级决定小数位，保证 tooltip 与徽标宽度稳定。
+function formatSeriesValue(value: number) {
+  const abs = Math.abs(value);
+  const digits = abs >= 100_000 ? 0 : abs >= 1_000 ? 1 : abs >= 1 ? 2 : 4;
+  return formatNumber(value, digits);
+}
+
+type ChartTooltipRow = { label: string; value: string; color?: string };
+
+// 浮动 tooltip：绝对定位在悬停热区内，靠近右缘时翻转（translateX(-100%)）。
+// left 用 clamp 按热区实际像素宽封边：普通态右缘不越界，翻转态左缘不越界，绝不溢出容器；
+// 出现不做动画（纯 opacity ≤120ms 由 CSS 控制），且 pointer-events: none 不挡指针。
+function ChartTooltip({ x, width, zoneWidth, title, rows }: { x: number; width: number; zoneWidth: number; title: string; rows: ChartTooltipRow[] }) {
+  const ratio = Math.min(1, Math.max(0, x / width));
+  const px = ratio * zoneWidth;
+  const flip = px > zoneWidth - 180;
+  const left = flip
+    ? `clamp(180px, ${px}px, 100%)`
+    : `clamp(0px, ${px}px, calc(100% - 180px))`;
+  return <div className={`ai-chart-tooltip${flip ? " flip" : ""}`} style={{ left }} aria-hidden="true">
+    {/* 纯视觉重复信息且随 pointermove 高频重渲染，对读屏隐藏，避免 live region 刷屏 */}
+    <div className="ai-chart-tooltip-head">{title}</div>
+    {rows.map((row) => <div className="ai-chart-tooltip-row" key={row.label}>{row.color ? <i style={{ background: row.color }} /> : null}<span>{row.label}</span><b>{row.value}</b></div>)}
+  </div>;
+}
+
+function MarketKlineChart({ candles, uiText, complete = true, bar = null }: { candles: ChartCandlePoint[]; uiText: InspectorProps["uiText"]; complete?: boolean; bar?: string | null }) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<ReturnType<typeof createTradingChart> | null>(null);
+  const [hoverCandle, setHoverCandle] = useState<ChartCandlePoint | null>(null);
+  const candleByTime = useMemo(() => new Map(candles.map((item): [number, ChartCandlePoint] => [item.time, item])), [candles]);
+  // ≥5 点且 OHLC 完整 → 图表库蜡烛图；否则（2-4 点或仅收盘价）→ 稀疏 SVG 线 + 点标记
+  const useLibraryChart = complete && candles.length >= 5;
   useEffect(() => {
-    if (!hostRef.current || candles.length < 2) return;
+    if (!hostRef.current || !useLibraryChart) return;
     const chart = createTradingChart(hostRef.current, []);
     chartRef.current = chart;
     chart.setCandles(candles);
     chart.fitContent();
+    // 悬停联动：图表库十字线落在某根 K 线上时，头部 OHLC 读数切到该根；离开恢复最新一根
+    const offCrosshair = chart.onCrosshairMove((position) => {
+      setHoverCandle(position ? candleByTime.get(position.time) ?? null : null);
+    });
     return () => {
+      offCrosshair();
       chart.destroy();
       chartRef.current = null;
     };
-  }, [candles]);
-  if (candles.length < 2) return <div className="ai-market-chart-empty">{uiText("当前工具返回单点快照，暂无 K 线序列。", "This tool returned a snapshot without a K-line series.")}</div>;
+  }, [candles, candleByTime, useLibraryChart]);
+  if (candles.length === 0) return <div className="ai-market-chart-empty">{uiText("当前工具返回单点快照，暂无 K 线序列。", "This tool returned a snapshot without a K-line series.")}</div>;
+  if (candles.length === 1) {
+    // 单点快照：文案与外层"已读取 N"同源（同一解析结果），保留原文案并附快照值
+    const only = candles[0]!;
+    return <div className="ai-market-chart-empty">{uiText("当前工具返回单点快照，暂无 K 线序列。", "This tool returned a snapshot without a K-line series.")}<small>{uiText("快照", "Snapshot")} · {formatTime(only.time * 1000)} · {uiText("收盘", "close")} {formatNumber(only.close)}</small></div>;
+  }
+  if (!useLibraryChart) return <KlineSparkline candles={candles} complete={complete} bar={bar} uiText={uiText} />;
   const latest = candles.at(-1)!;
+  const shown = hoverCandle ?? latest;
+  const up = shown.close >= shown.open;
   const change = latest.open ? ((latest.close - latest.open) / latest.open) * 100 : 0;
   return <section className="ai-market-kline" aria-label={uiText("K 线图", "Candlestick chart")}>
-    <div className="ai-market-chart-head"><strong><ChartNoAxesCombined size={13} />{uiText("K 线图", "Candles")}</strong><small>{candles.length} {uiText("根", "bars")} · {formatTime(latest.time * 1000)} · <b className={change >= 0 ? "positive" : "negative"}>{change >= 0 ? "+" : ""}{change.toFixed(2)}%</b></small></div>
+    <div className="ai-market-chart-head"><strong><ChartNoAxesCombined size={13} />{uiText("K 线图", "Candles")}</strong><small>{bar ? `${bar} · ` : ""}{candles.length} {uiText("根", "bars")} · {formatTime(latest.time * 1000)} · <b className={change >= 0 ? "positive" : "negative"}>{change >= 0 ? "+" : ""}{change.toFixed(2)}%</b></small></div>
+    <div className="ai-market-kline-ohlc" aria-label={uiText("K 线读数", "Candle readout")}>
+      <span>{uiText("开", "O")} <b>{formatNumber(shown.open)}</b></span>
+      <span>{uiText("高", "H")} <b>{formatNumber(shown.high)}</b></span>
+      <span>{uiText("低", "L")} <b>{formatNumber(shown.low)}</b></span>
+      <span>{uiText("收", "C")} <b className={up ? "positive" : "negative"}>{formatNumber(shown.close)}</b></span>
+      <span>{formatTime(shown.time * 1000)}</span>
+    </div>
     <div className="ai-market-kline-canvas" ref={hostRef} />
   </section>;
 }
 
-type MiniLineSeries = { label: string; values: number[]; color: string };
+// 稀疏 K 线（2-4 点，或仅收盘价可用）：SVG 折线 + 点标记 + 悬停十字线/tooltip，
+// 不启用图表库——2 根蜡烛没有结构信息，连线更能表达"序列"本身。
+function KlineSparkline({ candles, complete, bar, uiText }: { candles: ChartCandlePoint[]; complete: boolean; bar: string | null; uiText: InspectorProps["uiText"] }) {
+  const width = 520;
+  const height = 180;
+  const padX = 16;
+  const padT = 18;
+  const padB = 16;
+  const [hover, setHover] = useState<{ index: number; x: number; zone: number } | null>(null);
+  const closes = candles.map((item) => item.close);
+  const min = Math.min(...closes);
+  const max = Math.max(...closes);
+  const span = max - min || Math.abs(max) || 1;
+  const xFor = (index: number) => padX + (index / Math.max(candles.length - 1, 1)) * (width - padX * 2);
+  const yFor = (value: number) => height - padB - ((value - min) / span) * (height - padT - padB);
+  const latest = candles.at(-1)!;
+  const change = latest.open ? ((latest.close - latest.open) / latest.open) * 100 : 0;
+  const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const point = svgChartPoint(event.currentTarget, event.clientX, event.clientY);
+    if (!point) return;
+    const ratio = (point.x - padX) / (width - padX * 2);
+    const index = Math.round(Math.min(1, Math.max(0, ratio)) * (candles.length - 1));
+    setHover({ index, x: Math.min(width - padX, Math.max(padX, point.x)), zone: event.currentTarget.getBoundingClientRect().width || width });
+  };
+  const hovered = hover ? candles[hover.index] ?? null : null;
+  const rows: ChartTooltipRow[] = hovered ? (complete
+    ? [
+      { label: uiText("开", "O"), value: formatNumber(hovered.open) },
+      { label: uiText("高", "H"), value: formatNumber(hovered.high) },
+      { label: uiText("低", "L"), value: formatNumber(hovered.low) },
+      { label: uiText("收", "C"), value: formatNumber(hovered.close) }
+    ]
+    : [{ label: uiText("收盘", "Close"), value: formatNumber(hovered.close) }])
+    : [];
+  return <section className="ai-market-kline" aria-label={uiText("K 线图", "Candlestick chart")}>
+    <div className="ai-market-chart-head"><strong><ChartNoAxesCombined size={13} />{uiText("K 线图", "Candles")}</strong><small>{bar ? `${bar} · ` : ""}{candles.length} {uiText("点", "points")} · {formatTime(latest.time * 1000)} · <b className={change >= 0 ? "positive" : "negative"}>{change >= 0 ? "+" : ""}{change.toFixed(2)}%</b></small></div>
+    <div className="ai-chart-hover-zone">
+      <svg className="ai-market-kline-spark" viewBox={`0 0 ${width} ${height}`} role="img" aria-label={uiText("价格序列图", "Price series chart")} onPointerMove={onPointerMove} onPointerLeave={() => setHover(null)}>
+        <path d={`M ${padX} ${padT} H ${width - padX} M ${padX} ${(padT + height - padB) / 2} H ${width - padX} M ${padX} ${height - padB} H ${width - padX}`} className="ai-market-chart-grid" />
+        <polyline className="ai-market-kline-spark-line" points={candles.map((item, index) => `${xFor(index)},${yFor(item.close)}`).join(" ")} />
+        {candles.map((item, index) => <circle key={item.time} className={hover?.index === index ? "ai-market-kline-spark-dot hot" : "ai-market-kline-spark-dot"} cx={xFor(index)} cy={yFor(item.close)} r={hover?.index === index ? 4.5 : 3.2} />)}
+        {hover ? <line className="ai-chart-crosshair" x1={hover.x} x2={hover.x} y1={padT} y2={height - padB} /> : null}
+      </svg>
+      {hovered ? <ChartTooltip x={hover!.x} width={width} zoneWidth={hover!.zone} title={formatTime(hovered.time * 1000)} rows={rows} /> : null}
+    </div>
+  </section>;
+}
 
-function numericArray(value: unknown) {
+type MiniLineSeries = { label: string; values: Array<number | null>; color: string };
+
+// 指标值序列：保留 null（预热期）占位。Rust 端每条指标序列与 K 线窗口同长、前段为 null
+// （如 ema20 前 19 根），旧实现把 null 剔除会让各序列长度错位、悬停索引对不齐；
+// 保留占位后所有序列样本一一对应，预热段自然留白，对数据更诚实。
+function indicatorValues(value: unknown): Array<number | null> {
   if (!Array.isArray(value)) return [];
-  return value.map((item) => typeof item === "number" ? item : numberValue(item, "value", "v", "close", "price")).filter((item): item is number => item !== null && Number.isFinite(item));
+  return value.map((item) => {
+    if (typeof item === "number") return Number.isFinite(item) ? item : null;
+    return numberValue(item, "value", "v", "close", "price");
+  });
 }
 
 function indicatorSeries(data: unknown): MiniLineSeries[] {
   const { source, result, nested } = payloadSources(data);
-  const container = [source.indicators, result.indicators, nested.indicators, source.series, result.series].map(record).find((item) => Object.values(item).some(Array.isArray));
+  // 指标容器的值可能是数组（ema/rsi/atr/sma）或"数组对象"（boll: {upper,middle,lower}、macd: {macd,signal,histogram}）
+  const hasSeriesShape = (value: unknown) => Array.isArray(value) || Object.values(record(value)).some(Array.isArray);
+  const container = [source.indicators, result.indicators, nested.indicators, source.series, result.series].map(record).find((item) => Object.values(item).some(hasSeriesShape));
   if (!container) return [];
   const colors = ["#67d6bd", "#e2a35d", "#9b8af4", "#5eb9e8", "#e87d91"];
-  return Object.entries(container).flatMap(([label, value], index) => {
-    const values = numericArray(value);
-    return values.length >= 3 ? [{ label, values: values.slice(-160), color: colors[index % colors.length] }] : [];
+  let colorIndex = 0;
+  return Object.entries(container).flatMap(([label, value]) => {
+    const groups: Array<[string, unknown]> = Array.isArray(value) ? [["", value]] : Object.entries(record(value)).filter(([, item]) => Array.isArray(item));
+    return groups.flatMap(([suffix, raw]) => {
+      const values = indicatorValues(raw);
+      if (values.filter((item) => item !== null).length < 3) return [];
+      const color = colors[colorIndex % colors.length];
+      colorIndex += 1;
+      return [{ label: suffix ? `${label}.${suffix}` : label, values: values.slice(-160), color }];
+    });
   }).slice(0, 5);
 }
 
+// 归一化取舍：真实指标序列量纲差异极大（EMA≈6.3e4、ATR≈5e2、RSI∈[0,100]）。若共享同一
+// 0-1 值域，ATR/RSI 会被 EMA 压成两条贴底平线（实机截图问题），读不出任何形状；改成
+// "每序列独立 min-max"缩放到同一绘图框——只保证各序列自身走势可读，不承诺跨序列纵向
+// 位置可比；真实数值差异由悬停 tooltip 与右侧最新值徽标呈现。这是对当前数据最诚实的折中。
 function MarketIndicatorChart({ data, uiText }: { data: unknown; uiText: InspectorProps["uiText"] }) {
   const series = indicatorSeries(data);
+  const [hover, setHover] = useState<{ index: number; x: number; zone: number; nearest: string } | null>(null);
+  const [focus, setFocus] = useState<string | null>(null);
   if (series.length === 0) return null;
-  const all = series.flatMap((item) => item.values);
-  const min = Math.min(...all);
-  const max = Math.max(...all);
-  const span = max - min || 1;
   const width = 520;
   const height = 180;
-  const pointsFor = (values: number[]) => values.map((value, index) => `${(index / Math.max(values.length - 1, 1)) * (width - 24) + 12},${height - 18 - ((value - min) / span) * (height - 36)}`).join(" ");
-  return <section className="ai-market-linechart" aria-label={uiText("指标走势", "Indicator trends")}><header><strong>{uiText("指标走势", "Indicator trends")}</strong><small>{uiText("按返回序列绘制 · 仅展示实际样本", "Returned sequences · factual samples only")}</small></header><svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={uiText("技术指标折线图", "Technical indicator line chart")}><path d={`M 12 22 H ${width - 12} M 12 81 H ${width - 12} M 12 140 H ${width - 12}`} className="ai-market-chart-grid" />{series.map((item) => <polyline key={item.label} points={pointsFor(item.values)} fill="none" stroke={item.color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />)}</svg><div className="ai-market-chart-legend">{series.map((item) => <span key={item.label}><i style={{ background: item.color }} />{item.label}</span>)}</div></section>;
+  const padX = 12;
+  const padT = 18;
+  const padB = 16;
+  const innerW = width - padX * 2;
+  const innerH = height - padT - padB;
+  const scales = series.map((item) => {
+    const present = item.values.filter((value): value is number => value !== null);
+    const min = Math.min(...present);
+    const max = Math.max(...present);
+    return { min, max, span: max - min || Math.abs(max) || 1 };
+  });
+  const xFor = (index: number, length: number) => padX + (index / Math.max(length - 1, 1)) * innerW;
+  const yFor = (value: number, scaleIndex: number) => {
+    const scale = scales[scaleIndex]!;
+    return height - padB - ((value - scale.min) / scale.span) * innerH;
+  };
+  const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const point = svgChartPoint(event.currentTarget, event.clientX, event.clientY);
+    if (!point) return;
+    const count = series[0]!.values.length;
+    const index = Math.round(Math.min(1, Math.max(0, (point.x - padX) / innerW)) * (count - 1));
+    // 图例联动：把十字线"最近"的序列记下来，图例对应项高亮
+    let nearest = series[0]!.label;
+    let bestDist = Number.POSITIVE_INFINITY;
+    series.forEach((item, itemIndex) => {
+      const value = item.values[index];
+      if (value === null || value === undefined) return;
+      const distance = Math.abs(yFor(value, itemIndex) - point.y);
+      if (distance < bestDist) {
+        bestDist = distance;
+        nearest = item.label;
+      }
+    });
+    setHover({ index, x: Math.min(width - padX, Math.max(padX, point.x)), zone: event.currentTarget.getBoundingClientRect().width || width, nearest });
+  };
+  const valueAt = (item: MiniLineSeries, index: number) => index < item.values.length ? item.values[index] ?? null : null;
+  const hoverRows: ChartTooltipRow[] = hover ? series.map((item) => {
+    const value = valueAt(item, hover.index);
+    return { label: item.label, value: value === null ? "--" : formatSeriesValue(value), color: item.color };
+  }) : [];
+  return <section className="ai-market-linechart" aria-label={uiText("指标走势", "Indicator trends")}>
+    <header><strong>{uiText("指标走势", "Indicator trends")}</strong><small>{uiText("各序列独立标度 · 悬停查看真实数值", "Per-series scale · hover for real values")}</small></header>
+    <div className="ai-market-chart-body">
+      <div className="ai-chart-hover-zone">
+        <svg viewBox={`0 0 ${width} ${height}`} role="img" aria-label={uiText("技术指标折线图", "Technical indicator line chart")} onPointerMove={onPointerMove} onPointerLeave={() => setHover(null)}>
+          <path d={[padT, padT + innerH / 3, padT + (innerH * 2) / 3, height - padB].map((y) => `M ${padX} ${y} H ${width - padX}`).join(" ")} className="ai-market-chart-grid" />
+          {series.map((item, itemIndex) => <polyline
+            key={item.label}
+            className={`${focus && focus !== item.label ? " dim" : ""}${hover?.nearest === item.label ? " hot" : ""}`.trim() || undefined}
+            points={item.values.map((value, index) => value === null ? null : `${xFor(index, item.values.length)},${yFor(value, itemIndex)}`).filter((point): point is string => point !== null).join(" ")}
+            fill="none"
+            stroke={item.color}
+            strokeWidth="2"
+            strokeLinejoin="round"
+            strokeLinecap="round" />)}
+          {hover ? <>
+            <line className="ai-chart-crosshair" x1={hover.x} x2={hover.x} y1={padT} y2={height - padB} />
+            {series.map((item, itemIndex) => {
+              const value = valueAt(item, hover.index);
+              return value === null ? null : <circle key={item.label} cx={xFor(hover.index, item.values.length)} cy={yFor(value, itemIndex)} r="3.2" fill={item.color} />;
+            })}
+          </> : null}
+        </svg>
+        {hover ? <ChartTooltip x={hover.x} width={width} zoneWidth={hover.zone} title={uiText(`样本 #${hover.index + 1}`, `Sample #${hover.index + 1}`)} rows={hoverRows} /> : null}
+      </div>
+      <div className="ai-market-series-badges">
+        {series.map((item) => {
+          const latest = [...item.values].reverse().find((value) => value !== null) ?? null;
+          return <span className="ai-market-series-badge" key={item.label}><i style={{ background: item.color }} /><b>{latest === null ? "--" : formatSeriesValue(latest)}</b></span>;
+        })}
+      </div>
+    </div>
+    <div className="ai-market-chart-legend">
+      {series.map((item) => <span
+        key={item.label}
+        className={`${focus === item.label ? "focus " : ""}${hover?.nearest === item.label ? "hot" : ""}`.trim() || undefined}
+        onMouseEnter={() => setFocus(item.label)}
+        onMouseLeave={() => setFocus(null)}
+        onClick={() => setFocus((current) => (current === item.label ? null : item.label))}><i style={{ background: item.color }} />{item.label}</span>)}
+    </div>
+  </section>;
 }
 
 function MarketDepthChart({ data, uiText }: { data: unknown; uiText: InspectorProps["uiText"] }) {
+  const [hover, setHover] = useState<{ x: number; side: "bid" | "ask"; index: number; zone: number } | null>(null);
   const { source, result, nested } = payloadSources(data);
   const bidsRaw = [source.bids, result.bids, nested.bids].find(Array.isArray) ?? [];
   const asksRaw = [source.asks, result.asks, nested.asks].find(Array.isArray) ?? [];
@@ -309,7 +672,42 @@ function MarketDepthChart({ data, uiText }: { data: unknown; uiText: InspectorPr
   const max = Math.max(1, ...bidPoints.map((item) => item.total), ...askPoints.map((item) => item.total));
   const point = (item: { total: number }, index: number, length: number, direction: -1 | 1) => `${260 + direction * (index / Math.max(length - 1, 1)) * 248},${158 - item.total / max * 125}`;
   const area = (items: Array<{ total: number }>, direction: -1 | 1) => items.length === 0 ? "" : `M 260 158 L ${items.map((item, index) => point(item, index, items.length, direction)).join(" L ")} L 260 158 Z`;
-  return <section className="ai-market-depth" aria-label={uiText("盘口深度图", "Order book depth chart")}><header><strong>{uiText("盘口深度", "Order book depth")}</strong><small>{uiText("累计挂单量", "Cumulative resting size")}</small></header><svg viewBox="0 0 520 180" role="img" aria-label={uiText("买卖盘深度图", "Bid and ask depth chart")}><path d="M 12 32 H 508 M 12 95 H 508 M 12 158 H 508" className="ai-market-chart-grid" />{bidPoints.length > 0 ? <><path d={area(bidPoints, -1)} fill="rgba(76, 201, 160, .16)" /><polyline points={bidPoints.map((item, index) => point(item, index, bidPoints.length, -1)).join(" ")} fill="none" stroke="#4cc9a0" strokeWidth="2.5" strokeLinejoin="round" /></> : null}{askPoints.length > 0 ? <><path d={area(askPoints, 1)} fill="rgba(232, 125, 145, .16)" /><polyline points={askPoints.map((item, index) => point(item, index, askPoints.length, 1)).join(" ")} fill="none" stroke="#e87d91" strokeWidth="2.5" strokeLinejoin="round" /></> : null}<path d="M 260 20 V 164" className="ai-market-depth-mid" /><path d="M 12 158 H 508" className="ai-market-depth-base" /></svg><div className="ai-market-chart-legend"><span><i className="bid" />{uiText("买盘", "Bids")}</span><span><i className="ask" />{uiText("卖盘", "Asks")}</span></div></section>;
+  // 悬停：中线左侧取买盘档位、右侧取卖盘档位（按 x 最近对齐），tooltip 显示价位/累计/本档
+  const onPointerMove = (event: ReactPointerEvent<SVGSVGElement>) => {
+    const point = svgChartPoint(event.currentTarget, event.clientX, event.clientY);
+    if (!point) return;
+    const x = Math.min(508, Math.max(12, point.x));
+    const bidIndex = Math.round(Math.min(1, Math.max(0, (260 - x) / 248)) * Math.max(bidPoints.length - 1, 0));
+    const askIndex = Math.round(Math.min(1, Math.max(0, (x - 260) / 248)) * Math.max(askPoints.length - 1, 0));
+    if (x <= 260) {
+      if (bidPoints.length === 0) return;
+      setHover({ x, side: "bid", index: bidIndex, zone: event.currentTarget.getBoundingClientRect().width || 520 });
+    } else {
+      if (askPoints.length === 0) return;
+      setHover({ x, side: "ask", index: askIndex, zone: event.currentTarget.getBoundingClientRect().width || 520 });
+    }
+  };
+  const hoverPoint = hover ? (hover.side === "bid" ? bidPoints[hover.index] : askPoints[hover.index]) ?? null : null;
+  const hoverRows: ChartTooltipRow[] = hoverPoint ? [
+    { label: uiText("价位", "Price"), value: formatNumber(hoverPoint.price) },
+    { label: uiText("累计", "Cumulative"), value: formatNumber(hoverPoint.total) },
+    { label: uiText("本档", "Level"), value: formatNumber(hoverPoint.size) }
+  ] : [];
+  const hoverMarker = hoverPoint && hover ? {
+    cx: hover.side === "bid"
+      ? 260 - (hover.index / Math.max(bidPoints.length - 1, 1)) * 248
+      : 260 + (hover.index / Math.max(askPoints.length - 1, 1)) * 248,
+    cy: 158 - hoverPoint.total / max * 125
+  } : null;
+  return <section className="ai-market-depth" aria-label={uiText("盘口深度图", "Order book depth chart")}><header><strong>{uiText("盘口深度", "Order book depth")}</strong><small>{uiText("累计挂单量", "Cumulative resting size")}</small></header><div className="ai-chart-hover-zone"><svg viewBox="0 0 520 180" role="img" aria-label={uiText("买卖盘深度图", "Bid and ask depth chart")} onPointerMove={onPointerMove} onPointerLeave={() => setHover(null)}><path d="M 12 32 H 508 M 12 95 H 508 M 12 158 H 508" className="ai-market-chart-grid" />{bidPoints.length > 0 ? <><path d={area(bidPoints, -1)} fill="rgba(76, 201, 160, .16)" /><polyline points={bidPoints.map((item, index) => point(item, index, bidPoints.length, -1)).join(" ")} fill="none" stroke="#4cc9a0" strokeWidth="2.5" strokeLinejoin="round" /></> : null}{askPoints.length > 0 ? <><path d={area(askPoints, 1)} fill="rgba(232, 125, 145, .16)" /><polyline points={askPoints.map((item, index) => point(item, index, askPoints.length, 1)).join(" ")} fill="none" stroke="#e87d91" strokeWidth="2.5" strokeLinejoin="round" /></> : null}<path d="M 260 20 V 164" className="ai-market-depth-mid" /><path d="M 12 158 H 508" className="ai-market-depth-base" />{hover ? <line className="ai-chart-crosshair" x1={hover.x} x2={hover.x} y1={20} y2={164} /> : null}{hoverMarker ? <circle cx={hoverMarker.cx} cy={hoverMarker.cy} r="3.6" className={hover?.side === "bid" ? "ai-market-depth-marker bid" : "ai-market-depth-marker ask"} /> : null}</svg>{hover && hoverPoint ? <ChartTooltip x={hover.x} width={520} zoneWidth={hover.zone} title={hover.side === "bid" ? uiText("买盘", "Bids") : uiText("卖盘", "Asks")} rows={hoverRows} /> : null}</div><div className="ai-market-chart-legend"><span><i className="bid" />{uiText("买盘", "Bids")}</span><span><i className="ask" />{uiText("卖盘", "Asks")}</span></div></section>;
+}
+
+// 情绪条悬停数值反馈：行内 em 常显百分比，原生 title 再补"看多占比 + 提及数"细节
+function sentimentRowTitle(item: IntelligenceRecord, uiText: InspectorProps["uiText"]) {
+  const coin = String(valueFrom(item, "ccy", "coin", "symbol"));
+  const ratio = (numberValue(item, "bullishRatio", "longRatio", "positiveRatio") ?? 0) * 100;
+  const mentions = numberValue(item, "mentionCount", "mentions");
+  return `${coin} · ${uiText("看多占比", "Bullish")} ${ratio.toFixed(1)}%${mentions !== null ? ` · ${formatNumber(mentions, 0)} ${uiText("条提及", "mentions")}` : ""}`;
 }
 
 function MarketOverviewDashboard({ symbol, onOpenTrading, uiText }: { symbol?: string; onOpenTrading?: () => void; uiText: InspectorProps["uiText"] }) {
@@ -341,21 +739,29 @@ function MarketOverviewDashboard({ symbol, onOpenTrading, uiText }: { symbol?: s
   const bidTotal = hot.book?.bids.reduce((total, item) => total + (Number(item.sz) || 0), 0) ?? 0;
   const askTotal = hot.book?.asks.reduce((total, item) => total + (Number(item.sz) || 0), 0) ?? 0;
   const change = ticker && Number.isFinite(Number(ticker.last)) && Number(ticker.open24h) ? ((Number(ticker.last) - Number(ticker.open24h)) / Number(ticker.open24h)) * 100 : null;
-  return <section className="ai-market-overview" aria-label={uiText("市场概览", "Market overview")}><div className="ai-market-overview-head"><div><strong>{uiText("实时市场概览", "Live market overview")}</strong><small>{uiText("来自当前市场流与本地情报缓存", "Current market stream and local intelligence cache")}</small></div><div className="ai-market-overview-actions"><span className={change !== null && change >= 0 ? "positive" : "negative"}>{change === null ? "--" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`}</span><button type="button" className="ai-market-open-trading" onClick={onOpenTrading} disabled={!onOpenTrading} title={uiText("打开交易面板", "Open Trading workspace")} aria-label={uiText("打开交易面板", "Open Trading workspace")}><ChartNoAxesCombined size={16} /></button></div></div><div className="ai-market-metric-grid"><div className="ai-market-metric"><small>{uiText("最新价", "Last price")}</small><strong>{ticker?.last || "--"}</strong></div><div className="ai-market-metric"><small>{uiText("买一 / 卖一", "Best bid / ask")}</small><strong>{bid === null || ask === null ? "--" : `${formatNumber(bid)} / ${formatNumber(ask)}`}</strong></div><div className="ai-market-metric"><small>{uiText("盘口买 / 卖", "Book bid / ask")}</small><strong>{`${formatNumber(bidTotal)} / ${formatNumber(askTotal)}`}</strong></div><div className="ai-market-metric"><small>{uiText("资金费率", "Funding rate")}</small><strong>{formatNumber(funding?.fundingRate, 5)}</strong></div></div>{candles.length >= 2 ? <MarketKlineChart candles={candles} uiText={uiText} /> : <div className="ai-market-chart-empty">{uiText("等待当前交易对的 K 线流…", "Waiting for the selected pair's candle stream…")}</div>}{hot.book ? <MarketDepthChart data={hot.book} uiText={uiText} /> : null}<div className="ai-market-sentiment"><header><strong>{uiText("市场情绪", "Market sentiment")}</strong><small>{uiText("本地 24h 样本", "Local 24h sample")}</small></header>{sentiment.length > 0 ? sentiment.map((item, index) => <div key={`${String(valueFrom(item, "ccy", "coin", "symbol"))}:${index}`}><b>{String(valueFrom(item, "ccy", "coin", "symbol"))}</b><span><i style={{ width: `${Math.max(4, Math.min(100, (numberValue(item, "bullishRatio", "longRatio", "positiveRatio") ?? 0) * 100))}%` }} /></span><em>{formatNumber((numberValue(item, "bullishRatio", "longRatio", "positiveRatio") ?? 0) * 100, 1)}%</em></div>) : <p>{uiText("本地情绪数据尚未采集。", "Local sentiment data is not collected yet.")}</p>}</div></section>;
+  return <section className="ai-market-overview" aria-label={uiText("市场概览", "Market overview")}><div className="ai-market-overview-head"><div><strong>{uiText("实时市场概览", "Live market overview")}</strong><small>{uiText("来自当前市场流与本地情报缓存", "Current market stream and local intelligence cache")}</small></div><div className="ai-market-overview-actions"><span className={change !== null && change >= 0 ? "positive" : "negative"}>{change === null ? "--" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`}</span><button type="button" className="ai-market-open-trading" onClick={onOpenTrading} disabled={!onOpenTrading} title={uiText("打开交易面板", "Open Trading workspace")} aria-label={uiText("打开交易面板", "Open Trading workspace")}><ChartNoAxesCombined size={16} /></button></div></div><div className="ai-market-metric-grid"><div className="ai-market-metric"><small>{uiText("最新价", "Last price")}</small><strong>{ticker?.last || "--"}</strong></div><div className="ai-market-metric"><small>{uiText("买一 / 卖一", "Best bid / ask")}</small><strong>{bid === null || ask === null ? "--" : `${formatNumber(bid)} / ${formatNumber(ask)}`}</strong></div><div className="ai-market-metric"><small>{uiText("盘口买 / 卖", "Book bid / ask")}</small><strong>{`${formatNumber(bidTotal)} / ${formatNumber(askTotal)}`}</strong></div><div className="ai-market-metric"><small>{uiText("资金费率", "Funding rate")}</small><strong>{formatNumber(funding?.fundingRate, 5)}</strong></div></div>{candles.length >= 2 ? <MarketKlineChart candles={candles} uiText={uiText} /> : <div className="ai-market-chart-empty">{uiText("等待当前交易对的 K 线流…", "Waiting for the selected pair's candle stream…")}</div>}{hot.book ? <MarketDepthChart data={hot.book} uiText={uiText} /> : null}<div className="ai-market-sentiment"><header><strong>{uiText("市场情绪", "Market sentiment")}</strong><small>{uiText("本地 24h 样本", "Local 24h sample")}</small></header>{sentiment.length > 0 ? sentiment.map((item, index) => <div key={`${String(valueFrom(item, "ccy", "coin", "symbol"))}:${index}`} title={sentimentRowTitle(item, uiText)}><b>{String(valueFrom(item, "ccy", "coin", "symbol"))}</b><span><i style={{ width: `${Math.max(4, Math.min(100, (numberValue(item, "bullishRatio", "longRatio", "positiveRatio") ?? 0) * 100))}%` }} /></span><em>{formatNumber((numberValue(item, "bullishRatio", "longRatio", "positiveRatio") ?? 0) * 100, 1)}%</em></div>) : <p>{uiText("本地情绪数据尚未采集。", "Local sentiment data is not collected yet.")}</p>}</div></section>;
 }
 
 function MarketArtifact({ artifact, symbol, onOpenTrading, uiText }: { artifact: AiResearchArtifact; symbol?: string; onOpenTrading?: () => void; uiText: InspectorProps["uiText"] }) {
   const metrics = numericFacts(artifact, uiText);
-  const candles = useMemo(() => marketSeries(artifact.data), [artifact.data]);
+  // 唯一解析入口：图表 / 计数 / 快照判定全部由这一个结果派生，杜绝"已读取 N"与"单点快照"自相矛盾
+  const parsedCandles = useMemo(() => parseMarketCandles(artifact.data), [artifact.data]);
+  const candles = parsedCandles.candles;
   const isOverview = artifact.id === "market-overview";
   const isCandles = artifact.toolName === "market.readCandles" || candles.length >= 2;
+  const hasSeries = candles.length >= 2;
   const title = artifactTitle(artifact, symbol, uiText);
+  // 解析确实只剩 1 个点时：卡片描述同步为 1（同源派生），原始工具 summary 保留在 title 里可查
+  const snapshot = candles.length === 1 ? candles[0]! : null;
+  const summaryLine = snapshot
+    ? uiText(`已读取 1 个快照点 · ${formatTime(snapshot.time * 1000)} · 收盘 ${formatNumber(snapshot.close)}`, `Parsed 1 snapshot point · ${formatTime(snapshot.time * 1000)} · close ${formatNumber(snapshot.close)}`)
+    : artifact.summary || uiText("市场工具返回的实时证据与可读指标。", "Readable evidence and metrics returned by the market tool.");
   return <div className="ai-inspector-content ai-market-artifact">
     <div className="ai-inspector-kicker">{isCandles ? uiText("K 线市场工作台", "CANDLE WORKSPACE") : uiText("市场数据工作台", "MARKET DATA WORKSPACE")}</div>
-    <div className="ai-market-title-row"><div><h2>{title || symbol || uiText("市场概览", "Market overview")}</h2><small>{isOverview ? uiText("实时流 · 情报缓存", "Live stream · intelligence cache") : isCandles ? uiText("返回数据 · OHLC 结构", "Returned data · OHLC structure") : uiText("返回数据 · 可引用快照", "Returned data · attributable snapshot")}</small></div><BarChart3 size={18} /></div>
-    <p>{artifact.summary || uiText("市场工具返回的实时证据与可读指标。", "Readable evidence and metrics returned by the market tool.")}</p>
+    <div className="ai-market-title-row"><div><h2>{title || symbol || uiText("市场概览", "Market overview")}</h2><small>{isOverview ? uiText("实时流 · 情报缓存", "Live stream · intelligence cache") : hasSeries ? uiText("返回数据 · OHLC 结构", "Returned data · OHLC structure") : uiText("返回数据 · 可引用快照", "Returned data · attributable snapshot")}</small></div><BarChart3 size={18} /></div>
+    <p title={snapshot ? artifact.summary : undefined}>{summaryLine}</p>
     {isOverview ? <MarketOverviewDashboard symbol={symbol} onOpenTrading={onOpenTrading} uiText={uiText} /> : null}
-    {!isOverview && isCandles ? <MarketKlineChart candles={candles} uiText={uiText} /> : null}
+    {!isOverview && isCandles ? <MarketKlineChart candles={candles} complete={parsedCandles.complete} bar={parsedCandles.bar} uiText={uiText} /> : null}
     {!isOverview && artifact.toolName === "market.readIndicators" ? <MarketIndicatorChart data={artifact.data} uiText={uiText} /> : null}
     {!isOverview && artifact.toolName === "market.readOrderBook" ? <MarketDepthChart data={artifact.data} uiText={uiText} /> : null}
     {!isOverview && metrics.length > 0 ? <section className="ai-market-dashboard" aria-label={uiText("市场统计", "Market statistics")}><div className="ai-market-metric-grid">{metrics.slice(0, 4).map((item) => <div className="ai-market-metric" key={item.label}><small>{item.label}</small><strong>{item.value}</strong></div>)}</div></section> : null}
@@ -744,6 +1150,8 @@ function currentResearchCard({ selectedSymbol, accountLabel, state, uiText }: { 
   const activeTab = state.tabs.find((tab) => tab.id === state.activeTabId) ?? state.tabs[0];
   const strategyCount = state.tabs.filter((tab) => tab.kind === "strategy").length;
   const evidenceCount = Math.max(0, state.tabs.length - 1);
+  /* 空态降噪：仅有基线市场页签（无真实证据/产物）时不渲染"当前研究"卡，避免"证据 0 / 产物 0"空转 */
+  if (state.tabs.length <= 1) return null;
   return <section className="ai-current-research" aria-label={uiText("当前研究上下文", "Current research context")}>
     <div className="ai-inspector-kicker">{uiText("当前研究", "CURRENT RESEARCH")}</div>
     <div className="ai-current-research-card">

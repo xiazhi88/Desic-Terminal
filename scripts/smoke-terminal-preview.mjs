@@ -62,7 +62,19 @@ async function main() {
   await seedNotificationHistory(page);
 
   await page.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(".terminal .workspace", { timeout: 30_000 });
+  await page.waitForSelector(".ai-research-host:not([hidden])", { timeout: 30_000 });
+  if (!(await page.locator('[data-workspace="ai"].active').count())) {
+    throw new Error("AI Research should be the startup workspace");
+  }
+  if (!(await page.locator(".topbar .market-title__trigger").count()) || !(await page.locator(".topbar .account-button").count())) {
+    throw new Error("AI Research should preserve the shared market/account header");
+  }
+  const workspaceIds = await page.locator(".rail [data-workspace]").evaluateAll((items) => items.map((item) => item.getAttribute("data-workspace")));
+  for (const workspaceId of ["ai", "terminal", "radar", "opportunities", "automation", "intelligence", "systematic", "data", "settings"]) {
+    if (!workspaceIds.includes(workspaceId)) throw new Error(`workspace navigation is missing ${workspaceId}: ${JSON.stringify(workspaceIds)}`);
+  }
+  await page.locator('[data-workspace="terminal"]').click();
+  await page.waitForSelector(".content-grid", { timeout: 30_000 });
   const cacheHitRates = await page.evaluate(async () => {
     const { formatRunCacheHitRate } = await import("/src/ui/AiAutomationPanel.tsx");
     const summary = {
@@ -193,41 +205,26 @@ async function main() {
   await page.locator(".window-controls .window-button").nth(0).click();
   await page.locator(".window-controls .window-button").nth(1).click();
 
-  const aiFloat = page.locator(".ai-float");
-  const aiBefore = await aiFloat.boundingBox();
-  if (!aiBefore) throw new Error("AI floating entry is missing");
-  await aiFloat.hover();
-  await page.mouse.down();
-  await page.mouse.move(420, 240, { steps: 8 });
-  await page.mouse.up();
-  const aiAfter = await aiFloat.boundingBox();
-  if (!aiAfter || Math.abs(aiAfter.x - aiBefore.x) < 24 || Math.abs(aiAfter.y - aiBefore.y) < 24) {
-    throw new Error(`AI floating entry did not move freely: ${JSON.stringify({ aiBefore, aiAfter })}`);
+  if (await page.locator(".ai-float, .ai-dock-resizer").count()) {
+    throw new Error("floating AI controls should be removed from the terminal workspace");
   }
-  if (aiAfter.x < 0 || aiAfter.y < 0 || aiAfter.x + aiAfter.width > 1440 || aiAfter.y + aiAfter.height > 900) {
-    throw new Error(`AI floating entry moved outside viewport: ${JSON.stringify(aiAfter)}`);
-  }
-  if (await page.locator(".ai-panel").count()) throw new Error("dragging the AI entry should not toggle the panel");
-  await aiFloat.click();
-  const aiPanel = await page.locator(".ai-panel").boundingBox();
-  if (!aiPanel || aiPanel.x < 0 || aiPanel.y < 0 || aiPanel.x + aiPanel.width > 1440 || aiPanel.y + aiPanel.height > 900) {
-    throw new Error(`AI panel should remain inside the viewport after dragging: ${JSON.stringify(aiPanel)}`);
-  }
-  const aiLayerState = await page.evaluate(() => {
-    const dock = document.querySelector(".ai-dock");
-    const chartControls = document.querySelector(".chart-control-bar");
-    if (!dock || !chartControls) return null;
-    return {
-      aiZIndex: Number.parseInt(getComputedStyle(dock).zIndex, 10),
-      chartZIndex: Number.parseInt(getComputedStyle(chartControls).zIndex, 10)
-    };
-  });
-  if (!aiLayerState || !Number.isFinite(aiLayerState.aiZIndex) || !Number.isFinite(aiLayerState.chartZIndex)
-    || aiLayerState.aiZIndex <= aiLayerState.chartZIndex) {
-    throw new Error(`AI panel should render above chart controls: ${JSON.stringify(aiLayerState)}`);
+  await page.locator('[data-workspace="ai"]').click();
+  await page.waitForSelector(".ai-research-host:not([hidden])", { timeout: 5_000 });
+  const aiWorkspaceBox = await page.locator(".ai-research-shell").boundingBox();
+  if (!aiWorkspaceBox || aiWorkspaceBox.width < 900 || aiWorkspaceBox.height < 600) {
+    throw new Error(`AI Research should render as a full workspace: ${JSON.stringify(aiWorkspaceBox)}`);
   }
   await verifyAiModelConfigLiveUpdate(page);
-  await page.locator('.ai-panel-head button[title="收起"]').click();
+  const aiDraft = "navigation persistence smoke";
+  await page.locator(".ai-research-shell textarea").fill(aiDraft);
+  await page.locator('[data-workspace="terminal"]').click();
+  await page.waitForSelector(".content-grid");
+  if (await page.locator(".ai-research-shell textarea").inputValue() !== aiDraft) {
+    throw new Error("AI Research controller state should remain mounted across workspace navigation");
+  }
+  if (await page.locator(".rail-ai-status.has-unread").count()) {
+    throw new Error("Workspace navigation alone should not create unread AI output");
+  }
 
   await verifyMarketRadar(page);
   await verifySettingsConfigurationPage(page);
@@ -238,6 +235,7 @@ async function main() {
   }
 
   await verifyAccountModalWithPreviewAccounts(browser);
+  await verifyAiResearchMinimumViewport(browser);
   const responsiveCount = await verifyResponsiveScenarios(browser);
   await browser.close();
   process.stdout.write(
@@ -394,8 +392,9 @@ async function verifyEpisodeReviewModal(browser) {
     };
   });
 
-  if (!Number.isFinite(state.backdropZ) || !Number.isFinite(state.chartZ) || !Number.isFinite(state.aiZ) || !Number.isFinite(state.topbarZ)
-    || state.backdropZ <= state.chartZ || state.backdropZ <= state.aiZ || state.backdropZ <= state.topbarZ) {
+  const underlyingLayerZ = [state.chartZ, state.aiZ, state.topbarZ].filter(Number.isFinite);
+  if (!Number.isFinite(state.backdropZ) || !Number.isFinite(state.aiZ) || !Number.isFinite(state.topbarZ)
+    || underlyingLayerZ.some((layerZ) => state.backdropZ <= layerZ)) {
     throw new Error(`episode review modal layer order is invalid: ${JSON.stringify(state)}`);
   }
   if (!state.modalBox || state.modalBox.x < 0 || state.modalBox.y < 0
@@ -564,7 +563,9 @@ async function openTerminalPreviewPage(browser, scenario) {
   await seedMarketAssets(page);
   await seedNotificationHistory(page);
   await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
-  await page.waitForSelector(".terminal .workspace", { timeout: 30_000 });
+  await page.waitForSelector(".ai-research-host:not([hidden])", { timeout: 30_000 });
+  await page.locator('[data-workspace="terminal"]').click();
+  await page.waitForSelector(".content-grid", { timeout: 30_000 });
 
   // Search lives inside the title-bar market picker and spans every perpetual, so
   // a market can be starred without leaving the menu.
@@ -620,6 +621,39 @@ async function openTerminalPreviewPage(browser, scenario) {
   if (/自研图表|低延迟/.test(chartToolbarText || "")) throw new Error(`legacy chart labels should be removed: ${chartToolbarText}`);
 
   return { page, consoleErrors, pageErrors };
+}
+
+async function verifyAiResearchMinimumViewport(browser) {
+  const page = await browser.newPage({ viewport: { width: 720, height: 720 }, deviceScaleFactor: 1 });
+  await page.addInitScript(() => localStorage.setItem("desic.ui.language.v1", "zh-CN"));
+  try {
+    await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
+    await page.waitForSelector(".ai-research-host:not([hidden])", { timeout: 30_000 });
+    const state = await page.evaluate(() => {
+      const rect = (selector) => {
+        const box = document.querySelector(selector)?.getBoundingClientRect();
+        return box ? { x: box.x, y: box.y, width: box.width, height: box.height, right: box.right, bottom: box.bottom } : null;
+      };
+      return {
+        host: rect(".ai-research-host"),
+        sidebar: rect(".ai-session-sidebar"),
+        main: rect(".ai-panel-main"),
+        composer: rect(".ai-composer"),
+        contextDisplay: document.querySelector(".ai-research-context") ? getComputedStyle(document.querySelector(".ai-research-context")).display : "none",
+        floatingControls: document.querySelectorAll(".ai-float, .ai-dock-resizer").length,
+        viewport: { width: innerWidth, height: innerHeight },
+        overflowX: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        overflowY: document.documentElement.scrollHeight - document.documentElement.clientHeight
+      };
+    });
+    if (!state.host || !state.sidebar || !state.main || !state.composer
+      || state.main.width < 340 || state.composer.right > state.viewport.width || state.composer.bottom > state.viewport.height
+      || state.contextDisplay !== "none" || state.floatingControls !== 0 || state.overflowX > 2 || state.overflowY > 2) {
+      throw new Error(`AI Research minimum desktop viewport is invalid: ${JSON.stringify(state)}`);
+    }
+  } finally {
+    await page.close();
+  }
 }
 
 async function verifyResponsiveScenarios(browser) {
@@ -991,7 +1025,9 @@ async function verifyAccountModalWithPreviewAccounts(browser) {
   page.on("pageerror", (error) => pageErrors.push(error.message));
   await seedMarketAssets(page);
   await page.goto(accountPreviewUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(".terminal .workspace", { timeout: 30_000 });
+  await page.waitForSelector(".ai-research-host:not([hidden])", { timeout: 30_000 });
+  await page.locator('[data-workspace="terminal"]').click();
+  await page.waitForSelector(".content-grid", { timeout: 30_000 });
   const topAccountText = await page.locator(".account-button").textContent();
   if (!/OKX 预览模拟盘|demo/.test(topAccountText || "")) {
     throw new Error(`preview account should be visible in top account button: ${topAccountText}`);
@@ -1150,7 +1186,6 @@ async function verifySettingsConfigurationPage(page) {
       setup: rect(".ai-first-setup"),
       editor: rect(".ai-model-config-editor"),
       actions: rect(".ai-settings-pane > .modal-actions"),
-      aiFloat: rect(".ai-float"),
       copy: firstSetup?.textContent?.trim() || "",
       // Counts both the legacy button rows and the current row markup, so the
       // "no implicit draft" guarantee survives changes to the row structure.
@@ -1167,9 +1202,6 @@ async function verifySettingsConfigurationPage(page) {
   if (aiState.editor && aiState.actions) aiGaps.push(aiState.actions.top - aiState.editor.bottom);
   if (aiState.setupHeight <= 0 || aiState.setupHeight > 150 || aiGaps.some((gap) => gap < 0 || gap > 24) || aiState.bodyOverflowX > 2) {
     throw new Error(`AI first setup layout is not compact: ${JSON.stringify(aiState)}`);
-  }
-  if (aiState.actions && aiState.aiFloat && rectsOverlap(aiState.actions, aiState.aiFloat)) {
-    throw new Error(`AI launcher overlaps first setup actions: ${JSON.stringify(aiState)}`);
   }
   await page.locator(".ai-first-setup-action").click();
   await page.waitForSelector(".ai-provider-grid");
@@ -1188,7 +1220,7 @@ async function verifySettingsConfigurationPage(page) {
     return {
       provider: fields[1]?.value || "",
       model: document.querySelector('.ai-provider-model-field [role="combobox"]')?.getAttribute("data-value") || "",
-      baseUrl: fields[2]?.value || "",
+      baseUrl: fields[3]?.value || "",
       providerReadOnly: fields[1]?.readOnly ?? false,
       guideText: document.querySelector(".ai-provider-guide")?.textContent || "",
       guideHref: document.querySelector(".ai-provider-guide a")?.getAttribute("href") || "",
@@ -1214,7 +1246,7 @@ async function verifySettingsConfigurationPage(page) {
       name: fields[0]?.value || "",
       provider: fields[1]?.value || "",
       model: document.querySelector('.ai-provider-model-field [role="combobox"]')?.getAttribute("data-value") || "",
-      baseUrl: fields[2]?.value || "",
+      baseUrl: fields[3]?.value || "",
       providerReadOnly: fields[1]?.readOnly ?? false,
       guideText: document.querySelector(".ai-provider-guide")?.textContent || "",
       guideHref: document.querySelector(".ai-provider-guide a")?.getAttribute("href") || ""
@@ -1375,7 +1407,6 @@ async function verifyTradeTicket(page) {
       ticket: rect(".ticket"),
       marketDepth: rect(".market-depth"),
       orderbook: rect(".orderbook"),
-      aiFloat: rect(".ai-float"),
       emptyAccount: rect(".empty-account"),
       tradeButtons: Array.from(document.querySelectorAll(".trade-buttons button")).map((button) => {
         const box = button.getBoundingClientRect();
@@ -1414,9 +1445,6 @@ async function verifyTradeTicket(page) {
     }
     if (button.repeatedDisabledReason) {
       throw new Error(`trade action button should not repeat the shared blocker reason: ${JSON.stringify(button)}`);
-    }
-    if (layout.aiFloat && rectsOverlap(button, layout.aiFloat)) {
-      throw new Error(`AI launcher overlaps a trade action button: ${JSON.stringify({ button, aiFloat: layout.aiFloat })}`);
     }
   }
 }

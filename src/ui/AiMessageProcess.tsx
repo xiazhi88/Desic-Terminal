@@ -1,4 +1,4 @@
-import { lazy, Suspense, type Dispatch, type SetStateAction } from "react";
+import { lazy, Suspense, useState, type Dispatch, type SetStateAction } from "react";
 import { CheckCircle2, CircleAlert, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { getAiAgentFailure } from "../lib/aiAgentTrace";
@@ -208,6 +208,302 @@ function AiToolOutputCode({ value, pending }: { value: unknown; pending?: boolea
   return <code>{safeJson(normalized)}</code>;
 }
 
+// —— B1 工具 IO 结构化：高频工具键值卡 + "原始"兜底 chip ——
+// 数据形状来源：src/ui/ai-research/fixtures.ts 实测 + aiToolPresentation.ts PRESENTATIONS 高频工具。
+// 未识别工具不进入本节，保持原有 JSON 渲染（details.ai-tool-raw），不改动任何数据流。
+
+type AiToolIoRow = {
+  key: string;
+  label: string;
+  value: string;
+  truncated: boolean;
+  full?: string;
+};
+
+const AI_TOOL_IO_VALUE_LIMIT = 72;
+// B2：回退扫描总条目上限放宽到 10（覆盖"共 N 项 + 首项字段"的数组行组）。
+const AI_TOOL_IO_ROW_CAP = 10;
+// B2：递归扁平化深度上限——顶层为第 1 层，嵌套对象/数组首项字段为第 2 层。
+const AI_TOOL_IO_DEPTH_LIMIT = 2;
+const AI_TOOL_IO_NOISE_KEY = /^(content|contentSha256|sourceEventSeqs|seqId)$/i;
+
+// 高频工具的首选字段路径（点号路径，如 strategy.id）。一条都未命中时回退到 B2 递归扁平化，保持数据真实。
+// B2 形状校对（src-tauri/src/lib.rs 只读确认）：market.readTicker / readFundingRate / readInstrument
+// 均返回 { source, ageMs, summary, <载荷对象> }，真实字段在载荷对象内部（此前按顶层扁平形状书写，全部落空）。
+// radar.compareMarkets 返回 { snapshotAt, modelVersion, universeSize, markets: [...], readOnly, limitations }。
+const AI_TOOL_IO_FIELD_PATHS: Record<string, { input?: string[]; output?: string[] }> = {
+  "market.readTicker": { input: ["instId"], output: ["ticker.instId", "ticker.last", "ticker.high24h", "ticker.low24h", "ticker.volCcy24h", "ticker.askPx", "ticker.bidPx", "ticker.open24h"] },
+  "market.readCandles": { input: ["instId", "bar", "limit"], output: ["instId", "bar", "latestConfirmedAt", "candles"] },
+  "market.readInstrument": { input: ["instId"], output: ["instrument.instId", "instrument.state", "instrument.ctVal", "instrument.lever", "instrument.tickSz", "instrument.lotSz", "instrument.settleCcy", "instrument.instType"] },
+  "market.readFundingRate": { input: ["instId"], output: ["fundingRate.instId", "fundingRate.fundingRate", "fundingRate.nextFundingRate"] },
+  "market.readDecisionContext": { input: ["instId"], output: ["instId", "last", "asOf", "generatedAt"] },
+  "account.readSnapshot": { input: ["instId"], output: ["instId", "totalEq", "availEq", "lever", "mgnMode", "positionCount", "orderCount"] },
+  "strategy.create": { input: ["name", "description", "parameters"], output: ["strategy.id", "strategy.name", "strategy.version", "strategy.status", "createdVersion", "saved"] },
+  "strategy.backtest": { input: ["strategyId", "runId", "instId", "bar", "lookback"], output: ["strategyId", "runId", "status", "metrics.totalReturn", "metrics.maxDrawdown", "metrics.winRate", "tradeCount"] },
+  "strategy.optimize": { input: ["strategyId", "runId", "iterations"], output: ["strategyId", "runId", "status", "best.score", "trialCount"] },
+  "chart.createIndicator": { input: ["chartId", "name", "kind"], output: ["chartId", "indicatorId", "name", "status"] },
+  "trade.precheck": { input: ["instId", "side", "sz", "ordType"], output: ["instId", "side", "ok", "verdict", "reason"] },
+  "trade.submit": { input: ["instId", "side", "sz", "ordType"], output: ["instId", "ordId", "clOrdId", "status", "avgPx"] },
+  "radar.compareMarkets": { input: ["instIds"], output: ["universeSize", "modelVersion", "markets"] },
+  "radar.readRanking": { input: ["instId", "limit"], output: ["instId", "rowCount", "updatedAt"] },
+  "research.webSearch": { input: ["query", "limit"], output: ["query", "resultCount", "provider"] },
+  "skill.read": { input: ["skillId"], output: ["skillId", "name", "version"] }
+};
+
+function isStructuredIoTool(tool: AiToolRun): boolean {
+  const canonicalName = getAiToolPresentation(tool.name).canonicalName;
+  if (AI_TOOL_IO_FIELD_PATHS[canonicalName]) return true;
+  // 已知业务域前缀（对齐 aiToolPresentation.inferDomain）；system / mcp 兜底工具保持原始 JSON。
+  return /^(?:market|okx|account|position|strategy|profile|chart|indicator|trade|order|radar|research|intelligence|skill|skills|agent|subagent)\./i.test(canonicalName);
+}
+
+function resolveAiToolIoPath(source: Record<string, unknown>, path: string): unknown {
+  let current: unknown = source;
+  for (const segment of path.split(".")) {
+    if (!current || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[segment];
+  }
+  return current;
+}
+
+function humanizeToolFieldKey(key: string) {
+  // 与 aiToolPresentation.humanizeToolName 同构的分词规则，不新造业务词。
+  const normalized = key.replace(/\./g, " ");
+  return normalized
+    .replace(/([a-z])([A-Z])/g, "$1 $2")
+    .replace(/[-_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/^./, (value) => value.toUpperCase());
+}
+
+function aiToolIoValuePreview(value: unknown): { value: string; truncated: boolean; full?: string } | null {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "string") {
+    const compact = value.trim().replace(/\s+/g, " ");
+    if (!compact) return null;
+    if (compact.length <= AI_TOOL_IO_VALUE_LIMIT) return { value: compact, truncated: false };
+    return { value: `${compact.slice(0, AI_TOOL_IO_VALUE_LIMIT)}…`, truncated: true, full: compact };
+  }
+  if (typeof value === "number" || typeof value === "boolean") return { value: String(value), truncated: false };
+  if (typeof value !== "object") return null;
+  // 深层数据（嵌套对象/长数组）压缩截断显示 …，完整内容仍在"原始"视图。
+  let compact: string;
+  try {
+    compact = JSON.stringify(value) ?? "";
+  } catch {
+    return null;
+  }
+  if (!compact || compact === "{}" || compact === "[]") return null;
+  if (compact.length <= AI_TOOL_IO_VALUE_LIMIT) return { value: compact, truncated: false };
+  return { value: `${compact.slice(0, AI_TOOL_IO_VALUE_LIMIT)}…`, truncated: true, full: compact };
+}
+
+function aiToolIoRowFrom(key: string, value: unknown): AiToolIoRow | null {
+  const preview = aiToolIoValuePreview(value);
+  if (!preview) return null;
+  return {
+    key,
+    label: humanizeToolFieldKey(key),
+    value: preview.value,
+    truncated: preview.truncated,
+    ...(preview.full ? { full: preview.full } : {})
+  };
+}
+
+// —— B2 通用回退：递归扁平化 ——
+// 未配置/未命中显式路径的嵌套结构工具（radar.compareMarkets、funding basis 类等）也能产出键值行，
+// "暂无可固定的结构化字段"类空态只在扁平化后确实零标量时才出现。
+
+type AiToolIoFlatEntry = {
+  key: string;
+  value: unknown;
+};
+
+function isAiToolIoScalar(value: unknown) {
+  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+}
+
+// 对象数组的统一呈现："共 N 项"一行 + 首项标量字段（键路径如 markets[0].instId）。
+// 非对象数组（标量数组等）整体回退为 JSON 预览，交由 aiToolIoValuePreview 截断。
+function aiToolIoArrayEntries(value: unknown[], arrayKey: string): AiToolIoFlatEntry[] {
+  const items = value.filter((item) => item !== null && typeof item === "object" && !Array.isArray(item));
+  if (items.length === 0) return [{ key: arrayKey, value }];
+  const entries: AiToolIoFlatEntry[] = [{
+    key: arrayKey,
+    value: processText("toolIoArrayCount", "{{count}} items", "共 {{count}} 项", { count: value.length })
+  }];
+  const first = items[0] as Record<string, unknown>;
+  for (const [subKey, subValue] of Object.entries(first)) {
+    if (AI_TOOL_IO_NOISE_KEY.test(subKey)) continue;
+    if (isAiToolIoScalar(subValue)) entries.push({ key: `${arrayKey}[0].${subKey}`, value: subValue });
+  }
+  return entries;
+}
+
+// 递归扁平化对象载荷：本层标量 → 一层嵌套对象的标量字段（键路径如 btc.fundingRate）→
+// 对象数组（"共 N 项" + 首项标量字段）。深度上限 AI_TOOL_IO_DEPTH_LIMIT 层、总条目上限 cap；
+// 触顶置 overflow，由卡片提示"原始载荷含完整数据"。同层保持原始键序、标量优先。
+function flattenAiToolIoEntries(
+  source: Record<string, unknown>,
+  cap: number,
+  prefix = "",
+  depth = 1
+): { entries: AiToolIoFlatEntry[]; overflow: boolean } {
+  const entries: AiToolIoFlatEntry[] = [];
+  let overflow = false;
+  const push = (entry: AiToolIoFlatEntry) => {
+    if (entries.length >= cap) {
+      overflow = true;
+      return;
+    }
+    entries.push(entry);
+  };
+  const joinKey = (key: string) => (prefix ? `${prefix}.${key}` : key);
+  const fields = Object.entries(source).filter(([key]) => !AI_TOOL_IO_NOISE_KEY.test(key));
+  // 1) 本层标量优先。
+  for (const [key, value] of fields) {
+    if (isAiToolIoScalar(value)) push({ key: joinKey(key), value });
+  }
+  if (depth >= AI_TOOL_IO_DEPTH_LIMIT) return { entries, overflow };
+  // 2) 一层嵌套对象：下沉一层取标量字段，不再继续深入。
+  for (const [key, value] of fields) {
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      const nested = flattenAiToolIoEntries(value as Record<string, unknown>, cap - entries.length, joinKey(key), depth + 1);
+      entries.push(...nested.entries);
+      overflow = overflow || nested.overflow;
+    }
+  }
+  // 3) 数组：对象数组走"共 N 项 + 首项"，其余数组整体 JSON 预览。
+  for (const [key, value] of fields) {
+    if (!Array.isArray(value) || value.length === 0) continue;
+    for (const entry of aiToolIoArrayEntries(value, joinKey(key))) push(entry);
+  }
+  return { entries, overflow };
+}
+
+function aiToolIoRows(tool: AiToolRun, side: "input" | "output"): { rows: AiToolIoRow[]; overflow: boolean } | null {
+  const normalized = normalizeAiToolPayload(side === "input" ? tool.arguments : tool.result);
+  if (normalized === null || normalized === undefined) return null;
+  if (typeof normalized !== "object") {
+    // 标量/纯文本载荷：以单行键值卡呈现（label 复用现有 输入/输出 文案）。
+    const preview = aiToolIoValuePreview(normalized);
+    if (!preview) return null;
+    return {
+      rows: [{
+        key: side,
+        label: side === "input"
+          ? processText("toolInput", "Input", "输入")
+          : processText("toolOutput", "Output", "输出"),
+        value: preview.value,
+        truncated: preview.truncated,
+        ...(preview.full ? { full: preview.full } : {})
+      }],
+      overflow: false
+    };
+  }
+  const record = normalized as Record<string, unknown>;
+  const rows: AiToolIoRow[] = [];
+  let overflow = false;
+  const pushEntry = (entry: AiToolIoFlatEntry) => {
+    const row = aiToolIoRowFrom(entry.key, entry.value);
+    if (row) rows.push(row);
+  };
+  const paths = AI_TOOL_IO_FIELD_PATHS[getAiToolPresentation(tool.name).canonicalName]?.[side];
+  if (paths) {
+    for (const path of paths) {
+      const value = resolveAiToolIoPath(record, path);
+      if (value === null || value === undefined) continue;
+      if (value !== null && typeof value === "object") {
+        // B2：显式路径命中嵌套对象/数组时同样走通用扁平化（对象数组 = "共 N 项 + 首项字段"），不再渲染 JSON 长串。
+        const flat = Array.isArray(value)
+          ? { entries: aiToolIoArrayEntries(value, path), overflow: false }
+          : flattenAiToolIoEntries(value as Record<string, unknown>, AI_TOOL_IO_ROW_CAP - rows.length, path);
+        for (const entry of flat.entries) pushEntry(entry);
+        overflow = overflow || flat.overflow;
+        continue;
+      }
+      const row = aiToolIoRowFrom(path, value);
+      if (row) rows.push(row);
+    }
+  }
+  if (rows.length === 0) {
+    // B2：显式路径缺失/未命中 → 通用递归扁平化回退（顶层标量 → 嵌套标量 → 对象数组）。
+    const flat = flattenAiToolIoEntries(record, AI_TOOL_IO_ROW_CAP);
+    for (const entry of flat.entries) pushEntry(entry);
+    overflow = flat.overflow;
+  }
+  return rows.length > 0 ? { rows, overflow } : null;
+}
+
+function AiToolIoCard({ title, rows, emptyLabel, overflowHint }: { title: string; rows: AiToolIoRow[] | null; emptyLabel: string; overflowHint?: string }) {
+  return (
+    <div className={clsx("ai-tool-io-card", !rows && "is-empty")}>
+      <span className="ai-tool-io-card-title">{title}</span>
+      {rows ? (
+        <>
+          <dl className="ai-tool-kv">
+            {rows.map((row) => (
+              <div className="ai-tool-kv-item" key={row.key}>
+                <dt title={row.key}>{row.label}</dt>
+                <dd className={clsx(row.truncated && "is-truncated")} title={row.full} data-i18n-skip>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {/* B2：条目触顶提示——完整数据仍在"原始"视图，卡片不承担展开职责 */}
+          {overflowHint ? <small className="ai-tool-io-note" data-i18n-skip>{overflowHint}</small> : null}
+        </>
+      ) : (
+        <code className="ai-tool-io-empty">{emptyLabel}</code>
+      )}
+    </div>
+  );
+}
+
+function AiToolIoSection({ tool }: { tool: AiToolRun }) {
+  // 纯展示状态：默认结构化键值卡，"原始"chip 切回 JSON 视图；不改动任何数据流。
+  const [showRaw, setShowRaw] = useState(false);
+  const input = aiToolIoRows(tool, "input");
+  const output = aiToolIoRows(tool, "output");
+  const outputEmptyLabel = tool.status === "running"
+    ? processText("waitingToolResult", "Waiting for tool result", "等待工具返回")
+    : processText("noToolOutput", "No output data", "无输出数据");
+  const payloadHint = processText("toolIoPayloadHint", "Full data is available in the raw payload", "原始载荷含完整数据");
+  return (
+    <section className="ai-tool-io-cards">
+      <header className="ai-tool-io-cards-head">
+        <span className="ai-tool-io-cards-title">{processText("toolDetails", "Details", "详情")}</span>
+        <button
+          type="button"
+          className={clsx("ai-tool-io-toggle", showRaw && "is-raw")}
+          aria-pressed={showRaw}
+          onClick={() => setShowRaw((value) => !value)}
+        >
+          {showRaw ? processText("toolIoStructured", "Structured", "结构化") : processText("toolIoRaw", "Raw", "原始")}
+        </button>
+      </header>
+      {showRaw ? (
+        <pre className="ai-tool-io-raw">{safeJson({ arguments: normalizeAiToolPayload(tool.arguments), result: normalizeAiToolPayload(tool.result) })}</pre>
+      ) : (
+        <div className="ai-tool-io-cards-grid">
+          <AiToolIoCard
+            title={processText("toolInput", "Input", "输入")}
+            rows={input?.rows ?? null}
+            overflowHint={input?.overflow ? payloadHint : undefined}
+            emptyLabel={processText("noToolInput", "No input parameters", "无输入参数")}
+          />
+          <AiToolIoCard
+            title={processText("toolOutput", "Output", "输出")}
+            rows={output?.rows ?? null}
+            overflowHint={output?.overflow ? payloadHint : undefined}
+            emptyLabel={outputEmptyLabel}
+          />
+        </div>
+      )}
+    </section>
+  );
+}
+
 function strategyActionForTool(tool: AiToolRun) {
   if (!tool.name.startsWith("strategy.") || !tool.ok || !tool.result || typeof tool.result !== "object") return null;
   const result = tool.result as Record<string, unknown>;
@@ -249,10 +545,13 @@ function strategySourceForTool(value: unknown) {
 }
 
 function toolFactRows(value: unknown, limit = 7): Array<[string, string]> {
-  return Object.entries(toolRecord(value))
-    .filter(([, item]) => ["string", "number", "boolean"].includes(typeof item))
-    .slice(0, limit)
-    .map(([key, item]) => [key, String(item)]);
+  const record = toolRecord(value);
+  if (Object.keys(record).length === 0) return [];
+  // B2：与工具 IO 卡共用递归扁平化——嵌套对象/对象数组也能产出可固定的标量事实
+  // （如 fundingRate.fundingRate、markets[0].instId），inspector 的
+  // "暂无可固定的结构化字段"只在扁平化后确实零标量时才出现。
+  const flat = flattenAiToolIoEntries(record, limit);
+  return flat.entries.map((entry) => [entry.key, String(entry.value)]);
 }
 
 function artifactKindForTool(tool: AiToolRun): AiResearchArtifact["kind"] {
@@ -266,8 +565,129 @@ function artifactKindForTool(tool: AiToolRun): AiResearchArtifact["kind"] {
   return "research";
 }
 
+// —— B2 简单工具内联证据卡 ——
+// 清单判据（宁少勿多）：market 域只读 read 工具 + 返回单对象（无对象数组/行集）+
+// 核心标量字段 2-6 个 + 无副作用。K线/指标/深度/情绪/排名/智能钱/策略类等
+// 复杂产物保持 artifact 行为。market.readDecisionContext 不入列：返回
+// precheck + 账户 + 市场快照的复合复核载荷，属于右栏复杂产物。
+const AI_INLINE_EVIDENCE_TOOLS = new Set(["market.readTicker", "market.readFundingRate", "market.readInstrument"]);
+
+// 内联卡键值行数上限（工具名微标签 + 2-6 个键值 + 数据时间）。
+const AI_INLINE_EVIDENCE_ROW_CAP = 6;
+// 数据时间候选键：在载荷两层内按命中顺序取第一个正数时间戳。
+const AI_INLINE_EVIDENCE_TIME_KEYS = ["ts", "fundingTime", "nextFundingTime", "dataAt", "asOf", "generatedAt", "capturedAt", "updatedAt", "snapshotAt"];
+
+type AiInlineEvidence = {
+  key: string;
+  label: string;
+  toolName: string;
+  rows: Array<{ key: string; label: string; value: string; full?: string }>;
+  time?: string;
+};
+
+function isInlineEvidenceTool(tool: AiToolRun): boolean {
+  // 仅主线程工具：子 Agent 工具保留在子任务卡内，不在消息尾部重复落地。
+  return tool.status === "done"
+    && tool.ok !== false
+    && !tool.agentId
+    && AI_INLINE_EVIDENCE_TOOLS.has(getAiToolPresentation(tool.name).canonicalName);
+}
+
+// 数据时间：按候选键在两层内找第一个正数时间戳，秒/毫秒自适应（与 AiResearchInspector 同规则）。
+function aiInlineEvidenceTime(record: Record<string, unknown>): string | undefined {
+  const scalars: Array<[string, number]> = [];
+  const collect = (key: string, value: unknown) => {
+    if (AI_TOOL_IO_NOISE_KEY.test(key)) return;
+    if (typeof value === "number" && value > 0) scalars.push([key, value]);
+  };
+  for (const [key, value] of Object.entries(record)) {
+    collect(key, value);
+    if (value !== null && typeof value === "object" && !Array.isArray(value)) {
+      for (const [subKey, subValue] of Object.entries(value as Record<string, unknown>)) {
+        collect(`${key}.${subKey}`, subValue);
+      }
+    }
+  }
+  for (const timeKey of AI_INLINE_EVIDENCE_TIME_KEYS) {
+    const hit = scalars.find(([key]) => key === timeKey || key.endsWith(`.${timeKey}`));
+    if (!hit) continue;
+    const milliseconds = hit[1] < 10_000_000_000 ? hit[1] * 1000 : hit[1];
+    if (!Number.isFinite(milliseconds)) continue;
+    try {
+      return new Intl.DateTimeFormat(i18n.resolvedLanguage || i18n.language || "zh-CN", {
+        timeZone: "Asia/Shanghai",
+        month: "2-digit",
+        day: "2-digit",
+        hour: "2-digit",
+        minute: "2-digit"
+      }).format(new Date(milliseconds));
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+function aiInlineEvidenceForTool(tool: AiToolRun): AiInlineEvidence | null {
+  if (!isInlineEvidenceTool(tool)) return null;
+  const normalized = normalizeAiToolPayload(tool.result);
+  if (normalized === null || normalized === undefined || typeof normalized !== "object" || Array.isArray(normalized)) return null;
+  // 键值行复用工具 IO 卡的扁平化结果：显式路径优先（B2 已按 lib.rs 真实形状修正），缺行时通用回退兜底。
+  const output = aiToolIoRows(tool, "output");
+  if (!output) return null;
+  const selected = output.rows.slice(0, AI_INLINE_EVIDENCE_ROW_CAP);
+  if (selected.length === 0) return null;
+  // 全部行共享同一层前缀（如 ticker.）时省去重复前缀；完整键路径保留在 title。
+  const root = selected[0].key.split(".")[0];
+  const sharedPrefix = selected.every((row) => row.key.startsWith(`${root}.`)) ? `${root}.` : null;
+  const presentation = getAiToolPresentation(tool.name);
+  const time = aiInlineEvidenceTime(normalized as Record<string, unknown>);
+  return {
+    key: tool.id,
+    label: presentation.label,
+    toolName: presentation.canonicalName,
+    rows: selected.map((row) => ({
+      key: row.key,
+      label: sharedPrefix ? humanizeToolFieldKey(row.key.slice(sharedPrefix.length)) : row.label,
+      value: row.value,
+      ...(row.full ? { full: row.full } : {})
+    })),
+    ...(time ? { time } : {})
+  };
+}
+
+// 消息级内联证据卡：简单工具完成后在答案之后、footer 之上直接落地结果。
+export function AiInlineEvidenceCards({ message }: { message: AiUiMessage }) {
+  const cards = message.tools
+    .map((tool) => aiInlineEvidenceForTool(tool))
+    .filter((card): card is AiInlineEvidence => Boolean(card));
+  if (cards.length === 0) return null;
+  const timeLabel = processText("inlineEvidenceTime", "Data time", "数据时间");
+  return (
+    <div className="ai-inline-evidence">
+      {cards.map((card) => (
+        <div className="ai-inline-evidence-card" key={card.key} aria-label={card.label}>
+          <span className="ai-inline-evidence-tool" title={card.toolName}>{card.label}</span>
+          <dl className="ai-inline-evidence-kv">
+            {card.rows.map((row) => (
+              <div className="ai-inline-evidence-item" key={row.key}>
+                <dt title={row.key}>{row.label}</dt>
+                <dd className={clsx(row.full && "is-truncated")} title={row.full ?? row.value} data-i18n-skip>{row.value}</dd>
+              </div>
+            ))}
+          </dl>
+          {card.time ? <span className="ai-inline-evidence-time" title={timeLabel} data-i18n-skip>{card.time}</span> : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export function aiResearchArtifactForTool(tool: AiToolRun, sourceMessageId?: string): AiResearchArtifact | null {
   if (tool.status === "pending" || tool.status === "running") return null;
+  // B2：简单 read 工具不再产出 artifact——结果以消息内内联证据卡落地，右栏只留给复杂产物。
+  // 不生成 artifact 即无 id 可被引用，removeArtifact/编号逻辑不会产生悬空引用。
+  if (AI_INLINE_EVIDENCE_TOOLS.has(getAiToolPresentation(tool.name).canonicalName)) return null;
   const presentation = getAiToolPresentation(tool.name);
   const action = strategyActionForTool(tool);
   const result = toolRecord(tool.result);
@@ -365,13 +785,21 @@ function AiToolDomainDetails({ tool, onOpenArtifact }: { tool: AiToolRun; onOpen
               : processText("openResearchTab", "Open research", "打开研究资料");
   return <div className={clsx("ai-tool-domain-details", `domain-${kind ?? "research"}`)}>
     <div className="ai-tool-result-brief"><span>{tool.ok === false || tool.status === "failed" ? processText("toolResultFailed", "Tool did not complete", "工具未完成") : processText("toolResultReady", "Result ready", "结果已就绪")}</span><strong data-i18n-skip>{toolResultBrief(tool)}</strong></div>
-    <AiToolFactRows tool={tool} />
+    {/* B1：识别为高频业务域的工具用键值卡呈现 IO（结果摘要标量已并入输出卡，不再重复渲染 facts）；
+        未识别工具保持原有 facts + 原始 JSON 渲染不变。 */}
+    {isStructuredIoTool(tool) ? (
+      <AiToolIoSection tool={tool} />
+    ) : (
+      <AiToolFactRows tool={tool} />
+    )}
     {strategySourceBlock(tool)}
     {artifact && onOpenArtifact ? <button type="button" className="ai-tool-open-artifact" onClick={() => onOpenArtifact(artifact)}>{actionLabel}</button> : null}
-    <details className="ai-tool-raw">
-      <summary>{processText("rawToolPayload", "Raw payload", "原始载荷")}</summary>
-      <pre>{safeJson({ arguments: normalizeAiToolPayload(tool.arguments), result: normalizeAiToolPayload(tool.result) })}</pre>
-    </details>
+    {!isStructuredIoTool(tool) ? (
+      <details className="ai-tool-raw">
+        <summary>{processText("rawToolPayload", "Raw payload", "原始载荷")}</summary>
+        <pre>{safeJson({ arguments: normalizeAiToolPayload(tool.arguments), result: normalizeAiToolPayload(tool.result) })}</pre>
+      </details>
+    ) : null}
   </div>;
 }
 
@@ -392,7 +820,17 @@ function AiToolCard({ tool, onOpenStrategy, onOpenArtifact }: { tool: AiToolRun;
       )}
     >
       <summary onClick={opensMarketPanel ? (event) => { event.preventDefault(); if (artifact) onOpenArtifact?.(artifact); } : undefined} className={opensMarketPanel ? "ai-tool-direct-artifact" : undefined}>
-        <span className="ai-tool-title"><AiToolDomainIcon domain={presentation.domain} /> <span>{presentation.label}</span><code title={presentation.canonicalName}>{presentation.canonicalName}</code></span>
+        <span className="ai-tool-title">
+          <span
+            className={clsx(
+              "ai-tool-state-dot",
+              (tool.status === "failed" || tool.ok === false || tool.blocked) && "failed",
+              tool.status === "running" && "running"
+            )}
+            aria-hidden="true"
+          />
+          <AiToolDomainIcon domain={presentation.domain} /> <span>{presentation.label}</span><code title={presentation.canonicalName}>{presentation.canonicalName}</code>
+        </span>
         <strong>{toolStatusLabel(tool)}</strong>
       </summary>
       <small className="ai-tool-summary" data-i18n-skip>{tool.summary || presentation.summary}</small>
@@ -589,16 +1027,55 @@ function formatTokenCount(value: number) {
   return formatLocalizedNumber(Math.round(value));
 }
 
-export function AiTokenUsageLine({ usage }: { usage: unknown }) {
+function formatMetaTokenCount(value: number) {
+  if (value < 10_000) return formatLocalizedNumber(Math.round(value));
+  return formatTokenCount(value);
+}
+
+// B2：输入/输出分示文案。任一缺失（未报告或为 0）时返回 null，调用方回退显示总数，
+// 避免出现误导性的"输入 0 · 输出 0"。
+function aiTokenSplitLabel(normalized: { reported: boolean; input: number; output: number }) {
+  if (!normalized.reported || normalized.input <= 0 || normalized.output <= 0) return null;
+  return processText("tokenInputOutput", "Input {{input}} · Output {{output}}", "输入 {{input}} · 输出 {{output}}", {
+    input: formatTokenCount(normalized.input),
+    output: formatTokenCount(normalized.output)
+  });
+}
+
+export function AiTokenUsageLine({ usage, variant = "line" }: { usage: unknown; variant?: "line" | "meta" }) {
   const normalized = normalizedUsage(usage);
   if (!normalized) return null;
+  const split = aiTokenSplitLabel(normalized);
+  if (variant === "meta") {
+    // 紧凑 footer 段：B2 起直接分示"输入 X · 输出 Y"（用户可一眼看出大头是固定上下文）；
+    // 任一缺失时回退显示总数；合计/子 Agent/不完整提示等详情保留在 tooltip。
+    if (!normalized.reported) return null;
+    const detail = [
+      ...(split ? [split] : []),
+      processText("tokenTotal", "Total {{total}}", "合计 {{total}}", { total: formatMetaTokenCount(normalized.total) }),
+      ...(normalized.agentCount > 0 ? [processText("subagentCount", "{{count}} subagents", "{{count}} 个子 Agent", { count: normalized.agentCount })] : []),
+      ...(normalized.partial ? [normalized.unreportedAgentCount > 0
+        ? processText("usagePartiallyReportedAgents", "Known usage only; {{count}} agents did not report usage", "仅显示已知用量；{{count}} 个 Agent 未报告", { count: normalized.unreportedAgentCount })
+        : processText("usagePartiallyReported", "Known usage only; this turn was partially reported", "仅显示已知用量；本轮统计不完整")] : [])
+    ].join(" · ");
+    return (
+      <span
+        className={clsx("ai-meta-token", normalized.partial && "is-partial")}
+        title={detail}
+        aria-label={processText("tokenUsage", "Token usage for this turn", "本轮 Token 用量")}
+      >
+        {split ?? `${formatMetaTokenCount(normalized.total)} tok`}
+      </span>
+    );
+  }
   return (
     <div className={clsx("ai-token-usage", !normalized.reported && "unreported")} aria-label={processText("tokenUsage", "Token usage for this turn", "本轮 Token 用量")}>
       <span>Token</span>
       {normalized.reported ? (
         <>
+          {/* 向后兼容：图表中心/策略实验室沿用 strong 总数 + small 分示；分示缺失时只显示总数 */}
           <strong>{formatTokenCount(normalized.total)}</strong>
-          <small>{processText("tokenInputOutput", "Input {{input}} · Output {{output}}", "输入 {{input}} · 输出 {{output}}", { input: formatTokenCount(normalized.input), output: formatTokenCount(normalized.output) })}</small>
+          {split ? <small>{split}</small> : null}
           {normalized.agentCount > 0 ? <small>{processText("subagentCount", "{{count}} subagents", "{{count}} 个子 Agent", { count: normalized.agentCount })}</small> : null}
           {normalized.partial ? (
             <small>{normalized.unreportedAgentCount > 0
@@ -613,6 +1090,70 @@ export function AiTokenUsageLine({ usage }: { usage: unknown }) {
         </>
       ) : <small>{processText("usageNotReported", "Usage was not reported by the model", "模型未报告用量")}</small>}
     </div>
+  );
+}
+
+// —— B1 过程可视化：分段进度条 ——
+// 数据来源：message.timeline 中 kind==="tool" 的项按时间轴顺序映射到 tool runs 的 status 字段；
+// 无时间轴的历史消息回退到 message.tools + agents[].tools。
+// 只用真实工具名与状态，不伪造阶段语义；不新增 interval / 订阅。
+
+type AiProcessSegmentState = "done" | "running" | "failed" | "pending";
+
+type AiProcessSegment = {
+  id: string;
+  name: string;
+  label: string;
+  state: AiProcessSegmentState;
+};
+
+function aiProcessSegmentState(tool: AiToolRun): AiProcessSegmentState {
+  if (tool.status === "running") return "running";
+  if (tool.status === "failed" || tool.status === "blocked" || tool.ok === false || tool.blocked) return "failed";
+  if (tool.status === "done" || tool.ok === true) return "done";
+  return "pending";
+}
+
+function aiProcessToolSegments(message: AiUiMessage): AiProcessSegment[] {
+  const runs = message.timeline
+    ? message.timeline
+      .filter((item): item is Extract<AiTimelineItem, { kind: "tool" }> => item.kind === "tool")
+      .map((item) => (item.agentId
+        ? message.agents?.find((agent) => agent.id === item.agentId)?.tools?.find((entry) => entry.id === item.toolId)
+        : message.tools.find((entry) => entry.id === item.toolId)))
+      .filter((tool): tool is AiToolRun => Boolean(tool))
+    : [...message.tools, ...(message.agents ?? []).flatMap((agent) => agent.tools ?? [])];
+  return runs.map((tool) => {
+    const presentation = getAiToolPresentation(tool.name);
+    return {
+      id: `${tool.agentId ?? "main"}-${tool.id}`,
+      name: presentation.canonicalName,
+      label: presentation.label,
+      state: aiProcessSegmentState(tool)
+    };
+  });
+}
+
+// 段落悬停提示的状态词复用现有文案（已返回/运行中/失败/待审计），不新增业务词。
+const AI_PROCESS_SEGMENT_STATUS: Record<AiProcessSegmentState, [string, string, string]> = {
+  done: ["toolReturned", "Returned", "已返回"],
+  running: ["running", "Running", "运行中"],
+  failed: ["failed", "Failed", "失败"],
+  pending: ["pendingAudit", "Pending audit", "待审计"]
+};
+
+function AiProcessProgressSegments({ segments }: { segments: AiProcessSegment[] }) {
+  if (segments.length === 0) return null;
+  return (
+    <span className="ai-process-progress" aria-hidden="true">
+      {segments.map((segment) => (
+        <i
+          className={`is-${segment.state}`}
+          key={segment.id}
+          title={`${segment.name} · ${processText(...AI_PROCESS_SEGMENT_STATUS[segment.state])}`}
+        />
+      ))}
+    </span>
   );
 }
 
@@ -633,13 +1174,39 @@ export function AiProcessTimeline({ message, onApprove, now, onOpenStrategy, onO
   const groups = hasTimeline ? buildProcessGroups(timeline) : [];
   const processCount = hasTimeline ? groups.length : message.tools.length + (message.agents?.length ?? 0) + (message.teamEvents?.length ?? 0) + (message.approvals?.length ?? 0);
   const duration = hasTimeline ? timelineDuration(timeline, message.status ? now : undefined) : undefined;
+  const toolRunCount = message.tools.length + (message.agents?.reduce((count, agent) => count + (agent.tools?.length ?? 0), 0) ?? 0);
+  const summaryMeta = [
+    toolRunCount > 0
+      ? processText("processToolCount", "{{count}} tools", "{{count}} 工具", { count: toolRunCount })
+      : processCount > 0
+        ? processText("processItemCount", "{{count}} items", "{{count}} 项", { count: processCount })
+        : "",
+    duration ?? ""
+  ].filter(Boolean).join(" · ");
+  // B1：分段进度条 + 流式当前工具名。全部由现有 tool runs 的 status 派生。
+  const toolSegments = aiProcessToolSegments(message);
+  let runningSegment: AiProcessSegment | undefined;
+  for (let index = toolSegments.length - 1; index >= 0; index -= 1) {
+    if (toolSegments[index].state === "running") {
+      runningSegment = toolSegments[index];
+      break;
+    }
+  }
   return (
     <details className="ai-process" open={!done || hasFailure}>
       <summary>
-        <span>{done ? processText("processed", "Processed", "已处理") : processText("processing", "Processing", "处理中")}</span>
-        <strong>{duration ?? (processCount > 0
-          ? processText("processItemCount", "{{count}} items", "{{count}} 项", { count: processCount })
-          : processText("process", "Process", "过程"))}</strong>
+        <span>{done ? processText("executionProcess", "Execution process", "执行过程") : processText("processing", "Processing", "处理中")}</span>
+        {runningSegment ? (
+          <span
+            className="ai-process-current-tool"
+            data-i18n-skip
+            title={processText("processCurrentTool", "Current tool: {{name}}", "当前工具：{{name}}", { name: runningSegment.name })}
+          >
+            {runningSegment.label}
+          </span>
+        ) : null}
+        <strong>{summaryMeta || processText("process", "Process", "过程")}</strong>
+        <AiProcessProgressSegments segments={toolSegments} />
       </summary>
       <div className="ai-process-list">
         {hasTimeline ? (

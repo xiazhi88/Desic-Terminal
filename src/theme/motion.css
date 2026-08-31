@@ -1,0 +1,287 @@
+/*
+ * theme/motion.css — Phase 3 动效统一层（负责 agent：motion）
+ * ------------------------------------------------------------------
+ * 职责：弹层统一进场动效、列表行入场、Tab 内容淡入、按钮悬停微动效。
+ * 边界：只允许修改本文件。只动 transform/opacity/filter，禁止动画 layout 属性。
+ * 本文件在 styles.css 之后导入：同特异性时本文件规则胜出。
+ *
+ * 设计口径（对齐项目原则：动效只解释变化、150-400ms、ease-out、绝不动画 layout、
+ * 绝不与行情数据刷新竞争注意力）：
+ * - 时长与曲线复用 styles.css :root 注入的 token：--dur-fast(150ms) / --dur-med(280ms) /
+ *   --ease-out-soft(cubic-bezier(.2,.8,.2,1))；240ms 为任务规格指定值（介于 fast 与 med
+ *   之间，无对应 token，故字面量书写）。无需调值，本文件不覆盖 :root。
+ * - 全部挂载选择器用 :where() 包裹（特异性归零）：rowIn 靠源顺序覆盖 fadeIn，
+ *   文件尾 prefers-reduced-motion 块同样靠源顺序整体关闭，全程零 !important。
+ * - keyframes 统一 dsk- 前缀，避免与 styles.css 后续演进的关键帧撞名。
+ *
+ * 【退出动效待办】本终端弹层均为 React 条件渲染（关闭即卸载）或 display 切换，
+ * CSS 无法对「卸载」做过渡，因此本层只做进场。如需退出动效，需后续 JS 接线：
+ * 关闭时先置 data-closing 态播放离场关键帧，动画结束后再真正卸载；
+ * 届时直接复用下方 dsk-* 关键帧与 --ease-out-soft 曲线保持节奏一致。
+ *
+ * 【与既有 desic-popup 体系的分工】styles.css 26980-27185 已内建统一弹层进场
+ * （desic-popup-enter / desic-backdrop-enter / desic-tooltip-enter），覆盖 .modal-shell
+ * 全家（确认框、帮助中心、完整盘口、历史 Episode、Skill 来源、自动化/图表对话框等，
+ * 均经 ModalShell 渲染）与六个 .modal-backdrop 系背板、chart/AI 浮层菜单与 tooltip。
+ * 本文件只补它未覆盖的缺口，不重复挂载，避免两套节奏互相覆盖。
+ * 其中 .ai-context-popover-portal 是用户未提交的新增代码，已自带 160ms 进场动画
+ * 与 reduced-motion 关闭，本文件不改动它已有规则。
+ */
+
+/* ==================================================================
+ * 0. 可复用关键帧
+ * ================================================================== */
+
+/* dsk-fade-in：纯淡入，用于背板与 Tab 内容切换 */
+@keyframes dsk-fade-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+/* dsk-fade-up-in：面板进场，上浮 10px + 98.5% 缩放回正（对齐 pulse .ovl-panel 节奏） */
+@keyframes dsk-fade-up-in {
+  from {
+    opacity: 0;
+    transform: translateY(10px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* dsk-row-in：行级入场，仅 4px 上浮，克制到不与数据刷新抢注意力 */
+@keyframes dsk-row-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ==================================================================
+ * 1. 弹层进场（仅挂 styles.css 既有体系未覆盖的缺口）
+ *    多数弹层 display none→flex 或条件渲染，transition 不会触发，统一用 animation；
+ *    挂载/重挂载时自动重放，fill both 保证 delay 期间保持首帧。
+ * ================================================================== */
+
+/* AI 研究输入框 slash 命令面板：skillMenuOpen 条件挂载（App.tsx AiCommandPalette） */
+:where(.ai-command-palette) {
+  animation: dsk-fade-up-in var(--dur-med) var(--ease-out-soft) both;
+}
+
+/* 首次启动引导：背板淡入 + 卡片上浮（条件挂载，一次性） */
+:where(.first-launch-spotlight) {
+  animation: dsk-fade-in var(--dur-med) ease-out both;
+}
+
+:where(.first-launch-card) {
+  animation: dsk-fade-up-in var(--dur-med) var(--ease-out-soft) both;
+}
+
+/* ==================================================================
+ * 2. 列表行入场（rowIn 240ms + nth-child 级联）
+ *    虚拟化安全审查结论（只读 src/ui tsx 核实）：
+ *    - 挂载名单全部为「key 稳定 + 非滚动窗口化」容器：
+ *      · .orderbook        固定 5+5 档，key 为位置索引 a-0..4 / b-0..4（App.tsx OrderBookView），
+ *                          行情更新只改值不换元素，动画仅首次挂载播放一次，安全；
+ *      · .depth-side       完整盘口弹层内固定档位，key 为 side-索引（App.tsx DepthSide），随弹层挂载，安全；
+ *      · .positions-table  底部交易表格（持仓/挂单/资金/历史/账单/审计/复盘），key 为 instId/ordId/billId 等
+ *                          业务主键，切 Tab 时整组重挂载 → 级联入场；数据更新不重放，安全；
+ *      · .intelligence-feed 情报新闻/事件列表，key=recordId；visibleNewsEvents 只是相关性过滤
+ *                          （IntelligencePage.tsx），非滚动虚拟化，安全；
+ *      · .opportunity-list-scroll 机会列表，key=item.id，全量渲染无窗口化，安全；
+ *      · .ai-intel-list    AI 检查器情报列表，随查询结果挂载，低频刷新，安全。
+ *    - 明确跳过（见文末注释）：.recent-trades .trade-row（key 含 tradeId，逐笔重挂载）、
+ *      SystematicStrategyLab 全部（ReplayVirtualList 自研虚拟化）。
+ * ================================================================== */
+
+:where(
+  .orderbook .depth-row,
+  .depth-side .depth-modal-row,
+  .positions-table .table-row,
+  .intelligence-feed > button,
+  .opportunity-list-scroll .opportunity-list-item,
+  .ai-intel-list > *
+) {
+  animation: dsk-row-in 240ms var(--ease-out-soft) both;
+}
+
+/* 行级联延迟：同批挂载的第 1 行不延迟，第 2-8 行依次 +8ms（0/8/16/24/32/40/48/56ms）。
+ * 规则必须位于 rowIn 简写之后，delay 才能生效（同特异性，靠源顺序）。 */
+:where(
+  .orderbook .depth-row:nth-child(2),
+  .depth-side .depth-modal-row:nth-child(2),
+  .positions-table .table-row:nth-child(2),
+  .intelligence-feed > button:nth-child(2),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(2),
+  .ai-intel-list > *:nth-child(2)
+) { animation-delay: 8ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(3),
+  .depth-side .depth-modal-row:nth-child(3),
+  .positions-table .table-row:nth-child(3),
+  .intelligence-feed > button:nth-child(3),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(3),
+  .ai-intel-list > *:nth-child(3)
+) { animation-delay: 16ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(4),
+  .depth-side .depth-modal-row:nth-child(4),
+  .positions-table .table-row:nth-child(4),
+  .intelligence-feed > button:nth-child(4),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(4),
+  .ai-intel-list > *:nth-child(4)
+) { animation-delay: 24ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(5),
+  .depth-side .depth-modal-row:nth-child(5),
+  .positions-table .table-row:nth-child(5),
+  .intelligence-feed > button:nth-child(5),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(5),
+  .ai-intel-list > *:nth-child(5)
+) { animation-delay: 32ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(6),
+  .depth-side .depth-modal-row:nth-child(6),
+  .positions-table .table-row:nth-child(6),
+  .intelligence-feed > button:nth-child(6),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(6),
+  .ai-intel-list > *:nth-child(6)
+) { animation-delay: 40ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(7),
+  .depth-side .depth-modal-row:nth-child(7),
+  .positions-table .table-row:nth-child(7),
+  .intelligence-feed > button:nth-child(7),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(7),
+  .ai-intel-list > *:nth-child(7)
+) { animation-delay: 48ms; }
+
+:where(
+  .orderbook .depth-row:nth-child(8),
+  .depth-side .depth-modal-row:nth-child(8),
+  .positions-table .table-row:nth-child(8),
+  .intelligence-feed > button:nth-child(8),
+  .opportunity-list-scroll .opportunity-list-item:nth-child(8),
+  .ai-intel-list > *:nth-child(8)
+) { animation-delay: 56ms; }
+
+/* 盘口特例延伸：.orderbook 的 DOM 子元素为 头(1) + 卖 5 档(2-6) + 中间价(7) + 买 5 档(8-12)，
+ * 买侧从第 8 个子元素开始，延续 8ms 步进到 88ms，让买卖两侧级联完整、节奏一致。 */
+:where(.orderbook .depth-row:nth-child(9)) { animation-delay: 64ms; }
+:where(.orderbook .depth-row:nth-child(10)) { animation-delay: 72ms; }
+:where(.orderbook .depth-row:nth-child(11)) { animation-delay: 80ms; }
+:where(.orderbook .depth-row:nth-child(12)) { animation-delay: 88ms; }
+
+/* ==================================================================
+ * 3. Tab / 页签内容淡入（fadeIn 240ms）
+ *    全部为「切换 Tab 时条件重挂载内容」的真实容器，key 稳定故数据刷新不重放。
+ *    注意源顺序：本节在前、rowIn 在后，.positions-table 的行元素以 rowIn 为准，
+ *    表头与其余子元素走 fadeIn，两层动效自然分工。
+ * ================================================================== */
+
+:where(
+  .settings-tab-panel > *,
+  .positions-table > *,
+  .skill-source-form,
+  .help-question-list > *
+) {
+  animation: dsk-fade-in 240ms ease-out both;
+}
+
+/* ==================================================================
+ * 4. 图标按钮悬停微动效（借鉴 pulse .icon-btn：hover -1px / active 轻压）
+ *    只追加 transform，不覆盖 styles.css 已有的颜色/背板/阴影规则；
+ *    目标类均为真实图标按钮，绝不全局作用到所有 button。
+ *    明确排除：.window-controls .window-button（OS 窗口控制键不做悬停位移）、
+ *    .ai-send（自带 orbit 呼吸动效体系，避免叠加）。
+ * ================================================================== */
+
+:where(
+  .icon-button,
+  .table-action.icon-only,
+  .modal-head .window-button,
+  .window-button.ai-inspector-shortcut,
+  .notification-center-head .window-button
+) {
+  transition: transform var(--dur-fast) var(--ease-out-soft);
+}
+
+:where(
+  .icon-button,
+  .table-action.icon-only,
+  .modal-head .window-button,
+  .window-button.ai-inspector-shortcut,
+  .notification-center-head .window-button
+):hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+:where(
+  .icon-button,
+  .table-action.icon-only,
+  .modal-head .window-button,
+  .window-button.ai-inspector-shortcut,
+  .notification-center-head .window-button
+):active:not(:disabled) {
+  transform: translateY(0) scale(0.96);
+}
+
+/* ==================================================================
+ * 5. prefers-reduced-motion：本文件全部动效关闭
+ *    位于文件末尾 + :where() 同特异性，靠源顺序覆盖上方所有 animation/transition；
+ *    animation:none 同时重置 animation-delay，级联延迟一并失效，无需逐条处理。
+ * ================================================================== */
+
+@media (prefers-reduced-motion: reduce) {
+  :where(
+    .ai-command-palette,
+    .first-launch-spotlight,
+    .first-launch-card,
+    .orderbook .depth-row,
+    .depth-side .depth-modal-row,
+    .positions-table .table-row,
+    .intelligence-feed > button,
+    .opportunity-list-scroll .opportunity-list-item,
+    .ai-intel-list > *,
+    .settings-tab-panel > *,
+    .positions-table > *,
+    .skill-source-form,
+    .help-question-list > *
+  ) {
+    animation: none;
+  }
+
+  :where(
+    .icon-button,
+    .table-action.icon-only,
+    .modal-head .window-button,
+    .window-button.ai-inspector-shortcut,
+    .notification-center-head .window-button
+  ) {
+    transition: none;
+  }
+}
+
+/* ==================================================================
+ * 附：审查后明确跳过的高风险目标（后续如要接入需先消除根因）
+ * - .recent-trades .trade-row：key 为 `${trade.tradeId}-${trade.ts}`（App.tsx RecentTrades），
+ *   每笔新成交都是新元素，活跃行情下每秒多次重放 rowIn，与行情刷新竞争注意力；
+ * - SystematicStrategyLab 全部行列表：ReplayVirtualList 为自研虚拟列表
+ *   （scrollTop 窗口化 + overscan + 绝对定位行，SystematicStrategyLab.tsx 3948-3989），
+ *   滚动时不断挂载新行，动画会持续闪烁；
+ * - .table-row.opportunity-row：styles.css 存在样式但 src/ui 无对应渲染（疑似遗留），不挂；
+ * - .intelligence-table-wrap 内 <tr>：真实 table-row 参与 table 布局，transform 行为不可靠，不挂；
+ * - .automation-review-table-row：key 稳定本可安全，但不在本阶段点名的行情/订单/成交/情报
+ *   四类高频列表内，按克制原则不挂。
+ * - .ticket-form（开仓/平仓切换）：ticketMode 切换时是否重挂载未能确证，动画可能不重放，宁缺勿错。
+ * ================================================================== */

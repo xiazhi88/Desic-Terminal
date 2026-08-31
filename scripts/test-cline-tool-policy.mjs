@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import {
+  allKnownToolNames,
   buildToolPolicies,
   createBeforeToolHook,
   describeToolPolicy,
@@ -385,6 +386,38 @@ expectPolicy(
   "skill.readResource",
   disabled
 );
+
+// Required Skills such as trading-philosophy are user-editable, but the model
+// must never gain a direct skill-content write tool. The only sanctioned AI
+// path is review-run-only optimizationSuggestion.create, which proposes a
+// candidate for human preview and never mutates the active Skill itself.
+{
+  const sidecar = readFileSync(new URL("./cline-sidecar.mjs", import.meta.url), "utf8");
+  const known = allKnownToolNames();
+  const writeLike = known.filter((name) => /^skill\.(write|update|apply|save|edit|create|delete)/i.test(name));
+  if (writeLike.length > 0) {
+    failures.push(`skill-content write tools must not exist: ${writeLike.join(", ")}`);
+  }
+  if (!known.includes("optimizationSuggestion.create")) {
+    failures.push("review-backed optimizationSuggestion.create is the only sanctioned Skill-change path");
+  }
+  const suggestionPolicy = describeToolPolicy("optimizationSuggestion.create", {
+    permissionMode: "limited_auto",
+    agentRole: "main"
+  });
+  if (suggestionPolicy.allowed) {
+    failures.push("optimizationSuggestion.create must stay review-run-only, not interactive");
+  }
+  const reviewPolicy = describeToolPolicy("optimizationSuggestion.create", {
+    permissionMode: "limited_auto",
+    agentRole: "main",
+    reviewRun: true
+  });
+  expectTrue("review runs may propose candidate skill changes", reviewPolicy.allowed && !reviewPolicy.blocked);
+  if (!sidecar.includes("proposedSkill")) {
+    failures.push("optimization suggestion must carry a complete proposedSkill for human preview");
+  }
+}
 
 // Tool polling and idempotent retries may legitimately repeat an identical call.
 // The generic Cline repeat-call guard is disabled globally; tool permissions and

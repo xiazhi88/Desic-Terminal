@@ -1,0 +1,240 @@
+/*
+ * theme/atmosphere.css — Phase 1 氛围层（负责 agent：atmosphere）
+ * ------------------------------------------------------------------
+ * 职责：品牌紫氛围底色、全局 hairline 染色、主结构面板渐变与紫调描边、
+ *       状态点辉光（ready / running / failed / fresh / AI 活动）、
+ *       选区与滚动条、统一紫色焦点环。
+ * 边界：只允许修改本文件。src/styles.css 的 :root token 由 Captain 维护，
+ *       如需调整 token 取值，在本文件用 :root 覆盖并在注释中说明原因。
+ * 加载顺序：本文件在 styles.css 之后导入（main.tsx 第 5 行），同特异性时
+ *       本文件规则胜出；data-voice / motion / signature 三个兄弟文件在本文件
+ *       之后加载，已核实它们不涉及 body / scrollbar / selection / focus，
+ *       无重叠冲突。
+ * 辉光纪律：辉光只表达"数据活性与状态"（live、运行/失败、焦点、AI 活动），
+ *       禁止作为布局装饰或大面积纹理；动画只用 opacity/transform，
+ *       全部动画统一在文件尾的 prefers-reduced-motion 块中关闭。
+ * 设计基调：近黑 #020305 + 品牌紫 #955cff，克制专业。
+ */
+
+/* ============================================================
+ * 1. 页面氛围底色
+ *    styles.css 顶部要求 body:has(.startup-shell) 与 body:has(.coin-preview)
+ *    保持 background: transparent，本文件加载在它们之后，因此用
+ *    :not(:has()) 精确镜像这两条排除条件：启动屏 / 币种预览窗口命中时
+ *    本规则完全不匹配，透明底不被破坏。
+ *    --vignette 以背景图层叠在内容之下，只作用于面板间隙的页面边缘，
+ *    属氛围收敛而非大面积纹理；如需移除删掉该层即可。
+ * ============================================================ */
+body:not(:has(.startup-shell)):not(:has(.coin-preview)) {
+  background-color: var(--bg);
+  background-image: var(--atmosphere), var(--vignette);
+}
+
+/* ============================================================
+ * 2. 全局有色描边（token 覆盖）
+ *    --line 染为品牌紫：styles.css 中 var(--line) 共 71 处引用（面板描边、
+ *    弹层边框、状态胶囊等），token 级覆盖让全局 hairline 一次性统一为紫调，
+ *    免去逐选择器重染。
+ *    --line-soft 刻意保持中性灰不动：它有 133 处引用，多为密集表格行内
+ *    分隔线（订单/成交/持仓表），染紫会造成数据区噪点，违背克制基调。
+ * ============================================================ */
+:root {
+  --line: rgba(149, 92, 255, 0.2);
+}
+
+/* ============================================================
+ * 3. 主结构面板渐变
+ *    styles.css 的 --panel / --panel-2 / --surface-raised 几乎无 var() 引用
+ *    （0 / 1 / 0 处，容器多为硬编码色值），token 覆盖收效甚微，故按下方
+ *    真实存在且高频的结构容器定向覆盖：顶栏、侧导航、底部面板、
+ *    底部工具条、市场选择弹层、两个页面级主容器。
+ *    原则：不新增边框（仅把既有边框重染为紫调）；不触碰图表画布
+ *    （.center-panel / .chart-stage 保持原样）与输入控件内部。
+ * ============================================================ */
+
+/* 顶栏：背景换柔和面板渐变，底部 hairline 转紫调 */
+.topbar {
+  background: var(--panel-grad-soft);
+  border-bottom-color: var(--line-tinted);
+}
+
+/* 侧导航竖轨：背景换柔和面板渐变，右侧 hairline 转紫调 */
+.rail {
+  background: var(--panel-grad-soft);
+  border-right-color: var(--line-tinted);
+}
+
+/* 底部面板：背景换柔和面板渐变，顶部 hairline 转紫调（与工作区交界） */
+.bottom-panel {
+  background: var(--panel-grad-soft);
+  border-top-color: var(--line-tinted);
+}
+
+/* 底部工具条（页签行）：只换背景；其底部分隔线属密集工具区，保持中性 */
+.bottom-toolbar {
+  background: var(--panel-grad-soft);
+}
+
+/* 市场选择弹层（顶栏级浮出面板）：换柔和渐变；整圈描边走 var(--line)，
+ * 已随第 2 节 token 自动转紫，无需重复声明 */
+.market-picker {
+  background: var(--panel-grad-soft);
+}
+
+/* 自动化工作台：页面级主容器 */
+.automation-workspace {
+  background: var(--panel-grad-soft);
+}
+
+/* 交易机会工作台：页面级主容器 */
+.opportunity-workspace {
+  background: var(--panel-grad-soft);
+}
+
+/* ============================================================
+ * 4. 状态点辉光（只表达数据活性与状态）
+ *    styles.css 中四个状态 token 的真实消费点（已逐一核实）：
+ *      --status-ready   → .automation-profile-card__state.is-listening i（监听中）
+ *      --status-running → .automation-profile-card__state.is-running i（运行中）
+ *      --status-failed  → 当前无消费点（token 已定义但 CSS/TSX 均未使用），
+ *                         失败态辉光落在真实存在的失败点上（见下两条 danger/failed）。
+ *      --data-fresh     → .intelligence-context-scope i（情报数据新鲜度）
+ *    running / fresh 用 2s 呼吸（只动 opacity）；ready / failed 用稳定辉光。
+ * ============================================================ */
+
+/* 自动化卡片 · 监听中（--status-ready）：稳定绿色辉光 */
+.automation-profile-card__state.is-listening i {
+  box-shadow: 0 0 8px rgba(126, 219, 169, 0.4);
+}
+
+/* 自动化卡片 · 运行中（--status-running）：琥珀辉光 + 2s 呼吸 */
+.automation-profile-card__state.is-running i {
+  box-shadow: 0 0 8px rgba(232, 191, 98, 0.4);
+  animation: atmosphere-breathe 2s ease-in-out infinite;
+}
+
+/* 运行记录点 · running（琥珀）：辉光 + 2s 呼吸 */
+.automation-run-state-dot.running {
+  box-shadow: 0 0 8px rgba(240, 189, 100, 0.4);
+  animation: atmosphere-breathe 2s ease-in-out infinite;
+}
+
+/* 运行记录点 · 成功（绿）：结果态用稳定微辉光，不呼吸 */
+.automation-run-state-dot.success {
+  box-shadow: 0 0 8px rgba(51, 214, 166, 0.35);
+}
+
+/* 运行记录点 · 失败/取消（runStatusTone→danger，--status-failed 的实际载体）：
+ * 稳定红辉光，不呼吸 */
+.automation-run-state-dot.danger {
+  box-shadow: 0 0 8px rgba(255, 100, 100, 0.45);
+}
+
+/* 情报上下文 · 数据新鲜（--data-fresh）：青色辉光 + 2s 呼吸；
+ * 保留 styles.css 原有的 2px 同色环，避免整条 box-shadow 被覆盖丢失 */
+.intelligence-context-scope i {
+  box-shadow:
+    0 0 8px rgba(91, 199, 207, 0.4),
+    0 0 0 2px rgba(91, 199, 207, 0.1);
+  animation: atmosphere-breathe 2s ease-in-out infinite;
+}
+
+/* 侧导航 · AI 活动指示点：活跃会话（连接/运行/流式/工具调用/重试）
+ * 亮起品牌紫 + 2s 呼吸，表达 AI 正在工作 */
+.rail-ai-status:is(.running, .streaming, .connecting, .tooling, .retrying) {
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(149, 92, 255, 0.5);
+  animation: atmosphere-breathe 2s ease-in-out infinite;
+}
+
+/* 上条与 .has-unread 同特异性且本文件靠后，会盖掉未读圆环，这里补回叠加 */
+.rail-ai-status.has-unread:is(.running, .streaming, .connecting, .tooling, .retrying) {
+  box-shadow:
+    0 0 8px rgba(149, 92, 255, 0.5),
+    0 0 0 2px rgba(139, 121, 184, 0.22);
+}
+
+/* 侧导航 · AI 会话失败：稳定红辉光，不呼吸 */
+.rail-ai-status.failed {
+  box-shadow: 0 0 8px rgba(202, 102, 109, 0.5);
+}
+
+/* 失败 + 未读并存时同样补回未读圆环（原因同上） */
+.rail-ai-status.has-unread.failed {
+  box-shadow:
+    0 0 8px rgba(202, 102, 109, 0.5),
+    0 0 0 2px rgba(139, 121, 184, 0.22);
+}
+
+/* ============================================================
+ * 5. 选区与滚动条
+ * ============================================================ */
+
+/* 文本选区：品牌紫 25%（styles.css 原无任何 ::selection 规则，此处为新增） */
+::selection {
+  background: rgba(149, 92, 255, 0.25);
+}
+
+/* 滚动条 Firefox 别名：中性灰转紫调（仅覆盖颜色，宽度沿用 styles.css 的 thin） */
+* {
+  scrollbar-color: rgba(149, 92, 255, 0.3) transparent;
+}
+
+/* 覆盖 styles.css 全局 thumb：白色改紫调（同特异性、本文件靠后故胜出） */
+*::-webkit-scrollbar-thumb {
+  background: rgba(149, 92, 255, 0.26);
+}
+
+/* 滚动条悬停加深紫调 */
+*::-webkit-scrollbar-thumb:hover {
+  background: rgba(149, 92, 255, 0.45);
+}
+
+/* 密集面板（最近成交/下单表单等）自带的紫调细滚动条特异性更高，
+ * 保持原值不动，与本文件紫调天然同系 */
+
+/* ============================================================
+ * 6. 焦点环
+ *    styles.css 现有焦点实现是 outline: Npx solid var(--focus)（#b89aff，
+ *    本就属紫色系，保持不动，继续承担结构指示）；另有少量组件自带更高
+ *    特异性的 box-shadow 焦点样式（如 .ticket-form input:focus-visible），
+ *    会自然胜出。这里只在通用可交互元素上"叠加"紫色辉光环：
+ *    box-shadow 与 outline 是不同属性，二者并存不打架，且无需 !important。
+ * ============================================================ */
+button:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+a:focus-visible,
+[tabindex]:focus-visible {
+  box-shadow:
+    0 0 0 2px rgba(149, 92, 255, 0.45),
+    var(--glow-accent);
+}
+
+/* ============================================================
+ * 动画定义与降级
+ * ============================================================ */
+
+/* 呼吸：只动 opacity，2s 周期（仅供上方状态点使用，禁止挪作布局装饰） */
+@keyframes atmosphere-breathe {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0.45;
+  }
+}
+
+/* 所有关键帧动画在"减少动态"偏好下统一关闭 */
+@media (prefers-reduced-motion: reduce) {
+  .automation-profile-card__state.is-running i,
+  .automation-run-state-dot.running,
+  .intelligence-context-scope i,
+  .rail-ai-status:is(.running, .streaming, .connecting, .tooling, .retrying) {
+    animation: none;
+  }
+}
