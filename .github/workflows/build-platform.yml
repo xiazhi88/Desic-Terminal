@@ -1,0 +1,97 @@
+name: Build platform artifacts
+
+# 可复用的单平台构建：被 quick-build.yml 调用。
+# 只产出安装包并作为 workflow artifact 上传，不创建/覆盖 GitHub Release，
+# 因此可以在不打 tag、不改版本号的情况下用于快速验证。
+on:
+  workflow_call:
+    inputs:
+      name:
+        required: true
+        type: string
+      runner:
+        required: true
+        type: string
+      rust_targets:
+        required: true
+        type: string
+      rust_cache_key:
+        required: true
+        type: string
+      cache_workspace_crates:
+        required: false
+        type: boolean
+        default: false
+      args:
+        required: true
+        type: string
+      sidecar_platform:
+        required: true
+        type: string
+      sidecar_arch:
+        required: true
+        type: string
+      apple_signing_identity:
+        required: false
+        type: string
+        default: ""
+      artifact_name:
+        required: true
+        type: string
+      artifact_path:
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: ${{ inputs.name }}
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.rust_targets }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          shared-key: ${{ inputs.rust_cache_key }}
+          cache-workspace-crates: ${{ inputs.cache_workspace_crates }}
+          save-if: true
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Prepare AI sidecar
+        run: npm run prepare:sidecar
+        env:
+          DESIC_SIDECAR_TARGET_PLATFORM: ${{ inputs.sidecar_platform }}
+          DESIC_SIDECAR_TARGET_ARCH: ${{ inputs.sidecar_arch }}
+
+      - name: Build desktop artifacts
+        run: npm run tauri:build -- ${{ inputs.args }}
+        env:
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          APPLE_SIGNING_IDENTITY: ${{ inputs.apple_signing_identity }}
+          DESIC_SIDECAR_TARGET_PLATFORM: ${{ inputs.sidecar_platform }}
+          DESIC_SIDECAR_TARGET_ARCH: ${{ inputs.sidecar_arch }}
+          DESIC_SYSTEMATIC_PYTHON_TARGET_PLATFORM: ${{ inputs.sidecar_platform }}
+          DESIC_SYSTEMATIC_PYTHON_TARGET_ARCH: ${{ inputs.sidecar_arch }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}-${{ github.sha }}
+          path: ${{ inputs.artifact_path }}
+          if-no-files-found: error
+          retention-days: 14

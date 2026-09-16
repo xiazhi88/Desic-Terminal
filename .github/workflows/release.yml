@@ -27,7 +27,9 @@ jobs:
             asset_name: Desic-Terminal_macOS-arm64.[ext]
             apple_signing_identity: "-"
           - name: macOS Intel
-            platform: macos-15-intel
+            # 交叉编译：在 arm64 runner 上产出 x86_64 包。原来的 macos-15-intel 机器每次冷编译约 28 分钟，
+            # 且因为 workflow 只由 tag 触发、save-if 排除了 tag，缓存永远无法写入 → 每次都是全量编译。
+            platform: macos-latest
             rust_targets: x86_64-apple-darwin
             rust_cache_key: macos-x64-release
             cache_workspace_crates: false
@@ -36,6 +38,8 @@ jobs:
             sidecar_arch: x64
             asset_name: Desic-Terminal_macOS-x64.[ext]
             apple_signing_identity: "-"
+            # arm64 runner 默认没有 Rosetta，无法运行交叉编译出的 x64 包做运行时校验
+            verify_packaged_sidecar: false
           - name: Windows x64
             platform: windows-latest
             rust_targets: x86_64-pc-windows-msvc
@@ -65,7 +69,7 @@ jobs:
           workspaces: src-tauri
           shared-key: ${{ matrix.rust_cache_key }}
           cache-workspace-crates: ${{ matrix.cache_workspace_crates }}
-          save-if: ${{ github.ref == 'refs/heads/main' }}
+          save-if: ${{ github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') }}
 
       - name: Install dependencies
         run: npm ci
@@ -80,6 +84,7 @@ jobs:
           DESIC_SIDECAR_TARGET_ARCH: ${{ matrix.sidecar_arch }}
 
       - name: Verify packaged AI sidecar runtime
+        if: ${{ matrix.verify_packaged_sidecar != false }}
         run: npm run smoke:ai-packaged-ready
 
       - name: Cache bundled Python runtime
