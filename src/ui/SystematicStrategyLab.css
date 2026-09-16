@@ -250,7 +250,7 @@
 .systematic-lab-review-view { height: 100%; min-width: 0; min-height: 0; display: grid; overflow: hidden; }
 /* Side rails hold short names and label/value pairs, so surplus width goes to
    the code editor instead of stretching every rail on a wide monitor. */
-.systematic-lab-strategy-view { grid-template-columns: minmax(236px, 300px) minmax(430px, 1fr) minmax(268px, 340px); }
+.systematic-lab-strategy-view { grid-template-columns: var(--lab-list-width, minmax(236px, 300px)) minmax(430px, 1fr) var(--lab-params-width, minmax(268px, 340px)); }
 .systematic-lab-strategy-view.is-ai-open { grid-template-columns: minmax(216px, 280px) minmax(410px, 1fr) minmax(324px, 420px); }
 .systematic-lab-strategy-view.is-docs-open,
 .systematic-lab-strategy-view.is-versions-open { grid-template-columns: minmax(236px, 300px) minmax(430px, 1fr) minmax(310px, 400px); }
@@ -1485,4 +1485,46 @@
   .systematic-lab-tuning-budgets { grid-template-columns: minmax(0, 1fr); }
   .systematic-lab-tuning-budget { grid-template-columns: 1fr auto; align-items: center; }
   .systematic-lab-tuning-summary { padding: 16px 14px; }
+}
+
+/* ===== 三面板拖拽调整宽度 =====
+   拖拽条放在面板内部（绝对定位，不占用网格列），因此默认三栏布局无需改动列数；
+   AI/文档/版本面板打开时第三列换人、窄容器下 inspector 隐藏，这两种情况隐藏拖拽条。 */
+.systematic-lab-strategy-list,
+.systematic-lab-strategy-inspector { position: relative; }
+.systematic-lab-column-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+}
+.systematic-lab-column-resize::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  content: "";
+  transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+.systematic-lab-column-resize:hover::before,
+.systematic-lab-column-resize:focus-visible::before,
+.systematic-lab-column-resize.is-dragging::before {
+  background: var(--lab-accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--lab-accent) 30%, transparent);
+}
+.systematic-lab-column-resize:focus-visible { outline: none; }
+/* 参数栏的拖拽条贴其左边缘（与代码编辑器之间的分界线） */
+.systematic-lab-column-resize--start { right: auto; left: 0; }
+.systematic-lab-column-resize--start::before { right: auto; left: 0; }
+.systematic-lab-strategy-view.is-ai-open .systematic-lab-column-resize,
+.systematic-lab-strategy-view.is-docs-open .systematic-lab-column-resize,
+.systematic-lab-strategy-view.is-versions-open .systematic-lab-column-resize { display: none; }
+@container (max-width: 1040px) {
+  .systematic-lab-column-resize { display: none; }
 }

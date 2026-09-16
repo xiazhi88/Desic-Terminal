@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import clsx from "clsx";
 import {
@@ -134,6 +134,33 @@ function readSystematicAiSessionIds(strategyId: string): string[] {
       : [];
   } catch {
     return [];
+  }
+}
+
+// ===== 策略研究三面板宽度：拖拽调整 + 本地记忆 =====
+const LAB_COLUMNS_STORAGE_KEY = "desic.systematic.lab-columns";
+
+type LabColumnSide = "list" | "inspector";
+type LabColumnWidths = { list: number | null; inspector: number | null };
+
+const LAB_COLUMN_LIMITS: Record<LabColumnSide, { min: number; max: number }> = {
+  list: { min: 200, max: 460 },
+  inspector: { min: 240, max: 560 }
+};
+
+function readLabColumnWidths(): LabColumnWidths {
+  try {
+    const raw = window.localStorage.getItem(LAB_COLUMNS_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) as Record<string, unknown> : {};
+    const read = (side: LabColumnSide) => {
+      const value = Number(parsed[side]);
+      if (!Number.isFinite(value)) return null;
+      const limits = LAB_COLUMN_LIMITS[side];
+      return Math.max(limits.min, Math.min(limits.max, Math.round(value)));
+    };
+    return { list: read("list"), inspector: read("inspector") };
+  } catch {
+    return { list: null, inspector: null };
   }
 }
 
@@ -1464,14 +1491,109 @@ function StrategyView({
     setVersionsOpen(false);
     setAiTypingPreview(null);
   }, [selectedPython?.id]);
+  // 三面板宽度：null 表示使用 CSS 默认值（拖拽后为固定像素值）
+  const [columnWidths, setColumnWidths] = useState<LabColumnWidths>(() => readLabColumnWidths());
+  const [draggingColumn, setDraggingColumn] = useState<LabColumnSide | null>(null);
+  const columnWidthsRef = useRef(columnWidths);
+  useEffect(() => {
+    columnWidthsRef.current = columnWidths;
+  }, [columnWidths]);
+
+  const persistColumnWidths = useCallback((next: LabColumnWidths) => {
+    setColumnWidths(next);
+    try {
+      window.localStorage.setItem(LAB_COLUMNS_STORAGE_KEY, JSON.stringify(next));
+    } catch {
+      /* 隐私模式或配额受限：忽略，仅本次会话生效 */
+    }
+  }, []);
+
+  const clampColumnWidth = useCallback((side: LabColumnSide, value: number) => {
+    const limits = LAB_COLUMN_LIMITS[side];
+    return Math.max(limits.min, Math.min(limits.max, Math.round(value)));
+  }, []);
+
+  // 拖拽条位于面板内部，因此父元素即被调整的面板：
+  // 列表栏向右拖变宽；参数栏向左拖变宽（都在右/左边界的 9px 热区内）
+  const beginColumnResize = useCallback((side: LabColumnSide, event: React.PointerEvent<HTMLDivElement>) => {
+    const handle = event.currentTarget;
+    const pane = handle.parentElement;
+    if (!pane) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = pane.getBoundingClientRect().width;
+    handle.setPointerCapture(event.pointerId);
+    setDraggingColumn(side);
+    const onMove = (moveEvent: PointerEvent) => {
+      const delta = side === "list" ? moveEvent.clientX - startX : startX - moveEvent.clientX;
+      const next = clampColumnWidth(side, startWidth + delta);
+      setColumnWidths((current) => ({ ...current, [side]: next }));
+    };
+    const onEnd = () => {
+      handle.removeEventListener("pointermove", onMove);
+      handle.removeEventListener("pointerup", onEnd);
+      handle.removeEventListener("pointercancel", onEnd);
+      setDraggingColumn(null);
+      persistColumnWidths(columnWidthsRef.current);
+    };
+    handle.addEventListener("pointermove", onMove);
+    handle.addEventListener("pointerup", onEnd);
+    handle.addEventListener("pointercancel", onEnd);
+  }, [clampColumnWidth, persistColumnWidths]);
+
+  const nudgeColumnWidth = useCallback((side: LabColumnSide, event: React.KeyboardEvent<HTMLDivElement>) => {
+    const direction = event.key === "ArrowLeft" ? -1 : event.key === "ArrowRight" ? 1 : 0;
+    if (direction === 0) return;
+    event.preventDefault();
+    const step = (event.shiftKey ? 48 : 16) * direction * (side === "list" ? 1 : -1);
+    const current = columnWidthsRef.current[side];
+    const pane = event.currentTarget.parentElement;
+    const base = current ?? pane?.getBoundingClientRect().width ?? LAB_COLUMN_LIMITS[side].min;
+    persistColumnWidths({ ...columnWidthsRef.current, [side]: clampColumnWidth(side, base + step) });
+  }, [clampColumnWidth, persistColumnWidths]);
+
+  const resetColumnWidth = useCallback((side: LabColumnSide) => {
+    persistColumnWidths({ ...columnWidthsRef.current, [side]: null });
+  }, [persistColumnWidths]);
+
+  const columnStyle = {
+    ...(columnWidths.list ? { "--lab-list-width": `${columnWidths.list}px` } : {}),
+    ...(columnWidths.inspector ? { "--lab-params-width": `${columnWidths.inspector}px` } : {})
+  } as CSSProperties;
+
+  const columnResizeHandle = (side: LabColumnSide, label: string) => (
+    <div
+      className={clsx(
+        "systematic-lab-column-resize",
+        side === "inspector" && "systematic-lab-column-resize--start",
+        draggingColumn === side && "is-dragging"
+      )}
+      role="separator"
+      aria-orientation="vertical"
+      aria-label={label}
+      aria-valuenow={columnWidths[side] ?? undefined}
+      aria-valuemin={LAB_COLUMN_LIMITS[side].min}
+      aria-valuemax={LAB_COLUMN_LIMITS[side].max}
+      tabIndex={0}
+      title={label}
+      onPointerDown={(event) => beginColumnResize(side, event)}
+      onKeyDown={(event) => nudgeColumnWidth(side, event)}
+      onDoubleClick={() => resetColumnWidth(side)}
+    />
+  );
+
   return (
-    <div className={clsx(
-      "systematic-lab-strategy-view",
-      aiOpen && selectedPython && "is-ai-open",
-      documentationOpen && selectedPython && "is-docs-open",
-      versionsOpen && selectedPython && "is-versions-open",
-    )}>
+    <div
+      className={clsx(
+        "systematic-lab-strategy-view",
+        aiOpen && selectedPython && "is-ai-open",
+        documentationOpen && selectedPython && "is-docs-open",
+        versionsOpen && selectedPython && "is-versions-open",
+      )}
+      style={columnStyle}
+    >
       <aside className="systematic-lab-strategy-list">
+        {columnResizeHandle("list", text.resizeStrategyList)}
         <div className="systematic-lab__pane-head systematic-lab-strategy-list__head">
           <span>{text.myStrategies}</span>
           <div>
@@ -1692,6 +1814,7 @@ function StrategyView({
         />
       ) : !aiOpen && !documentationOpen && !versionsOpen && selectedPython ? (
         <aside className="systematic-lab-strategy-inspector">
+          {columnResizeHandle("inspector", text.resizeInspector)}
           <div className="systematic-lab__pane-head"><span>{text.strategyParameters}</span></div>
           <div className="systematic-lab-strategy-inspector__params">
             <VisualParameterEditor text={text} value={draft.parameters} onChange={(parameters) => onDraftChange({ ...draft, parameters })} />
@@ -5474,7 +5597,7 @@ function copy(chinese: boolean) {
     return {
       title: "策略研究", workflow: "策略研究工作流", confirmedBars: "仅使用已确认 K 线", refresh: "刷新",
       strategy: "策略", factors: "因子", backtest: "回测", review: "结果与回放", forward: "前向模拟", profiles: "Profiles", allProfiles: "全部 Profiles", profileFilter: "Profile", openProfile: "打开 Profile",
-      python: "Python", myStrategies: "我的策略", newStrategy: "新建 Python 策略", searchStrategies: "搜索策略", noStrategyMatches: "未找到匹配的策略", searchContract: "搜索合约", noMatchingContract: "没有匹配的合约",
+      python: "Python", myStrategies: "我的策略", newStrategy: "新建 Python 策略", resizeStrategyList: "拖动调整策略列表宽度（双击恢复默认）", resizeInspector: "拖动调整参数栏宽度（双击恢复默认）", searchStrategies: "搜索策略", noStrategyMatches: "未找到匹配的策略", searchContract: "搜索合约", noMatchingContract: "没有匹配的合约",
       noStrategies: "还没有策略", noStrategiesDetail: "新建策略后，在每根已收线 K 线上定义动作。",
       pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimeCreatingVenv: "正在创建本地 Python 环境…", runtimeInstallingDeps: "正在安装策略依赖", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
       save: "保存版本", name: "名称", description: "说明", source: "策略源码", strategyParameters: "策略参数", parameters: "参数", parameterTuning: "参数调优范围", parameterTuningHint: "平台固定支持顶层数值参数；仅调整范围与步长", parameterTuningUnavailable: "策略参数数据无效。", noNumericParameters: "当前参数中没有可调优的顶层数值。", noVisualParameters: "没有可视化的标量参数。", parameter: "参数", parameterDefault: "当前值", tuningMin: "最小", tuningMax: "最大", tuningStep: "步长", bestBacktest: "最佳回测", backtestDays: "回测 {days} 天", openBestBacktest: "查看最佳回测", deleteStrategy: "删除策略", deleteStrategyConfirm: "删除策略“{name}”及其所有本地回测、报告和调优记录？此操作不可撤销。", strategyDeleted: "策略已删除", strategyDeleteFailed: "无法删除策略", deleteBacktest: "删除回测", deleteBacktestConfirm: "删除“{name}”的该回测记录和本地回放数据？此操作不可撤销。", backtestDeleted: "回测已删除", backtestDeleteFailed: "无法删除回测", strategyUnchanged: "策略没有变更", strategyUnchangedDetail: "名称、说明、源码、参数和调优范围均未变化，未创建新版本。",
@@ -5522,7 +5645,7 @@ function copy(chinese: boolean) {
   return {
     title: "Strategy Research", workflow: "Strategy research workflow", confirmedBars: "confirmed bars only", refresh: "Refresh",
     strategy: "Strategy", factors: "Factors", backtest: "Backtest", review: "Results & replay", forward: "Forward simulation", profiles: "Profiles", allProfiles: "All Profiles", profileFilter: "Profile", openProfile: "Open Profile",
-    python: "Python", myStrategies: "My strategies", newStrategy: "New Python strategy", searchStrategies: "Search strategies", noStrategyMatches: "No matching strategy", searchContract: "Search contract", noMatchingContract: "No matching contract",
+    python: "Python", myStrategies: "My strategies", newStrategy: "New Python strategy", resizeStrategyList: "Drag to resize the strategy list (double-click to reset)", resizeInspector: "Drag to resize the parameters panel (double-click to reset)", searchStrategies: "Search strategies", noStrategyMatches: "No matching strategy", searchContract: "Search contract", noMatchingContract: "No matching contract",
     noStrategies: "No strategy yet", noStrategiesDetail: "Create one to define an action on each confirmed bar.",
     pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimeCreatingVenv: "Creating the local Python environment…", runtimeInstallingDeps: "Installing strategy dependencies", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",
     save: "Save version", name: "Name", description: "Description", source: "Strategy source", strategyParameters: "Strategy parameters", parameters: "Parameters", parameterTuning: "Parameter tuning ranges", parameterTuningHint: "The platform recognizes top-level numeric parameters; adjust only range and step", parameterTuningUnavailable: "Strategy parameters are invalid.", noNumericParameters: "This strategy has no top-level numeric parameters to tune.", noVisualParameters: "No scalar parameters can be edited visually.", parameter: "Parameter", parameterDefault: "Current", tuningMin: "Min", tuningMax: "Max", tuningStep: "Step", bestBacktest: "Best backtest", backtestDays: "{days}d backtest", openBestBacktest: "Open best backtest", deleteStrategy: "Delete strategy", deleteStrategyConfirm: "Delete strategy “{name}” with all of its local backtests, reports, and optimization records? This cannot be undone.", strategyDeleted: "Strategy deleted", strategyDeleteFailed: "Could not delete strategy", deleteBacktest: "Delete backtest", deleteBacktestConfirm: "Delete this backtest record and local replay data for “{name}”? This cannot be undone.", backtestDeleted: "Backtest deleted", backtestDeleteFailed: "Could not delete backtest", strategyUnchanged: "No strategy changes", strategyUnchangedDetail: "Name, description, source, parameters, and tuning ranges are unchanged, so no version was created.",
