@@ -1198,23 +1198,35 @@ fn persist_imported_bundle_files(
     let parent = target
         .parent()
         .ok_or_else(|| "Skill bundle 存储目录无效".to_string())?;
-    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    fs::create_dir_all(parent).map_err(|err| {
+        format!(
+            "创建 Skill bundle 父目录 {} 失败: {err}",
+            parent.display()
+        )
+    })?;
     let staging = parent.join(format!(".{}-{}.staging", summary.bundle_hash, now_ms()));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
     }
-    fs::create_dir_all(&staging).map_err(|err| err.to_string())?;
+    fs::create_dir_all(&staging)
+        .map_err(|err| format!("创建 Skill bundle 暂存目录 {} 失败: {err}", staging.display()))?;
     let result = (|| {
         for file in &bundle.files {
             let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
             let destination = staging.join(path);
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+                fs::create_dir_all(parent)
+                    .map_err(|err| format!("创建 Skill bundle 文件目录 {} 失败: {err}", parent.display()))?;
             }
             write_file_atomically(&destination, &file.bytes)?;
         }
-        fs::rename(&staging, &target)
-            .map_err(|err| format!("固化 Skill bundle 到 {} 失败：{}", target.display(), err))
+        fs::rename(&staging, &target).map_err(|err| {
+            format!(
+                "固化 Skill bundle 到 {} 失败（暂存 {}）: {err}",
+                target.display(),
+                staging.display()
+            )
+        })
     })();
     if result.is_err() {
         let _ = fs::remove_dir_all(&staging);
@@ -3264,7 +3276,8 @@ fn write_file_atomically_internal(
     let parent = path
         .parent()
         .ok_or_else(|| format!("文件路径缺少父目录：{}", path.display()))?;
-    fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("创建目录 {} 失败: {err}", parent.display()))?;
     let file_name = path
         .file_name()
         .and_then(|value| value.to_str())
@@ -3282,9 +3295,11 @@ fn write_file_atomically_internal(
             .create_new(true)
             .write(true)
             .open(&temp_path)
-            .map_err(|err| err.to_string())?;
-        file.write_all(content).map_err(|err| err.to_string())?;
-        file.sync_all().map_err(|err| err.to_string())?;
+            .map_err(|err| format!("创建临时文件 {} 失败: {err}", temp_path.display()))?;
+        file.write_all(content)
+            .map_err(|err| format!("写入临时文件 {} 失败: {err}", temp_path.display()))?;
+        file.sync_all()
+            .map_err(|err| format!("刷新临时文件 {} 失败: {err}", temp_path.display()))?;
         drop(file);
         if harden_temp_permissions {
             harden_sensitive_file_permissions(&temp_path)?;
@@ -3307,28 +3322,39 @@ fn replace_file_atomically(
         MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
 
-    let source = source
+    let source_wide = source
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let destination = destination
+    let destination_wide = destination
         .as_os_str()
         .encode_wide()
         .chain(std::iter::once(0))
         .collect::<Vec<_>>();
-    let moved = unsafe {
-        MoveFileExW(
-            source.as_ptr(),
-            destination.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if moved == 0 {
-        Err(std::io::Error::last_os_error().to_string())
-    } else {
-        Ok(())
+    // 先尝试带 WRITE_THROUGH 的移动（保证落盘），失败后退化为普通覆盖移动；
+    // 两者都失败时（例如 AppData 被重定向到不支持 MoveFileEx 的网络位置）再退化为复制 + 删除。
+    let mut last_error = String::new();
+    for flags in [
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        MOVEFILE_REPLACE_EXISTING,
+    ] {
+        let moved =
+            unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
+        if moved != 0 {
+            return Ok(());
+        }
+        last_error = std::io::Error::last_os_error().to_string();
     }
+    fs::copy(source, destination).map_err(|err| {
+        format!(
+            "替换文件 {} 失败（MoveFileEx: {last_error}）: {err}",
+            destination.display()
+        )
+    })?;
+    fs::remove_file(source)
+        .map_err(|err| format!("删除临时文件 {} 失败: {err}", source.display()))?;
+    Ok(())
 }
 
 #[cfg(not(windows))]

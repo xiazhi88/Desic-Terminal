@@ -4512,13 +4512,32 @@ fn ensure_skill_versions(app: &tauri::AppHandle, conn: &Connection) -> Result<()
         Err(error) if error.starts_with("AI config not found:") => return Ok(()),
         Err(error) => return Err(format!("加载 AI 配置失败：{}", error)),
     };
-    crate::storage_config::ensure_builtin_skill_bundles()?;
-    let skill_files_fingerprint = ai_skill_files_fingerprint(&config)?;
+    // Skill 相关步骤为尽力而为：Windows 上曾因内置 Skill 包安装的 io 错误导致
+    // AI 自动化面板整体不可用（前端报 ai_automation_summary / overview 失败）。缺失只记录日志。
+    if let Err(error) = crate::storage_config::ensure_builtin_skill_bundles() {
+        crate::boot_log(&format!(
+            "ensure_skill_versions: builtin skill bundles failed: {error}"
+        ));
+    }
+    let skill_files_fingerprint = match ai_skill_files_fingerprint(&config) {
+        Ok(value) => value,
+        Err(error) => {
+            crate::boot_log(&format!(
+                "ensure_skill_versions: skill files fingerprint failed: {error}"
+            ));
+            return Ok(());
+        }
+    };
     let stored_fingerprint = load_setting(conn, SKILL_FILES_FINGERPRINT_SETTING)
         .and_then(|value| value.as_str().map(str::to_string));
     let mut skill_files_synced = false;
     if stored_fingerprint.as_deref() != Some(skill_files_fingerprint.as_str()) {
-        crate::storage_config::sync_cline_skill_files_from_config(&config)?;
+        if let Err(error) = crate::storage_config::sync_cline_skill_files_from_config(&config) {
+            crate::boot_log(&format!(
+                "ensure_skill_versions: skill file sync failed: {error}"
+            ));
+            return Ok(());
+        }
         set_setting(
             conn,
             SKILL_FILES_FINGERPRINT_SETTING,

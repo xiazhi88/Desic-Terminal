@@ -105,28 +105,26 @@ jobs:
           # 历史问题：v0.1.36 发版时此处仍为 v0.1.35 文案，导致该 Release 说明与产物不符。
           # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
           # 历史问题：v0.1.36 发版时此处仍为 v0.1.35 文案，导致该 Release 说明与产物不符。
+          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
           releaseBody: |
-            ## Desic Terminal v0.1.38
+            ## Desic Terminal v0.1.39
 
-            ### 修复：首次安装后一启动就退出（退出码 101）
-            - 症状：干净 Windows 机器安装后双击启动，进程在 splash 出现前直接消失；系统事件查看器无崩溃记录（Rust panic 不是崩溃），命令行无输出（GUI 进程无控制台），应用日志为空。
-            - 根因：启动时运行目录初始化流程中，「旧标识目录迁移 / 旧工作区配置迁移 / 内置 Skill 包安装」返回的**裸 io 错误**被当作致命错误上抛——Windows 干净安装命中后即退出。v0.1.37 新增的 boot log 精确定位到：`setup: begin` 之后、`FATAL: 应用运行目录初始化失败: 系统找不到指定的路径。(os error 3)`。
-            - 修复：上述三个步骤全部改为**尽力而为**——失败只写入 boot.log（AI 场景按降级处理），不再阻断启动；关键目录创建失败仍保持致命。
-            - 诊断增强：boot.log 输出解析出的实际路径（`paths: config=… cache=… log=… data=…`），并为每一步补充精确上下文（解析各目录失败、`icacls` 运行失败均带路径）。
+            ### 修复：Windows 首次安装后“内置 Skill 安装失败”及其连锁问题
+            - 定位：v0.1.38 的 boot log 在 Windows 报出唯一失败点 `builtin skill bundles install failed: 系统找不到指定的路径。(os error 3)`。
+            - 影响面（同一个根因）：① v0.1.38 之前表现为启动即退出（退出码 101）② 内置 Skill 缺失 ③ AI 自动化面板报 `ai_automation_summary / ai_automation_overview` 失败（同一个 os error 3）。根因是 `ensure_skill_versions()` 首行即调用该安装函数并以 `?` 上抛。
+            - 修复：安装链每一处错误补齐“操作 + 完整路径”上下文；Windows 文件替换增加降级链（`MoveFileExW` 带/不带 WRITE_THROUGH → 复制+删除），兼容 AppData 被重定向到网络位置等场景；`ensure_skill_versions` 的 Skill 相关步骤改为尽力而为——失败只写 boot.log，不再让 AI 自动化面板整体不可用。
+            - 若仍复现，boot.log 会直接打印失败的操作与路径（例如 `创建 Skill bundle 父目录 <路径> 失败: …`）。
 
             ### 启动诊断能力（v0.1.37 起）
-            - boot log：在 Tauri 初始化之前建立独立日志，按检查点记录启动全过程。Windows 位于 `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`，macOS 位于 `~/Library/Logs/com.desic.terminal/boot.log`。
-            - panic 捕获：写入位置与 backtrace，不再只留在无人可见的 stderr。
-            - 构建或 setup 致命失败时，Windows 弹出原生错误对话框并指向上述日志，替代“静默闪退”。
-            - splash 尺寸适配失败改为非致命（无显示器或远程会话场景）。
+            - boot log：Tauri 初始化前独立落盘。Windows `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`，macOS `~/Library/Logs/com.desic.terminal/boot.log`；启动全程按检查点记录，并打印解析出的 config/cache/log/data 实际路径。
+            - panic 捕获（位置 + backtrace）与 Windows 原生错误对话框，替代“静默闪退”。
 
             ### 自 v0.1.36 起的其它内容
-            - AI 研究 tab 重构为研究指挥舱：过程分段进度条、工具结果结构化键值卡、简单工具内联证据卡、流式光标与状态点、证据甲板图表交互（十字线/数值 tooltip/独立归一化）、多周期 K 线解析修复、任务甲板快捷建议、slash 命令参数化、聚焦模式。
-            - AI 交互与正确性：修复中文加粗不生效；对话偏好（模型/思考深度/权限）跨重启记忆；输入/输出 token 分示；AI 工具面文本瘦身（行为契约逐条保留）。
-            - 市场资产图标：按魔数识别 PNG/WebP/AVIF/JPEG/GIF，损坏缓存自动清除重下，不再永久停留在首字母占位。
+            - AI 研究 tab 重构为研究指挥舱（过程可视化、结构化工具卡、内联证据卡、证据甲板图表交互、任务甲板、slash 参数化、聚焦模式）。
+            - 中文加粗修复；对话偏好（模型/思考深度/权限）跨重启记忆；输入/输出 token 分示；AI 工具面文本瘦身。
+            - 市场资产图标缓存自愈（魔数识别 PNG/WebP/AVIF/JPEG/GIF，损坏缓存自动重下）。
 
             ### 市场雷达与研究基础
-            - 保留全市场综合排名、强势、异动、活跃、稳健等研究视图；紧凑 inspector 榜单采用等宽行和细评分轨道。
             - 市场雷达评分只用于研究优先级，不是收益预测、交易信号、策略入场条件或订单命令。
           generateReleaseNotes: false
           releaseDraft: false
