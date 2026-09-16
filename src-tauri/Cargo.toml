@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.36"
+version = "0.1.37"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
@@ -78,7 +78,7 @@ desic-market-radar = { path = "crates/market-radar" }
 desic-systematic = { path = "crates/systematic" }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.dev]
 debug = 0

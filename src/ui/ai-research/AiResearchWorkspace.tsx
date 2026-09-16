@@ -98,6 +98,7 @@ import {
   loadAiSessionDraft,
   persistAiSessionDraft,
   persistPinnedAiSessionIds,
+  readAiChatPrefs,
   readAiResearchColumnWidths,
   readPinnedAiSessionIds,
   reconcilePendingPromptSnapshot,
@@ -109,10 +110,15 @@ import {
   statusLabel,
   summarizeAiResearchMemory,
   withAiContextFallback,
+  writeAiChatPrefs,
   type AiSessionViewCache
 } from "./shared";
 import { previewAiMessages, previewAiSessions } from "./fixtures";
 import { AiResearchMessageDuration, AiResearchMessageTimeline, AiThroughputMetric } from "./AiResearchMessageLeaves";
+
+/* AI 对话偏好（模型/权限/思考深度）合法值集合，用于校验持久化读回值 */
+const AI_PERMISSION_MODES = new Set(["advisor", "copilot", "limited_auto"]);
+const AI_REASONING_DEPTHS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 
 export function AiResearchWorkspace({ active = true, preview, onOpenSettings, onOpenStrategy, onOpenIntelligence, onOpenTrading, onRuntimeStateChange, accountId, accountLabel, accountEnvironment, selectedSymbol, marketAssets, marketTickers, cacheDir }: { active?: boolean; preview?: boolean; onOpenSettings?: () => void; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenIntelligence?: () => void; onOpenTrading?: () => void; onRuntimeStateChange?: (state: { status: string; unread: boolean }) => void; accountId?: string; accountLabel?: string; accountEnvironment?: string; selectedSymbol?: string; marketAssets?: MarketAssetsSummary | null; marketTickers?: Ticker[]; cacheDir?: string } = {}) {
   const { t, i18n } = useTranslation(["automation", "common", "settings"]);
@@ -155,9 +161,22 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
   );
   const [status, setStatus] = useState(preview ? "streaming" : "idle");
   const [statusDetail, setStatusDetail] = useState("");
-  const [chatModelId, setChatModelId] = useState(preview ? "preview-model" : "");
-  const [chatPermissionMode, setChatPermissionMode] = useState<AiPermissionMode>(preview ? "copilot" : "advisor");
-  const [chatReasoningDepth, setChatReasoningDepth] = useState<AiReasoningDepth>("medium");
+  // 跨重启记忆：读取 localStorage 中的离线偏好，新建会话/下次打开沿用（preview 不落盘）
+  const storedChatPrefs = useMemo(() => readAiChatPrefs(), []);
+  const [chatModelId, setChatModelId] = useState(preview ? "preview-model" : storedChatPrefs.modelId);
+  const [chatPermissionMode, setChatPermissionMode] = useState<AiPermissionMode>(preview ? "copilot" : (AI_PERMISSION_MODES.has(storedChatPrefs.permissionMode) ? storedChatPrefs.permissionMode as AiPermissionMode : "advisor"));
+  const [chatReasoningDepth, setChatReasoningDepth] = useState<AiReasoningDepth>(AI_REASONING_DEPTHS.has(storedChatPrefs.reasoningDepth) ? storedChatPrefs.reasoningDepth as AiReasoningDepth : "medium");
+  // 用户在对话框切换模型/权限/思考深度时写入 localStorage，供下次打开与新建会话引用
+  useEffect(() => {
+    if (preview) return;
+    writeAiChatPrefs({ modelId: chatModelId, permissionMode: chatPermissionMode, reasoningDepth: chatReasoningDepth });
+  }, [chatModelId, chatPermissionMode, chatReasoningDepth, preview]);
+  // 配置加载后，若持久化的模型 id 已不在现有模型列表（被删除/改名），回退到空（由 chatModel 兜底取默认）
+  useEffect(() => {
+    if (!preview && chatModelId && config?.models?.length && !config.models.some((model) => model.id === chatModelId)) {
+      setChatModelId("");
+    }
+  }, [config, chatModelId, preview]);
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<AiUiMessage[]>(() => preview ? previewAiMessages : []);
   const [contextUsage, setContextUsage] = useState<AiUiMessage["contextUsage"]>(() => latestAiContextUsage(preview ? previewAiMessages : []) ?? defaultAiContextUsage());

@@ -24650,9 +24650,119 @@ async fn export_chart_csv(
     .map_err(|error| format!("导出 K 线 CSV 任务失败: {error}"))?
 }
 
+// ===== 启动诊断（boot log / panic 捕获）=====
+// 背景：Windows 首发包出现“启动即退出、退出码 101、系统事件无崩溃记录、应用日志为空”。
+// 原因：启动期 panic 的信息只写 stderr（GUI 进程没有控制台）；而 setup 返回 Err 会走
+// `.expect("error while building tauri application")` 直接 panic 退出（101），故障完全不可见。
+// 下面在 Tauri 初始化之前建立独立日志（不依赖运行时目录解析），并捕获 panic，
+// 使后续任何启动失败都能直接定位到具体检查点。
+fn boot_log_dir() -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        if let Some(base) = std::env::var_os("LOCALAPPDATA") {
+            return std::path::PathBuf::from(base).join("com.desic.terminal").join("logs");
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join("Library")
+                .join("Logs")
+                .join("com.desic.terminal");
+        }
+    }
+    #[cfg(all(not(windows), not(target_os = "macos")))]
+    {
+        if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
+            return std::path::PathBuf::from(base).join("com.desic.terminal").join("logs");
+        }
+        if let Some(home) = std::env::var_os("HOME") {
+            return std::path::PathBuf::from(home)
+                .join(".local")
+                .join("share")
+                .join("com.desic.terminal")
+                .join("logs");
+        }
+    }
+    std::env::temp_dir().join("com.desic.terminal").join("logs")
+}
+
+/// 启动期诊断日志：同时写 boot.log 与 stderr（无控制台时以文件为准）
+pub(crate) fn boot_log(message: &str) {
+    use std::io::Write;
+    let line = format!(
+        "[{}] {}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+        message
+    );
+    let dir = boot_log_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(mut file) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("boot.log"))
+    {
+        let _ = file.write_all(line.as_bytes());
+    }
+    eprint!("{line}");
+    let _ = std::io::stderr().flush();
+}
+
+/// 启动期致命错误：落盘 + Windows 弹原生错误框（否则用户只看到“闪退”）
+pub(crate) fn fatal_startup_error(message: &str) {
+    boot_log(&format!("FATAL: {message}"));
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+        let text: Vec<u16> = format!(
+            "Desic Terminal 启动失败：\n{message}\n\n详细日志：{}",
+            boot_log_dir().join("boot.log").display()
+        )
+        .encode_utf16()
+        .chain(std::iter::once(0))
+        .collect();
+        let title: Vec<u16> = "Desic Terminal"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | MB_ICONERROR,
+            );
+        }
+    }
+}
+
+fn install_boot_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        let payload = if let Some(text) = info.payload().downcast_ref::<&str>() {
+            (*text).to_string()
+        } else if let Some(text) = info.payload().downcast_ref::<String>() {
+            text.clone()
+        } else {
+            "<non-string panic payload>".to_string()
+        };
+        boot_log(&format!("PANIC at {location}: {payload}"));
+        boot_log(&format!(
+            "backtrace:\n{}",
+            std::backtrace::Backtrace::force_capture()
+        ));
+    }));
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    install_boot_panic_hook();
+    boot_log("=== Desic Terminal boot start ===");
+    let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
@@ -24665,13 +24775,29 @@ pub fn run() {
         .manage(SystematicRuntime::default())
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
-            initialize_runtime_paths(app.handle()).map_err(std::io::Error::other)?;
-            let splash = app
-                .get_webview_window("splash")
-                .ok_or_else(|| std::io::Error::other("splash window not found"))?;
-            resize_window_to_work_area(&splash, AppWindowKind::Splash)
-                .map_err(std::io::Error::other)?;
-            splash.show().map_err(std::io::Error::other)?;
+            boot_log("setup: begin");
+            if let Err(error) = initialize_runtime_paths(app.handle()) {
+                fatal_startup_error(&format!("应用运行目录初始化失败：{error}"));
+                return Err(std::io::Error::other(error).into());
+            }
+            boot_log("setup: runtime paths ok");
+            let splash = match app.get_webview_window("splash") {
+                Some(splash) => splash,
+                None => {
+                    fatal_startup_error("splash window not found");
+                    return Err(std::io::Error::other("splash window not found").into());
+                }
+            };
+            boot_log("setup: splash window found");
+            // 尺寸适配失败不应阻塞启动（无显示器/远程会话下 work_area 可能不可用）
+            if let Err(error) = resize_window_to_work_area(&splash, AppWindowKind::Splash) {
+                boot_log(&format!("setup: resize splash failed (non-fatal): {error}"));
+            }
+            if let Err(error) = splash.show() {
+                fatal_startup_error(&format!("splash 窗口显示失败：{error}"));
+                return Err(std::io::Error::other(error).into());
+            }
+            boot_log("setup: splash shown");
             let app_handle = app.handle().clone();
             let database_runtime = app.state::<DatabaseRuntime>().inner().clone();
             tauri::async_runtime::spawn(async move {
@@ -24684,6 +24810,7 @@ pub fn run() {
                 database_runtime.complete(result.clone());
                 match result {
                     Ok(()) => {
+                        boot_log("setup: database ready; starting workers");
                         start_trade_execution_recovery(app_handle.clone());
                         instrument_operations::start_instrument_operation_recovery(
                             app_handle.clone(),
@@ -24698,9 +24825,13 @@ pub fn run() {
                             app_handle.state::<SystematicRuntime>(),
                         );
                     }
-                    Err(error) => eprintln!("startup database initialization failed: {error}"),
+                    Err(error) => {
+                        boot_log(&format!("setup: database initialization FAILED: {error}"));
+                        eprintln!("startup database initialization failed: {error}");
+                    }
                 }
             });
+            boot_log("setup: complete");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -24944,23 +25075,32 @@ pub fn run() {
             unregister_market_consumer,
             reconcile_private_streams,
             market_snapshot
-        ])
-        .build(tauri::generate_context!())
-        .expect("error while building tauri application")
-        .run(|app_handle, event| {
-            if let tauri::RunEvent::ExitRequested { api, .. } = event {
-                let runtime = app_handle.state::<AiRuntime>().inner().clone();
-                if runtime.shutdown_started.swap(true, Ordering::AcqRel) {
-                    return;
-                }
-                api.prevent_exit();
-                let app_handle = app_handle.clone();
-                tauri::async_runtime::spawn(async move {
-                    shutdown_ai_sidecar(&runtime).await;
-                    app_handle.exit(0);
-                });
+        ]);
+    let app = match builder.build(tauri::generate_context!()) {
+        Ok(app) => app,
+        Err(error) => {
+            fatal_startup_error(&format!("应用初始化失败：{error}"));
+            std::process::exit(101);
+        }
+    };
+    boot_log("tauri app built; entering event loop");
+    app.run(|app_handle, event| {
+        if let tauri::RunEvent::ExitRequested { api, .. } = event {
+            boot_log("run event: ExitRequested");
+            let runtime = app_handle.state::<AiRuntime>().inner().clone();
+            if runtime.shutdown_started.swap(true, Ordering::AcqRel) {
+                return;
             }
-        });
+            api.prevent_exit();
+            let app_handle = app_handle.clone();
+            tauri::async_runtime::spawn(async move {
+                shutdown_ai_sidecar(&runtime).await;
+                boot_log("ai sidecar shutdown complete; exiting");
+                app_handle.exit(0);
+            });
+        }
+    });
+    boot_log("=== Desic Terminal exit ===");
 }
 
 #[cfg(test)]

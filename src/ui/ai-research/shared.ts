@@ -105,6 +105,36 @@ export function tasksFromUnknown(value: unknown): AiResearchTask[] {
   return source.map(normalizeAiResearchTask).filter((item): item is AiResearchTask => Boolean(item));
 }
 
+// —— AI 对话偏好（模型 / 权限 / 思考深度）：跨重启记忆，用于下次打开与新建会话时套用 ——
+export type AiChatPrefs = {
+  modelId: string;
+  permissionMode: string;
+  reasoningDepth: string;
+};
+
+const AI_CHAT_PREFS_KEY = "desic.ai-research.chat-prefs";
+
+export function readAiChatPrefs(): AiChatPrefs {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(AI_CHAT_PREFS_KEY) || "{}") as Record<string, unknown>;
+    return {
+      modelId: typeof parsed.modelId === "string" ? parsed.modelId : "",
+      permissionMode: typeof parsed.permissionMode === "string" ? parsed.permissionMode : "",
+      reasoningDepth: typeof parsed.reasoningDepth === "string" ? parsed.reasoningDepth : ""
+    };
+  } catch {
+    return { modelId: "", permissionMode: "", reasoningDepth: "" };
+  }
+}
+
+export function writeAiChatPrefs(prefs: AiChatPrefs) {
+  try {
+    window.localStorage.setItem(AI_CHAT_PREFS_KEY, JSON.stringify(prefs));
+  } catch {
+    /* 隐私/配额受限时静默，不阻塞对话 */
+  }
+}
+
 export function extractAiTasks(messages: AiUiMessage[]): AiResearchTask[] {
   let latest: AiResearchTask[] = [];
   for (const message of messages) {
