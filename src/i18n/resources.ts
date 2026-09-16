@@ -413,6 +413,15 @@ const enUS: LocaleCatalog = {
 
 Object.assign(enUS.common, {
   startupReadyToEnter: "Ready to enter", startupDesktopBoot: "Desktop terminal boot",
+  startupDataRootTitle: "Choose where data is stored",
+  startupDataRootBody: "Market data, candles, AI sessions and strategy files are stored here. A local fixed drive is recommended; network or synced folders can affect database stability.",
+  startupDataRootUseDefault: "Use default location",
+  startupDataRootPick: "Choose another location…",
+  startupDataRootConfirm: "Use this location",
+  startupDataRootHint: "You can migrate the data directory later in settings.",
+  startupDataRootPreparing: "Preparing working directories…",
+  startupDataRootFailed: "Could not prepare the data location",
+  startupDataRootRetry: "Retry",
   startupSecureMarketSession: "Secure market session initializing",
   startupHeroTitleLine1: "Trade Intelligence", startupHeroTitleLine2: "Starts Now",
   startupStateReady: "Ready", startupStateLocked: "Locked", startupStateLive: "Live", startupStateSync: "Sync",
@@ -787,6 +796,38 @@ Object.assign(enUS.intelligence, {
   briefingQueued: "Market briefing added to the read-only Agent queue", briefingFailed: "Could not generate the market briefing"
 });
 
+Object.assign(enUS.common, {
+  startupDataRootMigrateTitle: "Migrating data directory",
+  startupDataRootMigrateBody: "Copying existing data to the new location. Do not close the app or disconnect the drive.",
+  startupDataRootMigrateTarget: "Target location", startupDataRootMigrateProgressAria: "Data directory migration progress",
+  startupDataRootMigratePhasePreparing: "Preparing", startupDataRootMigratePhaseCopying: "Copying files",
+  startupDataRootMigratePhaseVerifying: "Verifying", startupDataRootMigratePhaseSwitching: "Switching data directory",
+  startupDataRootMigratePhaseDone: "Completed", startupDataRootMigratePhaseFailed: "Migration failed", startupDataRootMigratePhaseCancelled: "Migration cancelled",
+  startupDataRootMigrateFiles: "Copied {{copied}} / {{total}} files · {{size}}",
+  startupDataRootMigrateFailed: "Data directory migration failed",
+  startupDataRootMigrateFailedHint: "The copy did not complete. Retry, or start with the existing data location.",
+  startupDataRootMigrateCancel: "Cancel migration", startupDataRootMigrateCancelling: "Cancelling…",
+  startupDataRootMigrateCancelHint: "Stop copying and start with the current data location.",
+  startupDataRootMigrateUseOldData: "Cancel migration and start with existing data",
+  startupDataRootMigrateHint: "Existing data stays in place until the migration completes."
+});
+
+Object.assign(enUS.settings, {
+  dataRoot: "Data directory", dataRootDescription: "Current location of market data, candles, AI sessions and strategy files.",
+  dataRootReading: "Reading data directory usage…", dataRootDesktopOnly: "Data directory management is available in the desktop app only.",
+  dataRootCustom: "Custom location", dataRootDefault: "Default location", dataRootReadFailed: "Could not read data directory usage",
+  dataRootChange: "Change data directory…", dataRootChanging: "Registering…",
+  dataRootMigrationRegistered: "Migration registered. Restart the app to finish.", dataRootChangeFailed: "Could not change the data directory",
+  dataRootUsageAria: "Data directory usage", dataRootTotal: "Total",
+  dataRootFileCount_one: "{{count}} file", dataRootFileCount_other: "{{count}} files",
+  dataRootPendingMigration: "Pending migration to {{path}}", dataRootRestartNow: "Restart now",
+  dataRootCancelMigration: "Cancel migration", dataRootCancelMigrationFailed: "Could not cancel the pending migration",
+  dataRootMigrationCancelled: "Pending migration cancelled", dataRootRestartFailed: "Could not restart the application",
+  dataRootOldData: "Old data still occupies {{path}} ({{size}})", dataRootCleanupOldData: "Delete old data",
+  dataRootCleanupOldDataConfirm: "Delete {{path}} ({{size}})? This cannot be undone.",
+  dataRootCleanupDone: "Old data deleted", dataRootCleanupFailed: "Could not delete old data"
+});
+
 const zhCN: LocaleCatalog = {
   common: {
     save: "保存", cancel: "取消", close: "关闭", delete: "删除", edit: "修改", confirm: "确认", loading: "加载中", refresh: "刷新", retry: "重试", enabled: "已启用", disabled: "已禁用", all: "全部", status: "状态", time: "时间", price: "价格", quantity: "数量", success: "成功", error: "错误", warning: "警告", unknown: "未知", none: "无", search: "搜索", details: "详情", today: "今天", yesterday: "昨天", live: "实盘", demo: "模拟盘", account: "账户", perpetual: "永续", system: "系统", language: "语言", new: "新建", run: "运行", history: "历史", data: "数据", settings: "配置", help: "帮助", notLoaded: "未加载", failed: "失败", checking: "检查中", completed: "已完成", processing: "处理中", copy: "复制", export: "导出", import: "导入", download: "下载", open: "打开", back: "返回", more: "更多", apply: "采用", reject: "拒绝", reset: "重置", restore: "恢复", clear: "清除", name: "名称", description: "描述", type: "类型", source: "来源", result: "结果", input: "输入", output: "输出", actions: "操作", unconfiguredAccount: "未配置账号", readOnlyMarket: "只读行情", desktopOnly: "仅桌面端可用", itemCount_one: "{{count}} 项", itemCount_other: "{{count}} 项", selectOption: "请选择", optionsFor: "{{label}}选项", marketCount_one: "{{count}} 个交易对", marketCount_other: "{{count}} 个交易对", connecting: "连接中",
@@ -1043,6 +1084,15 @@ Object.assign(zhCN.settings, {
 
 Object.assign(zhCN.common, {
   startupReadyToEnter: "准备进入", startupDesktopBoot: "桌面终端启动",
+  startupDataRootTitle: "选择数据存放位置",
+  startupDataRootBody: "行情、K 线、AI 会话与策略文件都会保存在这里。建议使用本地固定磁盘；网络盘或同步盘可能影响数据库稳定性。",
+  startupDataRootUseDefault: "使用默认位置",
+  startupDataRootPick: "选择其他位置…",
+  startupDataRootConfirm: "使用该位置",
+  startupDataRootHint: "也可以稍后在设置中迁移数据目录。",
+  startupDataRootPreparing: "正在准备工作目录…",
+  startupDataRootFailed: "数据位置准备失败",
+  startupDataRootRetry: "重试",
   startupSecureMarketSession: "安全市场会话正在初始化", startupHeroTitleLine1: "交易智能", startupHeroTitleLine2: "即刻启动",
   startupStateReady: "就绪", startupStateLocked: "已锁定", startupStateLive: "实时", startupStateSync: "同步中",
   startupStateOnline: "在线", startupStateChecking: "检查中", startupStateWaiting: "等待中",
@@ -1359,6 +1409,38 @@ Object.assign(zhCN.intelligence, {
   localHistoryCount: "本地历史 {{count}} 条", historyQueryFailed: "历史查询失败",
   briefingProfileRequired: "请先在市场情报设置中选择每日简报 Agent Profile",
   briefingQueued: "市场简报已进入只读 Agent 队列", briefingFailed: "市场简报生成失败"
+});
+
+Object.assign(zhCN.common, {
+  startupDataRootMigrateTitle: "正在迁移数据目录",
+  startupDataRootMigrateBody: "正在把已有数据复制到新位置，请勿关闭应用或断开磁盘。",
+  startupDataRootMigrateTarget: "目标位置", startupDataRootMigrateProgressAria: "数据目录迁移进度",
+  startupDataRootMigratePhasePreparing: "准备中", startupDataRootMigratePhaseCopying: "复制中",
+  startupDataRootMigratePhaseVerifying: "校验中", startupDataRootMigratePhaseSwitching: "切换中",
+  startupDataRootMigratePhaseDone: "已完成", startupDataRootMigratePhaseFailed: "迁移失败", startupDataRootMigratePhaseCancelled: "迁移已取消",
+  startupDataRootMigrateFiles: "已复制 {{copied}} / {{total}} 个文件 · {{size}}",
+  startupDataRootMigrateFailed: "数据目录迁移失败",
+  startupDataRootMigrateFailedHint: "复制未完成。可以重试，或改用原有数据位置启动。",
+  startupDataRootMigrateCancel: "取消迁移", startupDataRootMigrateCancelling: "正在取消…",
+  startupDataRootMigrateCancelHint: "停止复制并改用当前数据位置启动。",
+  startupDataRootMigrateUseOldData: "取消迁移并用旧数据启动",
+  startupDataRootMigrateHint: "迁移完成前，原有数据不会被删除。"
+});
+
+Object.assign(zhCN.settings, {
+  dataRoot: "数据目录", dataRootDescription: "行情、K 线、AI 会话与策略文件的当前位置。",
+  dataRootReading: "正在读取数据目录用量…", dataRootDesktopOnly: "数据目录管理仅可在桌面应用中使用。",
+  dataRootCustom: "自定义位置", dataRootDefault: "默认位置", dataRootReadFailed: "无法读取数据目录用量",
+  dataRootChange: "更改数据目录…", dataRootChanging: "正在登记…",
+  dataRootMigrationRegistered: "已登记迁移，需要重启完成。", dataRootChangeFailed: "更改数据目录失败",
+  dataRootUsageAria: "数据目录占用", dataRootTotal: "合计",
+  dataRootFileCount_one: "{{count}} 个文件", dataRootFileCount_other: "{{count}} 个文件",
+  dataRootPendingMigration: "待迁移到 {{path}}", dataRootRestartNow: "立即重启",
+  dataRootCancelMigration: "取消迁移", dataRootCancelMigrationFailed: "取消待迁移登记失败",
+  dataRootMigrationCancelled: "已取消待迁移登记", dataRootRestartFailed: "重启应用失败",
+  dataRootOldData: "旧数据仍占用 {{path}}（{{size}}）", dataRootCleanupOldData: "删除旧数据",
+  dataRootCleanupOldDataConfirm: "确定删除 {{path}}（{{size}}）？该操作无法撤销。",
+  dataRootCleanupDone: "旧数据已删除", dataRootCleanupFailed: "删除旧数据失败"
 });
 
 const zhTW: LocaleCatalog = {

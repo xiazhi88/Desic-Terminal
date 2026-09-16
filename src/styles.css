@@ -27028,3 +27028,273 @@ button {
 @media (max-width: 640px) {
   .ai-research-shell .ai-context-meter-trigger > span:last-of-type small { max-width: 88px; overflow: hidden; text-overflow: ellipsis; }
 }
+
+/* ===== 数据根选择（首次启动 splash 阶段）=====
+   全新安装时先让用户确认数据存放位置，确认前不写任何数据。 */
+.startup-shell { position: relative; }
+
+.startup-data-root {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(6, 8, 14, 0.72);
+  backdrop-filter: blur(6px);
+}
+
+.startup-data-root-card {
+  width: min(100%, 560px);
+  display: grid;
+  gap: 12px;
+  padding: 24px;
+  border: 1px solid rgba(149, 92, 255, 0.28);
+  border-radius: 14px;
+  background: linear-gradient(165deg, rgba(23, 18, 44, 0.96), rgba(10, 11, 20, 0.98));
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
+}
+
+.startup-data-root-card h2 {
+  margin: 0;
+  font-size: 18px;
+  color: #e8eaf0;
+}
+
+.startup-data-root-card p {
+  margin: 0;
+  font-size: 12px;
+  line-height: 1.6;
+  color: #a4aab6;
+}
+
+.startup-data-root-path {
+  overflow: hidden;
+  padding: 9px 11px;
+  border: 1px solid rgba(174, 186, 210, 0.16);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #cfd3db;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.startup-data-root-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.startup-data-root-actions button {
+  min-height: 34px;
+  padding: 0 16px;
+  border: 1px solid rgba(174, 186, 210, 0.2);
+  border-radius: 8px;
+  background: transparent;
+  color: #b9bec9;
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 150ms ease-out, color 150ms ease-out, background-color 150ms ease-out;
+}
+
+.startup-data-root-actions button.primary {
+  border-color: rgba(149, 92, 255, 0.45);
+  background: rgba(149, 92, 255, 0.14);
+  color: #cbb6ff;
+}
+
+.startup-data-root-actions button:hover:not(:disabled) {
+  border-color: rgba(149, 92, 255, 0.55);
+  background: rgba(149, 92, 255, 0.1);
+  color: #dcd6ef;
+}
+
+.startup-data-root-actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.startup-data-root-error { color: #e58a98; }
+.startup-data-root-hint { color: #7f8691; font-size: 11px; }
+
+/* ===== 数据目录迁移进度（splash 阶段）=====
+   迁移向导复用 .startup-data-root 卡片体系，仅新增进度相关选择器。 */
+.startup-data-root-progress { gap: 10px; }
+
+.startup-data-root-progress-target {
+  display: grid;
+  gap: 6px;
+}
+
+.startup-data-root-progress-target > span {
+  color: #7f8691;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.startup-data-root-progress-bar {
+  overflow: hidden;
+  height: 8px;
+  border-radius: 999px;
+  background: rgba(174, 186, 210, 0.14);
+}
+
+.startup-data-root-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(149, 92, 255, 0.9), rgba(120, 178, 255, 0.92));
+  transition: width 200ms ease-out;
+}
+
+.startup-data-root-progress-meta {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  color: #d5d8df;
+  font-size: 12px;
+}
+
+.startup-data-root-progress-meta span {
+  color: #8f97a6;
+  font-variant-numeric: tabular-nums;
+}
+
+.startup-data-root-progress-files {
+  color: #9aa2b1;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.startup-data-root-progress-current {
+  overflow: hidden;
+  color: #7f8691;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ===== 设置页「数据目录」===== */
+.settings-data-root-path {
+  height: 30px;
+  display: flex;
+  align-items: center;
+  border: 1px solid var(--line-soft);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  padding: 0 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-data-root-dirs {
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.024);
+  padding: 10px 12px;
+}
+
+.settings-data-root-dir {
+  min-height: 22px;
+  display: grid;
+  grid-template-columns: minmax(88px, 0.35fr) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.settings-data-root-dir > span {
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-data-root-dir > small {
+  overflow: hidden;
+  color: var(--weak);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-data-root-dir > strong {
+  color: var(--text);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.settings-data-root-total {
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.settings-data-root-banner {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid rgba(149, 92, 255, 0.28);
+  border-radius: 12px;
+  background: rgba(149, 92, 255, 0.08);
+  padding: 10px 12px;
+}
+
+.settings-data-root-banner-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: #cfd3db;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.settings-data-root-banner button {
+  height: 30px;
+  flex: none;
+  border: 1px solid rgba(174, 186, 210, 0.24);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 12px;
+  cursor: pointer;
+}
+
+.settings-data-root-banner button.primary-action {
+  border-color: rgba(139, 92, 246, 0.58);
+  background: rgba(139, 92, 246, 0.18);
+  color: #fff;
+}
+
+.settings-data-root-banner button:hover:not(:disabled) {
+  border-color: rgba(149, 92, 255, 0.55);
+  color: #e6e2f5;
+}
+
+.settings-data-root-banner button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* 迁移向导：当前文件行的占位高度固定，避免进度刷新时卡片跳动 */
+.startup-data-root-progress-current { min-height: 15px; }
+
+/* 设置页：旧数据删除按钮沿用 modal-actions 的破坏性配色 */
+.settings-data-root-banner button.danger-action {
+  border-color: rgba(255, 77, 79, 0.45);
+  background: rgba(255, 77, 79, 0.12);
+  color: #ffb3b5;
+}

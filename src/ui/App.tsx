@@ -237,7 +237,7 @@ import {
 } from "../lib/marketHotStore";
 import { loadNotificationSettings, saveFeishuConfig, testFeishuNotification } from "../lib/notifications";
 import { classifyAlgoPendingOrderGroup, classifyAlgoTriggerPurpose, classifyOrdinaryPendingOrderGroup, isOrdinaryPendingOrder, mergePendingAlgoOrders } from "../lib/pendingOrderClassification";
-import { getActiveTauriListenerCounts, invokeDesktop, invokeOptional, isTauriRuntime, listenOptional } from "../lib/tauri";
+import { DATA_ROOT_MIGRATION_EVENT, cancelDataRootMigration, cancelRunningDataRootMigration, cleanupOldDataRoot, dataRootBootstrapState, dataRootMigrationStatus, dataRootOverview, finalizeDataRootBootstrap, getActiveTauriListenerCounts, invokeDesktop, invokeOptional, isTauriRuntime, listenOptional, pickDataRootDirectory, requestDataRootMigration, restartApp, runDataRootMigration, type DataRootMigrationPhase, type DataRootMigrationProgress, type DataRootOverview } from "../lib/tauri";
 import { useTranslation } from "react-i18next";
 
 export type UiTranslation = ReturnType<typeof useTranslation>["t"];
@@ -739,6 +739,89 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
   const [proxyOpen, setProxyOpen] = useState(false);
   const [checking, setChecking] = useState(false);
   const [assetsSummary, setAssetsSummary] = useState<MarketAssetsSummary | null>(null);
+  // 数据根引导：全新安装时先让用户确认数据存放位置，确认前不写任何数据
+  const [bootstrapPhase, setBootstrapPhase] = useState<"loading" | "choose" | "migrate" | "finalizing" | "ready" | "failed">("loading");
+  const [bootstrapDataDir, setBootstrapDataDir] = useState("");
+  const [pendingDataRoot, setPendingDataRoot] = useState<string | null>(null);
+  const [bootstrapError, setBootstrapError] = useState<string | null>(null);
+  // 迁移前的数据根：取消迁移时回退到它继续启动
+  const [preMigrationRoot, setPreMigrationRoot] = useState<string | null>(null);
+  const [migrationTarget, setMigrationTarget] = useState<string | null>(null);
+
+  const finalizeBootstrap = useCallback(async (dataRoot: string | null) => {
+    setBootstrapPhase("finalizing");
+    setBootstrapError(null);
+    try {
+      const outcome = await finalizeDataRootBootstrap(dataRoot);
+      if (outcome?.dataDir) setBootstrapDataDir(outcome.dataDir);
+      setBootstrapPhase("ready");
+    } catch (failure) {
+      logger.error("data root bootstrap finalize failed", failure);
+      setBootstrapError(failure instanceof Error ? failure.message : String(failure));
+      setBootstrapPhase("failed");
+    }
+  }, []);
+
+  // 迁移完成：后端已切换数据指针，重新读取一次引导状态后再继续既有 bootstrap
+  const continueAfterMigration = useCallback(async (targetRoot: string | null) => {
+    const state = await dataRootBootstrapState().catch((failure) => {
+      logger.warn("data root bootstrap state after migration failed", { error: String(failure) });
+      return null;
+    });
+    if (state?.dataDir) setBootstrapDataDir(state.dataDir);
+    await finalizeBootstrap(state?.customRoot ?? targetRoot ?? null);
+  }, [finalizeBootstrap]);
+
+  // 取消迁移：回退到迁移前的数据根，继续既有 bootstrap 流程
+  const resumeWithOldData = useCallback(async () => {
+    setPendingDataRoot(preMigrationRoot);
+    await finalizeBootstrap(preMigrationRoot);
+  }, [finalizeBootstrap, preMigrationRoot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      if (!isTauriRuntime()) {
+        // 浏览器预览（无 Tauri 运行时）：直接进入启动检查
+        if (!cancelled) setBootstrapPhase("ready");
+        return;
+      }
+      const state = await dataRootBootstrapState().catch((failure) => {
+        logger.warn("data root bootstrap state failed", { error: String(failure) });
+        return null;
+      });
+      if (cancelled) return;
+      if (state) {
+        setBootstrapDataDir(state.dataDir);
+        setPreMigrationRoot(state.customRoot ?? null);
+      }
+      if (state?.migrationPending) {
+        // 已登记迁移：先完成迁移，不初始化运行目录
+        setMigrationTarget(state.migrationTarget ?? state.customRoot ?? null);
+        setPendingDataRoot(state.migrationTarget ?? state.customRoot ?? null);
+        setBootstrapPhase("migrate");
+        return;
+      }
+      if (state?.needsChoice) {
+        setPendingDataRoot(null);
+        setBootstrapPhase("choose");
+        return;
+      }
+      await finalizeBootstrap(state?.customRoot ?? null);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [finalizeBootstrap]);
+
+  const chooseDataRoot = useCallback(async () => {
+    try {
+      const picked = await pickDataRootDirectory(pendingDataRoot ?? bootstrapDataDir);
+      if (picked) setPendingDataRoot(picked);
+    } catch (failure) {
+      logger.error("pick data root failed", failure);
+    }
+  }, [bootstrapDataDir, pendingDataRoot]);
 
   const updateCheck = useCallback((id: string, patch: Partial<StartupCheck>) => {
     setChecks((items) => items.map((item) => (item.id === id ? { ...item, ...patch } : item)));
@@ -869,8 +952,10 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
   }, [previewFailure, t, updateCheck]);
 
   useEffect(() => {
+    // 数据根引导完成前不跑启动检查：此时运行目录/数据库尚未初始化
+    if (bootstrapPhase !== "ready") return;
     void runChecks();
-  }, [runChecks]);
+  }, [bootstrapPhase, runChecks]);
 
   const allRequiredPassed = checks.every((check) => check.status === "passed");
   const progress = Math.round((checks.filter((check) => check.status === "passed").length / checks.length) * 100);
@@ -895,6 +980,59 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
 
   return (
     <main className="startup-shell">
+      {bootstrapPhase === "migrate" ? (
+        <DataRootMigrationWizard
+          targetRoot={migrationTarget}
+          onCompleted={(targetRoot) => void continueAfterMigration(targetRoot)}
+          onUseOldData={() => void resumeWithOldData()}
+        />
+      ) : null}
+      {bootstrapPhase === "choose" || bootstrapPhase === "finalizing" || bootstrapPhase === "failed" ? (
+        <div className="startup-data-root" role="dialog" aria-modal="true" aria-label={t("common:startupDataRootTitle")}>
+          <div className="startup-data-root-card">
+            <h2>{t("common:startupDataRootTitle")}</h2>
+            <p>{t("common:startupDataRootBody")}</p>
+            <div className="startup-data-root-path" title={pendingDataRoot ?? bootstrapDataDir}>
+              {pendingDataRoot ?? bootstrapDataDir}
+            </div>
+            {bootstrapError ? (
+              <p className="startup-data-root-error">{t("common:startupDataRootFailed")}: {bootstrapError}</p>
+            ) : null}
+            <div className="startup-data-root-actions">
+              {pendingDataRoot ? (
+                <>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={bootstrapPhase === "finalizing"}
+                    onClick={() => void finalizeBootstrap(pendingDataRoot)}
+                  >
+                    {bootstrapPhase === "finalizing" ? t("common:startupDataRootPreparing") : t("common:startupDataRootConfirm")}
+                  </button>
+                  <button type="button" disabled={bootstrapPhase === "finalizing"} onClick={() => setPendingDataRoot(null)}>
+                    {t("common:startupDataRootUseDefault")}
+                  </button>
+                </>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    className="primary"
+                    disabled={bootstrapPhase === "finalizing"}
+                    onClick={() => void finalizeBootstrap(null)}
+                  >
+                    {bootstrapPhase === "finalizing" ? t("common:startupDataRootPreparing") : t("common:startupDataRootUseDefault")}
+                  </button>
+                  <button type="button" disabled={bootstrapPhase === "finalizing"} onClick={() => void chooseDataRoot()}>
+                    {t("common:startupDataRootPick")}
+                  </button>
+                </>
+              )}
+            </div>
+            <p className="startup-data-root-hint">{t("common:startupDataRootHint")}</p>
+          </div>
+        </div>
+      ) : null}
       <div className="startup-original">
       <section className="stage" aria-label={t("common:startupAria")}>
         <header className="chrome">
@@ -1021,6 +1159,196 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
 
 export function StartupPreview() {
   return <StartupGate onEnter={() => undefined} previewFailure="okx-network" />;
+}
+
+const DATA_ROOT_MIGRATION_PHASE_KEYS: Record<DataRootMigrationPhase, string> = {
+  idle: "common:startupDataRootMigratePhasePreparing",
+  preparing: "common:startupDataRootMigratePhasePreparing",
+  copying: "common:startupDataRootMigratePhaseCopying",
+  verifying: "common:startupDataRootMigratePhaseVerifying",
+  switching: "common:startupDataRootMigratePhaseSwitching",
+  done: "common:startupDataRootMigratePhaseDone",
+  failed: "common:startupDataRootMigratePhaseFailed",
+  cancelled: "common:startupDataRootMigratePhaseCancelled"
+};
+
+function createInitialMigrationProgress(targetRoot: string | null): DataRootMigrationProgress {
+  return {
+    phase: "preparing",
+    copiedFiles: 0,
+    totalFiles: 0,
+    copiedBytes: 0,
+    totalBytes: 0,
+    currentPath: "",
+    targetRoot,
+    error: null
+  };
+}
+
+/**
+ * 数据目录迁移向导（splash 阶段）。
+ * 迁移完成前不初始化运行目录；进度由后端事件驱动，并以 500ms 轮询兜底。
+ */
+function DataRootMigrationWizard({
+  targetRoot,
+  onCompleted,
+  onUseOldData
+}: {
+  targetRoot: string | null;
+  onCompleted: (targetRoot: string | null) => void;
+  onUseOldData: () => void;
+}) {
+  const { t } = useTranslation("common");
+  const [progress, setProgress] = useState<DataRootMigrationProgress | null>(() => createInitialMigrationProgress(targetRoot));
+  const [attempt, setAttempt] = useState(0);
+  const [cancelling, setCancelling] = useState(false);
+  const settledRef = useRef(false);
+
+  const applyProgress = useCallback((next: DataRootMigrationProgress | null) => {
+    if (!next) return;
+    // 运行期间轮询可能先拿到 idle 快照，避免把已有进度回退成初始态
+    setProgress((current) => (next.phase === "idle" && current && current.phase !== "idle" ? current : next));
+  }, []);
+
+  // 失败时保留已复制的计数，避免进度条回跳到 0
+  const markFailed = useCallback((error: string | null) => {
+    setProgress((current) => ({ ...(current ?? createInitialMigrationProgress(targetRoot)), phase: "failed", error }));
+  }, [targetRoot]);
+
+  useEffect(() => {
+    let cancelled = false;
+    settledRef.current = false;
+    setCancelling(false);
+    setProgress(createInitialMigrationProgress(targetRoot));
+    const listenerCleanup = createDeferredCleanupSlot();
+    void listenOptional<DataRootMigrationProgress>(DATA_ROOT_MIGRATION_EVENT, (payload) => {
+      if (!cancelled) applyProgress(payload);
+    }).then((unlisten) => listenerCleanup.settle(unlisten));
+    const pollTimer = window.setInterval(() => {
+      void dataRootMigrationStatus()
+        .then((status) => {
+          if (!cancelled) applyProgress(status);
+        })
+        .catch(() => undefined);
+    }, 500);
+    void (async () => {
+      try {
+        const result = await runDataRootMigration();
+        if (cancelled) return;
+        if (result) applyProgress(result);
+        else markFailed(null);
+      } catch (failure) {
+        if (cancelled) return;
+        logger.error("data root migration failed", failure);
+        markFailed(failure instanceof Error ? failure.message : String(failure));
+      }
+    })();
+    return () => {
+      cancelled = true;
+      window.clearInterval(pollTimer);
+      listenerCleanup.dispose();
+    };
+  }, [applyProgress, attempt, markFailed, targetRoot]);
+
+  // 取消迁移：清掉待迁移登记并回退到迁移前的数据根继续启动
+  const proceedWithOldData = useCallback(async () => {
+    try {
+      await cancelDataRootMigration();
+    } catch (failure) {
+      logger.warn("cancel pending data root migration failed", { error: String(failure) });
+    }
+    onUseOldData();
+  }, [onUseOldData]);
+
+  useEffect(() => {
+    if (!progress || settledRef.current) return;
+    if (progress.phase === "done") {
+      settledRef.current = true;
+      onCompleted(progress.targetRoot ?? targetRoot);
+      return;
+    }
+    if (progress.phase === "cancelled") {
+      settledRef.current = true;
+      void proceedWithOldData();
+    }
+  }, [onCompleted, proceedWithOldData, progress, targetRoot]);
+
+  const requestCancel = useCallback(() => {
+    setCancelling(true);
+    void cancelRunningDataRootMigration().catch((failure) => {
+      logger.error("cancel data root migration request failed", failure);
+      setCancelling(false);
+    });
+  }, []);
+
+  const retryMigration = useCallback(() => {
+    settledRef.current = false;
+    setProgress(createInitialMigrationProgress(targetRoot));
+    setAttempt((current) => current + 1);
+  }, [targetRoot]);
+
+  const phase = progress?.phase ?? "preparing";
+  const failed = phase === "failed";
+  const totalBytes = progress?.totalBytes ?? 0;
+  const copiedBytes = progress?.copiedBytes ?? 0;
+  const bytePercent = totalBytes > 0 ? Math.round((copiedBytes / totalBytes) * 100) : 0;
+  const percent = phase === "done" ? 100 : totalBytes > 0 ? Math.min(99, Math.max(0, bytePercent)) : phase === "verifying" || phase === "switching" ? 100 : 0;
+
+  return (
+    <div className="startup-data-root" role="dialog" aria-modal="true" aria-label={t("common:startupDataRootMigrateTitle")}>
+      <div className="startup-data-root-card startup-data-root-progress">
+        <h2>{t("common:startupDataRootMigrateTitle")}</h2>
+        <p>{t("common:startupDataRootMigrateBody")}</p>
+        <div className="startup-data-root-progress-target">
+          <span>{t("common:startupDataRootMigrateTarget")}</span>
+          <div className="startup-data-root-path" title={targetRoot ?? ""}>{targetRoot ?? "--"}</div>
+        </div>
+        <div
+          className="startup-data-root-progress-bar"
+          role="progressbar"
+          aria-label={t("common:startupDataRootMigrateProgressAria")}
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+          aria-valuetext={t(DATA_ROOT_MIGRATION_PHASE_KEYS[phase])}
+        >
+          <div className="startup-data-root-progress-fill" style={{ width: `${percent}%` }} />
+        </div>
+        <div className="startup-data-root-progress-meta">
+          <strong>{t(DATA_ROOT_MIGRATION_PHASE_KEYS[phase])}</strong>
+          <span>{percent}%</span>
+        </div>
+        <div className="startup-data-root-progress-files">
+          {t("common:startupDataRootMigrateFiles", { copied: progress?.copiedFiles ?? 0, total: progress?.totalFiles ?? 0, size: formatBytes(copiedBytes) })}
+        </div>
+        <div className="startup-data-root-progress-current" title={progress?.currentPath || undefined}>
+          {progress?.currentPath ?? ""}
+        </div>
+        {failed ? (
+          <p className="startup-data-root-error" title={progress?.error ?? ""}>
+            {t("common:startupDataRootMigrateFailed")}: {progress?.error ?? t("common:startupDataRootMigrateFailedHint")}
+          </p>
+        ) : null}
+        <div className="startup-data-root-actions">
+          {failed ? (
+            <>
+              <button type="button" className="primary" onClick={retryMigration} title={t("common:startupDataRootRetry")}>
+                {t("common:startupDataRootRetry")}
+              </button>
+              <button type="button" onClick={() => void proceedWithOldData()} title={t("common:startupDataRootMigrateCancelHint")}>
+                {t("common:startupDataRootMigrateUseOldData")}
+              </button>
+            </>
+          ) : (
+            <button type="button" disabled={cancelling} onClick={requestCancel} title={t("common:startupDataRootMigrateCancelHint")}>
+              {cancelling ? t("common:startupDataRootMigrateCancelling") : t("common:startupDataRootMigrateCancel")}
+            </button>
+          )}
+        </div>
+        <p className="startup-data-root-hint">{t("common:startupDataRootMigrateHint")}</p>
+      </div>
+    </div>
+  );
 }
 
 function useClockTick() {
@@ -8197,12 +8525,18 @@ function SettingsWorkspacePage({
   onAiValidated?: () => void;
 }) {
   const { t } = useTranslation(["settings", "common"]);
+  const confirmPrompt = useConfirmPrompt();
   const [maintenance, setMaintenance] = useState<StorageMaintenanceResult | null>(null);
   const [storageSnapshot, setStorageSnapshot] = useState<StorageStatusResult | null>(null);
   const [status, setStatus] = useState(() => t("settings:readingStorageStatus"));
   const [busy, setBusy] = useState(false);
   const [statusBusy, setStatusBusy] = useState(false);
   const [watchBusy, setWatchBusy] = useState(false);
+  // 数据目录：当前位置、各子目录用量、待迁移登记与旧数据遗留
+  const [dataRoot, setDataRoot] = useState<DataRootOverview | null>(null);
+  const [dataRootStatus, setDataRootStatus] = useState(() => t("settings:dataRootReading"));
+  const [dataRootBusy, setDataRootBusy] = useState(false);
+  const [registeredTarget, setRegisteredTarget] = useState<string | null>(null);
   const tabItems = useMemo(() => ([
     ["general", t("settings:general"), t("settings:generalDescription")],
     ["account", t("settings:account"), t("settings:accountDescription")],
@@ -8295,6 +8629,110 @@ function SettingsWorkspacePage({
     void loadStorageStatus();
   }, [activeTab, loadStorageStatus, maintenance, statusBusy, storageSnapshot]);
 
+  const loadDataRoot = useCallback(async () => {
+    setDataRootBusy(true);
+    try {
+      const overview = await dataRootOverview();
+      if (!overview) {
+        setDataRootStatus(t("settings:dataRootDesktopOnly"));
+        return;
+      }
+      setDataRoot(overview);
+      setDataRootStatus(overview.isCustomRoot ? t("settings:dataRootCustom") : t("settings:dataRootDefault"));
+      if (overview.pendingMigration) setRegisteredTarget(null);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("data root overview failed", error);
+      setDataRootStatus(t("settings:dataRootReadFailed"));
+      onNotify({ kind: "error", title: t("settings:dataRootReadFailed"), message });
+    } finally {
+      setDataRootBusy(false);
+    }
+  }, [onNotify, t]);
+
+  useEffect(() => {
+    if (activeTab !== "storage") return;
+    void loadDataRoot();
+  }, [activeTab, loadDataRoot]);
+
+  const changeDataRoot = useCallback(async () => {
+    setDataRootBusy(true);
+    try {
+      const picked = await pickDataRootDirectory(dataRoot?.customRoot ?? dataRoot?.dataRoot ?? null);
+      if (!picked) return;
+      await requestDataRootMigration(picked);
+      setRegisteredTarget(picked);
+      setDataRootStatus(t("settings:dataRootMigrationRegistered"));
+      onNotify({ kind: "info", title: t("settings:dataRootMigrationRegistered"), message: picked });
+      await loadDataRoot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("request data root migration failed", error);
+      setDataRootStatus(t("settings:dataRootChangeFailed"));
+      onNotify({ kind: "error", title: t("settings:dataRootChangeFailed"), message });
+    } finally {
+      setDataRootBusy(false);
+    }
+  }, [dataRoot?.customRoot, dataRoot?.dataRoot, loadDataRoot, onNotify, t]);
+
+  const cancelPendingMigration = useCallback(async () => {
+    setDataRootBusy(true);
+    try {
+      await cancelDataRootMigration();
+      setRegisteredTarget(null);
+      setDataRootStatus(t("settings:dataRootMigrationCancelled"));
+      await loadDataRoot();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("cancel data root migration failed", error);
+      onNotify({ kind: "error", title: t("settings:dataRootCancelMigrationFailed"), message });
+    } finally {
+      setDataRootBusy(false);
+    }
+  }, [loadDataRoot, onNotify, t]);
+
+  const restartForDataRoot = useCallback(async () => {
+    try {
+      await restartApp();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("restart app failed", error);
+      onNotify({ kind: "error", title: t("settings:dataRootRestartFailed"), message });
+    }
+  }, [onNotify, t]);
+
+  const cleanupOldData = useCallback(() => {
+    const oldRoot = dataRoot?.oldDataRoot;
+    if (!oldRoot) return;
+    const size = formatBytes(dataRoot?.oldDataBytes ?? 0);
+    confirmPrompt.confirm({
+      title: t("settings:dataRootCleanupOldData"),
+      message: t("settings:dataRootCleanupOldDataConfirm", { path: oldRoot, size }),
+      confirmText: t("common:delete"),
+      danger: true,
+      onConfirm: () => {
+        void (async () => {
+          setDataRootBusy(true);
+          try {
+            await cleanupOldDataRoot();
+            setDataRootStatus(t("settings:dataRootCleanupDone"));
+            onNotify({ kind: "success", title: t("settings:dataRootCleanupDone"), message: oldRoot });
+            await loadDataRoot();
+          } catch (error) {
+            const message = error instanceof Error ? error.message : String(error);
+            logger.error("cleanup old data root failed", error);
+            onNotify({ kind: "error", title: t("settings:dataRootCleanupFailed"), message });
+          } finally {
+            setDataRootBusy(false);
+          }
+        })();
+      }
+    });
+  }, [confirmPrompt, dataRoot?.oldDataBytes, dataRoot?.oldDataRoot, loadDataRoot, onNotify, t]);
+
+  // 重启前本地登记的目标优先：后端重启前可能尚未反映到 overview
+  const pendingMigrationTarget = dataRoot?.pendingMigration ?? registeredTarget;
+
   const displayedStorage = maintenance ?? storageSnapshot;
 
   const tableRows = useMemo(() => {
@@ -8376,6 +8814,68 @@ function SettingsWorkspacePage({
           {activeTab === "notifications" && <NotificationSettingsPane onNotify={onNotify} />}
           {activeTab === "storage" && (
             <div className="settings-storage-pane">
+              {/* 自定义数据目录仅 Windows 支持：其它平台不显示该区块（后端也会拒绝登记与迁移） */}
+              {dataRoot?.supported ? (
+                <>
+              <section className="settings-section settings-data-root-section">
+                <div>
+                  <strong>{t("settings:dataRoot")}</strong>
+                  <span>{dataRootStatus}</span>
+                  <small>{t("settings:dataRootDescription")}</small>
+                </div>
+                <button
+                  className="primary-action"
+                  onClick={() => void changeDataRoot()}
+                  disabled={dataRootBusy}
+                  title={t("settings:dataRootChange")}
+                >
+                  {dataRootBusy ? t("settings:dataRootChanging") : t("settings:dataRootChange")}
+                </button>
+              </section>
+              {dataRoot ? (
+                <>
+                  <div className="settings-data-root-path" title={dataRoot.dataRoot}>{dataRoot.dataRoot}</div>
+                  <div className="settings-data-root-dirs" role="list" aria-label={t("settings:dataRootUsageAria")}>
+                    {dataRoot.dirs.map((dir) => (
+                      <div className="settings-data-root-dir" role="listitem" key={dir.path || dir.label} title={dir.path}>
+                        <span>{dir.label}</span>
+                        <small>{dir.path}</small>
+                        <strong>{formatBytes(dir.bytes)}</strong>
+                      </div>
+                    ))}
+                    <div className="settings-data-root-dir settings-data-root-total" role="listitem">
+                      <span>{t("settings:dataRootTotal")}</span>
+                      <small>{t("settings:dataRootFileCount", { count: dataRoot.totalFiles })}</small>
+                      <strong>{formatBytes(dataRoot.totalBytes)}</strong>
+                    </div>
+                  </div>
+                </>
+              ) : null}
+              {pendingMigrationTarget ? (
+                <div className="settings-data-root-banner">
+                  <span className="settings-data-root-banner-text" title={pendingMigrationTarget}>
+                    {t("settings:dataRootPendingMigration", { path: pendingMigrationTarget })}
+                  </span>
+                  <button type="button" className="primary-action" onClick={() => void restartForDataRoot()} title={t("settings:dataRootRestartNow")}>
+                    {t("settings:dataRootRestartNow")}
+                  </button>
+                  <button type="button" onClick={() => void cancelPendingMigration()} disabled={dataRootBusy} title={t("settings:dataRootCancelMigration")}>
+                    {t("settings:dataRootCancelMigration")}
+                  </button>
+                </div>
+              ) : null}
+              {dataRoot?.oldDataRoot ? (
+                <div className="settings-data-root-banner">
+                  <span className="settings-data-root-banner-text" title={dataRoot.oldDataRoot}>
+                    {t("settings:dataRootOldData", { path: dataRoot.oldDataRoot, size: formatBytes(dataRoot.oldDataBytes) })}
+                  </span>
+                  <button type="button" className="danger-action" onClick={cleanupOldData} disabled={dataRootBusy} title={t("settings:dataRootCleanupOldData")}>
+                    {t("settings:dataRootCleanupOldData")}
+                  </button>
+                </div>
+              ) : null}
+                </>
+              ) : null}
               <section className="settings-section">
                 <div>
                   <strong>{t("settings:localStorage")}</strong>
@@ -8459,6 +8959,7 @@ function SettingsWorkspacePage({
           )}
         </section>
       </div>
+      {confirmPrompt.element}
     </div>
   );
 }

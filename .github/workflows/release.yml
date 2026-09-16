@@ -111,23 +111,27 @@ jobs:
           # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
           # 历史问题：v0.1.36 发版时此处仍为 v0.1.35 文案，导致该 Release 说明与产物不符。
           # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
+          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
           releaseBody: |
-            ## Desic Terminal v0.1.39
+            ## Desic Terminal v0.1.40
 
-            ### 修复：Windows 首次安装后“内置 Skill 安装失败”及其连锁问题
-            - 定位：v0.1.38 的 boot log 在 Windows 报出唯一失败点 `builtin skill bundles install failed: 系统找不到指定的路径。(os error 3)`。
-            - 影响面（同一个根因）：① v0.1.38 之前表现为启动即退出（退出码 101）② 内置 Skill 缺失 ③ AI 自动化面板报 `ai_automation_summary / ai_automation_overview` 失败（同一个 os error 3）。根因是 `ensure_skill_versions()` 首行即调用该安装函数并以 `?` 上抛。
-            - 修复：安装链每一处错误补齐“操作 + 完整路径”上下文；Windows 文件替换增加降级链（`MoveFileExW` 带/不带 WRITE_THROUGH → 复制+删除），兼容 AppData 被重定向到网络位置等场景；`ensure_skill_versions` 的 Skill 相关步骤改为尽力而为——失败只写 boot.log，不再让 AI 自动化面板整体不可用。
-            - 若仍复现，boot.log 会直接打印失败的操作与路径（例如 `创建 Skill bundle 父目录 <路径> 失败: …`）。
+            ### 数据目录可更换（Windows；不再强制放在 C 盘）
+            - 启动顺序改为「先开启动页 → 确认数据位置 → 再初始化运行目录与数据库」：**全新安装时在你确认之前不会写入任何数据**，可在启动页选择默认位置或指定其他盘符/路径（校验绝对路径、可创建、可写）。
+            - 已存在数据的用户**不会被询问**：检测到数据库或配置即沿用当前位置直接启动。
+            - 数据根记录在固定位置的 `data-dir.json`（不随数据迁移），自定义目录下布局与默认一致：`config` / `cache` / `logs` / `data`（数据库与 AI workspace 在 `data` 下）。数据库、更新前备份、日志目录全部改为按运行时目录解析。
+            - 该能力**仅在 Windows 提供**：macOS 始终使用系统默认位置，设置页不显示该区块，后端也会忽略任何自定义目录标记。
 
-            ### 启动诊断能力（v0.1.37 起）
-            - boot log：Tauri 初始化前独立落盘。Windows `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`，macOS `~/Library/Logs/com.desic.terminal/boot.log`；启动全程按检查点记录，并打印解析出的 config/cache/log/data 实际路径。
-            - panic 捕获（位置 + backtrace）与 Windows 原生错误对话框，替代“静默闪退”。
+            ### 数据目录迁移（已有数据也能换位置）
+            - 设置页新增「数据目录」区：显示当前位置、各子目录占用与合计，并提供「更改数据目录…」；确认后提示重启，重启时进入迁移向导。
+            - 迁移在数据库打开之前进行，按类别逐项复制并显示进度（阶段、已复制文件数、当前文件、百分比），支持取消；完成后做完整性校验（文件数量/大小 + 数据库 `PRAGMA quick_check`），**只有校验通过才切换数据根**——任何失败都安全留在旧目录，可幂等重试（已复制且大小一致的文件会跳过）。
+            - 旧数据删除是独立动作，需要你明确确认后才执行，且保留数据根标记文件。
 
-            ### 自 v0.1.36 起的其它内容
-            - AI 研究 tab 重构为研究指挥舱（过程可视化、结构化工具卡、内联证据卡、证据甲板图表交互、任务甲板、slash 参数化、聚焦模式）。
-            - 中文加粗修复；对话偏好（模型/思考深度/权限）跨重启记忆；输入/输出 token 分示；AI 工具面文本瘦身。
-            - 市场资产图标缓存自愈（魔数识别 PNG/WebP/AVIF/JPEG/GIF，损坏缓存自动重下）。
+            ### 工程改进
+            - 正式发版耗时从约 31 分钟降到约 15 分钟：修复了 tag 构建无法写入缓存的问题（此前每次都是全量冷编译），并将 macOS Intel 改为在 arm64 机器上交叉编译（原先的 Intel 机器单机就占 28 分钟）。
+            - 新增手动快速构建通道（Actions → Quick platform build）：可单独构建 Windows / macOS arm64 / macOS Intel，约 8-12 分钟，**不打 tag、不改版本号、不创建 Release**，用于快速验证修复。
+
+            ### 启动诊断能力（v0.1.37 起，持续保留）
+            - boot log（Windows `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`）、panic 位置与 backtrace、致命失败的原生错误对话框；启动全过程按检查点记录，并打印解析出的实际目录。
 
             ### 市场雷达与研究基础
             - 市场雷达评分只用于研究优先级，不是收益预测、交易信号、策略入场条件或订单命令。

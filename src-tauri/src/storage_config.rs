@@ -24,31 +24,164 @@ static LAST_STORAGE_MAINTENANCE_AT: std::sync::atomic::AtomicI64 =
     std::sync::atomic::AtomicI64::new(0);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-struct RuntimePaths {
-    config_dir: PathBuf,
-    cache_dir: PathBuf,
-    log_dir: PathBuf,
-    diagnostics_dir: PathBuf,
-    work_dir: PathBuf,
-    cline_skills_dir: PathBuf,
+pub(crate) struct RuntimePaths {
+    pub(crate) config_dir: PathBuf,
+    pub(crate) cache_dir: PathBuf,
+    pub(crate) log_dir: PathBuf,
+    pub(crate) diagnostics_dir: PathBuf,
+    pub(crate) work_dir: PathBuf,
+    pub(crate) cline_skills_dir: PathBuf,
 }
 
-pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), String> {
+// ===== 数据根目录（可重定位）=====
+// 首次启动允许用户选择数据存放位置；选择结果记录在**默认配置目录**下的标记文件中
+// （标记自身不随数据迁移，否则无法在启动早期发现「数据根已被移动」）。
+// 运行时目录是一次性写入（OnceLock），因此选择必须发生在任何数据落盘之前——
+// 由 splash 阶段调用 finalize_data_root_bootstrap 完成。
+
+const DATA_ROOT_MARKER_FILE: &str = "data-dir.json";
+
+fn data_root_marker_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("解析应用配置目录失败: {err}"))?
+        .join(DATA_ROOT_MARKER_FILE))
+}
+
+/// 读取自定义数据根。未设置 / 内容非法 / 非绝对路径时返回 None（回退默认目录）。
+/// **仅 Windows 支持自定义数据目录**：其它平台即使存在标记也一律忽略，始终使用默认位置。
+pub(crate) fn read_custom_data_root(app: &tauri::AppHandle) -> Option<PathBuf> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let marker = data_root_marker_path(app).ok()?;
+    let content = fs::read_to_string(marker).ok()?;
+    let parsed: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let raw = parsed.get("dataRoot")?.as_str()?.trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(raw);
+    if !path.is_absolute() {
+        return None;
+    }
+    Some(path)
+}
+
+/// 记录自定义数据根（原子写）。仅记录选择，不做数据搬迁——搬迁由迁移流程负责。
+/// **仅 Windows 支持**：其它平台拒绝写入，避免留下会被忽略的标记文件。
+pub(crate) fn write_custom_data_root(
+    app: &tauri::AppHandle,
+    root: &std::path::Path,
+) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Err("自定义数据目录仅 Windows 支持".to_string());
+    }
+    let marker = data_root_marker_path(app)?;
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("创建配置目录 {} 失败: {err}", parent.display()))?;
+    }
+    let payload = serde_json::json!({
+        "dataRoot": root.to_string_lossy(),
+        "updatedAt": now_ms(),
+    });
+    let content = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
+    write_file_atomically(&marker, content.as_bytes())
+}
+
+/// 数据根下的目录布局（与默认布局一致：config / cache / logs / data）
+pub(crate) fn runtime_paths_under(root: &std::path::Path) -> RuntimePaths {
+    let data_dir = root.join("data");
+    RuntimePaths {
+        config_dir: root.join("config"),
+        cache_dir: root.join("cache"),
+        log_dir: root.join("logs"),
+        diagnostics_dir: data_dir.join("diagnostics"),
+        work_dir: data_dir.join("workspace"),
+        cline_skills_dir: data_dir.join("workspace").join(".cline").join("skills"),
+    }
+}
+
+/// 默认（未迁移）运行时目录：用于首次启动展示与「是否需要选择数据位置」判定
+pub(crate) fn default_runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePaths, String> {
+    let data_dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|err| format!("解析应用数据目录失败: {err}"))?;
+    Ok(RuntimePaths {
+        config_dir: app
+            .path()
+            .app_config_dir()
+            .map_err(|err| format!("解析应用配置目录失败: {err}"))?,
+        cache_dir: app
+            .path()
+            .app_cache_dir()
+            .map_err(|err| format!("解析应用缓存目录失败: {err}"))?,
+        log_dir: app
+            .path()
+            .app_log_dir()
+            .map_err(|err| format!("解析应用日志目录失败: {err}"))?,
+        diagnostics_dir: data_dir.join("diagnostics"),
+        work_dir: data_dir.join("workspace"),
+        cline_skills_dir: data_dir.join("workspace").join(".cline").join("skills"),
+    })
+}
+
+/// 当前生效的数据目录（数据库 / workspace / 诊断）：自定义数据根为 `<root>/data`，否则沿用默认数据目录
+pub(crate) fn runtime_data_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    if let Some(root) = read_custom_data_root(app) {
+        return Ok(root.join("data"));
+    }
+    app.path()
+        .app_data_dir()
+        .map_err(|err| format!("解析应用数据目录失败: {err}"))
+}
+
+/// 运行时目录是否已初始化（用于区分「数据位置选择之前」与之后）
+pub(crate) fn runtime_paths_initialized() -> bool {
+    RUNTIME_PATHS.get().is_some()
+}
+
+/// 校验候选数据根：绝对路径 + 可创建 + 可写（写探针后删除）
+pub(crate) fn validate_data_root(root: &std::path::Path) -> Result<(), String> {
+    if !root.is_absolute() {
+        return Err("请选择绝对路径".to_string());
+    }
+    fs::create_dir_all(root).map_err(|err| format!("无法创建目录 {}: {err}", root.display()))?;
+    let probe = root.join(format!(".desic-write-probe-{}", now_ms()));
+    fs::write(&probe, b"probe").map_err(|err| format!("目录不可写 {}: {err}", root.display()))?;
+    let _ = fs::remove_file(&probe);
+    Ok(())
+}
+
+pub(crate) fn initialize_runtime_paths_with_root(
+    app: &tauri::AppHandle,
+    custom_root: Option<PathBuf>,
+) -> Result<(), String> {
+    let using_custom_root = !cfg!(debug_assertions) && custom_root.is_some();
     let paths = if cfg!(debug_assertions) {
         development_runtime_paths()
+    } else if let Some(root) = custom_root {
+        crate::boot_log(&format!("paths: custom data root {}", root.display()));
+        runtime_paths_under(&root)
     } else {
-        let config_dir = app.path().app_config_dir().map_err(|err| format!("解析应用配置目录失败: {err}"))?;
-        let cache_dir = app.path().app_cache_dir().map_err(|err| format!("解析应用缓存目录失败: {err}"))?;
-        let log_dir = app.path().app_log_dir().map_err(|err| format!("解析应用日志目录失败: {err}"))?;
-        let data_dir = app.path().app_data_dir().map_err(|err| format!("解析应用数据目录失败: {err}"))?;
+        let defaults = default_runtime_paths(app)?;
+        let data_dir = runtime_data_dir(app)?;
         crate::boot_log(&format!(
             "paths: config={} cache={} log={} data={}",
-            config_dir.display(),
-            cache_dir.display(),
-            log_dir.display(),
+            defaults.config_dir.display(),
+            defaults.cache_dir.display(),
+            defaults.log_dir.display(),
             data_dir.display()
         ));
-        for dir in [&config_dir, &cache_dir, &log_dir, &data_dir] {
+        for dir in [
+            &defaults.config_dir,
+            &defaults.cache_dir,
+            &defaults.log_dir,
+            &defaults.work_dir,
+        ] {
             // 旧标识目录迁移是尽力而为：失败只记录，不得阻断首次启动
             if let Err(error) = migrate_legacy_app_identifier_dir(dir) {
                 crate::boot_log(&format!(
@@ -57,14 +190,7 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
                 ));
             }
         }
-        RuntimePaths {
-            config_dir,
-            cache_dir,
-            log_dir,
-            diagnostics_dir: data_dir.join("diagnostics"),
-            work_dir: data_dir.join("workspace"),
-            cline_skills_dir: data_dir.join("workspace").join(".cline").join("skills"),
-        }
+        defaults
     };
 
     for dir in [
@@ -79,7 +205,7 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
             .map_err(|err| format!("创建应用目录 {} 失败: {}", dir.display(), err))?;
     }
     crate::boot_log("paths: directories created");
-    if !cfg!(debug_assertions) {
+    if !cfg!(debug_assertions) && !using_custom_root {
         // 旧工作区配置迁移同样是尽力而为：失败只记录（历史上这里的裸 io 错误曾让首次启动直接退出）
         if let Err(error) = migrate_legacy_workspace_config(&paths.config_dir) {
             crate::boot_log(&format!("legacy workspace config migration skipped: {error}"));
@@ -3178,8 +3304,15 @@ pub(crate) fn reqwest_client_with_proxy(config: &ProxyConfig) -> Result<reqwest:
     builder.build().map_err(|err| err.to_string())
 }
 
-pub(crate) fn frontend_log_dir(_app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let dir = runtime_paths().log_dir;
+pub(crate) fn frontend_log_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    // 运行时目录初始化之前（数据位置选择阶段）回退到默认日志目录，保证启动早期日志不丢
+    let dir = if runtime_paths_initialized() {
+        runtime_paths().log_dir
+    } else {
+        app.path()
+            .app_log_dir()
+            .map_err(|err| format!("解析应用日志目录失败: {err}"))?
+    };
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     Ok(dir)
 }

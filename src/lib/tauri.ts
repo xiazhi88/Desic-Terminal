@@ -127,6 +127,113 @@ export async function invokeOptional<T>(command: string, args?: Record<string, u
   }
 }
 
+// ===== 数据根引导（splash 阶段）=====
+export type DataRootBootstrapState = {
+  needsChoice: boolean;
+  customRoot: string | null;
+  dataDir: string;
+  databaseExists: boolean;
+  // 后端已登记待迁移：需要先完成迁移再初始化运行目录
+  migrationPending: boolean;
+  migrationTarget: string | null;
+  /** 当前平台是否支持自定义数据目录（仅 Windows） */
+  supported: boolean;
+};
+
+export type DataRootBootstrapOutcome = {
+  dataDir: string;
+  customRoot: string | null;
+  databaseReady: boolean;
+};
+
+export async function dataRootBootstrapState() {
+  return invokeDesktop<DataRootBootstrapState>("data_root_bootstrap_state");
+}
+
+export async function pickDataRootDirectory(current?: string | null) {
+  return invokeDesktop<string | null>("pick_data_root_directory", { current: current ?? null });
+}
+
+export async function finalizeDataRootBootstrap(dataRoot?: string | null) {
+  return invokeDesktop<DataRootBootstrapOutcome>("finalize_data_root_bootstrap", {
+    dataRoot: dataRoot ?? null
+  });
+}
+
+// ===== 数据目录迁移与用量（splash 迁移向导 / 设置页）=====
+export type DataRootDirUsage = {
+  label: string;
+  path: string;
+  bytes: number;
+  files: number;
+};
+
+export type DataRootOverview = {
+  /** 当前生效的数据目录（展示用） */
+  dataRoot: string;
+  /** 自定义数据根；null 表示默认位置 */
+  customRoot: string | null;
+  isCustomRoot: boolean;
+  /** 当前平台是否支持自定义数据目录（仅 Windows） */
+  supported: boolean;
+  dirs: DataRootDirUsage[];
+  totalBytes: number;
+  totalFiles: number;
+  /** 非 null = 有待迁移的目标路径 */
+  pendingMigration: string | null;
+  /** 迁移完成后旧数据所在位置（null = 无遗留） */
+  oldDataRoot: string | null;
+  oldDataBytes: number;
+};
+
+export type DataRootMigrationPhase = "idle" | "preparing" | "copying" | "verifying" | "switching" | "done" | "failed" | "cancelled";
+
+export type DataRootMigrationProgress = {
+  phase: DataRootMigrationPhase;
+  copiedFiles: number;
+  totalFiles: number;
+  copiedBytes: number;
+  totalBytes: number;
+  currentPath: string;
+  targetRoot: string | null;
+  error: string | null;
+};
+
+/** 迁移过程中后端推送 MigrationProgress 的事件名 */
+export const DATA_ROOT_MIGRATION_EVENT = "data-root-migration";
+
+export async function dataRootOverview() {
+  return invokeDesktop<DataRootOverview>("data_root_overview");
+}
+
+export async function requestDataRootMigration(targetRoot: string) {
+  return invokeDesktop<void>("request_data_root_migration", { targetRoot });
+}
+
+export async function cancelDataRootMigration() {
+  return invokeDesktop<void>("cancel_data_root_migration");
+}
+
+export async function restartApp() {
+  return invokeDesktop<void>("restart_app");
+}
+
+export async function dataRootMigrationStatus() {
+  return invokeDesktop<DataRootMigrationProgress>("data_root_migration_status");
+}
+
+export async function runDataRootMigration() {
+  return invokeDesktop<DataRootMigrationProgress>("run_data_root_migration");
+}
+
+export async function cancelRunningDataRootMigration() {
+  return invokeDesktop<void>("cancel_running_data_root_migration");
+}
+
+export async function cleanupOldDataRoot() {
+  return invokeDesktop<void>("cleanup_old_data_root");
+}
+
 export async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
   if (!isTauriRuntime()) return null;
   try {

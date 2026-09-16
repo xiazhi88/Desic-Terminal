@@ -20,7 +20,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use tauri::{Emitter, Manager};
+use tauri::Emitter;
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 use zip::{write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -582,10 +582,8 @@ fn encrypt_backup_archive(source: &Path, destination: &Path, key: &[u8; 32]) -> 
 
 fn create_update_backup_blocking(app: &tauri::AppHandle) -> Result<AppUpdateBackup, String> {
     let created_at = now_ms();
-    let data_root = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| error.to_string())?;
+    // 更新前备份跟随数据根：用户在其他盘设置数据目录后，备份也留在同一位置（避免 C 盘残留大文件）
+    let data_root = crate::storage_config::runtime_data_dir(app)?;
     let backup_root = data_root.join("update-backups");
     fs::create_dir_all(&backup_root).map_err(|error| error.to_string())?;
     let staging_root = backup_root.join(format!(".staging-{created_at}"));

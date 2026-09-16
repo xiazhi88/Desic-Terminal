@@ -42,6 +42,7 @@ mod ai_stream_checkpoint;
 mod app_updater;
 mod chart_alerts;
 mod chart_consumers;
+mod data_root_migration;
 mod equity_directory;
 mod equity_localization;
 mod instrument_operations;
@@ -122,7 +123,7 @@ use crate::storage_config::{
     ai_agent_template_preview_codex, ai_config_summary, ai_local_auth_status, ai_save_config,
     ai_sidecar_proxy_url, ai_skill_import, ai_skill_install_git, ai_skill_pick_source,
     ai_skill_set_runtime_trust, ai_test_connection, export_diagnostics, frontend_log,
-    initialize_runtime_paths, load_accounts_config, load_ai_config, load_notification_webhook,
+    load_accounts_config, load_ai_config, load_notification_webhook,
     load_proxy_config, load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
     proxy_config_summary, reqwest_client, runtime_cache_root, runtime_work_dir,
     save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
@@ -20322,7 +20323,8 @@ fn mark_memory_private_snapshot_incomplete(runtime: &MarketRuntime, account_id: 
 }
 
 fn database_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    let data_dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+    // 走运行时目录收口：用户在其他盘设置数据根后，数据库随之迁移到 <root>/data
+    let data_dir = crate::storage_config::runtime_data_dir(app)?;
     fs::create_dir_all(&data_dir).map_err(|err| err.to_string())?;
     Ok(data_dir.join("desic_trade_ai.sqlite3"))
 }
@@ -24758,6 +24760,170 @@ fn install_boot_panic_hook() {
     }));
 }
 
+// ===== 数据根引导（splash 阶段）=====
+// 启动顺序：setup 只开 splash → 前端查询 data_root_bootstrap_state →
+// （全新安装时让用户选择数据存放位置）→ finalize_data_root_bootstrap 完成
+// 运行时目录初始化 + 数据库初始化 + 启动后台 worker。
+// 这样「用户确认数据位置之前，磁盘上不写任何数据」。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataRootBootstrapState {
+    /// 仅全新安装为 true：此时应让用户确认数据存放位置
+    needs_choice: bool,
+    /// 已持久化的自定义数据根（老用户可能已有）
+    custom_root: Option<String>,
+    /// 当前生效的数据目录（未选择时为默认位置）
+    data_dir: String,
+    database_exists: bool,
+    /// 是否存在待执行的迁移（有则前端先走迁移向导，不进入选择/正常初始化）
+    migration_pending: bool,
+    migration_target: Option<String>,
+    /// 当前平台是否支持自定义数据目录（仅 Windows 支持）
+    supported: bool,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DataRootBootstrapOutcome {
+    data_dir: String,
+    custom_root: Option<String>,
+    database_ready: bool,
+}
+
+static BOOTSTRAP_DATABASE_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+static BOOTSTRAP_WORKERS_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[tauri::command]
+fn data_root_bootstrap_state(app: tauri::AppHandle) -> Result<DataRootBootstrapState, String> {
+    let defaults = crate::storage_config::default_runtime_paths(&app)?;
+    let custom_root = crate::storage_config::read_custom_data_root(&app);
+    let data_dir = crate::storage_config::runtime_data_dir(&app)?;
+    let database_exists = data_dir.join("desic_trade_ai.sqlite3").exists();
+    let default_data_dir = defaults
+        .diagnostics_dir
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| defaults.diagnostics_dir.clone());
+    let default_database_exists = default_data_dir.join("desic_trade_ai.sqlite3").exists();
+    let default_config_exists = ["ai.local.json", "accounts.local.json", "ui.local.json"]
+        .iter()
+        .any(|name| defaults.config_dir.join(name).exists());
+    let migration_pending = crate::data_root_migration::read_pending_migration(&app);
+    // 已有数据（自定义根或默认位置）→ 老用户，跳过选择，零打扰；待迁移时也不显示选择卡。
+    // 自定义数据目录仅 Windows 支持，其它平台永不出现选择卡。
+    let supported = cfg!(windows);
+    let needs_choice = supported
+        && migration_pending.is_none()
+        && custom_root.is_none()
+        && !database_exists
+        && !default_database_exists
+        && !default_config_exists;
+    Ok(DataRootBootstrapState {
+        needs_choice,
+        custom_root: custom_root.map(|path| path.to_string_lossy().into_owned()),
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        database_exists,
+        migration_pending: migration_pending.is_some(),
+        migration_target: migration_pending.map(|path| path.to_string_lossy().into_owned()),
+        supported,
+    })
+}
+
+#[tauri::command]
+fn pick_data_root_directory(
+    app: tauri::AppHandle,
+    current: Option<String>,
+) -> Result<Option<String>, String> {
+    use tauri_plugin_dialog::{DialogExt, FilePath};
+    let mut builder = app.dialog().file().set_title("选择数据存放位置");
+    if let Some(path) = current
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        builder = builder.set_directory(path);
+    }
+    match builder.blocking_pick_folder() {
+        None => Ok(None),
+        Some(FilePath::Path(path)) => Ok(Some(path.to_string_lossy().into_owned())),
+        Some(FilePath::Url(_)) => Err("数据存放位置必须是本地路径".to_string()),
+    }
+}
+
+#[tauri::command]
+async fn finalize_data_root_bootstrap(
+    app: tauri::AppHandle,
+    data_root: Option<String>,
+) -> Result<DataRootBootstrapOutcome, String> {
+    boot_log("bootstrap: finalize requested");
+    if let Some(raw) = data_root
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        let candidate = PathBuf::from(raw);
+        crate::storage_config::validate_data_root(&candidate)?;
+        crate::storage_config::write_custom_data_root(&app, &candidate)?;
+        boot_log(&format!(
+            "bootstrap: custom data root persisted: {}",
+            candidate.display()
+        ));
+    }
+    let custom_root = crate::storage_config::read_custom_data_root(&app);
+    if let Err(error) =
+        crate::storage_config::initialize_runtime_paths_with_root(&app, custom_root.clone())
+    {
+        fatal_startup_error(&format!("应用运行目录初始化失败：{error}"));
+        return Err(error);
+    }
+    boot_log("bootstrap: runtime paths ready");
+    let database_ready = ensure_database_and_workers(&app).await;
+    let data_dir = crate::storage_config::runtime_data_dir(&app)?;
+    Ok(DataRootBootstrapOutcome {
+        data_dir: data_dir.to_string_lossy().into_owned(),
+        custom_root: custom_root.map(|path| path.to_string_lossy().into_owned()),
+        database_ready,
+    })
+}
+
+/// 数据库初始化 + 启动后台 worker（幂等：重复调用只等待已有初始化结果）
+async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
+    if BOOTSTRAP_DATABASE_STARTED.swap(true, Ordering::AcqRel) {
+        let runtime = app.state::<DatabaseRuntime>().inner().clone();
+        return match tauri::async_runtime::spawn_blocking(move || runtime.wait_until_ready()).await {
+            Ok(Ok(())) => true,
+            _ => false,
+        };
+    }
+    let database_runtime = app.state::<DatabaseRuntime>().inner().clone();
+    let database_app = app.clone();
+    let result = tokio::task::spawn_blocking(move || initialize_database_v1(&database_app))
+        .await
+        .map_err(|error| format!("数据库初始化任务失败：{error}"))
+        .and_then(|result| result);
+    database_runtime.complete(result.clone());
+    match result {
+        Ok(()) => {
+            if !BOOTSTRAP_WORKERS_STARTED.swap(true, Ordering::AcqRel) {
+                boot_log("bootstrap: database ready; starting workers");
+                start_trade_execution_recovery(app.clone());
+                instrument_operations::start_instrument_operation_recovery(app.clone());
+                start_ai_automation_worker(app.clone());
+                start_intelligence_collector(app.clone(), app.state::<IntelligenceRuntime>());
+                start_systematic_worker(app.clone(), app.state::<SystematicRuntime>());
+            }
+            true
+        }
+        Err(error) => {
+            boot_log(&format!("bootstrap: database initialization FAILED: {error}"));
+            eprintln!("startup database initialization failed: {error}");
+            false
+        }
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     install_boot_panic_hook();
@@ -24776,11 +24942,8 @@ pub fn run() {
         .manage(AppUpdateRuntime::default())
         .setup(|app| {
             boot_log("setup: begin");
-            if let Err(error) = initialize_runtime_paths(app.handle()) {
-                fatal_startup_error(&format!("应用运行目录初始化失败：{error}"));
-                return Err(std::io::Error::other(error).into());
-            }
-            boot_log("setup: runtime paths ok");
+            // 运行时目录与数据库初始化已延迟到 finalize_data_root_bootstrap 命令：
+            // 全新安装需要先让用户确认数据存放位置，避免在用户选择之前写盘。
             let splash = match app.get_webview_window("splash") {
                 Some(splash) => splash,
                 None => {
@@ -24797,44 +24960,21 @@ pub fn run() {
                 fatal_startup_error(&format!("splash 窗口显示失败：{error}"));
                 return Err(std::io::Error::other(error).into());
             }
-            boot_log("setup: splash shown");
-            let app_handle = app.handle().clone();
-            let database_runtime = app.state::<DatabaseRuntime>().inner().clone();
-            tauri::async_runtime::spawn(async move {
-                let database_app = app_handle.clone();
-                let result =
-                    tokio::task::spawn_blocking(move || initialize_database_v1(&database_app))
-                        .await
-                        .map_err(|error| format!("数据库初始化任务失败：{error}"))
-                        .and_then(|result| result);
-                database_runtime.complete(result.clone());
-                match result {
-                    Ok(()) => {
-                        boot_log("setup: database ready; starting workers");
-                        start_trade_execution_recovery(app_handle.clone());
-                        instrument_operations::start_instrument_operation_recovery(
-                            app_handle.clone(),
-                        );
-                        start_ai_automation_worker(app_handle.clone());
-                        start_intelligence_collector(
-                            app_handle.clone(),
-                            app_handle.state::<IntelligenceRuntime>(),
-                        );
-                        start_systematic_worker(
-                            app_handle.clone(),
-                            app_handle.state::<SystematicRuntime>(),
-                        );
-                    }
-                    Err(error) => {
-                        boot_log(&format!("setup: database initialization FAILED: {error}"));
-                        eprintln!("startup database initialization failed: {error}");
-                    }
-                }
-            });
-            boot_log("setup: complete");
+            boot_log("setup: splash shown; awaiting data-root bootstrap");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            data_root_bootstrap_state,
+            pick_data_root_directory,
+            finalize_data_root_bootstrap,
+            data_root_migration::data_root_overview,
+            data_root_migration::request_data_root_migration,
+            data_root_migration::cancel_data_root_migration,
+            data_root_migration::data_root_migration_status,
+            data_root_migration::run_data_root_migration,
+            data_root_migration::cancel_running_data_root_migration,
+            data_root_migration::cleanup_old_data_root,
+            data_root_migration::restart_app,
             ai_config_summary,
             ai_local_auth_status,
             ai_save_config,
