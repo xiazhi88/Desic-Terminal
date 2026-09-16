@@ -37,12 +37,25 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
     let paths = if cfg!(debug_assertions) {
         development_runtime_paths()
     } else {
-        let config_dir = app.path().app_config_dir().map_err(|err| err.to_string())?;
-        let cache_dir = app.path().app_cache_dir().map_err(|err| err.to_string())?;
-        let log_dir = app.path().app_log_dir().map_err(|err| err.to_string())?;
-        let data_dir = app.path().app_data_dir().map_err(|err| err.to_string())?;
+        let config_dir = app.path().app_config_dir().map_err(|err| format!("解析应用配置目录失败: {err}"))?;
+        let cache_dir = app.path().app_cache_dir().map_err(|err| format!("解析应用缓存目录失败: {err}"))?;
+        let log_dir = app.path().app_log_dir().map_err(|err| format!("解析应用日志目录失败: {err}"))?;
+        let data_dir = app.path().app_data_dir().map_err(|err| format!("解析应用数据目录失败: {err}"))?;
+        crate::boot_log(&format!(
+            "paths: config={} cache={} log={} data={}",
+            config_dir.display(),
+            cache_dir.display(),
+            log_dir.display(),
+            data_dir.display()
+        ));
         for dir in [&config_dir, &cache_dir, &log_dir, &data_dir] {
-            migrate_legacy_app_identifier_dir(dir)?;
+            // 旧标识目录迁移是尽力而为：失败只记录，不得阻断首次启动
+            if let Err(error) = migrate_legacy_app_identifier_dir(dir) {
+                crate::boot_log(&format!(
+                    "legacy identifier migration skipped for {}: {error}",
+                    dir.display()
+                ));
+            }
         }
         RuntimePaths {
             config_dir,
@@ -65,13 +78,17 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
         fs::create_dir_all(dir)
             .map_err(|err| format!("创建应用目录 {} 失败: {}", dir.display(), err))?;
     }
+    crate::boot_log("paths: directories created");
     if !cfg!(debug_assertions) {
-        migrate_legacy_workspace_config(&paths.config_dir)?;
+        // 旧工作区配置迁移同样是尽力而为：失败只记录（历史上这里的裸 io 错误曾让首次启动直接退出）
+        if let Err(error) = migrate_legacy_workspace_config(&paths.config_dir) {
+            crate::boot_log(&format!("legacy workspace config migration skipped: {error}"));
+        }
     }
 
     if let Some(existing) = RUNTIME_PATHS.get() {
         if existing == &paths {
-            ensure_builtin_skill_bundles()?;
+            ensure_builtin_skill_bundles_best_effort();
             return Ok(());
         }
         return Err("应用运行目录已经使用其它路径初始化".to_string());
@@ -79,7 +96,16 @@ pub(crate) fn initialize_runtime_paths(app: &tauri::AppHandle) -> Result<(), Str
     RUNTIME_PATHS
         .set(paths)
         .map_err(|_| "应用运行目录初始化失败".to_string())?;
-    ensure_builtin_skill_bundles()
+    ensure_builtin_skill_bundles_best_effort();
+    crate::boot_log("paths: runtime paths ready");
+    Ok(())
+}
+
+/// 内置 Skill 包安装：失败只记录不阻断启动（缺失只影响 AI Skill，不影响应用可用性）
+fn ensure_builtin_skill_bundles_best_effort() {
+    if let Err(error) = ensure_builtin_skill_bundles() {
+        crate::boot_log(&format!("builtin skill bundles install failed: {error}"));
+    }
 }
 
 fn migrate_legacy_app_identifier_dir(destination: &std::path::Path) -> Result<(), String> {
@@ -3349,7 +3375,7 @@ pub(crate) fn harden_sensitive_file_permissions(path: &PathBuf) -> Result<(), St
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::piped())
         .output()
-        .map_err(|err| err.to_string())?;
+        .map_err(|err| format!("运行 icacls 失败({}): {err}", path.display()))?;
     if output.status.success() {
         Ok(())
     } else {
