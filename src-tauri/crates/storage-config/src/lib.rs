@@ -358,13 +358,21 @@ pub fn migrate_default_ai_system_prompt(value: String) -> String {
     }
 }
 
+pub const REQUIRED_AI_SKILL_IDS: [&str; 6] = [
+    "desic-core-operations",
+    "trading-philosophy",
+    "okx-market-intelligence",
+    "market-radar-research",
+    "desic-trade-operations",
+    "desic-agent-orchestration",
+];
+
 fn default_ai_enabled_skills() -> Vec<String> {
-    vec![
-        "trading-philosophy".to_string(),
-        "okx-market-intelligence".to_string(),
-        "market-radar-research".to_string(),
-        "desic-trade-operations".to_string(),
-    ]
+    REQUIRED_AI_SKILL_IDS
+        .into_iter()
+        .filter(|id| *id != "desic-core-operations")
+        .map(str::to_string)
+        .collect()
 }
 
 pub fn default_ai_skill_definitions() -> Vec<AiSkillDefinition> {
@@ -673,23 +681,21 @@ mod tests {
     #[test]
     fn default_skills_include_every_required_skill() {
         let enabled = default_ai_enabled_skills();
-        assert_eq!(
-            enabled,
-            vec![
-                "trading-philosophy",
-                "okx-market-intelligence",
-                "market-radar-research",
-                "desic-trade-operations"
-            ]
-        );
+        for id in REQUIRED_AI_SKILL_IDS {
+            if id == "desic-core-operations" {
+                assert!(
+                    !enabled.iter().any(|existing| existing == id),
+                    "fixed-policy skill must stay out of enabledSkills: {id}"
+                );
+                continue;
+            }
+            assert!(
+                enabled.iter().any(|existing| existing == id),
+                "default enabledSkills must include required skill {id}"
+            );
+        }
         let definitions = default_ai_skill_definitions();
-        for id in [
-            "desic-core-operations",
-            "trading-philosophy",
-            "okx-market-intelligence",
-            "market-radar-research",
-            "desic-trade-operations",
-        ] {
+        for id in REQUIRED_AI_SKILL_IDS {
             let skill = definitions
                 .iter()
                 .find(|skill| skill.id == id)

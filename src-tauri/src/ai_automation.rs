@@ -1,10 +1,10 @@
 use super::*;
 use desic_agent_automation::{
-    build_ai_usage_summary, evaluate_condition, normalize_multi_agent_mode,
-    normalize_permission_mode, normalize_profile_sub_agents, orderbook_imbalance,
-    validate_profile_sub_agent_capacity, AiProfileSubAgent, DomainEvent, RollingFeatureCache,
-    WakeCondition, WakeMarketState, ADVISOR_MODE, AI_USAGE_SCHEMA_VERSION,
-    MULTI_AGENT_CUSTOM_MAX_AGENTS,
+    build_ai_usage_summary, evaluate_condition, normalize_multi_agent_config,
+    normalize_multi_agent_mode, normalize_permission_mode, normalize_profile_sub_agents,
+    orderbook_imbalance, validate_profile_sub_agent_capacity, AiProfileSubAgent, DomainEvent,
+    RollingFeatureCache, WakeCondition, WakeMarketState, ADVISOR_MODE, AI_USAGE_SCHEMA_VERSION,
+    MULTI_AGENT_CUSTOM_MAX_AGENTS, MULTI_AGENT_ORCHESTRATOR_BACKEND,
 };
 pub(crate) use desic_agent_automation::{
     AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
@@ -25,12 +25,13 @@ const AGENT_TEMPLATE_PHASES: [&str; 3] = ["primary", "review", "final"];
 const MAX_AGENT_TEMPLATE_INSTRUCTION_CHARS: usize = 4_000;
 const MAX_AGENT_TEMPLATE_SKILL_IDS: usize = 24;
 const MAX_PROFILE_SYMBOLS: usize = 3;
-const REQUIRED_PROFILE_SKILL_IDS: [&str; 5] = [
+const REQUIRED_PROFILE_SKILL_IDS: [&str; 6] = [
     "desic-core-operations",
     "trading-philosophy",
     "okx-market-intelligence",
     "market-radar-research",
     "desic-trade-operations",
+    "desic-agent-orchestration",
 ];
 const DAILY_MARKET_REVIEW_EVIDENCE_RULES: &str = "历史 Smart Money 日内证据必须优先使用 intelligence.smartMoney.readSignalTrendByFilter：instId 使用完整永续交易对，granularity=1h，ts 使用 windowEnd-1 的 13 位毫秒字符串，limit 按窗口小时数设置；后端会把 ts 转成 OKX UTC+8 小时 dataVersion，绝不向上游发送 ts。readSignalOverviewByFilter 是当前小时快照且不得传 ts/dataVersion，只能作为明确标注的复盘后补充，不能归入目标日期或用于制造历史证据冲突。Daily Briefing 是可选的预生成产物；未启用或返回空列表不属于原始市场数据缺口，不得单独据此否决结论。System Stress 应按返回时间桶和 coverage 披露实际覆盖范围；ADL unknown 只表示没有可确认的警告状态。accountId 是不透明稳定标识，其中的 demo/live 字样不代表环境；只以独立 environment 字段和后端账户绑定校验为准。";
 const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES: &str = "永续合约的张数、币数量、名义敞口、保证金、止损和 ATR 风险只使用 account.readRisk 的 instrumentEvaluations、trade.evaluatePlan 或 trade.precheck 返回的结构化字段，不得自行手算。effectiveExposureMultiple=名义敞口÷USDT权益，notionalPctOfEquity=effectiveExposureMultiple×100%；例如 notionalPctOfEquity=47.58% 等于 effectiveExposureMultiple=0.4758X，表示标的反向波动1%时，忽略费用、资金费和滑点，权益约损失0.4758%，不是占用47.58%保证金。notionalPctOfEquity不超过100%表示有效敞口不超过1X；不得仅凭账户余额绝对值、minSz或名义敞口比例称为高风险、高杠杆、账户太小、容错空间有限或不适合开仓。账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。trade.precheck返回blocked=false时必须称为账户可行；没有明确用户风险预算时只报告结构化数值，不自行发明风险阈值。";
@@ -114,6 +115,10 @@ pub(crate) struct AiAgentProfileSummary {
     pub multi_agents: Vec<AiProfileSubAgent>,
     #[serde(default)]
     pub multi_agent_scheme_id: Option<String>,
+    #[serde(default)]
+    pub multi_agent_orchestrator: Option<String>,
+    #[serde(default)]
+    pub multi_agent_expert_source: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -176,6 +181,10 @@ pub(crate) struct AiAgentProfileInput {
     pub multi_agents: Vec<AiProfileSubAgent>,
     #[serde(default)]
     pub multi_agent_scheme_id: Option<String>,
+    #[serde(default)]
+    pub multi_agent_orchestrator: Option<String>,
+    #[serde(default)]
+    pub multi_agent_expert_source: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -539,6 +548,8 @@ pub(crate) struct BackgroundRunContext {
     pub multi_agent_mode: String,
     pub multi_agent_max_agents: u32,
     pub multi_agents: Vec<AiProfileSubAgent>,
+    pub multi_agent_orchestrator: String,
+    pub multi_agent_expert_source: String,
     pub review_id: Option<String>,
     pub episode_id: Option<String>,
 }
@@ -992,6 +1003,16 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE ai_agent_profiles ADD COLUMN multi_agent_mode TEXT NOT NULL DEFAULT 'off'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_profiles ADD COLUMN multi_agent_orchestrator TEXT NOT NULL DEFAULT 'backend'",
+        [],
+    );
+    // expert_source 默认留空：读取时空值由 multiAgentMode 推导（custom→custom），
+    // 避免迁移把存量 custom Profile 误标为 auto 名单。
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_profiles ADD COLUMN multi_agent_expert_source TEXT NOT NULL DEFAULT ''",
         [],
     );
     let _ = conn.execute(
@@ -2070,6 +2091,35 @@ pub(crate) async fn ai_agent_profile_save(
         .optional()
         .map_err(|err| err.to_string())?
         .unwrap_or(now);
+    upsert_profile_row(&conn, &profile, &id, created_at, now)?;
+    if !profile.enabled {
+        conn.execute(
+            "UPDATE ai_agent_runs SET status='cancelled',error='Agent Profile 已停用',finished_at=?2,updated_at=?2
+             WHERE profile_id=?1 AND status IN ('queued','running')",
+            params![id, now],
+        )
+        .map_err(|err| err.to_string())?;
+        conn.execute(
+            "UPDATE ai_daily_market_reviews SET status='cancelled',error='Agent Profile 已停用',updated_at=?2
+             WHERE profile_id=?1 AND status IN ('queued','running')",
+            params![id, now],
+        )
+        .map_err(|err| err.to_string())?;
+    }
+    stop_automation_sessions(&app, sessions_to_stop);
+    runtime.notify.notify_one();
+    load_profile(&conn, &id)
+}
+
+// 保存路径的落库单元：ai_agent_profile_save 与回归测试共用同一条 UPSERT，
+// 列位置 ↔ 值位置必须逐位对齐（NULL 对应 deleted_at）。
+fn upsert_profile_row(
+    conn: &Connection,
+    profile: &AiAgentProfileInput,
+    id: &str,
+    created_at: i64,
+    now: i64,
+) -> Result<(), String> {
     conn.execute(
         "INSERT INTO ai_agent_profiles (
           id,name,enabled,mode,account_id,environment,symbols_json,scan_interval_minutes,
@@ -2077,8 +2127,9 @@ pub(crate) async fn ai_agent_profile_save(
           entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
           feishu_enabled,daily_review_enabled,allowed_wake_condition_types_json,
           multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
+          multi_agent_orchestrator,multi_agent_expert_source,
           created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,NULL,?29,?30)
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,NULL,?31,?32)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,enabled=excluded.enabled,mode=excluded.mode,account_id=excluded.account_id,
           environment=excluded.environment,symbols_json=excluded.symbols_json,
@@ -2096,6 +2147,8 @@ pub(crate) async fn ai_agent_profile_save(
           multi_agent_max_agents=excluded.multi_agent_max_agents,
           multi_agents_json=excluded.multi_agents_json,
           multi_agent_scheme_id=excluded.multi_agent_scheme_id,
+          multi_agent_orchestrator=excluded.multi_agent_orchestrator,
+          multi_agent_expert_source=excluded.multi_agent_expert_source,
           target_leverage=excluded.target_leverage,
           max_single_trade_margin_pct=excluded.max_single_trade_margin_pct,
           updated_at=excluded.updated_at,deleted_at=NULL",
@@ -2126,6 +2179,14 @@ pub(crate) async fn ai_agent_profile_save(
             profile.multi_agent_max_agents,
             to_json(&profile.multi_agents)?,
             profile.multi_agent_scheme_id,
+            profile
+                .multi_agent_orchestrator
+                .clone()
+                .unwrap_or_else(|| MULTI_AGENT_ORCHESTRATOR_BACKEND.to_string()),
+            profile
+                .multi_agent_expert_source
+                .clone()
+                .unwrap_or_default(),
             created_at,
             now,
             profile.target_leverage,
@@ -2133,23 +2194,7 @@ pub(crate) async fn ai_agent_profile_save(
         ],
     )
     .map_err(|err| err.to_string())?;
-    if !profile.enabled {
-        conn.execute(
-            "UPDATE ai_agent_runs SET status='cancelled',error='Agent Profile 已停用',finished_at=?2,updated_at=?2
-             WHERE profile_id=?1 AND status IN ('queued','running')",
-            params![id, now],
-        )
-        .map_err(|err| err.to_string())?;
-        conn.execute(
-            "UPDATE ai_daily_market_reviews SET status='cancelled',error='Agent Profile 已停用',updated_at=?2
-             WHERE profile_id=?1 AND status IN ('queued','running')",
-            params![id, now],
-        )
-        .map_err(|err| err.to_string())?;
-    }
-    stop_automation_sessions(&app, sessions_to_stop);
-    runtime.notify.notify_one();
-    load_profile(&conn, &id)
+    Ok(())
 }
 
 #[tauri::command]
@@ -2969,6 +3014,15 @@ fn normalize_profile(mut profile: AiAgentProfileInput) -> Result<AiAgentProfileI
     profile.reasoning_depth = normalize_profile_reasoning_depth(&profile.reasoning_depth);
     profile.multi_agent_mode =
         normalize_multi_agent_mode(Some(&profile.multi_agent_mode)).to_string();
+    // D4（DES-7 v2 §5.4）：读旧写新——新正交字段缺省时由旧 multiAgentMode 推导，
+    // 显式提供时优先生效；保存即写回新字段，旧列保留做双写。
+    let multi_agent_config = normalize_multi_agent_config(
+        Some(&profile.multi_agent_mode),
+        profile.multi_agent_orchestrator.as_deref(),
+        profile.multi_agent_expert_source.as_deref(),
+    );
+    profile.multi_agent_orchestrator = Some(multi_agent_config.orchestrator.to_string());
+    profile.multi_agent_expert_source = Some(multi_agent_config.expert_source.to_string());
     profile.multi_agent_scheme_id = profile
         .multi_agent_scheme_id
         .map(|value| value.trim().to_string())
@@ -3066,6 +3120,16 @@ fn validate_profile_snapshot(
         ));
     }
     profile.multi_agent_mode = raw_mode.to_string();
+    // D4：快照中的新正交字段宽容归一化——旧快照缺字段时由 multiAgentMode 推导，
+    // 不作为校验错误（向后兼容）。
+    let snapshot_multi_agent_config = normalize_multi_agent_config(
+        Some(&profile.multi_agent_mode),
+        profile.multi_agent_orchestrator.as_deref(),
+        profile.multi_agent_expert_source.as_deref(),
+    );
+    profile.multi_agent_orchestrator = Some(snapshot_multi_agent_config.orchestrator.to_string());
+    profile.multi_agent_expert_source =
+        Some(snapshot_multi_agent_config.expert_source.to_string());
     profile.multi_agent_scheme_id = profile
         .multi_agent_scheme_id
         .map(|value| value.trim().to_string())
@@ -3184,7 +3248,8 @@ fn load_profiles(conn: &Connection) -> Result<Vec<AiAgentProfileSummary>, String
              entry_tolerance_bps,min_wake_interval_seconds,max_runs_per_hour,
              feishu_enabled,daily_review_enabled,allowed_wake_condition_types_json,
              multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
-             created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct
+             created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
+             multi_agent_orchestrator,multi_agent_expert_source
              FROM ai_agent_profiles WHERE deleted_at IS NULL ORDER BY enabled DESC, updated_at DESC",
         )
         .map_err(|err| err.to_string())?;
@@ -3202,7 +3267,8 @@ fn load_profile(conn: &Connection, id: &str) -> Result<AiAgentProfileSummary, St
          entry_tolerance_bps,min_wake_interval_seconds,max_runs_per_hour,
          feishu_enabled,daily_review_enabled,allowed_wake_condition_types_json,
          multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
-         created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct
+         created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
+         multi_agent_orchestrator,multi_agent_expert_source
          FROM ai_agent_profiles WHERE id=?1 AND deleted_at IS NULL",
         params![id],
         profile_from_row,
@@ -3260,6 +3326,32 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
         &multi_agents,
     )
     .map_err(|error| invalid_profile_row(21, error))?;
+    // D4：新正交字段宽容归一化；expert_source 为空（迁移默认列）时由
+    // multiAgentMode 推导，保证存量 custom Profile 读回 custom 名单。
+    let multi_agent_orchestrator = {
+        let raw_orchestrator: String = row.get(29)?;
+        normalize_multi_agent_config(
+            Some(&multi_agent_mode),
+            Some(raw_orchestrator.as_str()),
+            None,
+        )
+        .orchestrator
+        .to_string()
+    };
+    let multi_agent_expert_source = {
+        let raw_expert_source: String = row.get(30)?;
+        normalize_multi_agent_config(
+            Some(&multi_agent_mode),
+            None,
+            if raw_expert_source.trim().is_empty() {
+                None
+            } else {
+                Some(raw_expert_source.as_str())
+            },
+        )
+        .expert_source
+        .to_string()
+    };
     Ok(AiAgentProfileSummary {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -3288,6 +3380,8 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
         multi_agent_max_agents,
         multi_agents,
         multi_agent_scheme_id: row.get(22)?,
+        multi_agent_orchestrator: Some(multi_agent_orchestrator),
+        multi_agent_expert_source: Some(multi_agent_expert_source),
         created_at: row.get(23)?,
         updated_at: row.get(24)?,
     })
@@ -7846,6 +7940,14 @@ async fn execute_profile_run(
         multi_agent_mode: profile.multi_agent_mode.clone(),
         multi_agent_max_agents: profile.multi_agent_max_agents,
         multi_agents: profile.multi_agents.clone(),
+        multi_agent_orchestrator: profile
+            .multi_agent_orchestrator
+            .clone()
+            .unwrap_or_else(|| MULTI_AGENT_ORCHESTRATOR_BACKEND.to_string()),
+        multi_agent_expert_source: profile
+            .multi_agent_expert_source
+            .clone()
+            .unwrap_or_default(),
         review_id: None,
         episode_id: None,
     };
@@ -8074,6 +8176,8 @@ async fn execute_review_run(app: tauri::AppHandle, review: QueuedReview) -> Resu
         multi_agent_mode: desic_agent_automation::MULTI_AGENT_OFF_MODE.to_string(),
         multi_agent_max_agents: default_multi_agent_max_agents(),
         multi_agents: Vec::new(),
+        multi_agent_orchestrator: MULTI_AGENT_ORCHESTRATOR_BACKEND.to_string(),
+        multi_agent_expert_source: String::new(),
         review_id: Some(review.id.clone()),
         episode_id: Some(review.episode_id.clone()),
     };
@@ -9897,6 +10001,80 @@ mod tests {
     }
 
     #[test]
+    fn profile_save_upsert_keeps_row_visible_and_timestamps_aligned() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let profile = normalize_profile(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "保存回归",
+                "symbols": ["BTC-USDT-SWAP"],
+                "multiAgentMode": "auto",
+                "multiAgentOrchestrator": "lead",
+                "targetLeverage": 25,
+                "maxSingleTradeMarginPct": 40
+            }))
+            .expect("deserialize profile input"),
+        )
+        .expect("normalize profile input");
+
+        // 新建保存：created_at=1000、updated_at=2000，deleted_at 必须保持 NULL，
+        // 且保存后的行要能通过 load_profile（WHERE deleted_at IS NULL）读回。
+        upsert_profile_row(&conn, &profile, "profile-save-regression", 1_000, 2_000)
+            .expect("insert new profile row");
+        let loaded = load_profile(&conn, "profile-save-regression").expect("load new profile");
+        assert_eq!(loaded.created_at, 1_000);
+        assert_eq!(loaded.updated_at, 2_000);
+        assert_eq!(loaded.multi_agent_orchestrator.as_deref(), Some("lead"));
+        assert_eq!(loaded.multi_agent_expert_source.as_deref(), Some("auto"));
+        assert_eq!(loaded.target_leverage, 25);
+        assert_eq!(loaded.max_single_trade_margin_pct, 40);
+        let (deleted_at, orchestrator, expert_source, target_leverage, margin_pct): (
+            Option<i64>,
+            String,
+            String,
+            i64,
+            i64,
+        ) = conn
+            .query_row(
+                "SELECT deleted_at,multi_agent_orchestrator,multi_agent_expert_source,
+                 target_leverage,max_single_trade_margin_pct
+                 FROM ai_agent_profiles WHERE id='profile-save-regression'",
+                [],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .expect("query saved profile row");
+        assert_eq!(deleted_at, None, "新建保存不得写入 deleted_at");
+        assert_eq!(orchestrator, "lead");
+        assert_eq!(expert_source, "auto");
+        assert_eq!(target_leverage, 25);
+        assert_eq!(margin_pct, 40);
+
+        // 存量重存（ON CONFLICT 路径，created_at 沿用旧值）：created_at 保持、
+        // updated_at 前移、deleted_at 仍为 NULL。
+        upsert_profile_row(&conn, &profile, "profile-save-regression", 1_000, 3_000)
+            .expect("re-save existing profile row");
+        let reloaded = load_profile(&conn, "profile-save-regression").expect("reload profile");
+        assert_eq!(reloaded.created_at, 1_000, "重存不得改写 created_at");
+        assert_eq!(reloaded.updated_at, 3_000, "重存必须前移 updated_at");
+        let deleted_after_resave: Option<i64> = conn
+            .query_row(
+                "SELECT deleted_at FROM ai_agent_profiles WHERE id='profile-save-regression'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("query deleted_at after re-save");
+        assert_eq!(deleted_after_resave, None, "重存不得软删除已有 Profile");
+    }
+
+    #[test]
     fn agent_schemes_include_stable_builtin_and_persist_user_schemes() {
         let conn = Connection::open_in_memory().expect("open in-memory database");
         migrate_ai_automation(&conn).expect("migrate automation schema");
@@ -9980,6 +10158,70 @@ mod tests {
     }
 
     #[test]
+    fn profile_multi_agent_config_maps_on_read_and_normalize() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        // 存量行（迁移默认列留空）：读取时由 multiAgentMode 推导，auto → auto。
+        insert_test_profile(&conn, "profile-legacy-auto", "auto", 4, "[]");
+        let legacy = load_profile(&conn, "profile-legacy-auto").expect("load legacy profile");
+        assert_eq!(
+            legacy.multi_agent_orchestrator.as_deref(),
+            Some(MULTI_AGENT_ORCHESTRATOR_BACKEND)
+        );
+        assert_eq!(legacy.multi_agent_expert_source.as_deref(), Some("auto"));
+        conn.execute(
+            "UPDATE ai_agent_profiles SET multi_agent_orchestrator='lead',
+             multi_agent_expert_source='custom' WHERE id='profile-legacy-auto'",
+            [],
+        )
+        .expect("persist lead config");
+        let lead = load_profile(&conn, "profile-legacy-auto").expect("load lead profile");
+        // 显式存储值优先于 mode 推导（lead+custom 按 lead+custom 读回）。
+        assert_eq!(lead.multi_agent_orchestrator.as_deref(), Some("lead"));
+        assert_eq!(lead.multi_agent_expert_source.as_deref(), Some("custom"));
+
+        // normalize_profile：读旧写新（缺省新字段由旧 mode 推导），显式 lead 保留。
+        let derived = normalize_profile(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "存量 custom",
+                "symbols": ["BTC-USDT-SWAP"],
+                "multiAgentMode": "custom",
+                "multiAgents": [
+                    {
+                        "id": "market", "name": "市场结构", "role": "market_structure",
+                        "responsibility": "分析价格结构", "scopes": ["market"],
+                        "required": true, "enabled": true
+                    },
+                    {
+                        "id": "market-2", "name": "市场结构二", "role": "market_structure",
+                        "responsibility": "核对价格结构", "scopes": ["market"],
+                        "required": false, "enabled": true
+                    }
+                ]
+            }))
+            .expect("deserialize legacy profile"),
+        )
+        .expect("normalize legacy profile");
+        assert_eq!(
+            derived.multi_agent_orchestrator.as_deref(),
+            Some(MULTI_AGENT_ORCHESTRATOR_BACKEND)
+        );
+        assert_eq!(derived.multi_agent_expert_source.as_deref(), Some("custom"));
+        let explicit = normalize_profile(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "Lead 编排",
+                "symbols": ["BTC-USDT-SWAP"],
+                "multiAgentMode": "auto",
+                "multiAgentOrchestrator": "lead"
+            }))
+            .expect("deserialize lead profile"),
+        )
+        .expect("normalize lead profile");
+        assert_eq!(explicit.multi_agent_orchestrator.as_deref(), Some("lead"));
+        assert_eq!(explicit.multi_agent_expert_source.as_deref(), Some("auto"));
+    }
+
+    #[test]
     fn account_scoped_custom_agent_requires_a_profile_account() {
         let profile = serde_json::from_value::<AiAgentProfileInput>(json!({
             "name": "账户风险分析",
@@ -10028,6 +10270,7 @@ mod tests {
                 "okx-market-intelligence",
                 "market-radar-research",
                 "desic-trade-operations",
+                "desic-agent-orchestration",
                 "custom-risk-check",
             ]
         );

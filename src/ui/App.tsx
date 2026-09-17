@@ -547,9 +547,14 @@ const REQUIRED_AI_SKILL_IDS = [
   "desic-core-operations",
   "trading-philosophy",
   "okx-market-intelligence",
-  "desic-trade-operations"
+  "market-radar-research",
+  "desic-trade-operations",
+  "desic-agent-orchestration"
 ] as const;
 const REQUIRED_AI_SKILL_ID_SET = new Set<string>(REQUIRED_AI_SKILL_IDS);
+const REQUIRED_ENABLED_AI_SKILL_IDS: string[] = REQUIRED_AI_SKILL_IDS.filter(
+  (id) => id !== "desic-core-operations"
+);
 
 function aiSkillConstraintLabel(skillId: string, t?: UiTranslation): string {
   if (skillId === "desic-core-operations") return t ? t("settings:fixedPolicy") : "固定规范";
@@ -566,12 +571,7 @@ function withRequiredAiSkills(skills: string[] | undefined): string[] {
       : id === "desic-perpetual-risk" || id === "desic-position-management" || id === "desic-market-analysis"
         ? "desic-trade-operations"
         : id);
-  return [...new Set([
-    "trading-philosophy",
-    "okx-market-intelligence",
-    "desic-trade-operations",
-    ...migrated
-  ])];
+  return [...new Set([...REQUIRED_ENABLED_AI_SKILL_IDS, ...migrated])];
 }
 
 export function normalizeAiPermissionMode(mode: AiPermissionMode | string | undefined): AiPermissionMode {

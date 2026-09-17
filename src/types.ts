@@ -2066,6 +2066,8 @@ export type AiAgentProfile = {
   multiAgentMode: "off" | "auto" | "custom";
   multiAgentMaxAgents: number;
   multiAgentSchemeId?: string | null;
+  multiAgentOrchestrator?: "backend" | "lead" | null;
+  multiAgentExpertSource?: "auto" | "custom" | null;
   multiAgents: AiProfileSubAgent[];
   createdAt: number;
   updatedAt: number;

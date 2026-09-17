@@ -7,9 +7,9 @@ use desic_storage_config::{
     AiConfig, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiLocalAuthStatus,
     AiLocalCliStatus, AiModelConfig, AiModelConfigSummary, AiModelConfigUpdate, AiSkillDefinition,
     DiagnosticExportResult, FrontendLogEntry, KlineDataRange, ProxyConfig, ProxyConfigSummary,
-    ProxyConfigUpdate, ProxyTestResult, SensitiveConfigMigrationResult, StorageMaintenanceResult,
-    StorageStatusResult, UiPreferencesConfig, UiPreferencesQuery, UiPreferencesSummary,
-    UiPreferencesUpdate, WatchlistConfig,
+    ProxyConfigUpdate, ProxyTestResult, REQUIRED_AI_SKILL_IDS, SensitiveConfigMigrationResult,
+    StorageMaintenanceResult, StorageStatusResult, UiPreferencesConfig, UiPreferencesQuery,
+    UiPreferencesSummary, UiPreferencesUpdate, WatchlistConfig,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use zip::{read::ZipArchive, write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -3663,13 +3663,7 @@ fn merge_ai_skill_definitions(
         // limit orders received an explicit, conditional maker-cost preference.
         ("trading-philosophy", 0xaddb_6bab_fa83_ff77),
     ];
-    let protected_skill_ids = [
-        "desic-core-operations",
-        "trading-philosophy",
-        "okx-market-intelligence",
-        "market-radar-research",
-        "desic-trade-operations",
-    ];
+    let protected_skill_ids = REQUIRED_AI_SKILL_IDS;
     let mut merged = desic_storage_config::default_ai_skill_definitions();
     for mut item in items {
         item.id = item.id.trim().to_string();
@@ -3753,12 +3747,11 @@ fn canonical_skill_id(id: &str) -> &str {
 }
 
 fn normalize_ai_enabled_skills(items: Vec<String>) -> Vec<String> {
-    let mut result = vec![
-        "trading-philosophy".to_string(),
-        "okx-market-intelligence".to_string(),
-        "market-radar-research".to_string(),
-        "desic-trade-operations".to_string(),
-    ];
+    let mut result: Vec<String> = REQUIRED_AI_SKILL_IDS
+        .into_iter()
+        .filter(|id| *id != "desic-core-operations")
+        .map(str::to_string)
+        .collect();
     for item in items {
         let id = canonical_skill_id(&item);
         if id.is_empty()
@@ -5178,10 +5171,29 @@ wire_api = "responses"
                 "okx-market-intelligence",
                 "market-radar-research",
                 "desic-trade-operations",
+                "desic-agent-orchestration",
                 "custom-research",
             ]
         );
         assert!(!enabled.iter().any(|id| id == "desic-core-operations"));
+    }
+
+    #[test]
+    fn normalized_enabled_skills_include_every_required_skill() {
+        let enabled = normalize_ai_enabled_skills(Vec::new());
+        for id in REQUIRED_AI_SKILL_IDS {
+            if id == "desic-core-operations" {
+                assert!(
+                    !enabled.iter().any(|existing| existing == id),
+                    "fixed-policy skill must stay out of enabledSkills: {id}"
+                );
+                continue;
+            }
+            assert!(
+                enabled.iter().any(|existing| existing == id),
+                "normalized enabledSkills must include required skill {id}"
+            );
+        }
     }
 
     #[test]

@@ -13968,6 +13968,16 @@ async fn run_ai_stream(
                 .as_ref()
                 .map(|context| context.multi_agent_mode.clone())
                 .unwrap_or_else(|| desic_agent_automation::MULTI_AGENT_OFF_MODE.to_string()),
+            "multiAgentOrchestrator": run_context
+                .as_ref()
+                .map(|context| context.multi_agent_orchestrator.clone())
+                .unwrap_or_else(|| {
+                    desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND.to_string()
+                }),
+            "multiAgentExpertSource": run_context
+                .as_ref()
+                .map(|context| context.multi_agent_expert_source.clone())
+                .unwrap_or_default(),
             "multiAgentMaxAgents": run_context
                 .as_ref()
                 .map(|context| context.multi_agent_max_agents)
@@ -28421,6 +28431,9 @@ mod tests {
             multi_agent_mode: multi_agent_mode.to_string(),
             multi_agent_max_agents: 4,
             multi_agents,
+            multi_agent_orchestrator: desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND
+                .to_string(),
+            multi_agent_expert_source: String::new(),
             review_id: None,
             episode_id: None,
         }
@@ -29027,6 +29040,9 @@ mod tests {
             multi_agent_mode: desic_agent_automation::MULTI_AGENT_OFF_MODE.to_string(),
             multi_agent_max_agents: 4,
             multi_agents: Vec::new(),
+            multi_agent_orchestrator: desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND
+                .to_string(),
+            multi_agent_expert_source: String::new(),
             review_id: None,
             episode_id: None,
         });

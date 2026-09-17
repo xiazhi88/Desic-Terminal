@@ -80,7 +80,7 @@ Go to **AI Automation → Profiles** and create a new one:
    - Reasoning depth trades evidence chain length against time; keep the default at first.
 
 3. **Skills**
-   - The four system Skills are always loaded (see section 5).
+   - The six system Skills are always loaded (see section 5).
    - Custom Skills are selected individually; each Skill is pinned to a specific version.
 
 4. **Agent team**
@@ -128,7 +128,7 @@ A Profile's watch plan is a set of **typed wake conditions**, each with an expli
 
 Skills are **rule specs** injected into the model context. A Profile stores immutable version snapshots — editing a Skill never changes the rules historical runs used.
 
-**Four system Skills (always loaded)**
+**Six system Skills (always loaded)**
 
 | Skill | Responsibility |
 | --- | --- |
@@ -136,6 +136,8 @@ Skills are **rule specs** injected into the model context. A Profile stores immu
 | `trading-philosophy` | Evidence, market regimes, invalidation conditions, risk and review principles |
 | `okx-market-intelligence` | News, events, sentiment, macro, Smart Money, OI, taker flows, crowding, funding and basis |
 | `desic-trade-operations` | Trade opportunities, market evidence, perpetual risk, position lifecycle, protection and execution reconciliation |
+| `market-radar-research` | Read-only interpretation of market-wide rankings, attribution, breadth, saved filters and point-in-time validation |
+| `desic-agent-orchestration` | Multi-agent dispatch discipline: when to consult experts, task briefs, pre-conclusion cross-review and report merging |
 
 **Custom Skills** (Settings → Skills)
 

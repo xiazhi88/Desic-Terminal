@@ -563,7 +563,9 @@ const REQUIRED_PROFILE_SKILL_IDS = [
   "desic-core-operations",
   "trading-philosophy",
   "okx-market-intelligence",
-  "desic-trade-operations"
+  "market-radar-research",
+  "desic-trade-operations",
+  "desic-agent-orchestration"
 ] as const;
 const REQUIRED_PROFILE_SKILL_ID_SET = new Set<string>(REQUIRED_PROFILE_SKILL_IDS);
 const PROFILE_SYMBOL_LIMIT = 3;

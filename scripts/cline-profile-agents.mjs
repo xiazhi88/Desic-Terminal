@@ -2,6 +2,7 @@ export const PROFILE_AUTO_MULTI_AGENT_MAX = 8;
 export const PROFILE_CUSTOM_MULTI_AGENT_MAX = 10;
 export const PROFILE_MULTI_AGENT_MAX = PROFILE_AUTO_MULTI_AGENT_MAX;
 export const PROFILE_MULTI_AGENT_REPORT_LIMIT = 12_000;
+export const PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET = 4_000;
 export const PROFILE_MULTI_AGENT_STALL_TIMEOUT_MS = 180_000;
 
 export function createProfileAgentStallWatchdog(onStall, options = {}) {
@@ -191,6 +192,27 @@ export function normalizeProfileMultiAgentMode(value) {
   return mode === "auto" || mode === "custom" ? mode : "off";
 }
 
+// D4（DES-7 v2 §5.4）：multiAgentMode 仍是主开关（off=关闭）与旧值兼容入口，
+// multiAgentOrchestrator × multiAgentExpertSource 是正交维度。读旧写新：
+// off → 关闭；auto → backend+auto；custom → backend+custom（缺省 expertSource
+// 由旧 mode 推导，显式提供时优先生效）。
+export function normalizeMultiAgentConfig(config = {}) {
+  const source = config && typeof config === "object" ? config : {};
+  const mode = normalizeProfileMultiAgentMode(source.multiAgentMode);
+  const orchestrator = String(source.multiAgentOrchestrator || "").trim().toLowerCase();
+  const expertSource = String(source.multiAgentExpertSource || "").trim().toLowerCase();
+  return {
+    enabled: mode !== "off",
+    mode,
+    orchestrator: orchestrator === "lead" ? "lead" : "backend",
+    expertSource: expertSource === "custom" || expertSource === "auto"
+      ? expertSource
+      : mode === "custom"
+        ? "custom"
+        : "auto"
+  };
+}
+
 function normalizeProfileAgent(value, index) {
   if (!value || typeof value !== "object") return null;
   const id = String(value.id || `profile-agent-${index + 1}`).trim();
@@ -234,21 +256,13 @@ export function resolveProfileMultiAgents(config = {}, taskText = "") {
     Math.max(2, Number.isInteger(parsedMax) && parsedMax > 0 ? parsedMax : modeLimit)
   );
   if (mode === "custom") {
-    const agents = (Array.isArray(config.multiAgents) ? config.multiAgents : [])
-      .map(normalizeProfileAgent)
-      .filter(Boolean);
+    const agents = enabledCustomProfileAgents(config);
     if (agents.length > maxAgents) {
       throw new Error(`已启用 ${agents.length} 个自定义 Agent，超过当前上限 ${maxAgents}`);
     }
     return agents;
   }
-  const activeSkills = new Set(stringList(config.activeSkillIds));
-  const hasAccount = Boolean(String(config.agentProfileAccountId || "").trim());
-  const agents = AUTO_PROFILE_AGENTS.filter((agent) => {
-    if (agent.requiresAccount && !hasAccount) return false;
-    if (agent.requiresSkill && !activeSkills.has(agent.requiresSkill)) return false;
-    return true;
-  });
+  const agents = eligibleAutoProfileAgents(config);
   const task = String(taskText || "");
   const scores = new Map([
     ["auto-market-structure", 1_000],
@@ -298,10 +312,105 @@ export function resolveProfileMultiAgents(config = {}, taskText = "") {
     }));
 }
 
+function enabledCustomProfileAgents(config) {
+  return (Array.isArray(config.multiAgents) ? config.multiAgents : [])
+    .map(normalizeProfileAgent)
+    .filter(Boolean);
+}
+
+function eligibleAutoProfileAgents(config) {
+  const activeSkills = new Set(stringList(config.activeSkillIds));
+  const hasAccount = Boolean(String(config.agentProfileAccountId || "").trim());
+  return AUTO_PROFILE_AGENTS.filter((agent) => {
+    if (agent.requiresAccount && !hasAccount) return false;
+    if (agent.requiresSkill && !activeSkills.has(agent.requiresSkill)) return false;
+    return true;
+  });
+}
+
+// D8（DES-7 v2 §5.8）：lead 模式主 Agent 可点名的专家 = Profile 已启用名单。
+// 与 resolveProfileMultiAgents 的资格过滤同源（requiresAccount / requiresSkill /
+// enabled），但不做任务相关性打分与数量截断——目录呈现完整可点名池，配额由
+// D6 预算护栏约束（P2 落地）。
+export function resolveProfileAgentCatalog(config = {}) {
+  const normalized = normalizeMultiAgentConfig(config);
+  if (!normalized.enabled) return { ...normalized, agents: [] };
+  const agents = normalized.expertSource === "custom"
+    ? enabledCustomProfileAgents(config)
+    : eligibleAutoProfileAgents(config).map((agent) => ({
+      id: agent.id,
+      name: agent.name,
+      role: agent.role,
+      responsibility: agent.responsibility,
+      scopes: [...agent.scopes],
+      required: agent.required,
+      enabled: true
+    }));
+  return { ...normalized, agents };
+}
+
 export function truncateProfileAgentReport(value) {
   const text = String(value || "").trim();
-  if (text.length <= PROFILE_MULTI_AGENT_REPORT_LIMIT) return text;
-  return `${text.slice(0, PROFILE_MULTI_AGENT_REPORT_LIMIT).trim()}\n[报告已截断]`;
+  if (!text) return "";
+  let bounded = text;
+  let omittedByCharCap = 0;
+  if (bounded.length > PROFILE_MULTI_AGENT_REPORT_LIMIT) {
+    omittedByCharCap = bounded.length - PROFILE_MULTI_AGENT_REPORT_LIMIT;
+    bounded = bounded.slice(0, PROFILE_MULTI_AGENT_REPORT_LIMIT);
+  }
+  const totalTokens = estimateProfileAgentReportTokens(bounded);
+  if (totalTokens <= PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET) {
+    return omittedByCharCap > 0
+      ? `${bounded.trimEnd()}\n[报告已截断：超过 ${PROFILE_MULTI_AGENT_REPORT_LIMIT} 字符绝对上限，尾部省略约 ${omittedByCharCap} 字符]`
+      : bounded;
+  }
+  const headBudget = Math.floor(PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET * 0.7);
+  const tailBudget = PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET - headBudget;
+  const head = sliceProfileAgentReportHeadByTokens(bounded, headBudget);
+  const tail = sliceProfileAgentReportTailByTokens(bounded, tailBudget);
+  if (head.length + tail.length >= bounded.length) return bounded;
+  const omittedTokens = totalTokens - headBudget - tailBudget;
+  return [
+    head.trimEnd(),
+    `[报告已截断：中段省略约 ${omittedTokens} token，仅保留头尾；本标注由后端生成，不是报告内容]`,
+    tail.trimStart()
+  ].join("\n");
+}
+
+const PROFILE_AGENT_REPORT_CJK_CHAR = /[\u2e80-\u9fff\u3040-\u30ff\uf900-\ufaff\uff00-\uffef]/;
+
+function estimateProfileAgentReportTokens(text) {
+  let tokens = 0;
+  for (const char of String(text || "")) {
+    tokens += PROFILE_AGENT_REPORT_CJK_CHAR.test(char) ? 1 : 0.25;
+  }
+  return Math.ceil(tokens);
+}
+
+function sliceProfileAgentReportHeadByTokens(text, budget) {
+  const source = String(text || "");
+  if (budget <= 0) return "";
+  let used = 0;
+  let end = 0;
+  for (const char of source) {
+    used += PROFILE_AGENT_REPORT_CJK_CHAR.test(char) ? 1 : 0.25;
+    if (used > budget) break;
+    end += char.length;
+  }
+  return end > 0 ? source.slice(0, end) : source.slice(0, 1);
+}
+
+function sliceProfileAgentReportTailByTokens(text, budget) {
+  if (budget <= 0) return "";
+  const chars = Array.from(String(text || ""));
+  let used = 0;
+  let start = chars.length;
+  for (let index = chars.length - 1; index >= 0; index -= 1) {
+    used += PROFILE_AGENT_REPORT_CJK_CHAR.test(chars[index]) ? 1 : 0.25;
+    if (used > budget) break;
+    start = index;
+  }
+  return start < chars.length ? chars.slice(start).join("") : chars.slice(-1).join("");
 }
 
 export function profileAgentHistoricalReviewRules(prompt) {
@@ -312,12 +421,6 @@ export function profileAgentHistoricalReviewRules(prompt) {
     "intelligence.news.readDailyBriefing 读取的是可选的预生成产物，不是原始市场数据。返回空列表只表示该日期没有生成简报，不得单独列为严重数据缺口，也不得因此 veto。",
     "System Stress 的 coverage 按返回的时间桶理解；ADL unknown 表示没有可确认的警告状态。应披露实际覆盖时间范围，但不得把 unknown 描述为已经发生 ADL。"
   ];
-}
-
-function stringArray(value) {
-  if (!Array.isArray(value)) return null;
-  if (value.some((item) => typeof item !== "string" || !item.trim())) return null;
-  return value.map((item) => item.trim());
 }
 
 function parseProfileAgentJson(text) {
@@ -346,79 +449,30 @@ function parseProfileAgentJson(text) {
   return parsed.length === 1 ? parsed[0] : null;
 }
 
-export function parseProfileAgentResult(result) {
+// D1: report content is never judged by format. A prose report is a valid
+// report; failure comes only from an anomalous finishReason or empty output.
+// A structured JSON object (raw, fenced, or brace-sliced) is optional extra:
+// when it parses it is returned as-is with every field optional, and when it
+// does not the whole text is the report body.
+export function collectProfileAgentReport(result) {
   const finishReason = String(result?.finishReason || "error").trim().toLowerCase();
   const text = String(result?.text || "").trim();
   if (finishReason === "error") {
     const error = !text || /^(error|failed)$/i.test(text)
       ? "模型服务未返回可用结果"
       : text;
-    return { success: false, status: "blocked", error, text };
+    return { present: false, status: "failed", error, text };
+  }
+  if (finishReason !== "completed") {
+    return {
+      present: false,
+      status: "failed",
+      error: `Agent 未正常完成（${finishReason || "error"}）`,
+      text
+    };
   }
   if (!text) {
-    return { success: false, status: "blocked", error: "Agent 未返回可用报告", text: "" };
+    return { present: false, status: "failed", error: "Agent 未返回可用报告", text: "" };
   }
-  const report = parseProfileAgentJson(text);
-  if (!report) {
-    return { success: false, status: "blocked", error: "Agent 报告不是有效 JSON", text };
-  }
-  const status = String(report.status || "").trim().toLowerCase();
-  const stance = String(report.stance || "").trim().toLowerCase();
-  const confidence = Number(report.confidence);
-  const timeHorizon = String(report.timeHorizon || "").trim();
-  const evidence = stringArray(report.evidence);
-  const risks = stringArray(report.risks);
-  const invalidation = stringArray(report.invalidation);
-  const missingData = stringArray(report.missingData);
-  const recommendation = String(report.recommendation || "").trim();
-  const blockedWithoutEvidence = status === "blocked"
-    && evidence?.length === 0
-    && ((risks?.length || 0) > 0 || (missingData?.length || 0) > 0);
-  const valid = ["success", "partial", "blocked"].includes(status)
-    && ["bullish", "bearish", "neutral", "risk"].includes(stance)
-    && Number.isFinite(confidence)
-    && confidence >= 0
-    && confidence <= 100
-    && Boolean(timeHorizon)
-    && evidence !== null
-    && (evidence.length > 0 || blockedWithoutEvidence)
-    && risks !== null
-    && invalidation !== null
-    && missingData !== null
-    && Boolean(recommendation)
-    && (report.veto === undefined || typeof report.veto === "boolean")
-    && (report.vetoReason === undefined || typeof report.vetoReason === "string")
-    && (report.veto !== true || Boolean(String(report.vetoReason || "").trim()));
-  if (!valid) {
-    return { success: false, status: "blocked", error: "Agent 报告字段不完整或类型无效", text };
-  }
-  const normalized = {
-    status,
-    stance,
-    confidence,
-    timeHorizon,
-    evidence,
-    risks,
-    invalidation,
-    missingData,
-    recommendation,
-    veto: report.veto === true,
-    vetoReason: String(report.vetoReason || "").trim()
-  };
-  const success = finishReason === "completed" && status === "success";
-  const blockedReason = status === "blocked"
-    ? risks[0] || missingData[0] || recommendation
-    : "";
-  const error = success
-    ? ""
-    : finishReason !== "completed"
-      ? `Agent 未正常完成（${finishReason || "error"}）`
-      : `Agent 报告状态为 ${status}${blockedReason ? `：${blockedReason}` : ""}`;
-  return {
-    success,
-    status,
-    error,
-    report: normalized,
-    text: JSON.stringify(normalized)
-  };
+  return { present: true, status: "success", error: "", report: parseProfileAgentJson(text), text };
 }

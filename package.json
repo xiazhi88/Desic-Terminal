@@ -19,6 +19,7 @@
     "build": "tsc && vite build",
     "preview": "vite preview --host 127.0.0.1",
     "test:ai-policy": "node scripts/test-cline-tool-policy.mjs",
+    "test:ai-skills-sync": "node scripts/test-ai-skills-sync.mjs",
     "test:ai-multi-agent": "node scripts/test-cline-profile-agents.mjs",
     "test:ai-stream": "node scripts/test-cline-event-stream.mjs",
     "test:ai-codex": "node scripts/test-codex-cli-adapter.mjs",

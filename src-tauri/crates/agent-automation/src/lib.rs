@@ -44,6 +44,60 @@ pub fn normalize_multi_agent_mode(value: Option<&str>) -> &'static str {
     }
 }
 
+pub const MULTI_AGENT_ORCHESTRATOR_BACKEND: &str = "backend";
+pub const MULTI_AGENT_ORCHESTRATOR_LEAD: &str = "lead";
+pub const MULTI_AGENT_EXPERT_SOURCE_AUTO: &str = "auto";
+pub const MULTI_AGENT_EXPERT_SOURCE_CUSTOM: &str = "custom";
+
+/// Orthogonal multi-agent configuration (DES-7 v2 §5.4): `multiAgentMode`
+/// stays the master on/off + legacy-compat switch, while the two new fields
+/// decide who dispatches (`orchestrator`) and where the expert list comes
+/// from (`expertSource`). Legacy profiles map read-old-write-new:
+/// `off` → disabled, `auto` → backend+auto, `custom` → backend+custom.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultiAgentConfig {
+    pub enabled: bool,
+    pub orchestrator: &'static str,
+    pub expert_source: &'static str,
+}
+
+pub fn normalize_multi_agent_orchestrator(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default().trim() {
+        MULTI_AGENT_ORCHESTRATOR_LEAD => MULTI_AGENT_ORCHESTRATOR_LEAD,
+        _ => MULTI_AGENT_ORCHESTRATOR_BACKEND,
+    }
+}
+
+pub fn normalize_multi_agent_expert_source(value: Option<&str>) -> &'static str {
+    match value.unwrap_or_default().trim() {
+        MULTI_AGENT_EXPERT_SOURCE_CUSTOM => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
+        MULTI_AGENT_EXPERT_SOURCE_AUTO => MULTI_AGENT_EXPERT_SOURCE_AUTO,
+        _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
+    }
+}
+
+pub fn normalize_multi_agent_config(
+    mode: Option<&str>,
+    orchestrator: Option<&str>,
+    expert_source: Option<&str>,
+) -> MultiAgentConfig {
+    let normalized_mode = normalize_multi_agent_mode(mode);
+    let explicit_expert_source = expert_source
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| normalize_multi_agent_expert_source(Some(value)));
+    MultiAgentConfig {
+        enabled: normalized_mode != MULTI_AGENT_OFF_MODE,
+        orchestrator: normalize_multi_agent_orchestrator(orchestrator),
+        // Absent expert source derives from the legacy mode so存量 custom
+        // profiles keep their custom expert list after the split.
+        expert_source: explicit_expert_source.unwrap_or(match normalized_mode {
+            MULTI_AGENT_CUSTOM_MODE => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
+            _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
+        }),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AiProfileSubAgent {
@@ -658,6 +712,80 @@ pub fn orderbook_imbalance(bid_sizes: &[f64], ask_sizes: &[f64], depth: usize) -
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn multi_agent_config_maps_legacy_modes_without_behavior_change() {
+        let off = normalize_multi_agent_config(Some(MULTI_AGENT_OFF_MODE), None, None);
+        assert!(!off.enabled);
+        assert_eq!(off.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
+        assert_eq!(off.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
+
+        let auto = normalize_multi_agent_config(Some(MULTI_AGENT_AUTO_MODE), None, None);
+        assert!(auto.enabled);
+        assert_eq!(auto.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
+        assert_eq!(auto.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
+
+        let custom = normalize_multi_agent_config(Some(MULTI_AGENT_CUSTOM_MODE), None, None);
+        assert!(custom.enabled);
+        assert_eq!(custom.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
+        assert_eq!(custom.expert_source, MULTI_AGENT_EXPERT_SOURCE_CUSTOM);
+    }
+
+    #[test]
+    fn multi_agent_config_accepts_orthogonal_fields_and_defaults_to_backend() {
+        let lead_auto = normalize_multi_agent_config(
+            Some(MULTI_AGENT_AUTO_MODE),
+            Some("lead"),
+            Some(MULTI_AGENT_EXPERT_SOURCE_AUTO),
+        );
+        assert!(lead_auto.enabled);
+        assert_eq!(lead_auto.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
+        assert_eq!(lead_auto.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
+
+        let lead_custom = normalize_multi_agent_config(
+            Some(MULTI_AGENT_CUSTOM_MODE),
+            Some(" lead "),
+            None,
+        );
+        assert!(lead_custom.enabled);
+        assert_eq!(lead_custom.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
+        assert_eq!(lead_custom.expert_source, MULTI_AGENT_EXPERT_SOURCE_CUSTOM);
+
+        let unknown_fall_back_to_backend = normalize_multi_agent_config(
+            Some(MULTI_AGENT_AUTO_MODE),
+            Some("board"),
+            Some("builtin"),
+        );
+        assert_eq!(
+            unknown_fall_back_to_backend.orchestrator,
+            MULTI_AGENT_ORCHESTRATOR_BACKEND
+        );
+        assert_eq!(
+            unknown_fall_back_to_backend.expert_source,
+            MULTI_AGENT_EXPERT_SOURCE_AUTO
+        );
+    }
+
+    #[test]
+    fn multi_agent_mode_off_disables_lead_orchestrator() {
+        // off → 关闭（两字段不生效）：legacy off switch stays authoritative.
+        let disabled_lead = normalize_multi_agent_config(
+            Some(MULTI_AGENT_OFF_MODE),
+            Some(MULTI_AGENT_ORCHESTRATOR_LEAD),
+            Some(MULTI_AGENT_EXPERT_SOURCE_CUSTOM),
+        );
+        assert!(!disabled_lead.enabled);
+        assert_eq!(disabled_lead.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
+        assert_eq!(
+            disabled_lead.expert_source,
+            MULTI_AGENT_EXPERT_SOURCE_CUSTOM
+        );
+
+        assert_eq!(
+            normalize_multi_agent_mode(Some(MULTI_AGENT_ORCHESTRATOR_LEAD)),
+            MULTI_AGENT_OFF_MODE
+        );
+    }
 
     fn profile_agent(id: &str, enabled: bool, scopes: &[&str]) -> AiProfileSubAgent {
         AiProfileSubAgent {
