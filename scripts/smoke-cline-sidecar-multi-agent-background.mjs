@@ -13,8 +13,11 @@
 // 3. 至少一个散文式（非 JSON）专家报告被 status=done 接收（D1 宽容解析）；
 // 4. profileOrchestrationCompleted.failed=0、requiredFailure=null，主 Agent 正常收尾。
 //
-// 用法：
-//   NODE_USE_ENV_PROXY=1 node scripts/smoke-cline-sidecar-multi-agent-background.mjs
+// 用法（本机 OKX 走系统代理；NODE_USE_ENV_PROXY 必须在进程启动前设置，运行时设置无效）：
+//   NODE_USE_ENV_PROXY=1 \
+//   HTTP_PROXY=http://127.0.0.1:7890 HTTPS_PROXY=http://127.0.0.1:7890 \
+//   NO_PROXY=localhost,127.0.0.1,api.deepseek.com \
+//   node scripts/smoke-cline-sidecar-multi-agent-background.mjs
 // 环境变量：
 //   DESIC_MULTI_AGENT_SMOKE_MODE   auto | custom | both（默认 both）
 //   DESIC_MULTI_AGENT_SMOKE_TIMEOUT_MS  单模式超时（默认 1200000）
@@ -273,6 +276,8 @@ function runOnce(modeName) {
       }
       if (event.type === "done") {
         doneEvent = event;
+        // done 之后短暂等待尾部事件落盘，再结束本轮（避免等到外层超时）。
+        setTimeout(() => finish({ ok: true, reason: "done", sawDone: true }), 2_000);
       }
       if (event.type === "error") {
         transcript.push({ type: "harnessNotedError", message: event.message });
