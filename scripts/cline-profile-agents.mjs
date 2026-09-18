@@ -4,6 +4,12 @@ export const PROFILE_MULTI_AGENT_MAX = PROFILE_AUTO_MULTI_AGENT_MAX;
 export const PROFILE_MULTI_AGENT_REPORT_LIMIT = 12_000;
 export const PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET = 4_000;
 export const PROFILE_MULTI_AGENT_STALL_TIMEOUT_MS = 180_000;
+// D6（DES-7 v2 §5.6）：lead 模式预算护栏为后端硬约束。consult 与 follow_up
+// 独立计数（follow_up 不占用 consult 的每轮额度）；总时限覆盖全部咨询/追问
+// 活动，与 180s 停滞看门狗正交并存（看门狗管卡死，总时限管总长）。
+export const PROFILE_MULTI_AGENT_MAX_CONSULTS_PER_RUN = 8;
+export const PROFILE_MULTI_AGENT_FOLLOW_UPS_PER_EXPERT = 2;
+export const PROFILE_MULTI_AGENT_TOTAL_TIMEOUT_MS = 600_000;
 
 export function createProfileAgentStallWatchdog(onStall, options = {}) {
   const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0

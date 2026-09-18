@@ -293,6 +293,37 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main", reviewRun: true }, 
 
 expectPolicy({ permissionMode: "advisor", agentRole: "main", enableSpawnAgent: false }, "spawn_agent", disabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main", enableAgentTeams: false }, "team_status", disabled);
+
+// P2b (DES-31): consult_expert / follow_up are lead-only coordinator tools.
+// Visible exactly when the lead dispatch gate is active (enabled + orchestrator
+// "lead" + non-review background run); off / backend / reviewRun / interactive
+// runs keep the P2a lists byte-identical, and delegated roles never dispatch.
+const leadActiveMain = {
+  permissionMode: "copilot",
+  agentRole: "main",
+  backgroundRun: true,
+  multiAgentMode: "auto",
+  multiAgentOrchestrator: "lead"
+};
+expectPolicy(leadActiveMain, "consult_expert", enabled);
+expectPolicy(leadActiveMain, "follow_up", enabled);
+expectPolicy(leadActiveMain, "spawn_agent", enabled);
+expectPolicy({ ...leadActiveMain, multiAgentMode: "off" }, "consult_expert", disabled);
+expectPolicy({ ...leadActiveMain, multiAgentMode: "off", multiAgentOrchestrator: "lead" }, "follow_up", disabled);
+expectPolicy({ ...leadActiveMain, multiAgentOrchestrator: "backend" }, "consult_expert", disabled);
+expectPolicy({ ...leadActiveMain, multiAgentOrchestrator: "backend" }, "follow_up", disabled);
+expectPolicy({ ...leadActiveMain, reviewRun: true }, "consult_expert", disabled);
+expectPolicy({ ...leadActiveMain, reviewRun: true }, "follow_up", disabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", multiAgentMode: "auto", multiAgentOrchestrator: "lead" }, "consult_expert", disabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", multiAgentMode: "auto", multiAgentOrchestrator: "lead" }, "follow_up", disabled);
+for (const agentRole of ["subagent", "team"]) {
+  expectPolicy({ ...leadActiveMain, agentRole }, "consult_expert", disabled);
+  expectPolicy({ ...leadActiveMain, agentRole }, "follow_up", disabled);
+  // Expert allowlists derive from scopes (profileAgentToolAllowlist) and never
+  // contain lead dispatch tools (F4: no expert-side additions, zero relaxation).
+  expectPolicy({ ...leadActiveMain, agentRole, toolAllowlist: ["account.readRisk", "trade.precheck"] }, "consult_expert", disabled);
+  expectPolicy({ ...leadActiveMain, agentRole, toolAllowlist: ["account.readRisk", "trade.precheck"] }, "follow_up", disabled);
+}
 expectPolicy(
   { permissionMode: "limited_auto", agentRole: "main", disableSkillsTool: true },
   "skills",
@@ -394,6 +425,12 @@ expectPolicy(
 {
   const sidecar = readFileSync(new URL("./cline-sidecar.mjs", import.meta.url), "utf8");
   const known = allKnownToolNames();
+  if (!known.includes("consult_expert") || !known.includes("follow_up")) {
+    failures.push("lead dispatch tools must be registered orchestration tools");
+  }
+  if (!sidecar.includes('describeToolPolicy("consult_expert", mainPolicyConfig).allowed')) {
+    failures.push("lead dispatch tools must enter the coordinator tool list behind the same policy gate as spawn_agent");
+  }
   const writeLike = known.filter((name) => /^skill\.(write|update|apply|save|edit|create|delete)/i.test(name));
   if (writeLike.length > 0) {
     failures.push(`skill-content write tools must not exist: ${writeLike.join(", ")}`);

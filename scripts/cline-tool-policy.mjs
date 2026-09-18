@@ -1,3 +1,5 @@
+import { normalizeMultiAgentConfig } from "./cline-profile-agents.mjs";
+
 export const AI_PERMISSION_MODES = new Set(["advisor", "copilot", "limited_auto"]);
 export const AI_AGENT_ROLES = new Set(["main", "subagent", "team"]);
 
@@ -128,6 +130,8 @@ export const OPPORTUNITY_TOOLS = OPPORTUNITY_WRITE_TOOLS;
 
 export const ORCHESTRATION_TOOLS = new Set([
   "spawn_agent",
+  "consult_expert",
+  "follow_up",
   "team_spawn_teammate",
   "team_shutdown_teammate",
   "team_status",
@@ -318,6 +322,23 @@ export function resolveToolPolicy(name, config = {}) {
       return disabledPolicy("disabled:delegated-agent-no-orchestration");
     }
     return disabledPolicy("disabled:unknown-tool");
+  }
+
+  // P2b (DES-31, D6/D8 §5.5/§5.8): lead dispatch tools exist only while the
+  // coordinator can actually dispatch — the exact gate as the lead prompt
+  // injection in buildSystemPrompt (enabled + orchestrator=lead + non-review
+  // background run). Everywhere else they are disabled rather than merely
+  // absent from tool lists, so off/backend/reviewRun lists stay byte-identical
+  // to P2a. Subagent/team denial is already handled by the role gate above via
+  // ORCHESTRATION_TOOLS membership.
+  if (canonicalName === "consult_expert" || canonicalName === "follow_up") {
+    const multiAgentConfig = normalizeMultiAgentConfig(config);
+    const leadDispatchActive = multiAgentConfig.enabled
+      && multiAgentConfig.orchestrator === "lead"
+      && boolConfig(config.backgroundRun, false)
+      && config.reviewRun !== true;
+    if (!leadDispatchActive) return disabledPolicy("disabled:lead-dispatch-off");
+    return enabledPolicy("auto-approved:main-lead-dispatch");
   }
 
   if (OPPORTUNITY_READ_TOOLS.has(canonicalName)) {
