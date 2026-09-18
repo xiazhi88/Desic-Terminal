@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listenOptional, checkAppUpdate, loadAppUpdateStatus } from "../lib/tauri";
 import { installAvailableUpdate, type UpdateProgress } from "../lib/updater";
 import type { AppUpdateState } from "../types";
@@ -28,6 +28,7 @@ export function AppUpdateBadge() {
   const [open, setOpen] = useState(false);
   const [progress, setProgress] = useState<UpdateProgress | null>(null);
   const [error, setError] = useState("");
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const busy = state?.status === "checking" || Boolean(progress);
 
   const checkNow = useCallback(async () => {
@@ -72,6 +73,25 @@ export function AppUpdateBadge() {
     }
   }, [progress, state]);
 
+  // 面板里是可点击操作（检测更新 / 立即更新），因此必须由点击开关控制：
+  // 早前用 onPointerEnter/onPointerLeave 悬停开关，鼠标一离开图标面板就收起，按钮永远点不到。
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutside = (event: PointerEvent) => {
+      const container = containerRef.current;
+      if (container && !container.contains(event.target as Node | null)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("pointerdown", closeOnOutside, true);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOnOutside, true);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [open]);
+
   const percent = progressPercent(progress);
   const statusText = useMemo(() => {
     if (progress) return t(`updatePhase_${progress.phase}`);
@@ -85,9 +105,7 @@ export function AppUpdateBadge() {
   return (
     <div
       className="app-update-badge"
-      onPointerEnter={() => setOpen(true)}
-      onPointerLeave={() => setOpen(false)}
-      onFocusCapture={() => setOpen(true)}
+      ref={containerRef}
       onBlurCapture={(event) => {
         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setOpen(false);
       }}
@@ -96,8 +114,9 @@ export function AppUpdateBadge() {
         type="button"
         className={`rail-logo${state?.available ? " has-update" : ""}`}
         aria-label={state?.available ? t("updateAvailable") : "Desic Terminal"}
+        aria-haspopup="dialog"
         aria-expanded={open}
-        onClick={() => setOpen(true)}
+        onClick={() => setOpen((value) => !value)}
       >
         <img src="/assets/brand/desic-terminal-icon.png" alt="Desic Terminal" />
         {busy ? <Loader2 className="app-update-logo-spinner spin" size={13} /> : null}
