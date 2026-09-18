@@ -7751,37 +7751,22 @@ async fn execute_profile_run(
             )
         }
     };
-    let (analysis_owner, confirmed_by, rerun_workflow) = if profile.multi_agent_mode
-        == desic_agent_automation::MULTI_AGENT_OFF_MODE
-    {
-        if chinese_prompt {
-            (
-                "由主 Agent 独立完成证据分析并决定是否形成交易候选",
-                "本轮主 Agent 分析",
-                "重新运行当前 Profile",
-            )
-        } else {
-            (
-                    "the main Agent independently analyzes the evidence and decides whether to form a trade candidate",
-                    "this run's main-Agent analysis",
-                    "rerunning the current Profile",
-                )
-        }
-    } else {
-        if chinese_prompt {
-            (
-                "由专家 Agent 完成证据分析，主 Agent 比较证据并决定是否形成交易候选",
-                "本轮多 Agent 讨论",
-                "重新运行多 Agent",
-            )
-        } else {
-            (
-                    "expert Agents analyze evidence and the main Agent compares it before deciding whether to form a trade candidate",
-                    "this run's Multi-Agent review",
-                    "rerunning the Multi-Agent workflow",
-                )
-        }
-    };
+    // P2a (DES-27 / DES-22 review P2-1): the decision wording must describe
+    // what actually happens in this run. The pure three-branch function in
+    // desic-agent-automation is shared by production and tests; the lead
+    // branch never claims a multi-agent discussion happened this round.
+    let multi_agent_prompt_config = desic_agent_automation::normalize_multi_agent_config(
+        Some(&profile.multi_agent_mode),
+        profile.multi_agent_orchestrator.as_deref(),
+        profile.multi_agent_expert_source.as_deref(),
+    );
+    let decision_wording =
+        desic_agent_automation::multi_agent_decision_wording(multi_agent_prompt_config, chinese_prompt);
+    let (analysis_owner, confirmed_by, rerun_workflow) = (
+        decision_wording.analysis_owner,
+        decision_wording.confirmed_by,
+        decision_wording.rerun_workflow,
+    );
     let decision_workflow_instruction = if chinese_prompt {
         format!(
             "请先使用工具读取本地情报、行情、账户、挂单和必要历史，{}。涉及开仓方案时，Agent 可以在 Profile 单笔保证金上限内自行选择张数，但必须使用目标杠杆调用 trade.precheck，以 perpetualEvaluation、maxSingleTradeSize 和 normalizedSize 为准；超过上限的方案会被后端阻断。若 leverageInfo 与目标不一致且目标不超过合约/档位上限，copilot 或 limited_auto 主 Agent 应调用 trade.setLeverage 同步，再次调用 trade.precheck 确认通过。trade.setLeverage 是唯一允许主 Agent 直接调用的交易设置工具；下单、撤单、改单和平仓仍必须通过交易机会链路。当前价格未到计划入场价并不妨碍提前挂单：经{}确认的回调做多或反弹做空使用 limit，突破做多或跌破做空使用 trigger；limited_auto 可立即提交为等待成交或触发的 OKX 订单。只有仍依赖未来闭合 K 线、OI、主动流等复合证据时才等待唤醒后{}。只有形成字段完整、准备通过 tradeOpportunity.create 提交的可执行候选时，主 Agent 才使用完整候选参数调用 market.readDecisionContext，独立取得当场行情、账户、杠杆、挂单、预检和本轮起止差异。若结论是 wait 或 abandon 且本轮没有新交易候选，不调用 market.readDecisionContext，直接通过 background.finishRun 结束；不得使用 size=0、缺失 price 或其它占位参数伪造候选。open/close 的 size 必须大于 0，limit/trigger 必须提供 price。revise 后必须用修改后的完整参数重新复核；上下文 60 秒内未用于机会操作就必须重新读取。确认最后一次复核通过后，调用 tradeOpportunity.create 提交系统已经冻结的候选；不要再次抄写候选字段，也不要提交或生成 decisionContextId。limited_auto 模式由后端按 Profile 权限自动批准并执行。",

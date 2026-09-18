@@ -36,7 +36,10 @@ pub fn normalize_permission_mode(value: Option<&str>) -> &'static str {
 }
 
 pub fn normalize_multi_agent_mode(value: Option<&str>) -> &'static str {
-    match value.unwrap_or_default().trim() {
+    // INFO (DES-27): trim + ASCII lowercase to match the JS side's
+    // `normalize*` behavior. Legacy save paths already persist lowercase, so
+    // only garbage-case input (e.g. "AUTO"/"Lead") changes classification.
+    match value.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
         MULTI_AGENT_AUTO_MODE => MULTI_AGENT_AUTO_MODE,
         MULTI_AGENT_CUSTOM_MODE => MULTI_AGENT_CUSTOM_MODE,
         MULTI_AGENT_OFF_MODE => MULTI_AGENT_OFF_MODE,
@@ -62,14 +65,24 @@ pub struct MultiAgentConfig {
 }
 
 pub fn normalize_multi_agent_orchestrator(value: Option<&str>) -> &'static str {
-    match value.unwrap_or_default().trim() {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         MULTI_AGENT_ORCHESTRATOR_LEAD => MULTI_AGENT_ORCHESTRATOR_LEAD,
         _ => MULTI_AGENT_ORCHESTRATOR_BACKEND,
     }
 }
 
 pub fn normalize_multi_agent_expert_source(value: Option<&str>) -> &'static str {
-    match value.unwrap_or_default().trim() {
+    match value
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         MULTI_AGENT_EXPERT_SOURCE_CUSTOM => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
         MULTI_AGENT_EXPERT_SOURCE_AUTO => MULTI_AGENT_EXPERT_SOURCE_AUTO,
         _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
@@ -95,6 +108,78 @@ pub fn normalize_multi_agent_config(
             MULTI_AGENT_CUSTOM_MODE => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
             _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
         }),
+    }
+}
+
+/// P2a (DES-27 / DES-22 review P2-1): the background-Run decision-workflow
+/// wording must state what actually happens in this run instead of claiming a
+/// multi-agent discussion from the static switch. Branches are keyed by the
+/// normalized multi-agent config:
+/// - off: the main agent works alone;
+/// - backend: this run really orchestrates read-only experts before the
+///   coordinator decides, so the multi-agent wording is factual;
+/// - lead: experts are consulted via coordinator tools, so no expert report
+///   exists at prompt time — the wording stays honest and defers to expert
+///   reports actually received during the run (also correct once the P2b
+///   consult tool delivers reports mid-run).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MultiAgentDecisionWording {
+    pub analysis_owner: &'static str,
+    pub confirmed_by: &'static str,
+    pub rerun_workflow: &'static str,
+}
+
+pub fn multi_agent_decision_wording(
+    config: MultiAgentConfig,
+    chinese: bool,
+) -> MultiAgentDecisionWording {
+    if !config.enabled {
+        return if chinese {
+            MultiAgentDecisionWording {
+                analysis_owner: "由主 Agent 独立完成证据分析并决定是否形成交易候选",
+                confirmed_by: "本轮主 Agent 分析",
+                rerun_workflow: "重新运行当前 Profile",
+            }
+        } else {
+            MultiAgentDecisionWording {
+                analysis_owner:
+                    "the main Agent independently analyzes the evidence and decides whether to form a trade candidate",
+                confirmed_by: "this run's main-Agent analysis",
+                rerun_workflow: "rerunning the current Profile",
+            }
+        };
+    }
+    if config.orchestrator == MULTI_AGENT_ORCHESTRATOR_BACKEND {
+        return if chinese {
+            MultiAgentDecisionWording {
+                analysis_owner: "由专家 Agent 完成证据分析，主 Agent 比较证据并决定是否形成交易候选",
+                confirmed_by: "本轮多 Agent 讨论",
+                rerun_workflow: "重新运行多 Agent",
+            }
+        } else {
+            MultiAgentDecisionWording {
+                analysis_owner:
+                    "expert Agents analyze evidence and the main Agent compares it before deciding whether to form a trade candidate",
+                confirmed_by: "this run's Multi-Agent review",
+                rerun_workflow: "rerunning the Multi-Agent workflow",
+            }
+        };
+    }
+    if chinese {
+        MultiAgentDecisionWording {
+            analysis_owner:
+                "由主 Agent 主导证据分析并决定是否形成交易候选，专家意见以本轮实际收到的专家报告为准",
+            confirmed_by: "本轮主 Agent 分析（专家意见以本轮实际收到的专家报告为准）",
+            rerun_workflow: "重新运行当前 Profile",
+        }
+    } else {
+        MultiAgentDecisionWording {
+            analysis_owner:
+                "the main Agent leads the evidence analysis and decides whether to form a trade candidate; expert opinions count only through expert reports actually received this run",
+            confirmed_by:
+                "this run's main-Agent analysis (expert opinions count only through expert reports actually received)",
+            rerun_workflow: "rerunning the current Profile",
+        }
     }
 }
 
@@ -825,6 +910,79 @@ mod tests {
             normalize_multi_agent_mode(Some("custom")),
             MULTI_AGENT_CUSTOM_MODE
         );
+    }
+
+    #[test]
+    fn multi_agent_normalize_matches_js_case_insensitivity() {
+        // INFO (DES-27): JS normalize* 均 trim + toLowerCase；Rust 侧对齐，
+        // 消除垃圾大小写输入（如 AUTO/Lead）两侧判定漂移。
+        assert_eq!(normalize_multi_agent_mode(Some("AUTO")), MULTI_AGENT_AUTO_MODE);
+        assert_eq!(
+            normalize_multi_agent_mode(Some(" Custom ")),
+            MULTI_AGENT_CUSTOM_MODE
+        );
+        assert_eq!(normalize_multi_agent_mode(Some("OFF")), MULTI_AGENT_OFF_MODE);
+        assert_eq!(
+            normalize_multi_agent_orchestrator(Some("LEAD")),
+            MULTI_AGENT_ORCHESTRATOR_LEAD
+        );
+        assert_eq!(
+            normalize_multi_agent_orchestrator(Some(" Lead ")),
+            MULTI_AGENT_ORCHESTRATOR_LEAD
+        );
+        assert_eq!(
+            normalize_multi_agent_expert_source(Some("CUSTOM")),
+            MULTI_AGENT_EXPERT_SOURCE_CUSTOM
+        );
+        assert_eq!(
+            normalize_multi_agent_expert_source(Some(" Auto ")),
+            MULTI_AGENT_EXPERT_SOURCE_AUTO
+        );
+        let lead = normalize_multi_agent_config(Some("AUTO"), Some("LEAD"), None);
+        assert!(lead.enabled);
+        assert_eq!(lead.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
+    }
+
+    #[test]
+    fn decision_wording_states_backend_dispatch_as_factual() {
+        let backend = normalize_multi_agent_config(Some(MULTI_AGENT_AUTO_MODE), None, None);
+        let zh = multi_agent_decision_wording(backend, true);
+        assert_eq!(zh.confirmed_by, "本轮多 Agent 讨论");
+        assert_eq!(zh.rerun_workflow, "重新运行多 Agent");
+
+        let en = multi_agent_decision_wording(backend, false);
+        assert_eq!(en.confirmed_by, "this run's Multi-Agent review");
+    }
+
+    #[test]
+    fn decision_wording_off_and_lead_stay_honest() {
+        // off：主 Agent 独立分析。
+        let off = normalize_multi_agent_config(Some(MULTI_AGENT_OFF_MODE), None, None);
+        let zh_off = multi_agent_decision_wording(off, true);
+        assert_eq!(zh_off.confirmed_by, "本轮主 Agent 分析");
+        assert_eq!(zh_off.rerun_workflow, "重新运行当前 Profile");
+
+        // lead：本轮没有预编排专家报告，不得宣称「多 Agent 讨论」；
+        // 专家意见以实际收到的专家报告为准（同时覆盖 P2b consult 语义）。
+        let lead = normalize_multi_agent_config(
+            Some(MULTI_AGENT_AUTO_MODE),
+            Some(MULTI_AGENT_ORCHESTRATOR_LEAD),
+            None,
+        );
+        let zh_lead = multi_agent_decision_wording(lead, true);
+        assert_eq!(
+            zh_lead.confirmed_by,
+            "本轮主 Agent 分析（专家意见以本轮实际收到的专家报告为准）"
+        );
+        assert_eq!(zh_lead.rerun_workflow, "重新运行当前 Profile");
+        assert!(zh_lead.analysis_owner.contains("实际收到的专家报告"));
+
+        let en_lead = multi_agent_decision_wording(lead, false);
+        assert_eq!(
+            en_lead.confirmed_by,
+            "this run's main-Agent analysis (expert opinions count only through expert reports actually received)"
+        );
+        assert_eq!(en_lead.rerun_workflow, "rerunning the current Profile");
     }
 
     #[test]
