@@ -31,7 +31,12 @@ const PRESENTATIONS: Record<string, Omit<AiToolPresentation, "canonicalName">> =
   "trade.precheck": { label: "Trade precheck", summary: "Validate a proposed trade against current constraints.", domain: "trade", icon: "trade" },
   "trade.submit": { label: "Submit order", summary: "Submit an authorized order request.", domain: "trade", icon: "trade" },
   "radar.readRanking": { label: "Read market ranking", summary: "Read persisted cross-market research evidence.", domain: "research", icon: "research" },
-  "research.webSearch": { label: "Web research", summary: "Read attributable external market intelligence.", domain: "intelligence", icon: "intelligence" }
+  "research.webSearch": { label: "Web research", summary: "Read attributable external market intelligence.", domain: "intelligence", icon: "intelligence" },
+  // Agent 库工具（契约 v3 C6）：主 Agent 读取目录/正文，创建与更新仅在交互式会话可用。
+  "agent.list": { label: "List Agents", summary: "Read the Agent library with roles, sources, and dependency warnings.", domain: "agent", icon: "agent" },
+  "agent.read": { label: "Read Agent", summary: "Read one AGENTS.md with its parsed metadata and body.", domain: "agent", icon: "agent" },
+  "agent.create": { label: "Create Agent", summary: "Create a custom Agent in the library (Main Agent, interactive sessions only).", domain: "agent", icon: "agent" },
+  "agent.update": { label: "Update Agent", summary: "Rewrite one custom Agent's AGENTS.md; built-in Agents are rejected.", domain: "agent", icon: "agent" }
 };
 
 function humanizeToolName(name: string) {

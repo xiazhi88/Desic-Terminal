@@ -16517,6 +16517,317 @@ button {
   color: #9380bd;
 }
 
+/* ===== C25⑤ 是否进入深度分析 ===== */
+.automation-run-deep-analysis {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  padding: 3px 10px;
+  color: var(--muted);
+  font-size: 10.5px;
+}
+
+.automation-run-deep-analysis > span { color: var(--weak); }
+.automation-run-deep-analysis strong { color: var(--text); font-weight: 600; }
+.automation-run-deep-analysis.is-deep { border-color: rgba(91, 199, 207, 0.42); }
+.automation-run-deep-analysis.is-deep strong { color: var(--data-fresh); }
+.automation-run-deep-analysis.is-skipped { border-color: rgba(149, 92, 255, 0.4); }
+.automation-run-deep-analysis.is-off strong,
+.automation-run-deep-analysis.is-na strong { color: var(--weak); }
+.automation-run-deep-analysis__forced { color: var(--warn); font-style: normal; }
+/* tsk_21c3c561：极简模式进入深度时的行内注记（比状态文案弱一级，不抢主信息）。 */
+.automation-run-deep-analysis__note { color: var(--weak); font-style: normal; }
+
+/* ===== C24 单 Agent 极简模式 ===== */
+.automation-preview-minimal { min-height: 0; height: 100%; overflow: auto; display: grid; align-content: start; gap: 14px; }
+
+.agent-picker__single-mode {
+  min-width: 0;
+  display: grid;
+  gap: var(--agent-space-2xs);
+  border: 1px solid var(--agent-line-soft);
+  border-radius: var(--agent-radius-control);
+  padding: 8px 10px;
+}
+
+.agent-picker__single-mode-head { min-width: 0; display: grid; gap: 2px; }
+.agent-picker__single-mode-head strong { color: var(--agent-text); font-size: var(--agent-text-body); font-weight: 600; }
+.agent-picker__single-mode-head span { color: var(--agent-weak); font-size: var(--agent-text-label); line-height: 1.5; }
+
+.automation-run-single-agent-badge {
+  position: absolute;
+  top: 10px;
+  right: 12px;
+  border: 1px solid rgba(91, 199, 207, 0.42);
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: var(--data-fresh);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.automation-run-outcome { position: relative; }
+
+/* ===== C23.2 逐专家详情（lane 可点 → 弹层） ===== */
+.automation-agent-trace-open {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(149, 92, 255, 0.34);
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: #d9cbff;
+  background: transparent;
+  cursor: pointer;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.automation-agent-trace-open:hover { border-color: rgba(149, 92, 255, 0.6); background: rgba(149, 92, 255, 0.1); }
+
+.automation-agent-detail {
+  width: min(760px, calc(100vw - 64px));
+  height: min(660px, calc(100vh - 64px));
+  grid-template-rows: 58px minmax(0, 1fr);
+}
+
+.automation-agent-detail__head span { display: inline-flex; align-items: center; gap: 6px; margin-top: 2px; }
+.automation-agent-detail__role { color: var(--weak); font-size: 10px; font-style: normal; }
+
+.automation-agent-detail__body {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: 12px;
+  padding: 12px 14px;
+  scrollbar-gutter: stable;
+}
+
+.automation-agent-detail__usage { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 0 14px; margin: 0; }
+.automation-agent-detail__usage > div { min-width: 0; display: grid; grid-template-columns: 96px minmax(0, 1fr); gap: 8px; align-items: baseline; border-bottom: 1px solid var(--line-soft); padding: 4px 0; }
+.automation-agent-detail__usage dt { color: var(--weak); font-size: 10px; }
+.automation-agent-detail__usage dd { min-width: 0; margin: 0; color: var(--muted); font-size: 10.5px; overflow-wrap: anywhere; }
+
+.automation-agent-detail__block { min-width: 0; display: grid; gap: 5px; }
+.automation-agent-detail__block > strong { color: var(--weak); font-size: 10px; font-weight: 700; letter-spacing: 0.04em; }
+
+.automation-agent-detail__task {
+  max-height: 32vh;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--muted);
+  background: var(--chart);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+
+.automation-agent-detail__report {
+  min-height: 80px;
+  max-height: 46vh;
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 8px 10px;
+  background: var(--panel-2);
+  scrollbar-gutter: stable;
+}
+
+.automation-agent-detail__missing { margin: 0; color: var(--weak); font-size: 10.5px; }
+.automation-agent-detail__task.is-missing { color: var(--weak); }
+
+/* ===== C21.3 排版提醒 + C20.6 未派专家 ===== */
+.automation-run-format-warning {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin: 0 0 6px;
+  border: 1px solid rgba(245, 165, 36, 0.3);
+  border-radius: 8px;
+  padding: 6px 9px;
+  color: var(--warn);
+  background: rgba(245, 165, 36, 0.07);
+  font-size: 10.5px;
+  line-height: 1.5;
+}
+
+.automation-run-format-warning em { color: var(--weak); font-style: normal; }
+
+.automation-run-wake-rejected {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 4px;
+  border: 1px dashed rgba(245, 165, 36, 0.35);
+  border-radius: 6px;
+  padding: 5px 8px;
+  color: var(--warn);
+  font-size: 10px;
+}
+
+.automation-run-outcome-active-wakes { display: block; margin-top: 4px; color: var(--weak); font-size: 10.5px; }
+
+.automation-run-contributions__reason { margin: 0; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.automation-run-contributions__unjustified { display: flex; align-items: center; gap: 5px; margin: 0; color: var(--warn); font-size: 10.5px; }
+
+/* ===== C20 内置专家重构：停用折叠组 / 输出契约徽标 / 证据贡献 ===== */
+.agent-picker__roles-note { color: var(--weak); font-size: var(--agent-text-micro); font-style: normal; }
+
+
+.automation-run-contributions {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+.automation-run-contributions > header { min-width: 0; display: grid; gap: 2px; }
+.automation-run-contributions > header strong { display: inline-flex; align-items: center; gap: 6px; color: var(--text); font-size: 11.5px; }
+.automation-run-contributions > header strong svg { color: #9380bd; }
+.automation-run-contributions > header span { color: var(--weak); font-size: 10px; }
+.automation-run-contributions__block { min-width: 0; display: grid; gap: 4px; }
+.automation-run-contributions__block > em { color: var(--weak); font-size: 10px; font-style: normal; }
+.automation-run-contributions__empty { margin: 0; color: var(--weak); font-size: 10.5px; }
+.automation-run-contributions ul { min-width: 0; margin: 0; padding-left: 0; list-style: none; display: grid; gap: 4px; }
+.automation-run-contributions li ul { padding-left: 16px; list-style: disc; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.automation-run-contributions [data-run-used-evidence-item] > strong { color: var(--text); font-size: 10.5px; }
+.automation-run-contributions [data-run-contrarian-resolution] {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 4px 8px;
+  align-items: baseline;
+  border-bottom: 1px solid var(--line-soft);
+  padding: 3px 0;
+}
+
+.automation-run-contributions__outcome {
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 9.5px;
+  white-space: nowrap;
+}
+
+.automation-run-contributions [data-contrarian-outcome="accepted"] .automation-run-contributions__outcome { border-color: rgba(91, 199, 207, 0.4); color: var(--data-fresh); }
+.automation-run-contributions [data-contrarian-outcome="rebutted"] .automation-run-contributions__outcome { border-color: rgba(149, 92, 255, 0.45); color: #d9cbff; }
+.automation-run-contributions [data-contrarian-outcome="unresolved"] .automation-run-contributions__outcome { border-color: rgba(245, 165, 36, 0.5); color: var(--warn); }
+.automation-run-contributions__claim { min-width: 0; color: var(--muted); font-size: 10.5px; overflow-wrap: anywhere; }
+.automation-run-contributions__basis { grid-column: 2; color: var(--weak); font-size: 10px; }
+
+/* ===== C19 试判（triage）：Profile 设置 + 运行徽标/详情 ===== */
+.automation-triage-section { gap: 9px; }
+.automation-triage-section > strong { display: inline-flex; align-items: center; gap: 6px; color: #d8d8dc; font-size: 11px; }
+.automation-triage-section > strong svg { color: #9380bd; }
+
+.automation-triage-field { min-width: 0; display: grid; gap: 4px; }
+.automation-triage-field > span { color: var(--weak); font-size: 10px; }
+.automation-triage-field > div { min-width: 0; display: flex; align-items: center; gap: 6px; }
+.automation-triage-field input { min-width: 0; width: 100%; height: 28px; border: 1px solid #2b2a33; border-radius: 6px; padding: 0 8px; color: var(--text); background: #090c11; font-size: 11px; outline: none; }
+.automation-triage-field input:focus { border-color: rgba(149, 92, 255, 0.62); box-shadow: 0 0 0 3px rgba(149, 92, 255, 0.12); }
+.automation-triage-field em { flex: 0 0 auto; color: var(--weak); font-size: 10px; font-style: normal; }
+.automation-triage-field small { color: var(--weak); font-size: 9.5px; line-height: 1.5; }
+.automation-triage-field small.is-warning { color: var(--warn); }
+.automation-triage-field.is-invalid input { border-color: rgba(245, 165, 36, 0.5); }
+
+.automation-triage-grid { min-width: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 10px; }
+
+.automation-triage-risk {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  border: 1px solid rgba(245, 165, 36, 0.3);
+  border-radius: 8px;
+  padding: 8px 10px;
+  color: var(--warn);
+  background: rgba(245, 165, 36, 0.07);
+}
+
+.automation-triage-risk strong { display: block; font-size: 11px; }
+.automation-triage-risk span { color: var(--muted); font-size: 10px; line-height: 1.55; }
+
+.automation-triage-escalate {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 14px;
+  border-top: 1px solid var(--line-soft);
+  padding-top: 8px;
+}
+
+.automation-triage-escalate__title { color: var(--weak); font-size: 10px; }
+.automation-triage-escalate .automation-check { color: var(--muted); font-size: 10px; }
+
+.automation-triage-badges { display: inline-flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+
+.automation-triage-badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  padding: 1px 8px;
+  color: var(--muted);
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.automation-triage-badge.is-skip { border-color: rgba(91, 199, 207, 0.4); color: var(--data-fresh); }
+.automation-triage-badge.is-escalate { border-color: rgba(149, 92, 255, 0.45); color: #d9cbff; }
+.automation-triage-badge.is-forced { border-color: rgba(245, 165, 36, 0.5); color: var(--warn); }
+.automation-triage-forced { color: var(--warn); font-size: 10px; font-style: normal; }
+.automation-triage-sampled { border: 1px dashed rgba(149, 92, 255, 0.45); border-radius: 999px; padding: 1px 7px; color: #d9cbff; font-size: 9px; font-style: normal; }
+.automation-triage-tokens { color: var(--weak); font-size: 10px; font-style: normal; }
+
+/* skipped 运行：中性/静默视觉，明确不是失败 */
+.automation-run-state-dot.skipped,
+.automation-run-outcome.skipped { color: var(--data-fresh); }
+.automation-run-state-dot.skipped { background: var(--data-fresh); }
+.automation-run-outcome.skipped { border-color: rgba(91, 199, 207, 0.32); background: rgba(91, 199, 207, 0.05); }
+.automation-status.skipped { border-color: rgba(91, 199, 207, 0.32); color: var(--data-fresh); }
+
+.automation-run-triage {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--panel-2);
+}
+
+.automation-run-triage > header { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.automation-run-triage-skip-note { color: var(--data-fresh); font-size: 10.5px; }
+.automation-run-triage-block { min-width: 0; display: grid; gap: 4px; }
+.automation-run-triage-block > strong { color: var(--weak); font-size: 10px; }
+.automation-run-triage-block ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 10.5px; line-height: 1.6; }
+.automation-run-triage-evidence { min-width: 0; display: grid; gap: 4px; }
+.automation-run-triage-evidence > div { min-width: 0; display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 8px; align-items: baseline; border-bottom: 1px solid var(--line-soft); padding: 3px 0; }
+.automation-run-triage-fact { min-width: 0; color: var(--muted); font-size: 10.5px; overflow-wrap: anywhere; }
+.automation-run-triage-evidence code { color: #b9a3ff; font-size: 10px; }
+.automation-run-triage-evidence time { color: var(--weak); font-size: 10px; font-variant-numeric: tabular-nums; }
+.automation-run-triage-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.automation-run-triage-actions button { display: inline-flex; align-items: center; gap: 6px; min-height: 28px; border: 1px solid #34303d; border-radius: 6px; padding: 0 10px; color: var(--text); background: transparent; cursor: pointer; font-size: 11px; }
+.automation-run-triage-actions button:disabled { opacity: 0.5; cursor: not-allowed; }
+.automation-run-triage-hint { color: var(--data-fresh); font-size: 10.5px; }
+.automation-run-triage-hint.is-warning { color: var(--warn); }
+
+.automation-preview-triage { min-height: 0; height: 100%; overflow: auto; }
+
 .automation-collaboration-section {
   gap: 11px;
 }
@@ -18809,6 +19120,46 @@ button {
   margin-top: 3px;
   color: #70707a;
   font-size: 8px;
+}
+
+/* C18.3：lane 上的执行方式（并行/串行）与真实时间窗 */
+.automation-agent-trace-mode {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.automation-agent-trace-mode.is-parallel {
+  border-color: rgba(91, 199, 207, 0.42);
+  color: var(--data-fresh);
+}
+
+.automation-agent-trace-mode.is-serial {
+  border-color: rgba(255, 255, 255, 0.16);
+  color: var(--weak);
+}
+
+.automation-agent-trace-metas {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 7px;
+}
+
+.automation-agent-trace-window {
+  flex: 0 0 auto;
+  color: var(--weak);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .automation-agent-trace-meta {
@@ -27297,4 +27648,80 @@ button {
   border-color: rgba(255, 77, 79, 0.45);
   background: rgba(255, 77, 79, 0.12);
   color: #ffb3b5;
+}
+
+/* ===== C27 运行详情分层（默认精简 + 分区折叠）=====
+   只新增规则，不改动既有规则：默认区保留「本轮结果 / 本轮决策 / 关键数字一行」，
+   试判理由与证据、风险质疑与引用证据、技能与运行元信息各自收进原生 <details>（默认收起）。 */
+.automation-run-key-metrics {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin: 10px 18px 0;
+  padding: 8px 10px;
+  border: 1px solid #202025;
+  border-radius: 6px;
+  background: #0c0c0f;
+}
+
+/* 关键数字一行里，深度分析胶囊不再需要"贴在结果块底部"的上边距。 */
+.automation-run-key-metrics .automation-run-deep-analysis {
+  margin-top: 0;
+}
+
+/* 关键数字一行里的试判徽标组不需要右对齐的外边距。 */
+.automation-run-key-metrics .automation-triage-badges {
+  min-width: 0;
+}
+
+/* 折叠区标题行：标题 + 摘要（摘要走弱一级颜色，收起时也能看出大概）。 */
+.automation-run-collapsible > summary {
+  display: list-item;
+  list-style-position: outside;
+}
+
+.automation-run-fold-title {
+  color: #a1a1aa;
+  font-weight: 600;
+}
+
+.automation-run-fold-meta {
+  color: #64646e;
+}
+
+/* C27 折叠③修订：Token 明细（模型 / 输入 / 输出 / 缓存命中率）从折叠正文挪到摘要行，
+   与「技能与运行元信息 · N 个技能」并排同一行。摘要本体仍是 list-item（保留三角标记），
+   因此这里让明细以 inline-flex 参与同一行内联流；超宽时整体换行、必要时在盒内换行，
+   数字（b/em）不裁剪、不省略号。 */
+.automation-run-collapsible > summary .automation-run-token-breakdown {
+  display: inline-flex;
+  max-width: 100%;
+  margin-left: 8px;
+  justify-content: flex-start;
+  vertical-align: baseline;
+}
+
+/* 折叠区为空时的占位行（与既有 empty 文案同级）。 */
+.automation-run-fold-empty {
+  margin: 4px 0 0;
+  color: var(--weak);
+  font-size: 10.5px;
+}
+
+/* 折叠后的运行元信息条：外层折叠区已自带 18px 内缩，这里不再二次内缩。 */
+.automation-run-collapsible .automation-run-context-bar {
+  margin: 8px 0 0;
+}
+
+/* 折叠后的证据贡献块：保留原有的面板视觉，但作为折叠区内容时去掉重复的外边距。 */
+.automation-run-collapsible .automation-run-contributions {
+  margin-top: 8px;
+}
+
+@media (max-width: 680px) {
+  .automation-run-key-metrics {
+    margin-inline: 10px;
+  }
 }

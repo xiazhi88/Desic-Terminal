@@ -20,7 +20,19 @@ pub(crate) fn persist_ai_stream_checkpoint_with_conn(
         reasoning,
         Some(process_json),
         Some(status),
-    )
+    )?;
+    // 后台 Run 的心跳：检查点每 250ms 就可能落一次，这里顺手推进 `ai_agent_runs.updated_at`。
+    // 僵尸运行清理（ai_automation::fail_stale_running_runs）依赖它区分"还在跑"与"进程已死"，
+    // 否则只能靠 started_at 猜，会误杀长时间但健康的运行。
+    if let Some(run_id) = session_id.strip_prefix("background:") {
+        if !run_id.is_empty() {
+            let _ = conn.execute(
+                "UPDATE ai_agent_runs SET updated_at=?2 WHERE id=?1 AND status='running'",
+                rusqlite::params![run_id, super::now_ms()],
+            );
+        }
+    }
+    Ok(())
 }
 
 pub(crate) async fn persist_ai_stream_checkpoint(

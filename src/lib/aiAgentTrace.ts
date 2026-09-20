@@ -1,4 +1,5 @@
 import { filterInternalAiToolEvents } from "./aiToolEvents";
+import { collectExpertGrants, collectExpertModes, isGrantedAllScopes, type AiExpertMode } from "./aiExpertGrant";
 
 export type AiAgentTraceStatus = "running" | "done" | "failed" | "cancelled";
 
@@ -55,6 +56,17 @@ export type AiAgentTraceItem = {
   startedAt?: number;
   endedAt?: number;
   tools: AiAgentTraceTool[];
+  /** C23.2：主 Agent 给它的提问全文（`agentStart.taskPrompt`，侧车拼装后的最终任务）。 */
+  taskPrompt?: string;
+  /** C15.3：本次点名时授予的只读工具域（来自 `consult_expert`/`follow_up` 的工具结果）。 */
+  grantedScopes?: string[];
+  grantedAllScopes?: boolean;
+  /**
+   * C18.3：执行方式。来自 `consult_experts` 的 `results[].mode`；
+   * 缺省（单点 `consult_expert`/`follow_up`）按 **serial** 呈现 —— v2 的"并行取证"文案
+   * 就是因为在没有依据时默认并行，才和真实串行执行不符。
+   */
+  mode: AiExpertMode;
 };
 
 export type AiAgentCollaborationTrace = {
@@ -189,7 +201,8 @@ function ensureAgent(
     task: stringValue(event?.task),
     status: "running",
     startedAt: numberValue(event?.startedAt),
-    tools: []
+    tools: [],
+    mode: "serial"
   };
   agents.set(id, agent);
   order.push(id);
@@ -222,6 +235,9 @@ export function buildAiAgentTrace(events: unknown[]): AiAgentCollaborationTrace 
   const runtimeAgentIds = new Map<string, string>();
   const order: string[] = [];
   const teamEvents: unknown[] = [];
+  // C15.3/C18.3：主 Agent 的点名结果里带 grantedScopes 与 mode，关联到对应专家的 lane。
+  const expertGrants = collectExpertGrants(events);
+  const expertModes = collectExpertModes(events);
 
   filterInternalAiToolEvents(events).forEach((event, index) => {
     const type = stringValue(event.type);
@@ -242,6 +258,7 @@ export function buildAiAgentTrace(events: unknown[]): AiAgentCollaborationTrace 
       agent.role = stringValue(event.role) || agent.role;
       agent.title = stringValue(event.title) || agent.title;
       agent.task = stringValue(event.task) || agent.task;
+      agent.taskPrompt = stringValue(event.taskPrompt) || agent.taskPrompt;
       agent.startedAt = numberValue(event.startedAt) ?? agent.startedAt;
       agent.status = "running";
       agent.error = null;
@@ -303,10 +320,18 @@ export function buildAiAgentTrace(events: unknown[]): AiAgentCollaborationTrace 
     tool.executionEndedAt = numberValue(event.executionEndedAt);
   });
 
-  return {
-    agents: order.map((id) => agents.get(id)).filter((item): item is AiAgentTraceItem => Boolean(item)),
-    teamEvents
-  };
+  const traceAgents = order.map((id) => agents.get(id)).filter((item): item is AiAgentTraceItem => Boolean(item));
+  for (const agent of traceAgents) {
+    const lookup = (map: Map<string, unknown>) => map.get(agent.id) ?? map.get(agent.title) ?? map.get(agent.role || "");
+    const grant = expertGrants.get(agent.id) || expertGrants.get(agent.title) || expertGrants.get(agent.role || "");
+    if (grant) {
+      agent.grantedScopes = grant.grantedScopes;
+      agent.grantedAllScopes = grant.allScopes || isGrantedAllScopes(grant.grantedScopes);
+    }
+    agent.mode = lookup(expertModes) as AiExpertMode | undefined ?? "serial";
+  }
+
+  return { agents: traceAgents, teamEvents };
 }
 
 const AGENT_REPORT_VALIDATION_ERROR = /Agent (?:报告不是有效 JSON|报告字段不完整或类型无效|未返回可用报告)/;

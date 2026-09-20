@@ -5,7 +5,8 @@ import {
   useMemo,
   useRef,
   useState,
-  type ReactNode
+  type ReactNode,
+  type SyntheticEvent
 } from "react";
 import { createPortal } from "react-dom";
 import { useGSAP } from "@gsap/react";
@@ -29,6 +30,7 @@ import {
   FileDiff,
   Gauge,
   History,
+  Layers,
   Lightbulb,
   Loader2,
   MoreHorizontal,
@@ -54,9 +56,10 @@ import { useBump } from "./useBump";
 import type {
   AccountSummary,
   AiAgentProfile,
-  AiAgentScheme,
-  AiAgentTemplatePhase,
+  AiAgentSummary,
   AiAutomationCounts,
+  AiRunTriage,
+  AiSingleAgentMode,
   AiAutomationEvent,
   AiAutomationOverview,
   AiAutomationReviewDetail,
@@ -64,12 +67,14 @@ import type {
   AiAutomationReview,
   AiAutomationRun,
   AiAutomationRunStatus,
-  AiAutomationSummary,
   AiAutomationSection,
+  AiAutomationSectionTab,
+  AiAutomationSummary,
   AiAutomationTab,
   AiConfigSummary,
   AiDailyMarketReview,
   AiLegacyPermissionMode,
+  AiModelConfigSummary,
   AiNotificationDelivery,
   AiOptimizationSuggestion,
   AiPermissionMode,
@@ -83,19 +88,15 @@ import type {
   Ticker
 } from "../types";
 import { buildHistoricalFillMarkers } from "../lib/chartTradeSemantics";
+import { expertGrantLabel } from "../lib/aiExpertGrant";
 import { AiMarkdown } from "./AiMarkdown";
 import { AgentCollaborationTrace } from "./AgentCollaborationTrace";
+import { AgentLibraryView } from "./agent-library/AgentLibraryView";
+import { ProfileAgentSelector } from "./agent-library/ProfileAgentSelector";
+import { TriageSettings, createDefaultTriage, normalizeTriage } from "./TriageSettings";
+import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
-import {
-  AGENT_TEMPLATE_INSTRUCTION_LIMIT,
-  AUTO_AGENT_LIMIT,
-  CUSTOM_AGENT_LIMIT,
-  createBuiltinAgentSchemes,
-  createPerpetualDecisionTeam,
-  ProfileCollaborationEditor,
-  type AiAgentSchemeDraft
-} from "./ProfileCollaborationEditor";
 import { loadAiConfigSummary } from "../lib/ai";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { resolveAiAutomationRunError } from "../lib/aiAgentTrace";
@@ -139,7 +140,6 @@ type AiAutomationPanelProps = {
 
 const EMPTY_AUTOMATION_SUMMARY: AiAutomationSummary = {
   masterEnabled: false,
-  agentSchemes: [],
   profiles: [],
   runs: [],
   wakeConditions: [],
@@ -161,10 +161,11 @@ const EMPTY_AUTOMATION_COUNTS: AiAutomationCounts = {
 
 let automationOverviewCache: AiAutomationOverview | null = null;
 let automationConfigCache: AiConfigSummary | null = null;
-const automationSectionCache = new Map<Exclude<AiAutomationTab, "profiles">, AiAutomationSection>();
+const automationSectionCache = new Map<AiAutomationSectionTab, AiAutomationSection>();
 
 const AUTOMATION_TABS: Array<{ id: AiAutomationTab; icon: typeof Bot }> = [
   { id: "profiles", icon: Bot },
+  { id: "agents", icon: Layers },
   { id: "runs", icon: Activity },
   { id: "wake_conditions", icon: Radio },
   { id: "reviews", icon: ClipboardCheck },
@@ -489,15 +490,8 @@ function permissionModeHintI18nKey(mode: AiPermissionMode) {
 }
 
 function normalizeSummary(value: AiAutomationSummary): AiAutomationSummary {
-  const agentSchemes = (Array.isArray(value?.agentSchemes) ? value.agentSchemes : [])
-    .map(normalizeAgentScheme)
-    .filter((scheme): scheme is AiAgentScheme => Boolean(scheme));
-  for (const builtin of createBuiltinAgentSchemes()) {
-    if (!agentSchemes.some((scheme) => scheme.id === builtin.id)) agentSchemes.unshift(builtin);
-  }
   return {
     masterEnabled: Boolean(value?.masterEnabled),
-    agentSchemes,
     profiles: Array.isArray(value?.profiles) ? value.profiles.map(normalizeProfile) : [],
     runs: Array.isArray(value?.runs) ? value.runs : [],
     wakeConditions: Array.isArray(value?.wakeConditions) ? value.wakeConditions : [],
@@ -509,53 +503,6 @@ function normalizeSummary(value: AiAutomationSummary): AiAutomationSummary {
     // Rebuilt field by field, so anything omitted here is silently dropped: the
     // Profile cards showed "--" because this list never survived normalization.
     profilePerformance: Array.isArray(value?.profilePerformance) ? value.profilePerformance : []
-  };
-}
-
-function normalizeSubAgents(value: unknown, limit = CUSTOM_AGENT_LIMIT) {
-  return (Array.isArray(value) ? value : [])
-    .slice(0, limit)
-    .map((item, index) => {
-      const agent = asRecord(item);
-      return {
-        id: valueString(agent.id, `agent-${index + 1}`),
-        name: valueString(agent.name),
-        role: valueString(agent.role),
-        responsibility: valueString(agent.responsibility),
-        scopes: Array.isArray(agent.scopes) ? Array.from(new Set(agent.scopes.map(String).filter(Boolean))) : [],
-        required: Boolean(agent.required),
-        enabled: Boolean(agent.enabled)
-      };
-    });
-}
-
-function normalizeAgentScheme(value: unknown): AiAgentScheme | null {
-  const scheme = asRecord(value);
-  const id = valueString(scheme.id);
-  const name = valueString(scheme.name);
-  if (!id || !name) return null;
-  return {
-    id,
-    name,
-    description: valueString(scheme.description),
-    builtin: Boolean(scheme.builtin),
-    agents: normalizeSubAgents(scheme.agents),
-    instructions: valueString(scheme.instructions).slice(0, AGENT_TEMPLATE_INSTRUCTION_LIMIT),
-    skillIds: (Array.isArray(scheme.skillIds) ? scheme.skillIds : [])
-      .map((skillId) => valueString(skillId))
-      .filter(Boolean),
-    // Template-level phase is retained only for legacy persistence compatibility.
-    phase: (["primary", "review", "final"] as const).includes(valueString(scheme.phase) as AiAgentTemplatePhase)
-      ? (valueString(scheme.phase) as AiAgentTemplatePhase)
-      : "primary",
-    model: valueString(scheme.model) || null,
-    reasoningDepth: (["none", "minimal", "low", "medium", "high", "xhigh"] as const).includes(
-      valueString(scheme.reasoningDepth) as AiReasoningDepth
-    )
-      ? (valueString(scheme.reasoningDepth) as AiReasoningDepth)
-      : "medium",
-    createdAt: Number(scheme.createdAt) || 0,
-    updatedAt: Number(scheme.updatedAt) || 0
   };
 }
 
@@ -578,11 +525,6 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
   const allowedWakeConditionTypes = Array.isArray(profile.allowedWakeConditionTypes)
     ? profile.allowedWakeConditionTypes.filter(isWakeConditionType)
     : [];
-  const multiAgentMode = profile.multiAgentMode === "auto" || profile.multiAgentMode === "custom"
-    ? profile.multiAgentMode
-    : "off";
-  const multiAgents = normalizeSubAgents(profile.multiAgents);
-  const modeAgentLimit = multiAgentMode === "auto" ? AUTO_AGENT_LIMIT : CUSTOM_AGENT_LIMIT;
   return {
     ...profile,
     mode: normalizePermissionMode(profile.mode),
@@ -598,12 +540,21 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     allowedWakeConditionTypes: allowedWakeConditionTypes.length > 0
       ? allowedWakeConditionTypes
       : [...DEFAULT_WAKE_CONDITION_TYPES],
-    multiAgentMode,
-    multiAgentMaxAgents: Math.max(2, Math.min(modeAgentLimit, Number(profile.multiAgentMaxAgents) || 4)),
-    multiAgentSchemeId: typeof profile.multiAgentSchemeId === "string" && profile.multiAgentSchemeId.trim()
-      ? profile.multiAgentSchemeId.trim()
-      : null,
-    multiAgents
+    // C19：老 Profile 没有 triage 字段 → 回落到契约默认值（enforce）。
+    triage: normalizeTriage(profile.triage),
+    // C24：缺字段/非法值一律回落 standard。
+    singleAgentMode: profile.singleAgentMode === "minimal" ? "minimal" : "standard",
+    // TypeSafe / Jev：缺字段 / 旧 Profile → 关闭（判定层默认不启用）。
+    typesafeEnabled: Boolean(profile.typesafeEnabled),
+    // 迁移（老 multiAgentMode / 老模板）由 Rust 读侧完成；这里只做缺字段兜底。
+    // C14：字段缺失时按迁移表推断——`enabled_agent_ids_json` 非空即视为已开启。
+    collaborationEnabled: typeof profile.collaborationEnabled === "boolean"
+      ? profile.collaborationEnabled
+      : (Array.isArray(profile.enabledAgentIds) && profile.enabledAgentIds.some((id) => String(id ?? "").trim())),
+    enabledAgentIds: Array.isArray(profile.enabledAgentIds)
+      ? Array.from(new Set(profile.enabledAgentIds.map((id) => String(id ?? "").trim()).filter(Boolean)))
+      : [],
+    // C20.5（改写版）：迁移由 Rust 强制完成，UI 不再读/写 ignoredEnabledAgentIds。
   };
 }
 
@@ -634,10 +585,15 @@ function createProfile(accounts: AccountSummary[], defaultModelId: string): AiAg
     feishuEnabled: false,
     dailyReviewEnabled: false,
     allowedWakeConditionTypes: [...DEFAULT_WAKE_CONDITION_TYPES],
-    multiAgentMode: "off",
-    multiAgentMaxAgents: 4,
-    multiAgentSchemeId: null,
-    multiAgents: [],
+    // 新 Profile 默认关闭协作：与今天 `off` 的行为一致，零点名、主 Agent 独立完成。
+    collaborationEnabled: false,
+    // C19：试判默认 enforce（董事会决定）。
+    triage: createDefaultTriage(),
+    // C24：单 Agent 模式默认 standard（极简需用户显式选择）。
+    singleAgentMode: "standard",
+    enabledAgentIds: [],
+    // TypeSafe / Jev：新 Profile 默认关闭判定层（需要显式打开，并在 AI 设置里配置 Key）。
+    typesafeEnabled: false,
     createdAt: now,
     updatedAt: now
   };
@@ -673,8 +629,265 @@ function structuredPreview(value: unknown, maxLength = 220) {
   return `${text.slice(0, maxLength).trim()}…`;
 }
 
+/**
+ * 运行历史的**只读**兼容读取。
+ *
+ * 历史 `profileSnapshotJson` 里可能仍写着迁移前的协作字段（`multiAgentMode` /
+ * `multiAgents` / `multiAgentMaxAgents` 等），这些字段已从类型层删除，但历史 JSON
+ * 不会被改写。这里只做 `asRecord` + 可选读取 + 默认值，用来在运行详情里把旧快照
+ * 显示成一句人话；**绝不参与写回**，也不进入任何 payload。
+ */
+function legacyProfileSnapshotAgentSummary(snapshot: unknown): string {
+  const record = asRecord(snapshot);
+  // 新格式：快照里带 enabledAgents（含名称），有就说有，空数组就不显示这一行。
+  if (Array.isArray(record.enabledAgents)) {
+    return record.enabledAgents
+      .map((item) => valueString(asRecord(item).name))
+      .filter(Boolean)
+      .join("、");
+  }
+  // 旧格式（迁移前快照）：只读展示，不做任何迁移。
+  const legacyAgents = Array.isArray(record.multiAgents) ? record.multiAgents : [];
+  const legacyNames = legacyAgents
+    .map((item) => valueString(asRecord(item).name))
+    .filter(Boolean);
+  if (legacyNames.length > 0) return legacyNames.join("、");
+  const legacyMode = valueString(record.multiAgentMode);
+  if (legacyMode === "auto") return automationText("runLegacyAutoTeam", "Auto team (pre-migration snapshot)", "自动团队（迁移前快照）");
+  if (legacyMode === "custom") return automationText("runLegacyCustomTeam", "Custom team (pre-migration snapshot)", "自定义团队（迁移前快照）");
+  if (legacyMode === "off") return automationText("runLegacySolo", "Single Agent (pre-migration snapshot)", "单 Agent（迁移前快照）");
+  return "";
+}
+
+/** C19：运行记录里的试判块（宽松读取：字段缺失/类型不符一律忽略，绝不因此崩）。 */
+function readRunTriage(value: unknown): AiRunTriage | null {
+  const record = asRecord(value);
+  if (Object.keys(record).length === 0) return null;
+  const verdict = valueString(record.verdict).toLowerCase();
+  const forcedBy = Array.isArray(record.forcedBy)
+    ? record.forcedBy.map((item) => valueString(item)).filter(Boolean)
+    : valueString(record.forcedBy) ? [valueString(record.forcedBy)] : [];
+  const evidence = (Array.isArray(record.evidence) ? record.evidence : [])
+    .map((item) => {
+      const entry = asRecord(item);
+      return { fact: valueString(entry.fact), source: valueString(entry.source), at: valueString(entry.at) };
+    })
+    .filter((item) => item.fact || item.source || item.at);
+  const mode = valueString(record.mode).toLowerCase();
+  const tokens = (source: unknown, key: string) => {
+    const usage = asRecord(source);
+    const total = Number(asRecord(usage.usage).totalTokens);
+    if (Number.isFinite(total)) return total;
+    const direct = Number(record[key]);
+    return Number.isFinite(direct) ? direct : 0;
+  };
+  return {
+    mode: mode === "off" || mode === "shadow" || mode === "enforce" ? mode as AiRunTriage["mode"] : undefined,
+    // C25①：Rust 现在发字符串（`skip` | `escalate`），同时保留布尔 `escalate` 兼容 ——
+    // 两者都读，避免历史上 `is-true` / 恒假判断那类问题。
+    verdict: verdict === "skip" || verdict === "escalate"
+      ? verdict
+      : record.escalate === true ? "escalate" : record.escalate === false ? "skip" : undefined,
+    phase: valueString(record.phase) || undefined,
+    reasons: (Array.isArray(record.reasons) ? record.reasons : []).map((item) => valueString(item)).filter(Boolean),
+    evidence,
+    forcedBy,
+    forced: record.forced === true || forcedBy.length > 0,
+    sampled: record.sampled === true || valueString(record.sampled).toLowerCase() === "true",
+    triageTokens: tokens(record.triageUsage, "triageTokens"),
+    deepTokens: tokens(record.deepUsage, "deepTokens"),
+    triageUsage: (record.triageUsage ?? null) as AiRunTriage["triageUsage"],
+    deepUsage: (record.deepUsage ?? null) as AiRunTriage["deepUsage"]
+  };
+}
+
+/**
+ * C25⑤：本轮是否进入深度分析（四态）。
+ *
+ * 数据来源就是既有 `run.triage`（`verdict` / `phase` / `forcedBy`）：
+ * - `na`：有试判块但没有任何可用判定（数据缺失的老记录）；
+ * - `off`：`triage.mode === "off"`，或 `triage === null`（未启用试判，C25②）；
+ * - `skipped`：`verdict === "skip"` 或 run 状态为 `skipped`；
+ * - `deep`：`verdict === "escalate"` 或 `phase === "deep"`（有 forcedBy 时展示强制原因）。
+ *
+ * C24 / tsk_21c3c561：`singleAgentMode === "minimal"`（极简模式）**不再短路成 `na`** ——
+ * 极简模式约束的是"不派专家 + 结论一句话（≤160 字）"，**不等于"不做深度"**；把两者混为一谈会产出
+ * 自相矛盾的标签（右上角「不适用」，而同一页写着「试判 升级」与「深度 token 587K」）。
+ * 是否进入深度**只由 `triage` 判定**；是否极简仅用于 UI 注记（见运行详情 `data-run-deep-analysis-minimal-note`）。
+ */
+type RunDeepAnalysisState = "deep" | "skipped" | "off" | "na";
+
+function resolveDeepAnalysisState(run: AiAutomationRun, triage: AiRunTriage | null) {
+  // C25②：`triage === null` = 未启用试判（老记录/未配置），**不是**"未进入深度"。
+  if (!triage) return { state: "off" as RunDeepAnalysisState, forcedBy: [] };
+  const forcedBy = triage.forcedBy ?? [];
+  if (triage.mode === "off") return { state: "off" as RunDeepAnalysisState, forcedBy };
+  const phase = valueString(triage.phase).toLowerCase();
+  if (triage.verdict === "escalate" || phase === "deep") return { state: "deep" as RunDeepAnalysisState, forcedBy };
+  if (triage.verdict === "skip" || phase === "skipped" || run.status === "skipped") {
+    return { state: "skipped" as RunDeepAnalysisState, forcedBy };
+  }
+  // 有试判块但没给出可用判定 → 数据缺失，按不适用呈现（不谎报"未进入"）。
+  return { state: "na" as RunDeepAnalysisState, forcedBy };
+}
+
+/** 无 verdict 时不渲染徽标（老运行记录没有试判块）。 */
+function RunTriageBadges({ triage, showTokens = false }: { triage: AiRunTriage | null | undefined; showTokens?: boolean }) {
+  const { t } = useTranslation(["automation", "common"]);
+  if (!triage?.verdict) return null;
+  const reasons = triage.forcedBy ?? [];
+  return (
+    <span className="automation-triage-badges">
+      <span
+        className={clsx("automation-triage-badge", `is-${triage.verdict}`, triage.forced && "is-forced")}
+        data-run-triage-badge
+        data-triage-verdict={triage.verdict}
+        data-triage-forced={triage.forced ? "true" : "false"}
+      >
+        {triage.verdict === "skip" ? t("runTriageSkip") : t("runTriageEscalate")}
+      </span>
+      {triage.forced && reasons.length > 0 ? (
+        <em className="automation-triage-forced" data-triage-forced-reasons>{t("runTriageForced", { reasons: reasons.join("、") })}</em>
+      ) : null}
+      {triage.sampled ? <em className="automation-triage-sampled" data-triage-sampled="true">{t("runTriageSampled")}</em> : null}
+      {showTokens ? (
+        <em className="automation-triage-tokens">
+          {t("runTriageTokens")} {formatRunTokenCount(triage.triageTokens ?? 0)} · {t("runTriageDeepTokens")} {formatRunTokenCount(triage.deepTokens ?? 0)}
+        </em>
+      ) : null}
+    </span>
+  );
+}
+
+/** C20.6：`usedEvidence[]` / `contrarianResolutions[]` 的宽松读取（字段缺失不渲染空壳）。 */
+type RunUsedEvidence = { expertId: string; expertName: string; points: string[] };
+type RunContrarianResolution = { claim: string; outcome: "accepted" | "rebutted" | "unresolved"; basis: string };
+
+function readUsedEvidence(value: unknown): RunUsedEvidence[] {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => {
+      const record = asRecord(item);
+      const points = [
+        ...(Array.isArray(record.points) ? record.points : []),
+        ...(Array.isArray(record.facts) ? record.facts : []),
+        record.fact,
+        record.summary,
+        record.evidence
+      ].map((entry) => valueString(entry)).filter(Boolean);
+      return {
+        expertId: valueString(record.expertId ?? record.agentId),
+        expertName: valueString(record.expertName ?? record.agentName ?? record.name),
+        points: Array.from(new Set(points))
+      };
+    })
+    .filter((item) => item.expertId || item.expertName || item.points.length > 0);
+}
+
+function readContrarianResolutions(value: unknown): RunContrarianResolution[] {
+  return (Array.isArray(value) ? value : [])
+    .map((item) => {
+      const record = asRecord(item);
+      const raw = valueString(record.resolution ?? record.outcome ?? record.verdict).toLowerCase();
+      const responded = record.responded === false ? false : record.responded === true ? true : undefined;
+      const basis = valueString(record.basis ?? record.reason ?? record.rationale);
+      const outcome: RunContrarianResolution["outcome"] = responded === false || (!raw && !basis)
+        ? "unresolved"
+        : raw === "accepted" || raw === "accept" || record.accepted === true
+          ? "accepted"
+          : "rebutted";
+      return {
+        claim: valueString(record.claim ?? record.opinion ?? record.point ?? record.objection),
+        outcome,
+        basis
+      };
+    })
+    .filter((item) => item.claim || item.basis);
+}
+
+/** C20.6：运行详情里的"证据贡献"一节 —— 数据专家有没有被用到、反方是不是走过场。 */
+function RunContributions({ run, fallback }: { run: AiAutomationRun; fallback?: { usedEvidence?: unknown; contrarianResolutions?: unknown } }) {
+  const { t } = useTranslation(["automation", "common"]);
+  // 权威落点是 run 记录（C20.6）；这里同时兼容字段被放在 detail 根上的情形。
+  const rawUsedEvidence = run.usedEvidence ?? fallback?.usedEvidence;
+  const rawResolutions = run.contrarianResolutions ?? fallback?.contrarianResolutions;
+  const usedEvidence = useMemo(() => readUsedEvidence(rawUsedEvidence), [rawUsedEvidence]);
+  const resolutions = useMemo(() => readContrarianResolutions(rawResolutions), [rawResolutions]);
+  // C20.6 补充：升级了但一个专家都没派（允许，但必须可见、可复盘）。
+  const selfAnalysisReason = valueString(run.audit?.selfAnalysisReason);
+  const selfAnalysisUnjustified = run.audit?.selfAnalysisUnjustified === true;
+  const showSelfAnalysis = selfAnalysisUnjustified || Boolean(selfAnalysisReason) || (run.triage?.verdict === "escalate" && usedEvidence.length === 0);
+  if (usedEvidence.length === 0 && resolutions.length === 0 && !showSelfAnalysis) return null;
+  // C27 折叠②：风险质疑 / 反向质疑（= 反方回应 + 引用证据 + 本轮未派专家说明）。
+  // 摘要按存在的块拼：「风险质疑与引用证据 · 3 项 · 引用证据 2 组 …」；全空则「无」。
+  const foldSummaryParts = [
+    ...(resolutions.length > 0 ? [t("runFoldContrarianCount", { count: resolutions.length })] : []),
+    ...(usedEvidence.length > 0 ? [t("runFoldUsedEvidenceCount", { count: usedEvidence.length })] : []),
+    ...(showSelfAnalysis ? [t("runFoldSelfAnalysisCount", { count: 1 })] : [])
+  ];
+  const fold = useRunDetailFold(run.id, "contributions");
+  return (
+    <details className="automation-run-collapsible" data-run-contributions open={fold.open} onToggle={fold.onToggle}>
+      <summary>{runFoldSummary(t("runFoldContributionsTitle"), foldSummaryParts)}</summary>
+      <section className="automation-run-contributions">
+        <header>
+          <strong><ClipboardCheck size={13} />{t("runContributions")}</strong>
+          <span>{t("runContributionsHint")}</span>
+        </header>
+        {showSelfAnalysis ? (
+          <div className="automation-run-contributions__block" data-run-self-analysis>
+            <em>{t("runSelfAnalysisTitle")}</em>
+            {selfAnalysisReason ? <p className="automation-run-contributions__reason" data-run-self-analysis-reason>{t("runSelfAnalysisReason", { reason: selfAnalysisReason })}</p> : null}
+            {selfAnalysisUnjustified ? (
+              <p className="automation-run-contributions__unjustified" data-run-self-analysis-unjustified>
+                <AlertTriangle size={11} aria-hidden="true" />{t("runSelfAnalysisUnjustified")}
+              </p>
+            ) : null}
+          </div>
+        ) : null}
+        <div className="automation-run-contributions__block">
+          <em>{t("runUsedEvidence")}</em>
+          {usedEvidence.length === 0 ? (
+            <p className="automation-run-contributions__empty" data-run-used-evidence-empty>{t("runUsedEvidenceEmpty")}</p>
+          ) : (
+            <ul data-run-used-evidence>
+              {usedEvidence.map((item, index) => (
+                <li key={`${item.expertId || item.expertName}-${index}`} data-run-used-evidence-item>
+                  <strong data-run-used-evidence-expert>{item.expertName || item.expertId}</strong>
+                  {item.points.length > 0 ? (
+                    <ul>{item.points.map((point) => <li key={point} data-run-used-evidence-point>{point}</li>)}</ul>
+                  ) : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+        <div className="automation-run-contributions__block">
+          <em>{t("runContrarianResolutions")}</em>
+          {resolutions.length === 0 ? (
+            <p className="automation-run-contributions__empty" data-run-contrarian-resolutions-empty>{t("runContrarianResolutionsEmpty")}</p>
+          ) : (
+            <ul data-run-contrarian-resolutions>
+              {resolutions.map((item, index) => (
+                <li key={`${item.claim}-${index}`} data-run-contrarian-resolution data-contrarian-outcome={item.outcome}>
+                  <span className="automation-run-contributions__outcome" data-contrarian-outcome-label>
+                    {item.outcome === "accepted" ? t("runContrarianAccepted") : item.outcome === "rebutted" ? t("runContrarianRebutted") : t("runContrarianUnresolved")}
+                  </span>
+                  <span className="automation-run-contributions__claim" data-contrarian-claim>{item.claim || "--"}</span>
+                  {item.basis ? <span className="automation-run-contributions__basis" data-contrarian-basis>{item.basis}</span> : null}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </section>
+    </details>
+  );
+}
+
 function statusTone(status: string) {
   const value = String(status || "").toLowerCase();
+  // C19：skipped 是"按判定主动结束"，不是失败 —— 独立视觉，不与 failed 混。
+  if (value === "skipped") return "skipped";
   if (/(failed|error|rejected|blocked|expired|cancelled|canceled)/.test(value)) return "danger";
   if (/(running|pending|queued|review|validating|draft)/.test(value)) return "warning";
   if (/(success|completed|done|sent|accepted|approved|active|enabled|ready|applied|published)/.test(value)) return "success";
@@ -696,6 +909,7 @@ function statusLabel(status: string) {
     accepted: automationText("statusApplied", "Adopted", "已采用"),
     rejected: automationText("statusRejected", "Rejected", "已拒绝"),
     cancelled: automationText("statusCancelled", "Removed", "已删除"),
+    skipped: i18n.t("automation:runStatusSkipped"),
     draft: automationText("statusDraft", "Draft", "草稿"),
     published: automationText("statusPublished", "Published", "已发布"),
     sent: automationText("statusSent", "Sent", "已发送"),
@@ -824,6 +1038,7 @@ function ProfileCard({
   focused,
   recentRuns,
   performance,
+  agentNamesById,
   busy,
   onEdit,
   onDelete,
@@ -835,6 +1050,8 @@ function ProfileCard({
   focused: boolean;
   recentRuns: { runs: number; failed: number; trades: number; lastAt: number | null } | null;
   performance: AiProfilePerformance | null;
+  /** 勾选名单展示：id → Agent 名称（库中已删除的 id 直接显示 id）。 */
+  agentNamesById: Map<string, string>;
   busy: boolean;
   onEdit: () => void;
   onDelete: () => void;
@@ -847,11 +1064,15 @@ function ProfileCard({
     : profile.enabled
       ? t("automation:profileListening")
       : t("automation:stopped");
-  const collaboration = profile.multiAgentMode === "off"
-    ? t("automation:profileCardSingleAgent")
-    : profile.multiAgentMode === "auto"
-      ? t("automation:profileCollaborationAuto", { count: profile.multiAgentMaxAgents || 4 })
-      : t("automation:profileCollaborationCustom", { count: profile.multiAgents.filter((agent) => agent.enabled).length });
+  // C14 三态摘要：关闭 → 独立工作；开启但空名单 → 配置不完整提示；开启且有名单 → 已勾选 N 个。
+  const enabledAgentNames = profile.enabledAgentIds
+    .map((id) => agentNamesById.get(id) ?? id)
+    .filter(Boolean);
+  const collaboration = !profile.collaborationEnabled
+    ? t("automation:profileCardCollaborationOff")
+    : enabledAgentNames.length === 0
+      ? t("automation:profileCardCollaborationEnabledEmpty")
+      : t("automation:profileCardAgents", { count: enabledAgentNames.length, names: enabledAgentNames.join("、") });
   // Profile 卡已实现盈亏跳动：无成交数据时以 "--" 占位，netPnlUsdt 变化按数值升降定方向。
   const pnlBump = useBump(performance && performance.fillCount > 0 ? performance.netPnlUsdt : "--");
 
@@ -983,12 +1204,14 @@ function ProfileEditor({
   skills,
   skillVersions,
   models,
-  agentSchemes,
+  agents,
+  agentResponsibilities,
+  agentsLoading,
+  agentsError,
   busy,
-  schemeBusy,
   onChange,
-  onSaveScheme,
-  onDeleteScheme,
+  onOpenAgentLibrary,
+  onReloadAgents,
   onSave,
   onRun,
   onDailyReview,
@@ -1001,12 +1224,14 @@ function ProfileEditor({
   skills: AiSkillDefinition[];
   skillVersions: AiSkillVersion[];
   models: AiConfigSummary["models"];
-  agentSchemes: AiAgentScheme[];
+  agents: AiAgentSummary[];
+  agentResponsibilities: Record<string, string>;
+  agentsLoading: boolean;
+  agentsError: string | null;
   busy: boolean;
-  schemeBusy: boolean;
   onChange: (patch: Partial<AiAgentProfile>) => void;
-  onSaveScheme: (scheme: AiAgentSchemeDraft) => Promise<AiAgentScheme | null>;
-  onDeleteScheme: (id: string) => Promise<boolean>;
+  onOpenAgentLibrary: () => void;
+  onReloadAgents: () => void;
   onSave: () => void;
   onRun: () => void;
   onDailyReview: () => void;
@@ -1185,6 +1410,17 @@ function ProfileEditor({
             onChange={(value) => onChange({ reasoningDepth: value as AiReasoningDepth })}
           />
         </label>
+        <label className="automation-typesafe-field">
+          <FieldLabel help={t("automation:profileTypesafeHelp")}>{t("automation:profileTypesafeLabel")}</FieldLabel>
+          <span className="automation-toggle-row">
+            <input
+              type="checkbox"
+              checked={Boolean(draft.typesafeEnabled)}
+              onChange={(event) => onChange({ typesafeEnabled: event.target.checked })}
+            />
+            <em>{draft.typesafeEnabled ? t("automation:profileTypesafeOn") : t("automation:profileTypesafeOff")}</em>
+          </span>
+        </label>
         <div className="automation-symbol-field wide">
           <span>
             {t("automation:profileWatchSymbols")}
@@ -1252,16 +1488,26 @@ function ProfileEditor({
         </div>
       </div>
 
-      <ProfileCollaborationEditor
-        mode={draft.multiAgentMode}
-        maxAgents={draft.multiAgentMaxAgents}
-        agents={draft.multiAgents}
-        schemes={agentSchemes}
-        selectedSchemeId={draft.multiAgentSchemeId}
-        schemeBusy={schemeBusy}
-        onChange={onChange}
-        onSaveScheme={onSaveScheme}
-        onDeleteScheme={onDeleteScheme}
+      <ProfileAgentSelector
+        agents={agents}
+        responsibilities={agentResponsibilities}
+        selectedIds={draft.enabledAgentIds}
+        collaborationEnabled={draft.collaborationEnabled}
+        onToggleCollaboration={(collaborationEnabled) => onChange({ collaborationEnabled })}
+        loading={agentsLoading}
+        error={agentsError}
+        disabled={busy}
+        onChange={(enabledAgentIds) => onChange({ enabledAgentIds })}
+        onOpenAgentLibrary={onOpenAgentLibrary}
+        onReload={onReloadAgents}
+        singleAgentMode={draft.singleAgentMode}
+        onChangeSingleAgentMode={(singleAgentMode) => onChange({ singleAgentMode })}
+      />
+
+      <TriageSettings
+        value={draft.triage}
+        disabled={busy}
+        onChange={(triage) => onChange({ triage })}
       />
 
       <div className="automation-form-section">
@@ -1523,6 +1769,64 @@ function estimatedOpportunityCount(run: AiAutomationRun) {
   return /(创建|新建|产生|保存).{0,8}交易机会/.test(text) ? 1 : 0;
 }
 
+type WakeCounts = {
+  /** 本轮**新增**的观察条件条数（优先取落库真值，退化到最终计划）。 */
+  created: number;
+  /** 当前生效条数（工具结果里带才给，否则 null）。 */
+  active: number | null;
+  /** 该数字的来源，便于自检与文案取舍。 */
+  source: "result" | "plan" | "none";
+};
+
+function readCountFromResult(result: Record<string, unknown>, keys: string[]): number | null {
+  for (const key of keys) {
+    const value = result[key];
+    if (Array.isArray(value)) return value.length;
+    const parsed = Number(value);
+    if (value !== undefined && value !== null && Number.isFinite(parsed) && parsed >= 0) return parsed;
+  }
+  return null;
+}
+
+/**
+ * 观察条件计数（口径修正）。
+ *
+ * 旧实现把**每一个** wake 步骤的计划条数累加 —— 而 `background.finishRun` 一轮可能被调用多次
+ * （软校验打回后重试、模型重规划），于是两次计划的条数被相加，头部出现「35 条」这种虚高数字，
+ * 而真正落库生效的只有最后一次（7 条）。
+ *
+ * 现在的口径：
+ *   1. 只取**成功收尾**的那一次 `background.finishRun`（最后一次 `ok !== false`）；
+ *   2. 该步骤的工具结果里若带真实落库条数/创建条数（`createdWakeConditionIds` 等），以它为准；
+ *   3. 拿不到就退化为"最终计划的 conditions 条数"；
+ *   4. **永不跨步骤累加**。
+ */
+function resolveWakeCounts(steps: RunToolStep[]): WakeCounts {
+  const finishSteps = steps.filter((step) => step.name === "background.finishRun");
+  if (finishSteps.length === 0) return { created: 0, active: null, source: "none" };
+  const successful = [...finishSteps].reverse().find((step) => step.ok !== false);
+  const step = successful ?? finishSteps[finishSteps.length - 1];
+  const result = isRecord(step.result) ? step.result : {};
+  const created = readCountFromResult(result, [
+    "createdWakeConditionIds",
+    "wakeConditionIds",
+    "createdWakeConditions",
+    "createdIds",
+    "created",
+    "wakeConditionCount",
+    "wakeCount"
+  ]);
+  const active = readCountFromResult(result, [
+    "activeWakeConditionIds",
+    "activeWakeConditions",
+    "activeWakeConditionCount",
+    "activeCount",
+    "active"
+  ]);
+  const planned = wakeConditionsFromStep(step).length;
+  return { created: created ?? planned, active, source: created !== null ? "result" : "plan" };
+}
+
 function runActionCounts(
   run: AiAutomationRun,
   detail: AiAutomationRunDetail | undefined,
@@ -1533,7 +1837,12 @@ function runActionCounts(
     const steps = buildRunToolSteps(detail.toolEvents);
     return {
       opportunity: Math.max(summaryCounts?.opportunity ?? 0, steps.filter((step) => runActionKind(step) === "opportunity").length),
-      wake: Math.max(summaryCounts?.wake ?? 0, steps.reduce((total, step) => total + (runActionKind(step) === "wake" ? wakeConditionsFromStep(step).length : 0), 0)),
+      // 与详情同一口径：能算出"最终生效的那次收尾"就用它（地面真值），
+      // 否则才回落到运行记录里的 actionCounts.wake —— 不做 max()，避免把虚高的旧数字留下。
+      wake: (() => {
+        const resolved = resolveWakeCounts(steps);
+        return resolved.source === "none" ? (summaryCounts?.wake ?? 0) : resolved.created;
+      })(),
       trade: Math.max(summaryCounts?.trade ?? 0, steps.filter((step) => runActionKind(step) === "trade").length),
       notification: Math.max(summaryCounts?.notification ?? 0, steps.filter((step) => runActionKind(step) === "notification").length, deliveries.filter((item) => item.runId === run.id).length)
     };
@@ -1621,13 +1930,16 @@ function RunsView({
   profiles,
   deliveries,
   focusId,
-  readDetail = readAutomationRunDetail
+  readDetail = readAutomationRunDetail,
+  onForceDeep
 }: {
   items: AiAutomationRun[];
   profiles: Map<string, AiAgentProfile>;
   deliveries: AiNotificationDelivery[];
   focusId?: string | null;
   readDetail?: (id: string) => Promise<AiAutomationRunDetail | null>;
+  /** C19.4：一键强制深度（返回 false 表示命令不可用/失败 → UI 降级）。 */
+  onForceDeep?: (runId: string) => Promise<boolean>;
 }) {
   const [selectedId, setSelectedId] = useState<string | null>(focusId ?? null);
   const [details, setDetails] = useState<Record<string, AiAutomationRunDetail>>({});
@@ -1768,6 +2080,7 @@ function RunsView({
               <div className="automation-row-main">
                 <div className="automation-run-title-line">
                   <span className={clsx("automation-run-state-dot", runStatusTone(item.status))} />
+                  <RunTriageBadges triage={readRunTriage(item.triage)} />
                   <strong>{profiles.get(item.profileId)?.name ?? item.profileId}</strong>
                   <StatusBadge status={item.status} />
                   <em>{runTriggerLabel(item.triggerType)}</em>
@@ -1800,6 +2113,7 @@ function RunsView({
           loading={loadingId === selectedRun.id}
           error={detailErrors[selectedRun.id]}
           onClose={closeRun}
+          onForceDeep={onForceDeep}
         />
       ) : null}
     </div>
@@ -1810,13 +2124,24 @@ function readAutomationRunDetail(id: string) {
   return invokeDesktop<AiAutomationRunDetail>("ai_automation_run_detail", { id });
 }
 
+/**
+ * C19.4：一键强制深度 —— 把被跳过的运行重新排为深度运行。
+ *
+ * B-RUST 的命令 `ai_automation_force_deep_run` 尚未落地时，invoke 会失败；
+ * 调用方据此把按钮降级为「当前版本尚不支持」，不静默、不卡住。
+ */
+function forceDeepRun(runId: string) {
+  return invokeDesktop<unknown>("ai_automation_force_deep_run", { runId });
+}
+
 function RunDetailDialog({
   run,
   profileName,
   detail,
   loading,
   error,
-  onClose
+  onClose,
+  onForceDeep
 }: {
   run: AiAutomationRun;
   profileName: string;
@@ -1824,6 +2149,7 @@ function RunDetailDialog({
   loading: boolean;
   error?: string;
   onClose: () => void;
+  onForceDeep?: (runId: string) => Promise<boolean>;
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogDrag = useDraggableSurface<HTMLElement>();
@@ -1857,7 +2183,7 @@ function RunDetailDialog({
           ) : error ? (
             <div className="automation-run-detail-state error">{error}</div>
           ) : detail ? (
-            <RunDetailPanel detail={detail} />
+            <RunDetailPanel detail={detail} onForceDeep={onForceDeep} />
           ) : null}
         </div>
       </section>
@@ -1866,11 +2192,72 @@ function RunDetailDialog({
   );
 }
 
-function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
+/**
+ * C27：运行详情折叠区 —— 展开状态记在**模块级** Set（key = `${runId}::${section}`）。
+ *
+ * 为什么不放 useState：运行详情会随弹层关闭而**卸载**，组件内 state 会随之丢失。
+ * 模块级 Set 的生命周期 = 本会话（页面），因此：
+ * - 关闭运行详情再打开同一记录 → 之前展开的分区仍然展开；
+ * - 在不同运行记录之间切换（key 带 runId）→ 每条记录各自的展开状态互不污染、不被重置；
+ * - 受控写法（`open={...}` + `onToggle`）保证 React 重渲染不会把用户刚展开的分区弹回去。
+ */
+const RUN_DETAIL_OPEN_FOLDS = new Set<string>();
+
+function runDetailFoldKey(runId: string, section: string) {
+  return `${runId}::${section}`;
+}
+
+/** C27：受控 `<details>` 的展开状态（原生折叠：Tab 可聚焦 + Enter/Space 可切换，不重造交互）。 */
+function useRunDetailFold(runId: string, section: string) {
+  const key = runDetailFoldKey(runId, section);
+  const [open, setOpen] = useState(() => RUN_DETAIL_OPEN_FOLDS.has(key));
+  const onToggle = useCallback((event: SyntheticEvent<HTMLDetailsElement>) => {
+    const next = event.currentTarget.open;
+    if (next) RUN_DETAIL_OPEN_FOLDS.add(key);
+    else RUN_DETAIL_OPEN_FOLDS.delete(key);
+    setOpen(next);
+  }, [key]);
+  return { open, onToggle };
+}
+
+/** C27：折叠区标题 + 一行摘要（「试判理由 · 3 条」；内容为空时摘要显示「无」）。 */
+function runFoldSummary(title: string, parts: string[]) {
+  return (
+    <>
+      <span className="automation-run-fold-title">{title}</span>
+      <span className="automation-run-fold-meta"> · {parts.length > 0 ? parts.join(" · ") : i18n.t("automation:runFoldEmpty")}</span>
+    </>
+  );
+}
+
+function RunDetailFold({
+  runId,
+  section,
+  summary,
+  className,
+  children
+}: {
+  runId: string;
+  section: string;
+  summary: ReactNode;
+  className?: string;
+  children: ReactNode;
+}) {
+  const { open, onToggle } = useRunDetailFold(runId, section);
+  return (
+    <details className={clsx("automation-run-collapsible", className)} open={open} onToggle={onToggle}>
+      <summary>{summary}</summary>
+      {children}
+    </details>
+  );
+}
+
+function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail; onForceDeep?: (runId: string) => Promise<boolean> }) {
   const steps = useMemo(() => buildRunToolSteps(detail.toolEvents), [detail.toolEvents]);
   const duration = detail.run.finishedAt ? Math.max(0, detail.run.finishedAt - detail.run.startedAt) : null;
   const opportunityCount = steps.filter((step) => runActionKind(step) === "opportunity").length;
-  const wakeCount = steps.reduce((total, step) => total + (runActionKind(step) === "wake" ? wakeConditionsFromStep(step).length : 0), 0);
+  const wakeCounts = useMemo(() => resolveWakeCounts(steps), [steps]);
+  const wakeCount = wakeCounts.created;
   const tradeCount = steps.filter((step) => runActionKind(step) === "trade").length;
   const notificationCount = steps.filter((step) => runActionKind(step) === "notification").length;
   const skills = isRecord(detail.skillVersions) ? Object.entries(detail.skillVersions) : [];
@@ -1883,15 +2270,37 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
     () => resolveAiAutomationRunError(detail.run.error, detail.toolEvents),
     [detail.run.error, detail.toolEvents]
   );
+  const triage = useMemo(() => readRunTriage(detail.run.triage), [detail.run.triage]);
+  const deepAnalysis = useMemo(() => resolveDeepAnalysisState(detail.run, triage), [detail.run, triage]);
+  const [forceState, setForceState] = useState<"idle" | "busy" | "done" | "unsupported">("idle");
+  const requestForceDeep = useCallback(() => {
+    if (forceState === "busy" || !onForceDeep) return;
+    setForceState("busy");
+    // 命令缺失/报错 → 降级为"尚不支持"，绝不把用户留在"正在重新排队"。
+    void onForceDeep(detail.run.id).then((ok) => setForceState(ok ? "done" : "unsupported"));
+  }, [detail.run.id, forceState, onForceDeep]);
   return (
     <div className="automation-run-detail">
       <section className={clsx("automation-run-outcome", runStatusTone(detail.run.status))}>
+        {/* C24：极简模式运行徽标（summary 仍按原样展示那一句话）。 */}
+        {detail.run.singleAgentMode === "minimal" ? (
+          <span className="automation-run-single-agent-badge" data-run-single-agent-mode="minimal">
+            {i18n.t("automation:runSingleAgentModeMinimal")}
+          </span>
+        ) : null}
         <div className="automation-run-outcome-main">
           <span className="automation-run-outcome-icon">{detail.run.status === "completed" ? <CheckCircle2 size={20} /> : <Activity size={20} />}</span>
           <div>
             <span>{automationText("runOutcome", "Run outcome", "本轮运行结果")}</span>
             <strong>{runStatusTitle(detail.run.status)}</strong>
-            <p>{steps.length > 0 ? automationText("runOutcomeCounts", "Created {{opportunities}} trade opportunities, {{wakes}} dynamic watch conditions, {{trades}} trade actions, and {{notifications}} Feishu notifications.", "产生 {{opportunities}} 个交易机会、{{wakes}} 条动态观察条件、{{trades}} 个交易动作、{{notifications}} 条飞书通知。", { opportunities: opportunityCount, wakes: wakeCount, trades: tradeCount, notifications: notificationCount }) : automationText("runOutcomeAnalysisOnly", "This run only analyzed and read data; it produced no key actions to execute.", "本轮只进行了分析和数据读取，没有产生需要执行的关键动作。")}</p>
+            <p data-run-wake-created={wakeCount} data-run-wake-active={wakeCounts.active ?? undefined}>
+              {steps.length > 0 ? automationText("runOutcomeCounts", "Created {{opportunities}} trade opportunities, {{wakes}} new dynamic watch conditions, {{trades}} trade actions, and {{notifications}} Feishu notifications.", "产生 {{opportunities}} 个交易机会、本轮新增 {{wakes}} 条动态观察条件、{{trades}} 个交易动作、{{notifications}} 条飞书通知。", { opportunities: opportunityCount, wakes: wakeCount, trades: tradeCount, notifications: notificationCount }) : automationText("runOutcomeAnalysisOnly", "This run only analyzed and read data; it produced no key actions to execute.", "本轮只进行了分析和数据读取，没有产生需要执行的关键动作。")}
+            </p>
+            {wakeCounts.active !== null ? (
+              <span className="automation-run-outcome-active-wakes" data-run-wake-active-note>
+                {automationText("runOutcomeActiveWakes", "{{count}} watch conditions are active now", "当前生效 {{count}} 条观察条件", { count: wakeCounts.active })}
+              </span>
+            ) : null}
           </div>
         </div>
         <div className="automation-run-outcome-metrics">
@@ -1902,29 +2311,65 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
         </div>
       </section>
 
-      <div className="automation-run-context-bar">
-        <span className="automation-run-id">{detail.run.id}</span>
-        <div className="automation-run-skill-chips">
-          <span>Skills</span>
-          {skills.length > 0 ? skills.map(([name, version]) => <b key={name}>{name} · v{String(version)}</b>) : <em>{automationText("runNoPinnedVersions", "No pinned versions", "未锁定版本")}</em>}
+      {/* C27 关键数字一行（默认区，可见）：试判判定（升级/跳过）+ 试判/深度 token + 是否进入深度分析。
+          `data-run-triage` 从原"试判整块外壳"移到这一行：一眼要看的判定与 token 留在默认区，
+          理由/证据（原来最长的一块）降级进下方折叠区，钩子与内容整块保留。 */}
+      <section className="automation-run-key-metrics" data-run-triage={triage?.verdict ? "" : undefined}>
+        {triage?.verdict ? <RunTriageBadges triage={triage} showTokens /> : null}
+        {triage?.verdict && detail.run.status === "skipped" ? (
+          <span className="automation-run-triage-skip-note" data-run-triage-skipped-note>{i18n.t("automation:runTriageSkippedNote")}</span>
+        ) : null}
+        {/* C25⑤：是否进入深度分析 —— 与"试判判定"同一行，默认区可见（四态判定逻辑一字未改）。 */}
+        <div
+          className={clsx("automation-run-deep-analysis", `is-${deepAnalysis.state}`)}
+          data-run-deep-analysis={deepAnalysis.state}
+        >
+          <Crosshair size={13} aria-hidden="true" />
+          <span>{automationText("runDeepAnalysisLabel", "Deep analysis", "深度分析")}</span>
+          <strong data-run-deep-analysis-label>
+            {deepAnalysis.state === "deep"
+              ? automationText("runDeepAnalysisDeep", "Entered deep analysis", "已进入深度分析")
+              : deepAnalysis.state === "skipped"
+                ? automationText("runDeepAnalysisSkipped", "Not entered (triage skipped)", "未进入（试判判定跳过）")
+                : deepAnalysis.state === "off"
+                  ? automationText("runDeepAnalysisOff", "Triage disabled", "未启用试判")
+                  : automationText("runDeepAnalysisNa", "Not applicable", "不适用")}
+          </strong>
+          {deepAnalysis.state === "deep" && deepAnalysis.forcedBy.length > 0 ? (
+            <em className="automation-run-deep-analysis__forced" data-run-deep-analysis-forced>
+              {automationText("runDeepAnalysisForced", "Hard escalation: {{reasons}}", "硬升级：{{reasons}}", { reasons: deepAnalysis.forcedBy.join("、") })}
+            </em>
+          ) : null}
+          {/* tsk_21c3c561：极简模式进入深度时，同一行说明"为什么没有专家"（C24 = 不派专家 + 结论一句话，≠ 不做深度）。 */}
+          {deepAnalysis.state === "deep" && detail.run.singleAgentMode === "minimal" ? (
+            <em className="automation-run-deep-analysis__note" data-run-deep-analysis-minimal-note>
+              {automationText("runDeepAnalysisMinimalNote", "Minimal mode: no experts, one-sentence conclusion", "极简模式：不派专家、结论一句话")}
+            </em>
+          ) : null}
         </div>
-        {templateSnapshot ? <div className="automation-run-template-chip"><span>{automationText("runTemplate", "Template", "模板")}</span><b>{typeof templateSnapshot.name === "string" ? templateSnapshot.name : "--"}</b></div> : null}
-        {detail.run.tokenUsage ? (
-          <div className="automation-run-token-breakdown">
-            <span>{detail.run.tokenUsage.modelName || detail.run.tokenUsage.model}</span>
-            {detail.run.tokenUsage.reported ? (
-              <>
-                <b>{i18n.t("common:input")} {formatRunTokenCount(detail.run.tokenUsage.usage.inputTokens)}</b>
-                <b>{i18n.t("common:output")} {formatRunTokenCount(detail.run.tokenUsage.usage.outputTokens)}</b>
-                {detail.run.tokenUsage.coverage.cacheRead ? <em>{cacheHitRate ? automationText("runCacheHitRate", "Cache hit {{rate}} · read {{tokens}} (included in input)", "缓存命中率 {{rate}} · 读取 {{tokens}}（已含在输入）", { rate: cacheHitRate, tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) }) : automationText("runCacheRead", "Cache read {{tokens}} (included in input)", "缓存读取 {{tokens}}（已含在输入）", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
-                {detail.run.tokenUsage.agentCount > 0 ? <em>{automationText("runSubAgents", "{{count}} sub-Agents", "{{count}} 个子 Agent", { count: detail.run.tokenUsage.agentCount })}</em> : null}
-                {detail.run.tokenUsage.quality === "partial" ? <em>{automationText("runTokenPartial", "Known usage only; reporting is incomplete", "仅显示已知用量；统计不完整")}</em> : null}
-              </>
-            ) : <em>{automationText("runNoTokenUsage", "The current model did not return Token usage", "当前模型没有返回 Token 用量")}</em>}
+        {/* C26：一键强制深度**仅在试判判定跳过时**显示 —— 它的语义是"跳过试判、新排一轮深度"，
+            在已经深度分析过（deep）或未启用试判（off）/不适用（na）的运行上显示只会诱发误点。
+            该动作留在默认区（不随试判理由折叠），否则"被跳过 → 一键强制"要多点一次才看得见。 */}
+        {triage?.verdict && deepAnalysis.state === "skipped" ? (
+          <div className="automation-run-triage-actions">
+            <button
+              type="button"
+              data-run-force-deep
+              disabled={forceState === "busy" || forceState === "done" || forceState === "unsupported" || !onForceDeep}
+              title={forceState === "unsupported" ? i18n.t("automation:runForceDeepUnsupported") : i18n.t("automation:runForceDeep")}
+              onClick={requestForceDeep}
+            >
+              {forceState === "busy" ? <Loader2 size={13} className="spin" /> : <Play size={13} />}
+              {forceState === "busy" ? i18n.t("automation:runForceDeepBusy") : i18n.t("automation:runForceDeep")}
+            </button>
+            {forceState === "done" ? <span className="automation-run-triage-hint">{i18n.t("automation:runForceDeepDone")}</span> : null}
+            {forceState === "unsupported" ? <span className="automation-run-triage-hint is-warning">{i18n.t("automation:runForceDeepUnsupported")}</span> : null}
           </div>
         ) : null}
-      </div>
+      </section>
 
+      {/* C27 本轮决策（默认区）：等待观察 / 交易落地状态 —— 字段与组件原样未动，
+          只是上移到"结果 + 关键数字"之后，让默认视图三块连读（原来它被夹在折叠区之后）。 */}
       {reviewedDecisionTrace ? (
         <section className="automation-run-decision-flow" aria-label={automationText("runCandidateReview", "Trade candidate review", "交易候选复核")}>
           <header><ShieldCheck size={14} /><div><strong>{automationText("runCandidateReview", "Trade candidate review", "交易候选复核")}</strong><span>{automationText("runCandidateReviewDetail", "The Main Agent submits a candidate; the system reads a live snapshot and runs precheck.", "主 Agent 提交候选，系统读取实时快照并执行预检")}</span></div></header>
@@ -1955,11 +2400,108 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
         </section>
       ) : null}
 
-      <AgentCollaborationTrace events={detail.toolEvents} runStatus={detail.run.status} />
+      {/* C27 折叠①：试判理由与试判证据（原试判块里最长的一段，默认收起）。
+          摘要：「试判理由 · 3 条 · 证据 5 项」；两条都空时摘要显示「无」。 */}
+      {triage?.verdict ? (
+        <RunDetailFold
+          runId={detail.run.id}
+          section="triage-detail"
+          summary={runFoldSummary(automationText("runFoldTriageTitle", "Triage reasons", "试判理由"), [
+            ...(triage.reasons && triage.reasons.length > 0
+              ? [automationText("runFoldReasonsCount", "{{count}} reasons", "{{count}} 条", { count: triage.reasons.length })]
+              : []),
+            ...(triage.evidence && triage.evidence.length > 0
+              ? [automationText("runFoldEvidenceCount", "{{count}} evidence items", "证据 {{count}} 项", { count: triage.evidence.length })]
+              : [])
+          ])}
+        >
+          {triage.reasons && triage.reasons.length > 0 ? (
+            <div className="automation-run-triage-block">
+              <strong>{i18n.t("automation:runTriageReasons")}</strong>
+              <ul data-run-triage-reasons>
+                {triage.reasons.map((reason) => <li key={reason}>{reason}</li>)}
+              </ul>
+            </div>
+          ) : null}
+          {triage.evidence && triage.evidence.length > 0 ? (
+            <div className="automation-run-triage-block">
+              <strong>{i18n.t("automation:runTriageEvidence")}</strong>
+              <div className="automation-run-triage-evidence" data-run-triage-evidence>
+                {triage.evidence.map((item, index) => (
+                  <div key={`${item.source}-${index}`}>
+                    <span className="automation-run-triage-fact" data-triage-evidence-fact>{item.fact}</span>
+                    <code data-triage-evidence-source>{item.source}</code>
+                    <time data-triage-evidence-at>{item.at}</time>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
+          {(!triage.reasons || triage.reasons.length === 0) && (!triage.evidence || triage.evidence.length === 0) ? (
+            <p className="automation-run-fold-empty">{i18n.t("automation:runFoldEmpty")}</p>
+          ) : null}
+        </RunDetailFold>
+      ) : null}
+
+      <RunContributions run={detail.run} fallback={detail as unknown as { usedEvidence?: unknown; contrarianResolutions?: unknown }} />
+
+      {/* C27 折叠③：本轮技能列表与运行元信息。
+          摘要：「技能与运行元信息 · 5 个技能」+ Token 明细（模型 / 输入 / 输出 / 缓存命中率），
+          两者同一行；没有锁定技能时显示「无」。
+          正文保留：run id / 技能 chips / 快照专家 / 模板 chips。 */}
+      <RunDetailFold
+        runId={detail.run.id}
+        section="run-meta"
+        summary={
+          <>
+            {runFoldSummary(automationText("runFoldMetaTitle", "Skills & run metadata", "技能与运行元信息"), [
+              ...(skills.length > 0
+                ? [automationText("runFoldSkillsCount", "{{count}} skills", "{{count}} 个技能", { count: skills.length })]
+                : [])
+            ])}
+            {/* 摘要行里的 Token 明细：元素与内部结构不变（class 与内容一字未改），只是从折叠正文挪到摘要。 */}
+            {detail.run.tokenUsage ? (
+              <div className="automation-run-token-breakdown">
+                <span>{detail.run.tokenUsage.modelName || detail.run.tokenUsage.model}</span>
+                {detail.run.tokenUsage.reported ? (
+                  <>
+                    <b>{i18n.t("common:input")} {formatRunTokenCount(detail.run.tokenUsage.usage.inputTokens)}</b>
+                    <b>{i18n.t("common:output")} {formatRunTokenCount(detail.run.tokenUsage.usage.outputTokens)}</b>
+                    {detail.run.tokenUsage.coverage.cacheRead ? <em>{cacheHitRate ? automationText("runCacheHitRate", "Cache hit {{rate}} · read {{tokens}} (included in input)", "缓存命中率 {{rate}} · 读取 {{tokens}}（已含在输入）", { rate: cacheHitRate, tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) }) : automationText("runCacheRead", "Cache read {{tokens}} (included in input)", "缓存读取 {{tokens}}（已含在输入）", { tokens: formatRunTokenCount(detail.run.tokenUsage.usage.cacheReadTokens) })}</em> : null}
+                    {detail.run.tokenUsage.agentCount > 0 ? <em>{automationText("runSubAgents", "{{count}} sub-Agents", "{{count}} 个子 Agent", { count: detail.run.tokenUsage.agentCount })}</em> : null}
+                    {detail.run.tokenUsage.quality === "partial" ? <em>{automationText("runTokenPartial", "Known usage only; reporting is incomplete", "仅显示已知用量；统计不完整")}</em> : null}
+                  </>
+                ) : <em>{automationText("runNoTokenUsage", "The current model did not return Token usage", "当前模型没有返回 Token 用量")}</em>}
+              </div>
+            ) : null}
+          </>
+        }
+      >
+        <div className="automation-run-context-bar">
+          <span className="automation-run-id">{detail.run.id}</span>
+          <div className="automation-run-skill-chips">
+            <span>Skills</span>
+            {skills.length > 0 ? skills.map(([name, version]) => <b key={name}>{name} · v{String(version)}</b>) : <em>{automationText("runNoPinnedVersions", "No pinned versions", "未锁定版本")}</em>}
+          </div>
+          {legacyProfileSnapshotAgentSummary(detail.profileSnapshot) ? (
+            <div className="automation-run-template-chip">
+              <span>{automationText("runSnapshotAgents", "Snapshot experts", "快照专家")}</span>
+              <b>{legacyProfileSnapshotAgentSummary(detail.profileSnapshot)}</b>
+            </div>
+          ) : null}
+          {templateSnapshot ? <div className="automation-run-template-chip"><span>{automationText("runTemplate", "Template", "模板")}</span><b>{typeof templateSnapshot.name === "string" ? templateSnapshot.name : "--"}</b></div> : null}
+        </div>
+      </RunDetailFold>
+
+      <AgentCollaborationTrace events={detail.toolEvents} runStatus={detail.run.status} experts={detail.run.experts} />
 
       {detail.run.summary ? (
         <section className="automation-run-section automation-run-summary-section">
           <h3><Crosshair size={14} />{i18n.t("automation:analysisResult")}</h3>
+          {/* C25①：按董事会要求**不再渲染**排版提醒（极简模式已豁免 C21 排版契约，再报是噪声）。
+              注意：`audit.summaryFormatWarnings` 仍由 Rust 照旧记录，字段**不能删** ——
+              软审计数据仍用于复盘与后续度量，这里只是不展示。
+              正文（下一行的 AiMarkdown）始终按原样展示，不因提醒而折叠、改写或截断。 */}
           <div className="automation-run-summary-surface"><div className="automation-run-markdown"><AiMarkdown content={normalizeRunMarkdown(detail.run.summary)} /></div></div>
         </section>
       ) : runError ? <section className="automation-run-section automation-run-summary-section"><h3><Crosshair size={14} />{automationText("runFailureReason", "Failure reason", "失败原因")}</h3><div className="automation-run-summary-surface error" data-i18n-skip>{runError}</div></section> : null}
@@ -1973,20 +2515,18 @@ function RunDetailPanel({ detail }: { detail: AiAutomationRunDetail }) {
         )}
       </section>
 
+      {/* C27：既有两个折叠区改为同一受控写法 —— 内容一字未改，只是展开状态同样在本会话内保持。 */}
       {detail.reasoning ? (
-        <details className="automation-run-collapsible">
-          <summary>{automationText("runViewAnalysisProcess", "View analysis process", "查看分析过程")}</summary>
+        <RunDetailFold runId={detail.run.id} section="reasoning" summary={automationText("runViewAnalysisProcess", "View analysis process", "查看分析过程")}>
           <div className="automation-run-markdown reasoning"><AiMarkdown content={normalizeRunMarkdown(detail.reasoning)} /></div>
-        </details>
+        </RunDetailFold>
       ) : null}
-      <details className="automation-run-collapsible">
-        <summary>{automationText("runConfigSnapshot", "Run configuration snapshot", "运行配置快照")}</summary>
+      <RunDetailFold runId={detail.run.id} section="config-snapshot" summary={automationText("runConfigSnapshot", "Run configuration snapshot", "运行配置快照")}>
         <pre>{JSON.stringify(detail.profileSnapshot, null, 2)}</pre>
-      {templateSnapshot ? <details className="automation-run-collapsible">
-        <summary>{automationText("runTemplateSnapshot", "Frozen Agent Template snapshot", "已冻结的 Agent 模板快照")}</summary>
+      {templateSnapshot ? <RunDetailFold runId={detail.run.id} section="template-snapshot" summary={automationText("runTemplateSnapshot", "Frozen Agent Template snapshot", "已冻结的 Agent 模板快照")}>
         <pre>{JSON.stringify(templateSnapshot, null, 2)}</pre>
-      </details> : null}
-      </details>
+      </RunDetailFold> : null}
+      </RunDetailFold>
     </div>
   );
 }
@@ -2084,7 +2624,18 @@ function RunActionPayload({ step, kind }: { step: RunToolStep; kind: ExtendedRun
   const input = isRecord(step.arguments) ? step.arguments : {};
   if (kind === "wake") {
     const conditions = wakeConditionsFromStep(step);
-    return <div className="automation-run-wake-list">{conditions.map((condition, index) => <div key={`${formatStructured(condition)}-${index}`}><RadioTower size={13} /><span>{formatWakeCondition(condition)}</span></div>)}</div>;
+    return (
+      <div className="automation-run-wake-list">
+        {/* 收尾被拒（软校验打回）时这份计划**没有落库**，必须说清楚，避免被当成已生效。 */}
+        {step.ok === false ? (
+          <div className="automation-run-wake-rejected" data-run-wake-plan-rejected>
+            <AlertTriangle size={12} aria-hidden="true" />
+            {automationText("runWakePlanRejected", "This plan was not saved: the run finish was rejected.", "该计划未落库：本次收尾被拒绝。")}
+          </div>
+        ) : null}
+        {conditions.map((condition, index) => <div key={`${formatStructured(condition)}-${index}`}><RadioTower size={13} /><span>{formatWakeCondition(condition)}</span></div>)}
+      </div>
+    );
   }
   if (kind === "opportunity") {
     const opportunity = opportunityPayloadFromStep(step);
@@ -2171,12 +2722,27 @@ function toolDisplayName(name: string) {
     "okx.amendOrder": automationText("toolAmendOkxOrder", "Amend OKX order", "修改 OKX 订单"),
     "okx.closePosition": i18n.t("trading:closePosition"),
     "okx.setLeverage": automationText("toolSetLeverage", "Adjust leverage", "调整杠杆"),
-    "okx.setMarginMode": automationText("toolSetMarginMode", "Adjust margin mode", "调整保证金模式")
+    "okx.setMarginMode": automationText("toolSetMarginMode", "Adjust margin mode", "调整保证金模式"),
+    // Agent 库工具（契约 v3 C6）
+    "agent.list": automationText("toolAgentList", "List Agents", "读取 Agent 库"),
+    "agent.read": automationText("toolAgentRead", "Read Agent", "读取 Agent 正文"),
+    "agent.create": automationText("toolAgentCreate", "Create Agent", "创建 Agent"),
+    "agent.update": automationText("toolAgentUpdate", "Update Agent", "更新 Agent"),
+    // C15.2：主 Agent 点名/追问专家
+    "consult_expert": automationText("toolConsultExpert", "Consult expert", "咨询专家"),
+    "follow_up": automationText("toolFollowUpExpert", "Follow up with expert", "追问专家")
   };
   return labels[name] ?? name;
 }
 
+/** C15.3：专家点名那一步显示本次授予范围（数据来自工具结果 JSON，不新增事件字段）。 */
 function toolStepSummary(step: RunToolStep) {
+  const grant = expertGrantLabel(step.result, automationText);
+  const base = toolStepBaseSummary(step);
+  return [grant, base].filter(Boolean).join(" · ");
+}
+
+function toolStepBaseSummary(step: RunToolStep) {
   const input = isRecord(step.arguments) ? step.arguments : {};
   const result = isRecord(step.result) ? step.result : {};
   if (step.name === "background.finishRun") {
@@ -2396,6 +2962,8 @@ function formatRunTrigger(type: string, trigger: unknown) {
 
 function runStatusTone(status: string) {
   if (status === "completed") return "success";
+  // C19：skipped 独立色（中性/静默），不落进 failed 的红。
+  if (status === "skipped") return "skipped";
   if (status === "failed" || status === "cancelled") return "danger";
   return "running";
 }
@@ -2405,6 +2973,7 @@ function runStatusTitle(status: string) {
     completed: automationText("runAnalysisCompleted", "Analysis completed", "分析已完成"),
     failed: automationText("runFailedTitle", "Run failed", "运行失败"),
     cancelled: automationText("runCancelledTitle", "Run cancelled", "运行已取消"),
+    skipped: i18n.t("automation:runTriageSkippedNote"),
     running: automationText("runAgentAnalyzing", "Agent is analyzing", "Agent 正在分析"),
     queued: automationText("runWaiting", "Waiting to run", "等待运行")
   };
@@ -3997,13 +4566,18 @@ function AiAutomationPanelComponent({
   const [loading, setLoading] = useState(true);
   const [sectionLoading, setSectionLoading] = useState<AiAutomationTab | null>(null);
   const [automationCounts, setAutomationCounts] = useState<AiAutomationCounts>(() => automationOverviewCache?.counts ?? EMPTY_AUTOMATION_COUNTS);
-  const [loadedSections, setLoadedSections] = useState<Set<Exclude<AiAutomationTab, "profiles">>>(() => new Set(automationSectionCache.keys()));
+  const [loadedSections, setLoadedSections] = useState<Set<AiAutomationSectionTab>>(() => new Set(automationSectionCache.keys()));
   const [error, setError] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  // Agent 库（契约 C7）：文件为真相，列表由 ai_agents_list 扫目录返回。
+  const [agents, setAgents] = useState<AiAgentSummary[]>([]);
+  const [agentsLoading, setAgentsLoading] = useState(false);
+  const [agentsError, setAgentsError] = useState<string | null>(null);
+  const [agentResponsibilities, setAgentResponsibilities] = useState<Record<string, string>>({});
   const [systematicProfileConflict, setSystematicProfileConflict] = useState<SystematicProfileConflictConfirmation | null>(null);
   const summaryRequestIdRef = useRef(0);
   const appliedSummaryRequestIdRef = useRef(0);
-  const sectionLoadPromisesRef = useRef(new Map<Exclude<AiAutomationTab, "profiles">, Promise<void>>());
+  const sectionLoadPromisesRef = useRef(new Map<AiAutomationSectionTab, Promise<void>>());
   const runSectionRefreshTimerRef = useRef<number | null>(null);
 
   const applySummaryResponse = useCallback((requestId: number, rawSummary: AiAutomationSummary) => {
@@ -4024,7 +4598,7 @@ function AiAutomationPanelComponent({
     });
   }, [applySummaryResponse, summary]);
 
-  const applySectionResponse = useCallback((section: Exclude<AiAutomationTab, "profiles">, value: AiAutomationSection) => {
+  const applySectionResponse = useCallback((section: AiAutomationSectionTab, value: AiAutomationSection) => {
     automationSectionCache.set(section, value);
     setLoadedSections((current) => {
       if (current.has(section)) return current;
@@ -4078,7 +4652,7 @@ function AiAutomationPanelComponent({
     });
   }, []);
 
-  const loadSection = useCallback((section: Exclude<AiAutomationTab, "profiles">, silent = false, force = false): Promise<void> => {
+  const loadSection = useCallback((section: AiAutomationSectionTab, silent = false, force = false): Promise<void> => {
     const cached = automationSectionCache.get(section);
     if (cached) applySectionResponse(section, cached);
     if (cached && !force) return Promise.resolve();
@@ -4107,6 +4681,25 @@ function AiAutomationPanelComponent({
     });
     return request;
   }, [applySectionResponse]);
+
+  // Agent 库读取：桌面端才有命令；浏览器/预览态直接跳过，不写错误态。
+  const loadAgentLibrary = useCallback(async (): Promise<AiAgentSummary[]> => {
+    if (!isTauriRuntime()) return [];
+    setAgentsLoading(true);
+    try {
+      const next = await listAiAgents();
+      setAgents(next);
+      setAgentsError(null);
+      return next;
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      logger.warn("agent library load failed", { error: message });
+      setAgentsError(message);
+      return [];
+    } finally {
+      setAgentsLoading(false);
+    }
+  }, []);
 
   const refreshRunStatuses = useCallback(async (ids: string[]) => {
     const uniqueIds = [...new Set(ids.filter(Boolean))];
@@ -4156,6 +4749,7 @@ function AiAutomationPanelComponent({
       // the runs section. Load it quietly alongside the overview so a card shows
       // its run count immediately instead of only after visiting the runs tab.
       if (activeTab === "profiles") await loadSection("runs", true, true);
+      else if (activeTab === "agents") await loadAgentLibrary();
       else await loadSection(activeTab, true, true);
       logger.info("ai automation overview loaded", { durationMs: Math.round(performance.now() - startedAt), tab: activeTab });
     } catch (nextError) {
@@ -4165,7 +4759,7 @@ function AiAutomationPanelComponent({
     } finally {
       setLoading(false);
     }
-  }, [activeTab, applyOverviewResponse, focusId, loadSection, selectedProfileId, t]);
+  }, [activeTab, applyOverviewResponse, focusId, loadAgentLibrary, loadSection, selectedProfileId, t]);
 
   useEffect(() => {
     void refresh();
@@ -4175,8 +4769,9 @@ function AiAutomationPanelComponent({
 
   useEffect(() => {
     setActiveTab(initialTab);
-    if (initialTab !== "profiles") void loadSection(initialTab);
-  }, [initialTab, loadSection]);
+    if (initialTab === "agents") void loadAgentLibrary();
+    else if (initialTab !== "profiles") void loadSection(initialTab);
+  }, [initialTab, loadAgentLibrary, loadSection]);
 
   useEffect(() => {
     const listenerCleanup = createDeferredCleanupSlot();
@@ -4287,64 +4882,6 @@ function AiAutomationPanelComponent({
     );
   }, [runCommand, t]);
 
-  const saveAgentScheme = useCallback(async (scheme: AiAgentSchemeDraft): Promise<AiAgentScheme | null> => {
-    if (!isTauriRuntime()) {
-      onNotify({ kind: "warning", title: t("common:desktopOnly"), message: t("automation:collaborationSchemeSaveDesktopOnly") });
-      return null;
-    }
-    setBusyAction("agent-scheme-save");
-    setError(null);
-    try {
-      const raw = await invokeDesktop<AiAgentScheme>("ai_agent_scheme_save", { scheme });
-      const saved = normalizeAgentScheme(raw);
-      if (!saved) throw new Error(t("automation:collaborationInvalidSavedScheme"));
-      setSummary((current) => current ? {
-        ...current,
-        agentSchemes: [...current.agentSchemes.filter((item) => item.id !== saved.id), saved]
-          .sort((left, right) => Number(right.builtin) - Number(left.builtin) || right.updatedAt - left.updatedAt)
-      } : current);
-      onNotify({ kind: "success", title: t("automation:collaborationSchemeSaved"), message: t("automation:collaborationSchemeAgentCount", { name: saved.name, count: saved.agents.filter((agent) => agent.enabled).length }) });
-      return saved;
-    } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
-      logger.error("ai agent scheme save failed", nextError);
-      setError(message);
-      onNotify({ kind: "error", title: t("automation:collaborationSchemeSaveFailed"), message });
-      return null;
-    } finally {
-      setBusyAction(null);
-    }
-  }, [onNotify, t]);
-
-  const deleteAgentScheme = useCallback(async (id: string): Promise<boolean> => {
-    if (!isTauriRuntime()) {
-      onNotify({ kind: "warning", title: t("common:desktopOnly"), message: t("automation:collaborationSchemeDeleteDesktopOnly") });
-      return false;
-    }
-    setBusyAction(`agent-scheme-delete:${id}`);
-    setError(null);
-    try {
-      await invokeDesktop<void>("ai_agent_scheme_delete", { id });
-      setSummary((current) => current ? {
-        ...current,
-        agentSchemes: current.agentSchemes.filter((scheme) => scheme.id !== id)
-      } : current);
-      setProfileDraft((current) => current?.multiAgentSchemeId === id
-        ? { ...current, multiAgentSchemeId: null }
-        : current);
-      onNotify({ kind: "success", title: t("automation:collaborationSchemeDeleted"), message: t("automation:collaborationSchemeSnapshotRetained") });
-      return true;
-    } catch (nextError) {
-      const message = nextError instanceof Error ? nextError.message : String(nextError);
-      logger.error("ai agent scheme delete failed", nextError);
-      setError(message);
-      onNotify({ kind: "error", title: t("automation:collaborationSchemeDeleteFailed"), message });
-      return false;
-    } finally {
-      setBusyAction(null);
-    }
-  }, [onNotify, t]);
-
   const persistProfile = useCallback((profile: AiAgentProfile, forceSystematicConflict: boolean) => {
     void runCommand(
       `profile-save:${profile.id}`,
@@ -4384,39 +4921,8 @@ function AiAutomationPanelComponent({
       onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationNameDuplicate", { name }) });
       return;
     }
-    const multiAgents = profileDraft.multiAgents.slice(0, CUSTOM_AGENT_LIMIT).map((agent) => ({
-      ...agent,
-      id: agent.id.trim(),
-      name: agent.name.trim(),
-      role: agent.role.trim(),
-      responsibility: agent.responsibility.trim(),
-      scopes: Array.from(new Set(agent.scopes.map((scope) => scope.trim()).filter(Boolean)))
-    }));
-    const incompleteAgent = multiAgents.find((agent) => !agent.name || !agent.role || !agent.responsibility || agent.scopes.length === 0);
-    if (incompleteAgent) {
-      onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationAgentIncomplete", { name: incompleteAgent.name || t("automation:collaborationCustomAgent") }) });
-      return;
-    }
-    const invalidAgentId = multiAgents.find((agent) => !/^[a-z][a-z0-9_-]{0,31}$/.test(agent.id));
-    if (invalidAgentId) {
-      onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationAgentIdInvalid", { name: invalidAgentId.name || t("automation:collaborationCustomAgent") }) });
-      return;
-    }
-    if (profileDraft.multiAgentMode === "custom") {
-      const enabledAgents = multiAgents.filter((agent) => agent.enabled);
-      if (enabledAgents.length < 2) {
-        onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationMinimumAgents", { count: 2 }) });
-        return;
-      }
-      if (enabledAgents.length > profileDraft.multiAgentMaxAgents) {
-        onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationAgentLimitExceeded", { count: enabledAgents.length, limit: profileDraft.multiAgentMaxAgents }) });
-        return;
-      }
-      if (!profileDraft.accountId && enabledAgents.some((agent) => agent.scopes.includes("account"))) {
-        onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationAccountScopeRequiresAccount") });
-        return;
-      }
-    }
+    // 契约 C7：勾选制没有数量校验（不再有"至少 2 个 / 最多 N 个"）。
+    // 库里不存在的 id 由 Rust 保存侧丢弃并提示，前端不阻断。
     const now = Date.now();
     const profile: AiAgentProfile = {
       ...profileDraft,
@@ -4430,15 +4936,15 @@ function AiAutomationPanelComponent({
       skillVersionModes: profileDraft.skillVersionModes ?? {},
       reasoningDepth: profileDraft.reasoningDepth,
       allowedWakeConditionTypes: Array.from(new Set(profileDraft.allowedWakeConditionTypes)),
-      multiAgentMode: profileDraft.multiAgentMode === "auto" || profileDraft.multiAgentMode === "custom" ? profileDraft.multiAgentMode : "off",
-      multiAgentMaxAgents: Math.max(
-        2,
-        Math.min(
-          profileDraft.multiAgentMode === "auto" ? AUTO_AGENT_LIMIT : CUSTOM_AGENT_LIMIT,
-          Math.round(profileDraft.multiAgentMaxAgents) || 4
-        )
-      ),
-      multiAgents,
+      // C14：开关只写布尔值，绝不因为关闭而清空名单。
+      collaborationEnabled: Boolean(profileDraft.collaborationEnabled),
+      // C19：试判配置（前端只做范围收敛，权威校验在 Rust）。
+      triage: normalizeTriage(profileDraft.triage),
+      // C24：单 Agent 模式原样回传（协作开启时由 Rust 忽略）。
+      singleAgentMode: profileDraft.singleAgentMode === "minimal" ? "minimal" : "standard",
+      // C20.5（改写版）：勾选名单**原样回传**（不补默认 4 个、不过滤已下线）——
+      // 迁移由 Rust 强制完成，UI 再做一次过滤/补齐会与后端打架。
+      enabledAgentIds: [...(profileDraft.enabledAgentIds ?? [])],
       createdAt: profileDraft.createdAt || now,
       updatedAt: now
     };
@@ -4498,6 +5004,22 @@ function AiAutomationPanelComponent({
     deleteProfileById(profileDraft);
   }, [deleteProfileById, profileDraft]);
 
+  // C19.4：一键强制深度。命令缺失（B-RUST 未落地）时返回 false → UI 降级为"尚不支持"。
+  const forceDeep = useCallback(async (runId: string): Promise<boolean> => {
+    if (!isTauriRuntime()) return false;
+    try {
+      await forceDeepRun(runId);
+      automationSectionCache.delete("runs");
+      void loadSection("runs", true, true);
+      onNotify({ kind: "success", title: t("automation:runForceDeep"), message: t("automation:runForceDeepDone") });
+      return true;
+    } catch (nextError) {
+      logger.warn("force deep run failed", { runId, error: nextError instanceof Error ? nextError.message : String(nextError) });
+      onNotify({ kind: "warning", title: t("automation:runForceDeep"), message: t("automation:runForceDeepUnsupported") });
+      return false;
+    }
+  }, [loadSection, onNotify, t]);
+
   const runProfileNow = useCallback(() => {
     if (!profileDraft) return;
     runProfileById(profileDraft);
@@ -4520,8 +5042,11 @@ function AiAutomationPanelComponent({
     // Opening a tab revalidates it. A cached section still renders immediately so
     // the layout stays stable, while a forced reload replaces it with current
     // data; only the uncached first load shows the loading state.
-    if (id !== "profiles") void loadSection(id, Boolean(automationSectionCache.get(id)), true);
-  }, [loadSection]);
+    if (id === "profiles") return;
+    // agents 不走 ai_automation_section：它读的是 Agent 库目录。
+    if (id === "agents") { void loadAgentLibrary(); return; }
+    void loadSection(id, Boolean(automationSectionCache.get(id)), true);
+  }, [loadAgentLibrary, loadSection]);
 
   const saveUserWakeCondition = useCallback(async (draft: UserWakeConditionDraft) => {
     try {
@@ -4699,6 +5224,20 @@ function AiAutomationPanelComponent({
   }, [summary?.profilePerformance]);
 
   const profiles = summary?.profiles ?? [];
+  // 库列表只在挂载时读一次（数量级 10–50 个小文件）；切到 agents tab 或库有变动时再校验。
+  useEffect(() => {
+    void loadAgentLibrary();
+  }, [loadAgentLibrary]);
+  // 列表项不含职责（契约 C3 的 AiAgentSummary 没有 summary），勾选器需要一句话职责时才回读正文。
+  useEffect(() => {
+    if (!profileEditorOpen || agents.length === 0) return;
+    let cancelled = false;
+    void loadAgentResponsibilityIndex(agents)
+      .then((index) => { if (!cancelled) setAgentResponsibilities(index); })
+      .catch((nextError) => logger.warn("agent responsibility index failed", { error: nextError instanceof Error ? nextError.message : String(nextError) }));
+    return () => { cancelled = true; };
+  }, [agents, profileEditorOpen]);
+  const agentNamesById = useMemo(() => new Map(agents.map((agent) => [agent.id, agent.name])), [agents]);
   useEffect(() => {
     if (!onboardingActive || loading || !summary || activeTab !== "profiles" || profileDraft || profiles.length > 0) return;
     createNewProfile();
@@ -4726,6 +5265,8 @@ function AiAutomationPanelComponent({
   const useOverviewCounts = !scopeProfileId;
   const tabCounts: Partial<Record<AiAutomationTab, number>> = {
     profiles: profiles.length,
+    // Agent 库总数（内置 + 自定义 + AI 创建）；库读不到时显示 0。
+    agents: agents.length,
     runs: useOverviewCounts ? automationCounts.runs : scopeRuns.length,
     wake_conditions: useOverviewCounts ? automationCounts.activeWakeConditions : scopeWakeConditions.filter((item) => item.status === "active").length,
     reviews: automationCounts.reviews,
@@ -4733,7 +5274,7 @@ function AiAutomationPanelComponent({
     notifications: useOverviewCounts ? automationCounts.notifications : scopeNotificationDeliveries.length
   };
   const activeTabLabel = t(automationTabI18nKey(activeTab));
-  const activeSectionLoaded = activeTab === "profiles" || loadedSections.has(activeTab);
+  const activeSectionLoaded = activeTab === "profiles" || activeTab === "agents" || loadedSections.has(activeTab);
 
   useGSAP(() => {
     if (!hasMountedMotionRef.current) {
@@ -4802,7 +5343,7 @@ function AiAutomationPanelComponent({
         ))}
       </nav>
 
-      {summary && activeTab !== "profiles" && activeTab !== "reviews" ? (
+      {summary && activeTab !== "profiles" && activeTab !== "reviews" && activeTab !== "agents" ? (
         <div className="automation-scope-bar">
           <div>
             <span>{t("automation:workbenchViewScope")}</span>
@@ -4827,7 +5368,14 @@ function AiAutomationPanelComponent({
         </div>
       ) : null}
 
-      <section className={clsx("automation-content", activeTab === "runs" && "automation-content--runs")} data-onboarding-target={onboardingActive ? "profile" : undefined}>
+      <section
+        className={clsx(
+          "automation-content",
+          activeTab === "runs" && "automation-content--runs",
+          activeTab === "agents" && "automation-content--library"
+        )}
+        data-onboarding-target={onboardingActive ? "profile" : undefined}
+      >
         {sectionLoading === activeTab && summary ? (
           <div className={clsx("automation-section-loading", !activeSectionLoaded && "initial")} role="status" aria-live="polite">
             <Loader2 className="spin" size={15} />
@@ -4865,6 +5413,7 @@ function AiAutomationPanelComponent({
                     focused={focusId === profile.id}
                     recentRuns={profileRecentRuns.get(profile.id) ?? null}
                     performance={profilePerformance.get(profile.id) ?? null}
+                    agentNamesById={agentNamesById}
                     busy={Boolean(busyAction)}
                     onEdit={() => selectProfile(profile)}
                     onDelete={() => deleteProfileById(profile)}
@@ -4887,12 +5436,14 @@ function AiAutomationPanelComponent({
                   skills={skills}
                   skillVersions={summary.skillVersions}
                   models={aiConfig?.models ?? []}
-                  agentSchemes={summary.agentSchemes}
+                  agents={agents}
+                  agentResponsibilities={agentResponsibilities}
+                  agentsLoading={agentsLoading}
+                  agentsError={agentsError}
                   busy={Boolean(busyAction)}
-                  schemeBusy={Boolean(busyAction?.startsWith("agent-scheme"))}
                   onChange={(patch) => setProfileDraft((current) => current ? { ...current, ...patch } : current)}
-                  onSaveScheme={saveAgentScheme}
-                  onDeleteScheme={deleteAgentScheme}
+                  onOpenAgentLibrary={() => { closeProfileEditor(); handleTabClick("agents"); }}
+                  onReloadAgents={() => { void loadAgentLibrary().then((next) => loadAgentResponsibilityIndex(next, true).then(setAgentResponsibilities)); }}
                   onSave={saveProfile}
                   onRun={runProfileNow}
                   onDailyReview={runDailyReview}
@@ -4901,8 +5452,21 @@ function AiAutomationPanelComponent({
               </ProfileEditorDialog>
             ) : null}
           </div>
+        ) : activeTab === "agents" ? (
+          <AgentLibraryView
+            agents={agents}
+            profiles={profiles}
+            skills={skills}
+            enabledSkillIds={aiConfig?.enabledSkills ?? []}
+            models={aiConfig?.models ?? []}
+            activeModelId={aiConfig?.activeModelId ?? ""}
+            loading={agentsLoading}
+            error={agentsError}
+            onReload={loadAgentLibrary}
+            onNotify={onNotify}
+          />
         ) : activeTab === "runs" ? (
-          <RunsView items={scopeRuns} profiles={profileMap} deliveries={scopeNotificationDeliveries} focusId={focusId} />
+          <RunsView items={scopeRuns} profiles={profileMap} deliveries={scopeNotificationDeliveries} focusId={focusId} onForceDeep={forceDeep} />
         ) : activeTab === "wake_conditions" ? (
           <WakeConditionsView
             items={scopeWakeConditions}
@@ -4975,9 +5539,118 @@ const AUTOMATION_PREVIEW_MARKET_REPORT = {
   vetoReason: ""
 };
 
+const AUTOMATION_PREVIEW_RUN_TRIAGE: AiRunTriage = {
+  mode: "enforce",
+  verdict: "escalate",
+  reasons: ["4H 结构与 5m 主动成交同时转弱，边际变化成立", "标记位 65,800 已被 5m 收盘价确认跌破"],
+  evidence: [
+    { fact: "最新价 65,088.1，4H 低点下移且成交量放大", source: "market.readTicker", at: "2026-09-18T16:04:20Z" },
+    { fact: "主动卖出占比升至 58%，盘口卖方深度高出 1.7 倍", source: "market.readOrderBook", at: "2026-09-18T16:04:22Z" },
+    { fact: "资金费率接近中性，未见拥挤反转证据", source: "market.readFundingRate", at: "2026-09-18T16:04:23Z" }
+  ],
+  forcedBy: [],
+  sampled: false,
+  triageTokens: 41_200,
+  deepTokens: 194_830
+};
+
 const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
   run: {
     id: "run-preview-multi-agent",
+    triage: AUTOMATION_PREVIEW_RUN_TRIAGE,
+    // C23.2：逐专家详情（Rust 落库 = agentStart.taskPrompt + agentDone.result.text）。
+    // 前 3 位字段齐全；第 4 位（情报资金，仍在飞行）故意缺 taskPrompt/report/token → 覆盖"占位"路径。
+    experts: [
+      {
+        expertId: "market-structure",
+        configuredAgentId: "market-structure",
+        agentId: "preview-market",
+        name: "市场结构",
+        role: "market_structure",
+        mode: "parallel",
+        grantedScopes: ["market", "derivatives"],
+        toolCalls: 3,
+        durationMs: 13_000,
+        startedAt: 1_784_810_001_000,
+        endedAt: 1_784_810_014_000,
+        tokenUsage: { inputTokens: 252_000, outputTokens: 12_400, totalTokens: 264_400 },
+        taskPrompt: "时点：2026-07-23 16:30（Asia/Shanghai）。\n依赖提示：本轮尚未收到其它专家报告，请独立取证。\nProfile 任务：观察 BTC-USDT-SWAP，判断是否存在可执行的做空机会，并给出关键失效位。\n职责范围：多周期价格结构、成交、盘口、资金费率、持仓量与流动性；只给事实与推断，不给交易指令。",
+        report: [
+          "## 结论",
+          "结构偏空：4H 低点下移，5m 主动卖出占比 58%，盘口卖方深度为买方 1.7 倍。",
+          "",
+          "## 证据",
+          "- 最新价 65,088.1（market.readTicker · 2026-07-23T08:04:20Z · rec-1）",
+          "- 5m K 线确认跌破标记位 65,800（market.readCandles · 2026-07-23T08:04:21Z · rec-2）",
+          "- 资金费率 0.0031%，未见拥挤反转（market.readFundingRate · 2026-07-23T08:04:23Z · rec-3）",
+          "",
+          "## 失效条件",
+          "价格重新站稳 65,800 且成交量同步放大。",
+          "",
+          "## 数据缺口",
+          "15m 主动成交累积差尚未覆盖完整观察窗口。"
+        ].join("\n")
+      },
+      {
+        expertId: "account-risk",
+        configuredAgentId: "account-risk",
+        agentId: "preview-risk",
+        name: "账户与持仓",
+        role: "account_state",
+        mode: "parallel",
+        grantedScopes: ["account", "market"],
+        toolCalls: 1,
+        durationMs: 4_000,
+        startedAt: 1_784_810_010_000,
+        endedAt: 1_784_810_014_000,
+        tokenUsage: { inputTokens: 249_000, outputTokens: 3_100, totalTokens: 252_100 },
+        taskPrompt: "时点：2026-07-23 16:30（Asia/Shanghai）。\nProfile 任务：核对账户持仓、挂单与保证金率，只列事实与风险标记。",
+        report: "## 状态清单\n- 持仓：0 张（空仓）\n- 挂单：无\n- 保证金率：412%（口径：越大越安全，≤100% 进入强平区）\n\n## 风险标记\n- 无止损保护（因为空仓，不适用）\n- 可用余量充足，无集中度风险"
+      },
+      {
+        expertId: "contrarian-review",
+        configuredAgentId: "contrarian-review",
+        agentId: "preview-challenger",
+        name: "反方审查",
+        role: "contrarian",
+        mode: "serial",
+        grantedScopes: ["intelligence", "history"],
+        toolCalls: 1,
+        durationMs: 6_000,
+        startedAt: 1_784_810_015_000,
+        endedAt: 1_784_810_021_000,
+        tokenUsage: { inputTokens: 176_000, outputTokens: 4_900, totalTokens: 180_900 },
+        taskPrompt: "时点：2026-07-23 16:30（Asia/Shanghai）。\n上游报告：市场结构（结构偏空、失效位 65,800）、账户与持仓（空仓、保证金率 412%）。\n只读已有报告 + 少量定点核对，不要重新做全量取证；若无法推翻就明确写「无法推翻 + 适用范围」。",
+        report: "## 逐条回应\n1. **历史相似样本不足** —— 接受。已在结论中把置信度从 72% 降到 61%，并标注样本缺口（history.readSimilarOpportunities 超时，无样本）。\n2. **宏观事件窗口内滑点风险被低估** —— 反驳。本轮为限价入场且未穿价，滑点在预检中已按事件窗口放宽（trade.precheck · 2026-07-23T08:04:31Z）。\n3. **若 15m 主动买入回流，结论应立即失效** —— 未回应（本轮未取得该证据）。\n\n## 无法推翻的部分\n结构与盘口证据方向一致，无法推翻；适用范围限于 4H–1D 窗口。"
+      },
+      {
+        // 老记录样例：Rust 的键始终存在，但内容为空串 → UI 显示"未记录"占位。
+        expertId: "intelligence-flow",
+        configuredAgentId: "intelligence-flow",
+        agentId: "preview-intelligence",
+        name: "情报资金",
+        role: "intelligence_flow",
+        taskPrompt: "",
+        report: "",
+        mode: "parallel",
+        grantedScopes: ["market", "derivatives", "intelligence", "account", "history"],
+        tokensUnavailable: true
+      }
+    ],
+    // C21.3：排版提醒样例（另一条运行留空以覆盖"无警告"路径）。
+    summaryFormatWarnings: ["缺小节：观察条件"],
+    // C20.6 补充：升级了但未派专家（给理由 → 可复盘）。
+    audit: { selfAnalysisReason: "本轮只有行情快照可读，主 Agent 自行完成取数与判断。", selfAnalysisUnjustified: false },
+    // C20.6：审计字段样例（权威落点 = run 记录）。
+    usedEvidence: [
+      { expertId: "desic-data-digest", expertName: "数据汇总", points: ["最新价 65,088.1，4H 低点下移（market.readTicker · 16:04:20Z）", "主动卖出占比 58%，卖方深度 1.7×（market.readOrderBook · 16:04:22Z）"] },
+      { expertId: "desic-account-state", expertName: "账户与持仓", points: ["保证金率 412%，空仓无挂单（account.readSnapshot · 16:04:25Z）"] }
+    ],
+    contrarianResolutions: [
+      { claim: "历史相似样本不足，不能支持做空结论", resolution: "accepted", basis: "已在结论中把置信度从 72% 降到 61%，并标注样本缺口。" },
+      { claim: "宏观事件窗口内滑点风险被低估", resolution: "rebutted", basis: "本轮为限价入场且未穿价，滑点在预检中已按事件窗口放宽。" },
+      { claim: "若 15m 主动买入回流，结论应立即失效" }
+    ],
     profileId: "profile-preview-multi-agent",
     triggerType: "manual",
     status: "running",
@@ -5017,17 +5690,21 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
     }
   },
   trigger: { type: "manual", source: "automation-preview" },
+  // 运行历史只读兼容夹具：这是一份**迁移前**快照（仍带已删除的协作字段），
+  // 用来验证 `legacyProfileSnapshotAgentSummary()` 的兜底渲染；新快照写 enabledAgents。
   profileSnapshot: {
     id: "profile-preview-multi-agent",
     name: "BTC 永续决策台",
     multiAgentMode: "custom",
     multiAgentMaxAgents: 4,
+    multiAgents: [{ id: "market-structure", name: "市场结构" }, { id: "account-risk", name: "账户风险" }],
     symbols: ["BTC-USDT-SWAP"]
   },
   templateSnapshot: {
     id: "builtin-perpetual-decision-desk",
     name: "永续合约决策台",
-    instructions: "先并行取证，再由主 Agent 汇总。",
+    // v3：不再有"两波并行取证"编排 —— 主 Agent 按需点名专家，取证后自行汇总。
+    instructions: "主 Agent 按需点名专家，取证后自行汇总。",
     capturedAt: Date.UTC(2026, 6, 23, 8, 30, 0)
   },
   skillVersions: {
@@ -5039,10 +5716,12 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
   initialMarketSnapshot: null,
   finalDecision: null,
   toolEvents: [
+    // C18.3 夹具：v3 只有"专家取证 · 按需点名"一段 —— 3 位并行（时间区间真实重叠）+ 1 位串行（不重叠）。
+    // 起止时刻（相对 run.startedAt）：market +0s→+14s、intelligence +2s→+12s、account +10s→+14s、contrarian +15s→+21s。
     { type: "teamEvent", event: { type: "tasks_assigned", count: 4 } },
-    { type: "agentStart", agentId: "preview-market-attempt-1", configuredAgentId: "market-structure", parentAgentId: "run-preview-multi-agent", role: "market-structure", title: "市场结构", task: "分析 K 线、盘口、资金费率和持仓量。" },
-    { type: "agentDone", agentId: "preview-market-attempt-1", configuredAgentId: "market-structure", status: "failed", result: null, error: "首次连接超时，已自动重试。" },
-    { type: "agentStart", agentId: "preview-market", configuredAgentId: "market-structure", parentAgentId: "run-preview-multi-agent", role: "market-structure", title: "市场结构", task: "分析 K 线、盘口、资金费率和持仓量。" },
+    { type: "agentStart", agentId: "preview-market-attempt-1", configuredAgentId: "market-structure", parentAgentId: "run-preview-multi-agent", role: "market-structure", title: "市场结构", task: "分析 K 线、盘口、资金费率和持仓量。", startedAt: 1_784_810_000_000 + 0 },
+    { type: "agentDone", agentId: "preview-market-attempt-1", configuredAgentId: "market-structure", status: "failed", result: null, error: "首次连接超时，已自动重试。", endedAt: 1_784_810_000_000 + 1_000 },
+    { type: "agentStart", agentId: "preview-market", configuredAgentId: "market-structure", parentAgentId: "run-preview-multi-agent", role: "market-structure", title: "市场结构", task: "分析 K 线、盘口、资金费率和持仓量。", startedAt: 1_784_810_000_000 + 1_000 },
     { type: "toolCall", toolCallId: "preview-market-ticker", name: "market.readTicker", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true },
     { type: "toolResult", toolCallId: "preview-market-ticker", name: "market.readTicker", result: { last: "66420.1" }, summary: "最新行情已返回", ok: true },
     { type: "toolCall", toolCallId: "preview-market-candles", name: "market.readCandles", arguments: { instId: "BTC-USDT-SWAP", bar: "5m" }, allowed: true },
@@ -5052,6 +5731,7 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
       agentId: "preview-market",
       configuredAgentId: "market-structure",
       status: "done",
+      endedAt: 1_784_810_000_000 + 14_000,
       result: {
         finishReason: "completed",
         iterations: 5,
@@ -5059,18 +5739,56 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
         text: JSON.stringify(AUTOMATION_PREVIEW_MARKET_REPORT)
       }
     },
+    { type: "agentStart", agentId: "preview-risk", configuredAgentId: "account-risk", parentAgentId: "run-preview-multi-agent", role: "account-risk", title: "账户风险", task: "检查仓位、保证金、挂单和最小规模预检。", startedAt: 1_784_810_000_000 + 10_000 },
+    { type: "toolCall", toolCallId: "preview-risk-snapshot", agentId: "preview-risk", name: "account.readSnapshot", arguments: {}, allowed: true, startedAt: 1_784_810_011_000 },
+    { type: "toolResult", toolCallId: "preview-risk-snapshot", agentId: "preview-risk", name: "account.readSnapshot", result: { marginRatio: "18.4" }, summary: "账户风险可控", ok: true, requestedAt: 1_784_810_011_000, executionStartedAt: 1_784_810_012_100, executionEndedAt: 1_784_810_012_250, endedAt: 1_784_810_012_250 },
+    { type: "agentDone", agentId: "preview-risk", configuredAgentId: "account-risk", status: "done", result: "当前无冲突挂单，保证金余量充足。", endedAt: 1_784_810_014_000 },
+    // C18.1/C15.3：批量点名结果同时带 mode 与 grantedScopes —— lane 头部据此显示
+    // "并行/串行"与"本次授予范围"（单点 consult_expert 没有 mode，UI 按串行呈现）。
+    { type: "toolCall", toolCallId: "preview-consult-experts", name: "consult_experts", arguments: { experts: [
+      { expertId: "market-structure", task: "分析 K 线结构、盘口与关键失效位。", mode: "parallel" },
+      { expertId: "intelligence-flow", task: "核对新闻、宏观事件与 Smart Money。", mode: "parallel" },
+      { expertId: "account-risk", task: "检查仓位、保证金与交易预检。", mode: "parallel" },
+      { expertId: "contrarian-review", task: "寻找冲突证据与明确否决条件。", mode: "serial" }
+    ] }, allowed: true },
+    { type: "toolResult", toolCallId: "preview-consult-experts", name: "consult_experts", result: { ok: true, results: [
+      { expertId: "market-structure", expertName: "市场结构", mode: "parallel", grantedScopes: ["market", "derivatives"], report: "结构偏空，等待关键价位确认。" },
+      { expertId: "intelligence-flow", expertName: "情报资金", mode: "parallel", grantedScopes: ["market", "derivatives", "intelligence", "account", "history"], report: "宏观窗口临近，净流入放缓。" },
+      { expertId: "account-risk", expertName: "账户风险", mode: "parallel", grantedScopes: ["account", "market"], report: "保证金充足，保持现有保护单。" },
+      { expertId: "contrarian-review", expertName: "反方审查", mode: "serial", grantedScopes: ["market", "derivatives", "history"], report: "历史相似样本不足以支持该结论。" }
+    ], failures: [] }, summary: "4 位专家已回流", ok: true },
+    // 串行屏障：反方审查在全部并行批次结束后才启动（+15s→+21s，与任何专家都不重叠）。
+    { type: "agentStart", agentId: "preview-challenger", configuredAgentId: "contrarian-review", parentAgentId: "run-preview-multi-agent", role: "contrarian", title: "反方审查", task: "读取前序专家报告，寻找数据缺口、冲突证据和明确否决条件。", startedAt: 1_784_810_000_000 + 15_000 },
+    { type: "toolCall", toolCallId: "preview-history", agentId: "preview-challenger", name: "history.readSimilarOpportunities", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true },
+    { type: "toolResult", toolCallId: "preview-history", agentId: "preview-challenger", name: "history.readSimilarOpportunities", result: null, summary: "历史样本读取超时", ok: false },
+    { type: "agentDone", agentId: "preview-challenger", configuredAgentId: "contrarian-review", status: "failed", result: null, error: "历史相似机会读取超时，反方证据不完整。", endedAt: 1_784_810_000_000 + 21_000 },
+    // 第二批并行专家（仍在飞行）：v3 的 serial 是屏障，它必须等反方审查结束才开始，
+    // 因此这里刻意不写时刻 —— 没有时间区间就不谎报重叠，只由 lane 上的 mode 标记表达"并行"。
     { type: "agentStart", agentId: "preview-intelligence", configuredAgentId: "intelligence-flow", parentAgentId: "run-preview-multi-agent", role: "intelligence-flow", title: "情报资金", task: "核对新闻、宏观事件、Smart Money 与资金流。" },
     { type: "toolCall", toolCallId: "preview-news", agentId: "preview-intelligence", name: "intelligence.searchNews", arguments: { symbol: "BTC", limit: 20 }, allowed: true },
     { type: "toolResult", toolCallId: "preview-news", agentId: "preview-intelligence", name: "intelligence.searchNews", result: { count: 20 }, summary: "新闻证据已读取", ok: true },
     { type: "toolCall", toolCallId: "preview-smart-money", agentId: "preview-intelligence", name: "intelligence.readSmartMoney", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true },
-    { type: "agentStart", agentId: "preview-risk", configuredAgentId: "account-risk", parentAgentId: "run-preview-multi-agent", role: "account-risk", title: "账户风险", task: "检查仓位、保证金、挂单和最小规模预检。", startedAt: 1_784_810_010_000 },
-    { type: "toolCall", toolCallId: "preview-risk-snapshot", agentId: "preview-risk", name: "account.readSnapshot", arguments: {}, allowed: true, startedAt: 1_784_810_011_000 },
-    { type: "toolResult", toolCallId: "preview-risk-snapshot", agentId: "preview-risk", name: "account.readSnapshot", result: { marginRatio: "18.4" }, summary: "账户风险可控", ok: true, requestedAt: 1_784_810_011_000, executionStartedAt: 1_784_810_012_100, executionEndedAt: 1_784_810_012_250, endedAt: 1_784_810_012_250 },
-    { type: "agentDone", agentId: "preview-risk", configuredAgentId: "account-risk", status: "done", result: "当前无冲突挂单，保证金余量充足。", endedAt: 1_784_810_014_000 },
-    { type: "agentStart", agentId: "preview-challenger", configuredAgentId: "contrarian-review", parentAgentId: "run-preview-multi-agent", role: "contrarian", title: "反方审查", task: "读取第一阶段报告，寻找数据缺口、冲突证据和明确否决条件。" },
-    { type: "toolCall", toolCallId: "preview-history", agentId: "preview-challenger", name: "history.readSimilarOpportunities", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true },
-    { type: "toolResult", toolCallId: "preview-history", agentId: "preview-challenger", name: "history.readSimilarOpportunities", result: null, summary: "历史样本读取超时", ok: false },
-    { type: "agentDone", agentId: "preview-challenger", configuredAgentId: "contrarian-review", status: "failed", result: null, error: "历史相似机会读取超时，反方证据不完整。" },
+    // C22 软校验打回：第一次 finishRun 被拒（计划 5 条，未落库），随后重规划为 7 条并成功收尾。
+    // 旧口径会把 5 + 7 累加成 12；新口径只认成功收尾那一次的结果（7）。
+    { type: "toolCall", toolCallId: "preview-finish-rejected", name: "background.finishRun", arguments: { summary: "首次收尾", nextWakePlan: { mode: "any", conditions: [
+      { type: "price_cross", instId: "BTC-USDT-SWAP", direction: "up", price: "65800" },
+      { type: "price_cross", instId: "BTC-USDT-SWAP", direction: "down", price: "64000" },
+      { type: "position_changed" },
+      { type: "order_state_changed", states: ["filled"] },
+      { type: "timer", intervalMinutes: 60 }
+    ], expiresAt: 1_784_814_600_000 } }, allowed: true },
+    { type: "toolResult", toolCallId: "preview-finish-rejected", name: "background.finishRun", result: { ok: false, reason: "缺少观察条件小节，请补齐后重新收尾。" }, summary: "软校验打回：缺少观察条件小节", ok: false },
+    { type: "toolCall", toolCallId: "preview-finish", name: "background.finishRun", arguments: { summary: "最终收尾", nextWakePlan: { mode: "any", conditions: [
+      { type: "price_cross", instId: "BTC-USDT-SWAP", direction: "up", price: "65800" },
+      { type: "price_cross", instId: "BTC-USDT-SWAP", direction: "down", price: "64000" },
+      { type: "price_cross", instId: "BTC-USDT-SWAP", direction: "up", price: "67200" },
+      { type: "position_changed" },
+      { type: "order_state_changed", states: ["filled"] },
+      { type: "opportunity_state_changed", states: ["approved"] },
+      { type: "timer", intervalMinutes: 60 }
+    ], expiresAt: 1_784_814_600_000 } }, allowed: true },
+    // 落库真值（地面真值）：createdWakeConditionIds 7 条；全库 active 也是这 7 条。
+    { type: "toolResult", toolCallId: "preview-finish", name: "background.finishRun", result: { ok: true, createdWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], activeWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], nextWakeAt: 1_784_814_600_000 }, summary: "已保存 7 条动态观察条件", ok: true },
     { type: "toolCall", toolCallId: "preview-opportunity", name: "tradeOpportunity.create", arguments: {}, allowed: true },
     {
       type: "toolResult",
@@ -5090,6 +5808,204 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
       summary: "交易机会已创建",
       ok: true
     }
+  ]
+};
+
+/** C19 夹具②：enforce 下判 skip → 深度分析被跳过（带理由/证据/nextWakePlan）。 */
+const AUTOMATION_PREVIEW_SKIPPED_TRIAGE: AiRunTriage = {
+  mode: "enforce",
+  verdict: "skip",
+  reasons: ["距上次深度运行 14 分钟，结构、盘口与资金费率均无边际变化", "无持仓、无挂单变化，标记位未被触碰"],
+  evidence: [
+    { fact: "最新价 64,982.4，仍在上一轮取证区间内", source: "market.readTicker", at: "2026-09-18T16:32:05Z" },
+    { fact: "保证金率 61%，账户无挂单", source: "account.readSnapshot", at: "2026-09-18T16:32:06Z" },
+    { fact: "近 30 分钟无重要新闻事件", source: "intelligence.searchNews", at: "2026-09-18T16:32:07Z" }
+  ],
+  forcedBy: [],
+  sampled: false,
+  triageTokens: 18_400,
+  deepTokens: 0
+};
+
+const AUTOMATION_PREVIEW_SKIPPED_DETAIL: AiAutomationRunDetail = {
+  run: {
+    id: "run-preview-triage-skipped",
+    profileId: "profile-preview-multi-agent",
+    triggerType: "scheduled",
+    status: "skipped",
+    summary: "试判判定无边际变化，已跳过深度分析并写入下一轮观察条件。",
+    startedAt: Date.now() - 22 * 60_000,
+    finishedAt: Date.now() - 22 * 60_000 + 24_000,
+    nextWakeAt: Date.now() + 40 * 60_000,
+    actionCounts: { opportunity: 0, wake: 1, trade: 0, notification: 0 },
+    triage: AUTOMATION_PREVIEW_SKIPPED_TRIAGE,
+    tokenUsage: null
+  },
+  trigger: { type: "scheduled", source: "automation-preview", wakeConditionId: "wake-preview-triage" },
+  profileSnapshot: { id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-market-structure"] },
+  skillVersions: { "trading-philosophy": 3 },
+  assistantText: "本轮无边际变化，已写回下一轮观察条件。",
+  reasoning: "试判阶段只读了行情、账户与新闻三类只读证据，未发现达到深度分析门槛的变化。",
+  initialMarketSnapshot: null,
+  finalDecision: null,
+  toolEvents: [
+    { type: "toolCall", toolCallId: "preview-triage-ticker", name: "market.readTicker", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 2_000 },
+    { type: "toolResult", toolCallId: "preview-triage-ticker", name: "market.readTicker", result: { last: "64982.4" }, summary: "试判：读取最新行情", ok: true, endedAt: Date.now() - 22 * 60_000 + 2_400 },
+    { type: "toolCall", toolCallId: "preview-triage-account", name: "account.readSnapshot", arguments: {}, allowed: true, startedAt: Date.now() - 22 * 60_000 + 3_000 },
+    { type: "toolResult", toolCallId: "preview-triage-account", name: "account.readSnapshot", result: { marginRatio: "61" }, summary: "试判：账户无变化", ok: true, endedAt: Date.now() - 22 * 60_000 + 3_500 },
+    { type: "toolCall", toolCallId: "preview-triage-triage", name: "background.reportTriage", arguments: { escalate: false, reasons: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.reasons, evidence: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.evidence, nextWakePlan: { mode: "any", conditions: [{ type: "price_change_pct", thresholdPct: "0.8" }], expiresAt: Date.now() + 6 * 3_600_000 } }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 18_000 },
+    // C25③（裁决）：实时轨迹的 reportTriage 结果维持**布尔**形状（escalate + skipped），
+    // 与 C19 真模型探针验证过的一致；run 记录里的 `triage.verdict` 才是字符串。
+    { type: "toolResult", toolCallId: "preview-triage-triage", name: "background.reportTriage", result: { ok: true, escalate: false, skipped: true, nextWakeAt: Date.now() + 40 * 60_000 }, summary: "试判：建议跳过，已写入下一轮观察条件", ok: true, endedAt: Date.now() - 22 * 60_000 + 19_000 },
+    { type: "toolCall", toolCallId: "preview-triage-finish", name: "background.finishRun", arguments: { summary: "试判判定无边际变化，跳过深度分析。" }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 20_000 },
+    { type: "toolResult", toolCallId: "preview-triage-finish", name: "background.finishRun", result: { ok: true }, summary: "运行收尾", ok: true, endedAt: Date.now() - 22 * 60_000 + 21_000 }
+  ]
+};
+
+/** C19 夹具③：硬升级兜底 —— verdict=false 被否决并强制升级（forcedBy 写明原因），另含抽样复检标记。 */
+const AUTOMATION_PREVIEW_FORCED_TRIAGE: AiRunTriage = {
+  mode: "enforce",
+  // C25① 兼容路径：只有布尔 `escalate`（旧 Rust 形状）时，UI 也要正确映射成字符串 verdict。
+  escalate: true,
+  reasons: ["试判曾建议跳过，但命中硬升级清单"],
+  evidence: [
+    { fact: "距止损 1.2%，低于阈值 1.5%", source: "account.readSnapshot", at: "2026-09-18T17:02:11Z" },
+    { fact: "挂单被撤销后新增一笔限价单", source: "account.readSnapshot", at: "2026-09-18T17:02:12Z" },
+    { fact: "维持保证金率 120%，低于阈值 150（离强平不足 1.5 倍缓冲）", source: "account.readSnapshot", at: "2026-09-18T17:02:13Z" }
+  ],
+  forcedBy: ["止损距离 1.2%", "挂单变化", "保证金率 120%"],
+  forced: true,
+  sampled: true,
+  triageTokens: 22_900,
+  deepTokens: 87_400
+};
+
+const AUTOMATION_PREVIEW_FORCED_DETAIL: AiAutomationRunDetail = {
+  ...AUTOMATION_PREVIEW_RUN_DETAIL,
+  run: {
+    ...AUTOMATION_PREVIEW_RUN_DETAIL.run,
+    id: "run-preview-triage-forced",
+    status: "completed",
+    triage: AUTOMATION_PREVIEW_FORCED_TRIAGE,
+    // 未派专家且未说明理由 → UI 必须标出来（可见、可复盘）。
+    audit: { selfAnalysisUnjustified: true },
+    usedEvidence: [],
+    contrarianResolutions: [],
+    summaryFormatWarnings: [],
+    startedAt: Date.now() - 8 * 60_000,
+    finishedAt: Date.now() - 8 * 60_000 + 96_000
+  },
+  assistantText: "试判建议跳过，但止损距离与挂单变化触发硬升级，已执行深度分析。"
+};
+
+/** C19 预览夹具：三条运行 —— 升级 / 跳过 / 硬升级强制（列表徽标与详情都靠它们）。 */
+const AUTOMATION_PREVIEW_TRIAGE_RUNS: AiAutomationRun[] = [
+  {
+    id: AUTOMATION_PREVIEW_RUN_DETAIL.run.id,
+    profileId: "profile-preview-multi-agent",
+    triggerType: "manual",
+    status: "running",
+    summary: "试判升级，已进入深度分析。",
+    startedAt: Date.now() - 18 * 60_000,
+    finishedAt: null,
+    nextWakeAt: null,
+    actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
+    triage: AUTOMATION_PREVIEW_RUN_TRIAGE,
+    tokenUsage: AUTOMATION_PREVIEW_RUN_DETAIL.run.tokenUsage ?? null
+  },
+  {
+    id: AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.id,
+    profileId: "profile-preview-multi-agent",
+    triggerType: "scheduled",
+    status: "skipped",
+    summary: AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.summary ?? null,
+    startedAt: AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.startedAt,
+    finishedAt: AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.finishedAt ?? null,
+    nextWakeAt: AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.nextWakeAt ?? null,
+    actionCounts: { opportunity: 0, wake: 1, trade: 0, notification: 0 },
+    triage: AUTOMATION_PREVIEW_SKIPPED_TRIAGE,
+    tokenUsage: null
+  },
+  {
+    id: AUTOMATION_PREVIEW_FORCED_DETAIL.run.id,
+    profileId: "profile-preview-multi-agent",
+    triggerType: "wake_condition",
+    status: "completed",
+    summary: "硬升级兜底：止损距离 1.2%、保证金率 120% 强制深度。",
+    startedAt: AUTOMATION_PREVIEW_FORCED_DETAIL.run.startedAt,
+    finishedAt: AUTOMATION_PREVIEW_FORCED_DETAIL.run.finishedAt ?? null,
+    nextWakeAt: null,
+    actionCounts: { opportunity: 1, wake: 0, trade: 0, notification: 1 },
+    triage: AUTOMATION_PREVIEW_FORCED_TRIAGE,
+    tokenUsage: AUTOMATION_PREVIEW_RUN_DETAIL.run.tokenUsage ?? null
+  }
+];
+
+const AUTOMATION_PREVIEW_TRIAGE_PROFILES: Map<string, AiAgentProfile> = new Map([
+  ["profile-preview-multi-agent", { ...createProfile([], "preview-model"), id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-data-digest"] }]
+]);
+
+const AUTOMATION_PREVIEW_TRIAGE_DETAILS: Record<string, AiAutomationRunDetail> = {
+  [AUTOMATION_PREVIEW_RUN_DETAIL.run.id]: AUTOMATION_PREVIEW_RUN_DETAIL,
+  [AUTOMATION_PREVIEW_SKIPPED_DETAIL.run.id]: AUTOMATION_PREVIEW_SKIPPED_DETAIL,
+  [AUTOMATION_PREVIEW_FORCED_DETAIL.run.id]: AUTOMATION_PREVIEW_FORCED_DETAIL
+};
+
+/**
+ * tsk_21c3c561 夹具：极简模式 + 试判升级 + 深度实际完成 —— 镜像真实记录 `run-1789847813608036`
+ * （`singleAgentMode=minimal`、`verdict=escalate`、`phase=deep`、深度 token 587,198）。
+ * 用途：为「极简模式下『深度分析』误显示『不适用』」的展示层修复提供可判读的 before/after 截图证据。
+ * 注意：`triage === null` 的「未启用试判」口径仍由 `view=single-run` 夹具覆盖（C25②），本夹具不重复占用。
+ */
+const AUTOMATION_PREVIEW_MINIMAL_DEEP_TRIAGE: AiRunTriage = {
+  mode: "enforce",
+  verdict: "escalate",
+  phase: "deep",
+  reasons: ["4H 结构与 5m 主动成交同时转弱，边际变化成立"],
+  evidence: [
+    { fact: "最新价 65,088.1，4H 低点下移且成交量放大", source: "market.readTicker", at: "2026-09-18T16:04:20Z" }
+  ],
+  forcedBy: [],
+  forced: false,
+  sampled: false,
+  triageTokens: 41_200,
+  deepTokens: 587_198
+};
+
+/** C24 夹具：协作关闭 + 极简模式 —— 不输出正文，summary 一句话，且带"超过 160 字符"警告样例。 */
+const AUTOMATION_PREVIEW_MINIMAL_DETAIL: AiAutomationRunDetail = {
+  run: {
+    id: "run-preview-single-agent-minimal",
+    profileId: "profile-preview-single-agent",
+    triggerType: "scheduled",
+    status: "completed",
+    singleAgentMode: "minimal",
+    summary: "BTC-USDT-SWAP 无边际变化，未创建新的交易机会，保留下一轮观察条件。（这一句在极简模式下超过了 160 字符上限，因此运行记录里带了一条排版提醒样例。）",
+    startedAt: Date.now() - 6 * 60_000,
+    finishedAt: Date.now() - 6 * 60_000 + 41_000,
+    nextWakeAt: Date.now() + 54 * 60_000,
+    actionCounts: { opportunity: 0, wake: 1, trade: 0, notification: 0 },
+    summaryFormatWarnings: ["极简模式下 summary 超过 160 字符"],
+    // tsk_21c3c561：改为「极简 + 升级 + 深度完成」，用于复现并验证标签修复（原值 null 当时掩盖了缺陷）。
+    triage: AUTOMATION_PREVIEW_MINIMAL_DEEP_TRIAGE,
+    audit: null,
+    usedEvidence: [],
+    contrarianResolutions: [],
+    experts: [],
+    tokenUsage: null
+  },
+  trigger: { type: "scheduled", source: "automation-preview" },
+  profileSnapshot: { id: "profile-preview-single-agent", name: "BTC 单 Agent 观察（极简）", collaborationEnabled: false, enabledAgentIds: [] },
+  skillVersions: { "trading-philosophy": 3 },
+  assistantText: "",
+  reasoning: "极简模式：只调用工具，不输出正文。",
+  initialMarketSnapshot: null,
+  finalDecision: null,
+  toolEvents: [
+    { type: "toolCall", toolCallId: "preview-minimal-ticker", name: "market.readTicker", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true, startedAt: Date.now() - 6 * 60_000 + 2_000 },
+    { type: "toolResult", toolCallId: "preview-minimal-ticker", name: "market.readTicker", result: { last: "65021.9" }, summary: "读取最新行情", ok: true, endedAt: Date.now() - 6 * 60_000 + 2_400 },
+    { type: "toolCall", toolCallId: "preview-minimal-finish", name: "background.finishRun", arguments: { summary: "无边际变化，保留观察条件。", nextWakePlan: { mode: "any", conditions: [{ type: "price_change_pct", thresholdPct: "0.8" }], expiresAt: Date.now() + 4 * 3_600_000 } }, allowed: true, startedAt: Date.now() - 6 * 60_000 + 30_000 },
+    { type: "toolResult", toolCallId: "preview-minimal-finish", name: "background.finishRun", result: { ok: true, createdWakeConditionIds: ["wake-minimal-1"], activeWakeConditionIds: ["wake-minimal-1"] }, summary: "已保存 1 条动态观察条件", ok: true, endedAt: Date.now() - 6 * 60_000 + 31_000 }
   ]
 };
 
@@ -5141,6 +6057,15 @@ const AUTOMATION_PREVIEW_SINGLE_RUN_DETAIL: AiAutomationRunDetail = {
     id: "run-preview-single-agent",
     profileId: "profile-preview-single-agent",
     status: "completed",
+    // 对照：单 Agent 标准模式（不显示"极简模式"徽标）。
+    singleAgentMode: "standard",
+    // C25⑤ 四态覆盖：`triage === null` → 「未启用试判」（不是"未进入深度"）。
+    triage: null,
+    // 这条夹具覆盖"缺字段"的降级路径：无排版提醒、无试判块、无贡献度记录。
+    summaryFormatWarnings: [],
+    audit: null,
+    usedEvidence: [],
+    contrarianResolutions: [],
     summary: "BTC-USDT-SWAP 当前临近重大宏观事件，价格结构与资金流信号相互冲突；本轮不创建新交易机会，保留已有保护单并等待下一次观察条件触发。",
     finishedAt: Date.UTC(2026, 6, 23, 8, 31, 15),
     actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
@@ -5166,6 +6091,7 @@ const AUTOMATION_PREVIEW_SINGLE_RUN_DETAIL: AiAutomationRunDetail = {
     }
   },
   trigger: { type: "scheduled", source: "automation-preview" },
+  // 同上：迁移前的单 Agent 快照（旧字段只读展示，不参与写回）。
   profileSnapshot: {
     id: "profile-preview-single-agent",
     name: "BTC 单 Agent 观察",
@@ -5268,61 +6194,243 @@ const AUTOMATION_PREVIEW_POSITION_REVIEW: AiAutomationReview = {
   updatedAt: Date.now() - 180_000
 };
 
+const AUTOMATION_PREVIEW_AGENTS: AiAgentSummary[] = [
+  // C20.1：新默认 4 个流程角色（取数 / 账户 / 分析候选 / 反方）。
+  { id: "desic-data-digest", name: "数据汇总", role: "data_digest", envelope: "standard", skills: ["okx-market-intelligence", "market-radar-research"], requiresAccount: false, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: ["market-radar-research"], missingAccount: false, modified: false, deprecated: false },
+  { id: "desic-account-state", name: "账户与持仓", role: "account_state", envelope: "risk", skills: [], requiresAccount: true, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
+  { id: "desic-decision-proposal", name: "分析/决策候选", role: "decision_proposal", envelope: "standard", skills: [], requiresAccount: false, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
+  { id: "desic-contrarian-review", name: "反方审查", role: "contrarian", envelope: "standard", skills: ["okx-market-intelligence"], requiresAccount: false, source: "builtin", version: 2, updatedAt: Date.now() - 43_200_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
+  { id: "custom-mean-reversion-desk", name: "均值回归台", role: "custom", envelope: "standard", skills: [], requiresAccount: false, source: "custom", version: 2, updatedAt: Date.now() - 3_600_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: true, deprecated: false },
+  { id: "ai-volatility-regime", name: "波动率制度识别", role: "custom", envelope: "standard", skills: [], requiresAccount: false, source: "ai", version: 1, updatedAt: Date.now() - 600_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
+  // C20.5（改写版）：下线的历史专家不再出现在夹具里（Rust 侧也不返回）——彻底隐藏、文件保留。
+];
+
+/** C16 预览夹具：创建对话框的 Skill 多选（含一个未激活项）与 AI 对话框的模型选择。 */
+const AUTOMATION_PREVIEW_SKILLS: AiSkillDefinition[] = [
+  {
+    id: "trading-philosophy",
+    name: "trading-philosophy",
+    description: "永续合约决策与复盘规范。",
+    rules: "区分事实、推断与建议；风险优先。",
+    content: "## 入场确认\n价格到达关键位置后形成候选。",
+    builtin: true
+  },
+  {
+    id: "okx-market-intelligence",
+    name: "okx-market-intelligence",
+    description: "行情情报读取与时效标注。",
+    rules: "只读行情情报，标注快照时间。",
+    content: "## 快照\n记录快照标识与观测时间。",
+    builtin: true
+  },
+  {
+    id: "market-radar-research",
+    name: "market-radar-research",
+    description: "全市场 Radar 研究快照（预览中未激活）。",
+    rules: "只读 Radar 快照。",
+    content: "## 范围\n只读全市场快照。",
+    builtin: true
+  }
+];
+
+const AUTOMATION_PREVIEW_ENABLED_SKILL_IDS = ["trading-philosophy", "okx-market-intelligence"];
+
+const AUTOMATION_PREVIEW_MODELS: AiModelConfigSummary[] = [
+  { id: "preview-model", name: "Preview Reasoner", provider: "openai-compatible", model: "preview-reasoner", baseUrl: "https://example.invalid", apiKeyMasked: "sk-***", configured: true, permissionMode: "advisor", reasoningDepth: "medium" },
+  { id: "preview-model-fast", name: "Preview Fast", provider: "openai-compatible", model: "preview-fast", baseUrl: "https://example.invalid", apiKeyMasked: "sk-***", configured: true, permissionMode: "advisor", reasoningDepth: "low" },
+  { id: "preview-model-deep", name: "Preview Deep", provider: "openai-compatible", model: "preview-deep", baseUrl: "https://example.invalid", apiKeyMasked: "sk-***", configured: true, permissionMode: "advisor", reasoningDepth: "high" }
+];
+
+const AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES: Record<string, string> = {
+  "desic-data-digest": "一次读齐行情、衍生品、聪明钱、新闻与历史数据，产出可引用的结构化摘要，不做方向判断。",
+  "desic-account-state": "读取持仓、普通与算法挂单、止损止盈状态、保证金率与可用余量，输出纯客观的状态清单与风险标记。",
+  "desic-decision-proposal": "基于摘要与账户状态产出候选决策：方向、入场、仓位、失效条件与风险回报。",
+  "desic-contrarian-review": "尝试推翻候选决策：逐条反驳并给可检验依据，或明确无法推翻、需补什么证据。",
+  "desic-market-structure": "检查多周期价格结构、趋势、波动、成交、盘口和关键失效位，明确事实与推断。",
+  "desic-order-flow-liquidity": "核对主动成交、挂单深度与流动性变化，判断短周期方向是否被真实成交支持。",
+  "desic-derivatives-positioning": "读取资金费率、持仓量、基差与拥挤度，判断杠杆资金的位置与反转风险。",
+  "desic-account-risk": "检查仓位、保证金、挂单与交易预检，给出可执行的约束条件。",
+  "desic-intelligence-flow": "核对新闻、宏观事件、情绪与资金流，区分事实、推断与时效。",
+  "custom-mean-reversion-desk": "在震荡区间内评估均值回归机会，明确区间失效条件。",
+  "ai-volatility-regime": "识别波动率制度切换，给出制度内外的证据边界。"
+};
+
 export function AutomationPreview() {
   const requestedView = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
-  const initialView = requestedView === "run" || requestedView === "single-run" || requestedView === "refresh" || requestedView === "model-error" || requestedView === "optimization" || requestedView === "reviews" ? requestedView : "config";
-  const [view, setView] = useState<"config" | "run" | "single-run" | "refresh" | "model-error" | "optimization" | "reviews">(initialView);
+  const initialView = requestedView === "run" || requestedView === "single-run" || requestedView === "refresh" || requestedView === "model-error" || requestedView === "optimization" || requestedView === "reviews" || requestedView === "agents" || requestedView === "triage" || requestedView === "minimal" ? requestedView : "config";
+  const [view, setView] = useState<"config" | "agents" | "run" | "single-run" | "refresh" | "model-error" | "optimization" | "reviews" | "triage" | "minimal">(initialView);
   const singleAgentPreview = view === "single-run";
   const [previewSuggestions, setPreviewSuggestions] = useState<AiOptimizationSuggestion[]>([AUTOMATION_PREVIEW_OPTIMIZATION_SUGGESTION]);
-  const [previewSchemes, setPreviewSchemes] = useState<AiAgentScheme[]>(() => createBuiltinAgentSchemes());
-  const [collaboration, setCollaboration] = useState<Pick<AiAgentProfile, "multiAgentMode" | "multiAgentMaxAgents" | "multiAgentSchemeId" | "multiAgents">>(() => ({
-    multiAgentMode: "custom",
-    multiAgentMaxAgents: 4,
-    multiAgentSchemeId: createBuiltinAgentSchemes()[0].id,
-    multiAgents: createPerpetualDecisionTeam()
-  }));
-  const savePreviewScheme = async (draft: AiAgentSchemeDraft) => {
-    const now = Date.now();
-    const scheme: AiAgentScheme = {
-      id: `preview-scheme-${now}`,
-      name: draft.name,
-      description: draft.description,
-      builtin: false,
-      agents: draft.agents.map((agent) => ({ ...agent, scopes: [...agent.scopes] })),
-      instructions: draft.instructions,
-      skillIds: [],
-      phase: "primary",
-      model: null,
-      reasoningDepth: "medium",
-      createdAt: now,
-      updatedAt: now
-    };
-    setPreviewSchemes((current) => [...current, scheme]);
-    return scheme;
-  };
-  const deletePreviewScheme = async (id: string) => {
-    setPreviewSchemes((current) => current.filter((scheme) => scheme.id !== id || scheme.builtin));
-    return true;
-  };
+  // 预览态的勾选器：直接用假数据渲染真实组件（勾选制，无方案模板）。
+  // C20.5（改写版）：夹具反映"迁移后的形态" —— 默认 4 个新角色 + 1 个自定义（保留用户自定义专家）。
+  const [previewAgentIds, setPreviewAgentIds] = useState<string[]>(() => [
+    ...AUTOMATION_PREVIEW_AGENTS.slice(0, 4).map((agent) => agent.id),
+    "custom-mean-reversion-desk"
+  ]);
+  // 预览夹具默认开启协作：勾选/清空/全选断言依赖可交互。
+  const [previewCollaboration, setPreviewCollaboration] = useState(true);
+  // C19：试判设置夹具（默认 enforce + 契约默认参数）。
+  const [previewTriage, setPreviewTriage] = useState(createDefaultTriage);
+  // C24：两个独立夹具状态 —— config 视图默认「标准」（契约默认值），minimal 视图固定演示「极简」。
+  const [previewSingleAgentMode, setPreviewSingleAgentMode] = useState<AiSingleAgentMode>("standard");
+  const [previewMinimalAgentMode, setPreviewMinimalAgentMode] = useState<AiSingleAgentMode>("minimal");
+  // 全局慢放系数（`?slow=N`）：只放大夹具定时器，默认 1 与现状完全一致。
+  const previewSlow = useMemo(() => readPreviewSlowFactor(), []);
   const updatePreviewSuggestion = async (id: string, status: string) => {
     setPreviewSuggestions((current) => current.map((item) => item.id === id ? { ...item, status, updatedAt: Date.now() } : item));
     return true;
   };
 
   return (
-    <main className="automation-preview-page" data-preview-view={view}>
+    <main className="automation-preview-page" data-preview-view={view} data-preview-slow={previewSlow}>
       <div className="ai-automation-panel automation-preview-panel">
         <header className="automation-preview-head">
-          <div><Workflow size={17} /><span><strong>{singleAgentPreview ? automationText("singleAgentProfile", "Single-Agent Profile", "单 Agent Profile") : automationText("multiAgentProfile", "Multi-Agent Profile", "多 Agent Profile")}</strong><small>{automationText("visualRegressionPreview", "Visual regression preview", "视觉回归预览")}</small></span></div>
+          <div><Workflow size={17} /><span><strong>{view === "agents" ? automationText("agents", "Agent library", "Agent 库") : singleAgentPreview ? automationText("singleAgentProfile", "Single-Agent Profile", "单 Agent Profile") : automationText("profileConfigurationPreview", "Profile configuration", "Profile 配置")}</strong><small>{automationText("visualRegressionPreview", "Visual regression preview", "视觉回归预览")}</small></span></div>
           <nav role="tablist" aria-label={singleAgentPreview ? automationText("singleAgentPreviewAria", "Single-Agent preview", "单 Agent 预览视图") : automationText("multiAgentPreviewAria", "Multi-Agent preview", "多 Agent 预览视图")}>
             <button type="button" role="tab" aria-selected={view === "config"} className={view === "config" ? "active" : ""} onClick={() => setView("config")}>{automationText("configuration", "Configuration", "配置")}</button>
             <button type="button" role="tab" aria-selected={view === "run" || view === "single-run" || view === "model-error"} className={view === "run" || view === "single-run" || view === "model-error" ? "active" : ""} onClick={() => setView("run")}>{automationText("runTrace", "Run trace", "运行轨迹")}</button>
+            <button type="button" role="tab" aria-selected={view === "agents"} className={view === "agents" ? "active" : ""} onClick={() => setView("agents")}>{automationText("agents", "Agent library", "Agent 库")}</button>
+            <button type="button" role="tab" aria-selected={view === "triage"} className={view === "triage" ? "active" : ""} onClick={() => setView("triage")}>{automationText("triageTitle", "Triage", "试判")}</button>
+            <button type="button" role="tab" aria-selected={view === "minimal"} className={view === "minimal" ? "active" : ""} onClick={() => setView("minimal")}>{automationText("singleAgentMode", "Single-Agent mode", "单 Agent 模式")}</button>
             <button type="button" role="tab" aria-selected={view === "reviews"} className={view === "reviews" ? "active" : ""} onClick={() => setView("reviews")}>{automationText("reviews", "Reviews", "复盘")}</button>
             <button type="button" role="tab" aria-selected={view === "optimization"} className={view === "optimization" ? "active" : ""} onClick={() => setView("optimization")}>{automationText("suggestions", "Optimization suggestions", "优化建议")}</button>
           </nav>
         </header>
         <section className="automation-preview-content">
-          {view === "refresh" ? (
+          {view === "minimal" ? (
+            <div className="automation-preview-minimal">
+              {/* C24：协作关闭 + 极简模式的 Profile 设置夹具。 */}
+              <ProfileAgentSelector
+                agents={AUTOMATION_PREVIEW_AGENTS}
+                responsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}
+                selectedIds={[]}
+                collaborationEnabled={false}
+                singleAgentMode={previewMinimalAgentMode}
+                onChangeSingleAgentMode={setPreviewMinimalAgentMode}
+                onChange={() => undefined}
+                onOpenAgentLibrary={() => undefined}
+                onReload={() => undefined}
+              />
+              {/* C24：极简运行详情（徽标 + 一句话 summary + 排版提醒）。 */}
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_MINIMAL_DETAIL} /></div>
+            </div>
+          ) : view === "triage" ? (
+            <div className="automation-preview-triage">
+              <RunsView
+                items={AUTOMATION_PREVIEW_TRIAGE_RUNS}
+                profiles={AUTOMATION_PREVIEW_TRIAGE_PROFILES}
+                deliveries={[]}
+                focusId={AUTOMATION_PREVIEW_TRIAGE_RUNS[1].id}
+                readDetail={async (id) => AUTOMATION_PREVIEW_TRIAGE_DETAILS[id] ?? null}
+                onForceDeep={async () => true}
+              />
+            </div>
+          ) : view === "agents" ? (
+            <AgentLibraryView
+              agents={AUTOMATION_PREVIEW_AGENTS}
+              skills={AUTOMATION_PREVIEW_SKILLS}
+              enabledSkillIds={AUTOMATION_PREVIEW_ENABLED_SKILL_IDS}
+              models={AUTOMATION_PREVIEW_MODELS}
+              activeModelId={AUTOMATION_PREVIEW_MODELS[0].id}
+              profiles={[{ ...createProfile([], "preview-model"), id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: previewCollaboration, enabledAgentIds: previewAgentIds }]}
+              loading={false}
+              error={null}
+              onReload={async () => AUTOMATION_PREVIEW_AGENTS}
+              onNotify={() => undefined}
+              // 预览注入正文：浏览器里没有 Tauri 运行时，`ai_agent_read` 会抛
+              // AGENT_LIBRARY_DESKTOP_ONLY，编辑器只能停在错误态 —— 于是"源码框高度塌陷"
+              // 这类真实布局故障（2026-09-18 的"源码不显示"）在可视化回归里根本测不出来。
+              // 预览注入草稿生成：浏览器里没有 Tauri，`ai_agent_generate` 会抛
+              // AGENT_LIBRARY_DESKTOP_ONLY —— 注入后可完整回归"模型 → 流式 → 取消 → 草稿 → 由谁生成"这条链路。
+              // P2：分 3 段产出 delta（每段间隔 200ms），取消后不再产出。
+              generateDraft={async ({ description, name, model, onDelta, isCancelled }) => {
+                const label = model || AUTOMATION_PREVIEW_MODELS[0].id;
+                const warnings = [`预览草稿：模型 ${label}`];
+                const content = [
+                    "---",
+                    `id: custom-preview-draft`,
+                    `name: ${name || "预览专家"}`,
+                    "role: custom",
+                    "envelope: standard",
+                    "skills: []",
+                    "requiresAccount: false",
+                    "source: ai",
+                    "version: 1",
+                    `createdAt: ${Date.now()}`,
+                    "---",
+                    "## 身份",
+                    `只读「${name || "预览专家"}」专家，${description}`,
+                    "",
+                    "## 职责",
+                    "按描述给出结论、证据与失效条件。",
+                    "",
+                    "## 方法与证据要求",
+                    "只取职责所需的只读证据，标注时间与快照。",
+                    "",
+                    "## 输出偏好",
+                    "先结论后证据。",
+                    "",
+                    "## 数据缺口处理",
+                    "缺口如实列出，不编造数值。",
+                    ""
+                  ].join("\n");
+                const steps = [
+                  "---\nid: custom-preview-draft\nname: " + (name || "预览专家") + "\nrole: custom\n",
+                  "envelope: standard\nskills: []\nrequiresAccount: false\nsource: ai\nversion: 1\n---\n",
+                  "## 身份\n" + `只读「${name || "预览专家"}」专家，${description}` + "\n\n## 职责\n按描述给出结论、证据与失效条件。\n"
+                ];
+                let chars = 0;
+                // 400ms/段（≈1.4s 总时长）：足够观察到 1s 秒表跳动，也给"取消"留出操作窗口。
+                // `?slow=N` 会把它按倍数放大（smoke 用 slow=6 → ≈8.4s，与机器负载无关）。
+                const segmentMs = previewDelay(400, previewSlow);
+                for (const delta of steps) {
+                  await new Promise((resolve) => window.setTimeout(resolve, segmentMs));
+                  if (isCancelled?.()) throw new Error("AGENT_DRAFT_CANCELLED");
+                  chars += delta.length;
+                  onDelta?.(delta, chars);
+                }
+                await new Promise((resolve) => window.setTimeout(resolve, segmentMs));
+                if (isCancelled?.()) throw new Error("AGENT_DRAFT_CANCELLED");
+                return { content, warnings };
+              }}
+              readAgent={async (id) => {
+                const summary = AUTOMATION_PREVIEW_AGENTS.find((agent) => agent.id === id);
+                if (!summary) return null;
+                const responsibility = AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES[id] ?? "";
+                return {
+                  ...summary,
+                  content: [
+                    "---",
+                    `id: ${summary.id}`,
+                    `name: ${summary.name}`,
+                    `role: ${summary.role}`,
+                    `envelope: ${summary.envelope}`,
+                    `skills: [${summary.skills.join(", ")}]`,
+                    `requiresAccount: ${summary.requiresAccount ? "true" : "false"}`,
+                    `source: ${summary.source}`,
+                    `version: ${summary.version}`,
+                    `createdAt: ${summary.updatedAt}`,
+                    "---",
+                    "## 身份",
+                    `只读「${summary.name}」专家，只取职责所需的只读证据，不决策、不下单。`,
+                    "",
+                    "## 职责",
+                    responsibility,
+                    "",
+                    "## 方法与证据要求",
+                    "- 每条关键结论标注工具来源与观测时间；盘口类证据同时记录快照标识。",
+                    "- 区分事实、推断、冲突与数据缺口；跨快照只描述变化，不推断方向。",
+                    "",
+                    "## 输出偏好",
+                    "- 先给结论，再给支撑证据、失效条件与反例；不重复其他专家的正向结论。",
+                    "",
+                    "## 数据缺口处理",
+                    "- 缺数据时说明缺失项、影响范围与下一次复核条件，不编造数值。"
+                  ].join("\n")
+                };
+              }}
+            />
+          ) : view === "refresh" ? (
             <AutomationRunRefreshPreview />
           ) : view === "optimization" ? (
             <SuggestionsView
@@ -5348,16 +6456,19 @@ export function AutomationPreview() {
                   </div>
                   <span className="automation-preview-readonly"><ShieldCheck size={12} />{automationText("subagentsReadOnly", "Subagents are read-only", "子 Agent 只读")}</span>
                 </div>
-                <ProfileCollaborationEditor
-                  mode={collaboration.multiAgentMode}
-                  maxAgents={collaboration.multiAgentMaxAgents}
-                  agents={collaboration.multiAgents}
-                  schemes={previewSchemes}
-                  selectedSchemeId={collaboration.multiAgentSchemeId}
-                  onChange={(patch) => setCollaboration((current) => ({ ...current, ...patch }))}
-                  onSaveScheme={savePreviewScheme}
-                  onDeleteScheme={deletePreviewScheme}
+                <ProfileAgentSelector
+                  agents={AUTOMATION_PREVIEW_AGENTS}
+                  responsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}
+                  selectedIds={previewAgentIds}
+                  collaborationEnabled={previewCollaboration}
+                  onToggleCollaboration={setPreviewCollaboration}
+                  singleAgentMode={previewSingleAgentMode}
+                  onChangeSingleAgentMode={setPreviewSingleAgentMode}
+                  onChange={setPreviewAgentIds}
+                  onOpenAgentLibrary={() => setView("agents")}
+                  onReload={() => undefined}
                 />
+                <TriageSettings value={previewTriage} onChange={setPreviewTriage} />
               </div>
             </div>
           ) : (
@@ -5369,6 +6480,49 @@ export function AutomationPreview() {
       </div>
     </main>
   );
+}
+
+/**
+ * 预览夹具的**全局慢放系数**：`?slow=6`（默认 1，夹取 [1, 60]）。
+ *
+ * 预览夹具里的定时器用于演示"进行中 → 随后完成"，但它们本身只有 1–2 秒；机器繁忙时
+ * （并行跑 cargo / 其它测试）会被 waitFor 页面/弹窗的阶段吃掉，断言就与速度赛跑。
+ * 该参数把所有这类 `setTimeout` 按倍数放大，**默认 1 时视觉回归表现与不传完全一致**。
+ */
+const PREVIEW_SLOW_LIMITS = { min: 1, max: 60 };
+
+function readPreviewSlowFactor() {
+  if (typeof window === "undefined") return 1;
+  const raw = new URLSearchParams(window.location.search).get("slow");
+  if (!raw) return 1;
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return 1;
+  return Math.min(PREVIEW_SLOW_LIMITS.max, Math.max(PREVIEW_SLOW_LIMITS.min, Math.round(parsed)));
+}
+
+/** 夹具定时器统一走这里：`ms * slow`（slow 缺省/非法 = 1）。 */
+function previewDelay(ms: number, slow = readPreviewSlowFactor()) {
+  return Math.max(0, Math.round(ms * slow));
+}
+
+/**
+ * `?view=refresh` 夹具的"运行中 → 已完成"延迟。
+ *
+ * 默认 1200ms（视觉回归保持原样）；可通过 `?view=refresh&holdMs=10000` 拉长到足够长的观察窗口 ——
+ * 这个延迟纯粹是**为回归测试留出观察窗口**：之前固定 1.2s 时，机器繁忙（并行跑 cargo/其它测试）
+ * 会让 smoke 在"等页面/弹窗出现"的阶段就把窗口耗掉，出现偶发失败。
+ */
+const AUTOMATION_REFRESH_DEFAULT_HOLD_MS = 1_200;
+const AUTOMATION_REFRESH_HOLD_LIMITS = { min: 200, max: 10 * 60_000 };
+
+function readAutomationRefreshHoldMs(slow = readPreviewSlowFactor()) {
+  if (typeof window === "undefined") return previewDelay(AUTOMATION_REFRESH_DEFAULT_HOLD_MS, slow);
+  const raw = new URLSearchParams(window.location.search).get("holdMs");
+  // `holdMs` 显式给出时优先（不再乘 slow）；否则默认 1200ms 按全局慢放系数放大。
+  if (!raw) return previewDelay(AUTOMATION_REFRESH_DEFAULT_HOLD_MS, slow);
+  const parsed = Number(raw);
+  if (!Number.isFinite(parsed)) return previewDelay(AUTOMATION_REFRESH_DEFAULT_HOLD_MS, slow);
+  return Math.min(AUTOMATION_REFRESH_HOLD_LIMITS.max, Math.max(AUTOMATION_REFRESH_HOLD_LIMITS.min, Math.round(parsed)));
 }
 
 function AutomationRunRefreshPreview() {
@@ -5402,10 +6556,11 @@ function AutomationRunRefreshPreview() {
     };
   }, [finishedAt]);
 
+  const holdMs = useMemo(() => readAutomationRefreshHoldMs(readPreviewSlowFactor()), []);
   useEffect(() => {
-    const timerId = window.setTimeout(() => setCompleted(true), 1_200);
+    const timerId = window.setTimeout(() => setCompleted(true), holdMs);
     return () => window.clearTimeout(timerId);
-  }, []);
+  }, [holdMs]);
 
   const profile = normalizeProfile({
     ...createProfile([], "preview-model"),
@@ -5413,7 +6568,7 @@ function AutomationRunRefreshPreview() {
     name: "运行状态刷新测试"
   });
   return (
-    <div className="automation-preview-run automation-refresh-preview">
+    <div className="automation-preview-run automation-refresh-preview" data-refresh-hold-ms={holdMs} data-refresh-completed={completed ? "true" : "false"}>
       <RunsView
         items={[run]}
         profiles={new Map([[profile.id, profile]])}

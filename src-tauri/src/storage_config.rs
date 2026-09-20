@@ -31,6 +31,8 @@ pub(crate) struct RuntimePaths {
     pub(crate) diagnostics_dir: PathBuf,
     pub(crate) work_dir: PathBuf,
     pub(crate) cline_skills_dir: PathBuf,
+    /// Agent 库（契约 v3 C1）：`<workspace>/.cline/agents/<id>/AGENTS.md`
+    pub(crate) cline_agents_dir: PathBuf,
 }
 
 // ===== 数据根目录（可重定位）=====
@@ -101,6 +103,7 @@ pub(crate) fn runtime_paths_under(root: &std::path::Path) -> RuntimePaths {
         diagnostics_dir: data_dir.join("diagnostics"),
         work_dir: data_dir.join("workspace"),
         cline_skills_dir: data_dir.join("workspace").join(".cline").join("skills"),
+        cline_agents_dir: data_dir.join("workspace").join(".cline").join("agents"),
     }
 }
 
@@ -126,6 +129,7 @@ pub(crate) fn default_runtime_paths(app: &tauri::AppHandle) -> Result<RuntimePat
         diagnostics_dir: data_dir.join("diagnostics"),
         work_dir: data_dir.join("workspace"),
         cline_skills_dir: data_dir.join("workspace").join(".cline").join("skills"),
+        cline_agents_dir: data_dir.join("workspace").join(".cline").join("agents"),
     })
 }
 
@@ -200,6 +204,7 @@ pub(crate) fn initialize_runtime_paths_with_root(
         &paths.diagnostics_dir,
         &paths.work_dir,
         &paths.cline_skills_dir,
+        &paths.cline_agents_dir,
     ] {
         fs::create_dir_all(dir)
             .map_err(|err| format!("创建应用目录 {} 失败: {}", dir.display(), err))?;
@@ -215,6 +220,7 @@ pub(crate) fn initialize_runtime_paths_with_root(
     if let Some(existing) = RUNTIME_PATHS.get() {
         if existing == &paths {
             ensure_builtin_skill_bundles_best_effort();
+            ensure_builtin_agent_bundles_best_effort();
             return Ok(());
         }
         return Err("应用运行目录已经使用其它路径初始化".to_string());
@@ -223,6 +229,7 @@ pub(crate) fn initialize_runtime_paths_with_root(
         .set(paths)
         .map_err(|_| "应用运行目录初始化失败".to_string())?;
     ensure_builtin_skill_bundles_best_effort();
+    ensure_builtin_agent_bundles_best_effort();
     crate::boot_log("paths: runtime paths ready");
     Ok(())
 }
@@ -286,6 +293,7 @@ fn development_runtime_paths() -> RuntimePaths {
         diagnostics_dir: root.join("diagnostics"),
         work_dir: root.clone(),
         cline_skills_dir: root.join(".cline").join("skills"),
+        cline_agents_dir: root.join(".cline").join("agents"),
     }
 }
 
@@ -557,6 +565,48 @@ pub(crate) fn ai_save_config(
                 })
                 .unwrap_or_default(),
         ),
+        // TypeSafe / Jev（可选判定层）：`None` 字段沿用现值，避免旧前端保存时静默关掉它。
+        typesafe: {
+            let mut typesafe = existing
+                .as_ref()
+                .map(|config| config.typesafe.clone())
+                .unwrap_or_default();
+            if let Some(enabled) = update.typesafe_enabled {
+                typesafe.enabled = enabled;
+            }
+            if let Some(model) = update
+                .typesafe_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                typesafe.model = model.to_string();
+            }
+            if let Some(base_url) = update
+                .typesafe_base_url
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            {
+                typesafe.base_url = base_url.to_string();
+            }
+            if let Some(api_key) = update.typesafe_api_key.as_deref() {
+                let trimmed = api_key.trim();
+                // 掩码回显（含 `****`）不覆盖真实 Key；空串表示显式清空。
+                if !trimmed.contains("****") {
+                    typesafe.api_key = trimmed.to_string();
+                }
+            }
+            typesafe
+        },
+        // 只读工具并发闸门（可选）：界面上没有对应控件，保存时**原样沿用现值**，
+        // 否则用户改任意其它设置都会把并发上限重置回缺省。
+        tool_read_concurrency: existing
+            .as_ref()
+            .and_then(|config| config.tool_read_concurrency),
+        tool_domain_concurrency: existing
+            .as_ref()
+            .and_then(|config| config.tool_domain_concurrency.clone()),
     };
     validate_ai_config(&config)?;
     save_ai_config(&app, &config)?;
@@ -1434,6 +1484,309 @@ pub(crate) fn ensure_builtin_skill_bundles() -> Result<(), String> {
         persist_imported_bundle_files(&definition, &bundle)?;
     }
     Ok(())
+}
+
+// ===== Agent 库（契约 v3 C1 / C2）=====
+//
+// 文件真相源：`<workspace>/.cline/agents/<id>/AGENTS.md`（可选 `references/*.md`）。
+// 本模块只负责**路径、读写、内置安装**；解析、校验与渲染由 `desic_agent_automation` 提供，
+// 调用方（ai_automation / lib.rs 工具宿主）拿到的是完整 AGENTS.md 文本，勿再二次格式化。
+
+/// Agent 库根目录（`<workspace>/.cline/agents`）。
+pub(crate) fn agent_library_dir() -> PathBuf {
+    runtime_paths().cline_agents_dir
+}
+
+/// 校验 id 并解析出该 Agent 的库目录；非法 id（含路径分隔符、`..`、大写等）一律拒绝。
+fn agent_bundle_dir_in(root: &Path, id: &str) -> Result<PathBuf, String> {
+    let id = id.trim();
+    if !desic_agent_automation::is_valid_agent_id(id) {
+        return Err(format!(
+            "Agent id 非法，拒绝访问 Agent 库：{id:?}（要求 {}）",
+            desic_agent_automation::AGENT_ID_PATTERN_HINT
+        ));
+    }
+    // 双保险：即使 id 校验被放宽，也要求解析结果是单一普通路径段。
+    let mut components = Path::new(id).components();
+    let single_normal = matches!(components.next(), Some(std::path::Component::Normal(_)))
+        && components.next().is_none();
+    if !single_normal {
+        return Err(format!("Agent id 非法，拒绝访问 Agent 库：{id:?}"));
+    }
+    Ok(root.join(id))
+}
+
+/// `AGENTS.md` 的绝对路径（不要求文件存在）。
+pub(crate) fn agent_bundle_markdown_path(id: &str) -> Result<PathBuf, String> {
+    Ok(agent_bundle_dir_in(&agent_library_dir(), id)?.join(desic_agent_automation::AGENT_FILE_NAME))
+}
+
+/// 读取 Agent 文本；不存在返回 `Ok(None)`。
+pub(crate) fn read_agent_bundle(id: &str) -> Result<Option<String>, String> {
+    read_agent_bundle_in(&agent_library_dir(), id)
+}
+
+fn read_agent_bundle_in(root: &Path, id: &str) -> Result<Option<String>, String> {
+    let path = agent_bundle_dir_in(root, id)?.join(desic_agent_automation::AGENT_FILE_NAME);
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 Agent 文件 {} 失败: {error}", path.display())),
+    }
+}
+
+/// `write_agent_bundle` 的结果：`wrote=false` 表示目标已存在且调用方要求不覆盖（迁移幂等）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AgentBundleWrite {
+    pub path: PathBuf,
+    pub wrote: bool,
+}
+
+/// 写入完整 AGENTS.md（frontmatter + 正文，**逐字写入，不做格式化**）。
+///
+/// 写前用 `desic_agent_automation::parse_agent_markdown` 校验，并要求 frontmatter 的 `id`
+/// 与目录名一致（防串档）。`overwrite=false` 且文件已存在时跳过（`wrote=false`），
+/// 供「off/auto/custom/旧模板」迁移与内置安装的幂等路径使用。
+pub(crate) fn write_agent_bundle(
+    id: &str,
+    markdown: &str,
+    overwrite: bool,
+) -> Result<AgentBundleWrite, String> {
+    write_agent_bundle_in(&agent_library_dir(), id, markdown, overwrite)
+}
+
+fn write_agent_bundle_in(
+    root: &Path,
+    id: &str,
+    markdown: &str,
+    overwrite: bool,
+) -> Result<AgentBundleWrite, String> {
+    let dir = agent_bundle_dir_in(root, id)?;
+    let path = dir.join(desic_agent_automation::AGENT_FILE_NAME);
+    if path.exists() && !overwrite {
+        return Ok(AgentBundleWrite { path, wrote: false });
+    }
+    let definition = desic_agent_automation::parse_agent_markdown(markdown)
+        .map_err(|error| format!("Agent 文件内容非法（目录 {id}）: {error}"))?;
+    if definition.id != id {
+        return Err(format!(
+            "Agent 文件 frontmatter 的 id（{}）与目录名（{}）不一致",
+            definition.id, id
+        ));
+    }
+    fs::create_dir_all(&dir)
+        .map_err(|error| format!("创建 Agent 目录 {} 失败: {error}", dir.display()))?;
+    fs::write(&path, markdown.as_bytes())
+        .map_err(|error| format!("写入 Agent 文件 {} 失败: {error}", path.display()))?;
+    Ok(AgentBundleWrite { path, wrote: true })
+}
+
+/// 写入 `references/<relative_path>`（相对路径由 crate 校验：禁止绝对路径与 `..`）。
+pub(crate) fn write_agent_reference(
+    id: &str,
+    relative_path: &str,
+    content: &str,
+) -> Result<PathBuf, String> {
+    let dir = agent_bundle_dir_in(&agent_library_dir(), id)?;
+    let relative = desic_agent_automation::validate_agent_reference_path(relative_path)?;
+    let path = dir.join(relative);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|error| format!("创建 Agent 引用目录 {} 失败: {error}", parent.display()))?;
+    }
+    fs::write(&path, content.as_bytes())
+        .map_err(|error| format!("写入 Agent 引用文件 {} 失败: {error}", path.display()))?;
+    Ok(path)
+}
+
+/// 列出该 Agent 已有的 `references/*.md` 相对路径（`references/xxx.md` 形式）；无目录返回空。
+pub(crate) fn list_agent_reference_paths(id: &str) -> Result<Vec<String>, String> {
+    let dir = agent_bundle_dir_in(&agent_library_dir(), id)?
+        .join(desic_agent_automation::AGENT_REFERENCES_DIR);
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => return Err(format!("读取 Agent 引用目录 {} 失败: {error}", dir.display())),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
+        let entry = entry.map_err(|error| format!("读取 {} 条目失败: {error}", dir.display()))?;
+        let file_type = entry
+            .file_type()
+            .map_err(|error| format!("读取 {} 类型失败: {error}", entry.path().display()))?;
+        if !file_type.is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if !name.to_ascii_lowercase().ends_with(".md") {
+            continue;
+        }
+        paths.push(format!("{}/{name}", desic_agent_automation::AGENT_REFERENCES_DIR));
+    }
+    paths.sort();
+    Ok(paths)
+}
+
+/// 读取 `references/<relative_path>`；不存在返回 `Ok(None)`。
+pub(crate) fn read_agent_reference(id: &str, relative_path: &str) -> Result<Option<String>, String> {
+    let dir = agent_bundle_dir_in(&agent_library_dir(), id)?;
+    let relative = desic_agent_automation::validate_agent_reference_path(relative_path)?;
+    let path = dir.join(relative);
+    match fs::read_to_string(&path) {
+        Ok(content) => Ok(Some(content)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(format!("读取 Agent 引用文件 {} 失败: {error}", path.display())),
+    }
+}
+
+/// 库内已存在的 Agent id（目录名合法且含 `AGENTS.md`），按字典序返回。
+pub(crate) fn list_agent_bundle_ids() -> Vec<String> {
+    list_agent_bundle_ids_in(&agent_library_dir())
+}
+
+fn list_agent_bundle_ids_in(root: &Path) -> Vec<String> {
+    let Ok(entries) = fs::read_dir(root) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::new();
+    for entry in entries.flatten() {
+        if !entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !desic_agent_automation::is_valid_agent_id(&id) {
+            continue;
+        }
+        if entry
+            .path()
+            .join(desic_agent_automation::AGENT_FILE_NAME)
+            .is_file()
+        {
+            ids.push(id);
+        }
+    }
+    ids.sort();
+    ids
+}
+
+/// 删除整个 Agent 目录（不存在视为成功）。调用方负责确认该 Agent 非内置。
+pub(crate) fn delete_agent_bundle(id: &str) -> Result<(), String> {
+    let dir = agent_bundle_dir_in(&agent_library_dir(), id)?;
+    match fs::remove_dir_all(&dir) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(format!("删除 Agent 目录 {} 失败: {error}", dir.display())),
+    }
+}
+
+/// 内置 Agent 安装结果（带指纹清单的三态判定）。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BuiltinAgentInstall {
+    /// 本次新建的文件数。
+    pub written: usize,
+    /// 本次升级为新版的文件数（清单指纹证明"是上次我们装的那份、用户没动过"）。
+    pub upgraded: usize,
+    /// 保持不覆盖的文件数（用户改动，或清单缺失时无法判定）。
+    pub kept: usize,
+    /// 清单缺失且遇到"已存在但内容不等于当前版本"的文件（调用方按此记一行日志）。
+    pub manifest_missing: bool,
+    /// 安装后的指纹清单；`manifest` 传入 None 时为 None（不猜测、不回写）。
+    pub manifest: Option<std::collections::HashMap<String, String>>,
+}
+
+/// 内置 Agent 包安装（三态，C1 + lead 裁决「安装清单指纹」）：
+///
+/// 1. 文件不存在 → 写入当前版本；
+/// 2. 文件内容 == 当前内置渲染 → 跳过；
+/// 3. 文件内容 == 清单里记录的指纹（上次我们装的那份、用户没动过）→ **覆盖为新版**；
+/// 4. 其它（用户改过，或清单缺失且内容不等于当前内置）→ 保持不覆盖。
+///
+/// 清单来自既有 `ai_automation_settings`（键 `builtin_agent_files_fingerprint`），
+/// 由调用方读取/回写；本函数只做文件层判定，保持可测。
+pub(crate) fn install_builtin_agent_bundles_with_manifest(
+    root: &std::path::Path,
+    manifest: Option<&std::collections::HashMap<String, String>>,
+) -> Result<BuiltinAgentInstall, String> {
+    let mut result = BuiltinAgentInstall {
+        manifest: manifest.map(|_| std::collections::HashMap::new()),
+        ..Default::default()
+    };
+    for id in desic_agent_automation::builtin_agent_ids() {
+        let markdown = desic_agent_automation::builtin_agent_markdown(&id)
+            .ok_or_else(|| format!("内置 Agent 定义缺失：{id}"))?;
+        let expected = sha256_bytes(markdown.as_bytes());
+        let dir = agent_bundle_dir_in(root, &id)?;
+        let path = dir.join(desic_agent_automation::AGENT_FILE_NAME);
+        // 只有"我们确实写下的内容"才进清单；未知文件的指纹**不猜测**（lead 裁决 3）。
+        let next_fingerprint: Option<String>;
+        if !path.exists() {
+            fs::create_dir_all(&dir)
+                .map_err(|error| format!("创建内置 Agent 目录 {} 失败: {error}", dir.display()))?;
+            fs::write(&path, markdown.as_bytes())
+                .map_err(|error| format!("写入内置 Agent 文件 {} 失败: {error}", path.display()))?;
+            result.written += 1;
+            next_fingerprint = Some(expected.clone());
+        } else {
+            let existing = fs::read(&path)
+                .map_err(|error| format!("读取内置 Agent 文件 {} 失败: {error}", path.display()))?;
+            let existing_hash = sha256_bytes(&existing);
+            if existing_hash == expected {
+                // 已是当前版本：这份内容就是我们的当前版本，可以记录。
+                next_fingerprint = Some(expected.clone());
+            } else if let Some(previous) =
+                manifest.and_then(|entries| entries.get(&id)).filter(|previous| **previous == existing_hash)
+            {
+                // `previous` 只用于确认"这就是我们上次装的那份"，覆盖即安全升级。
+                let _ = previous;
+                fs::write(&path, markdown.as_bytes()).map_err(|error| {
+                    format!("升级内置 Agent 文件 {} 失败: {error}", path.display())
+                })?;
+                result.upgraded += 1;
+                next_fingerprint = Some(expected.clone());
+            } else {
+                result.kept += 1;
+                if manifest.is_none() {
+                    result.manifest_missing = true;
+                }
+                // 保留该 id 上次记录的指纹（若曾有）：用户把它改回我们装过的版本时
+                // 仍可安全升级；没有记录就不写，避免把"用户可能改过"的内容当成我们的。
+                next_fingerprint = manifest
+                    .and_then(|entries| entries.get(&id))
+                    .cloned();
+            }
+        }
+        if let (Some(next), Some(fingerprint)) = (result.manifest.as_mut(), next_fingerprint) {
+            next.insert(id, fingerprint);
+        }
+    }
+    Ok(result)
+}
+
+/// 内置 Agent 包安装（无清单路径，签名与语义保持不变）：只补缺失文件、已存在一律不覆盖。
+/// 返回本次新建的文件数。
+pub(crate) fn install_builtin_agent_bundles_in(root: &std::path::Path) -> Result<usize, String> {
+    let result = install_builtin_agent_bundles_with_manifest(root, None)?;
+    if result.manifest_missing {
+        crate::boot_log("builtin agent fingerprint manifest missing");
+    }
+    Ok(result.written)
+}
+
+/// 内置 Agent 包安装（失败只记录不阻断启动，与内置 Skill 同策略）
+pub(crate) fn ensure_builtin_agent_bundles() -> Result<(), String> {
+    let written = install_builtin_agent_bundles_in(&agent_library_dir())?;
+    if written > 0 {
+        crate::boot_log(&format!("agents: builtin bundles installed: {written}"));
+    }
+    Ok(())
+}
+
+/// 与 `ensure_builtin_skill_bundles_best_effort` 同款：任何错误只 `boot_log`，绝不冒泡阻断启动
+/// （v0.1.38/39 的教训：裸 io 错误曾让 Windows 首次启动直接退出）。
+fn ensure_builtin_agent_bundles_best_effort() {
+    if let Err(error) = ensure_builtin_agent_bundles() {
+        crate::boot_log(&format!("builtin agent bundles install failed: {error}"));
+    }
 }
 
 fn skill_definition_text_matches(left: &AiSkillDefinition, right: &AiSkillDefinition) -> bool {
@@ -3564,6 +3917,7 @@ pub(crate) fn harden_sensitive_file_permissions(_path: &PathBuf) -> Result<(), S
 }
 
 fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
+    let typesafe = config.typesafe.clone();
     let provider = config
         .provider
         .clone()
@@ -3604,6 +3958,11 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
         skill_runtime_trust: config.skill_runtime_trust,
         open_agent: config.open_agent,
         workspace_roots: config.workspace_roots,
+        typesafe_enabled: typesafe.enabled,
+        typesafe_configured: typesafe.enabled && !typesafe.api_key.trim().is_empty(),
+        typesafe_api_key_masked: mask_key(&typesafe.api_key),
+        typesafe_model: typesafe.model.clone(),
+        typesafe_base_url: typesafe.base_url.clone(),
     }
 }
 
@@ -3626,43 +3985,115 @@ fn unconfigured_ai_config_summary() -> AiConfigSummary {
         skill_runtime_trust: HashMap::new(),
         open_agent: true,
         workspace_roots: Vec::new(),
+        typesafe: desic_storage_config::AiTypesafeConfig::default(),
+        tool_read_concurrency: None,
+        tool_domain_concurrency: None,
     })
 }
+
+const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
+const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 21] = [
+    ("trading-philosophy", 0x28b8_35c6_2b63_9623),
+    ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
+    ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
+    // Untouched baselines whose descriptions still said "when the user asks".
+    // Under on-demand loading the description is the routing signal, so that
+    // wording made background Runs skip these Skills entirely: nobody is
+    // asking in a scheduled scan. Upgrading an unedited default is safe.
+    ("okx-news-intelligence", 0xb640_7d75_2958_c507),
+    ("okx-smart-money-analysis", 0x4fb7_3ba6_e18f_2e12),
+    // Untouched English baseline that still carried the factual constraints
+    // (OI identity, contract-size invention, leverage/margin) before they
+    // moved into the fixed skill. Upgrading it is safe precisely because an
+    // unedited philosophy carries no user intent.
+    ("trading-philosophy", 0x77f1_451b_c3b4_4a7c),
+    // Untouched baseline shipped after that move but before the philosophy
+    // was de-biased (waiting cost, directional lean, absence review). Same
+    // reasoning: no user edit, so the newer default is strictly better.
+    ("trading-philosophy", 0x701f_74f8_3aa4_b270),
+    // Untouched de-biased baseline shipped before target-side fee economics
+    // became deterministic. User-edited philosophy text has a different
+    // fingerprint and remains authoritative.
+    ("trading-philosophy", 0x70bc_d86c_6f81_36cf),
+    // Untouched fee-aware baseline shipped before existing-position lifecycle
+    // and deliberate-hedging decisions became mandatory on every run.
+    ("trading-philosophy", 0x2d67_2800_126d_8227),
+    // Untouched position-lifecycle baseline shipped before ordinary resting
+    // limit orders received an explicit, conditional maker-cost preference.
+    ("trading-philosophy", 0xaddb_6bab_fa83_ff77),
+    // Untouched coordinator-dispatch baseline (v2 wording): it still taught
+    // backend-enforced consultation/follow-up budgets, a "backend-orchestrated
+    // mode" that pre-attached expert reports, and the removed account-risk
+    // hard-evidence gate in front of trade opportunity creation. None of those
+    // mechanisms exist after the v3 free-dispatch redesign, so an unedited copy
+    // must be upgraded; any user edit changes the fingerprint and stays
+    // authoritative.
+    ("desic-agent-orchestration", 0x3588_dc57_4293_41ee),
+    // Untouched v3 free-dispatch baseline shipped before batch dispatch existed
+    // (C18): it taught only single consult_expert/follow_up, so an unedited copy
+    // kept dispatching six experts strictly one after another (~15 minutes of
+    // wall clock in production). Same rule as above: only the untouched default is
+    // upgraded, any user edit keeps its own fingerprint and stays authoritative.
+    ("desic-agent-orchestration", 0x05b9_9a0d_3f3f_987a),
+    // Untouched C18 baseline that still capped a consult_experts batch at 3 experts.
+    // A consult_experts call returns only when the whole batch finishes, so that cap
+    // decided how many strictly sequential rounds an eight-expert run needed (three
+    // rounds, ~13 minutes of expert wall clock in production). The newer default allows
+    // 5; an unedited copy must be upgraded, a user-edited copy keeps its own fingerprint.
+    ("desic-agent-orchestration", 0xeccf_0df9_fe00_31fd),
+    // Uncommitted development state between raising the concurrency cap to 5 and tightening
+    // the parallel/serial rules (dependency test, per-role examples, fill-the-batch guidance).
+    // A local copy saved from that build is still an untouched default, so it must upgrade.
+    ("desic-agent-orchestration", 0xe4bf_bdfc_5085_31b3),
+    // Untouched C18 batch-dispatch baseline that still described consumers of the old eight
+    // expert roles and the pre-C20 orchestration wording. C20 replaced the default enabled set
+    // with four process roles (data digest / account state / decision proposal / contrarian
+    // review) and rewrote this body (no fixed pipeline, degrade-when-a-role-is-missing, triage
+    // note, no report cap). An unedited copy must be upgraded; a user edit keeps its fingerprint.
+    ("desic-agent-orchestration", 0x1d3a_005c_66d7_8a9f),
+    // Untouched orchestration baseline shipped before the explicit degradation path for a missing
+    // decision-proposal expert was added (14 items, with the cross-reference in the degrade
+    // matrix). Without it the coordinator invents the arrangement silently; an unedited copy must
+    // upgrade, a user edit keeps its own fingerprint.
+    ("desic-agent-orchestration", 0xd835_d3ec_72e2_0d86),
+    // Untouched orchestration baseline shipped before C23.1 made narrowed scopes mandatory when
+    // consulting a review/contrarian expert (item 6) and added the cross-reference in item 7.
+    // An unedited copy keeps paying the full read-only surface for reviews (the single most
+    // expensive expert in the first real 4-expert run), so it must upgrade; a user edit keeps
+    // its own fingerprint and stays authoritative.
+    ("desic-agent-orchestration", 0x9a54_8460_ecd7_bac6),
+    // Untouched C20 orchestration baseline (12 items) shipped before the C22 rewrite added the
+    // "escalating to the deep stage is a commitment to delegate" rule (13 items) and gave the last
+    // item its `selfAnalysisReason` cross-reference. An unedited copy silently keeps escalating and
+    // then working alone, so it must upgrade; a user edit keeps its own fingerprint.
+    ("desic-agent-orchestration", 0x2343_bf35_b952_993f),
+    // Untouched C20 baseline (14 items) shipped before C27 moved the "what to ask" text into
+    // this Skill. Until C27 the sidecar prepended the whole Profile task to every consulted
+    // expert, so the coordinator could rely on the expert already seeing the round's Profile
+    // text and never wrote the question's evidence / time basis / out-of-scope parts itself.
+    // After C27 the expert sees only the injected fact block, so an unedited copy would keep
+    // dispatching under-specified tasks; a user edit keeps its own fingerprint and stays
+    // authoritative.
+    ("desic-agent-orchestration", 0xe3a4_f31b_633d_7fd3),
+    // Untouched C27 baseline (15 items) shipped before the dispatch-economics section was added
+    // (16-19: you gather the round's facts yourself, experts judge instead of re-gathering, the
+    // output spec is written per task in plain language, and an over-length report is trimmed by
+    // quoting or one targeted follow-up instead of a re-run). Without it the coordinator keeps
+    // paying a full expert round for data one read-only call would have returned, so an unedited
+    // copy must upgrade; a user edit changes the fingerprint and stays authoritative.
+    ("desic-agent-orchestration", 0x000e_71f5_03dc_5de3),
+    // Untouched `desic-core-operations` baseline shipped before C21 added section V
+    // ("Analysis-result formatting (run summary)", items 28-34: conclusion first, the five
+    // fixed sections, allowed Markdown, paragraph discipline, plain-text readability and the
+    // soft-audit consequence). This Skill is always injected, so an unedited copy silently
+    // keeps producing unstructured "analysis results"; only an untouched default is upgraded,
+    // a user edit changes the fingerprint and stays authoritative.
+    ("desic-core-operations", 0x5387_2f01_0cc0_ad05),
+];
 
 fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
 ) -> Vec<desic_storage_config::AiSkillDefinition> {
-    const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-    const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 10] = [
-        ("trading-philosophy", 0x28b8_35c6_2b63_9623),
-        ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
-        ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
-        // Untouched baselines whose descriptions still said "when the user asks".
-        // Under on-demand loading the description is the routing signal, so that
-        // wording made background Runs skip these Skills entirely: nobody is
-        // asking in a scheduled scan. Upgrading an unedited default is safe.
-        ("okx-news-intelligence", 0xb640_7d75_2958_c507),
-        ("okx-smart-money-analysis", 0x4fb7_3ba6_e18f_2e12),
-        // Untouched English baseline that still carried the factual constraints
-        // (OI identity, contract-size invention, leverage/margin) before they
-        // moved into the fixed skill. Upgrading it is safe precisely because an
-        // unedited philosophy carries no user intent.
-        ("trading-philosophy", 0x77f1_451b_c3b4_4a7c),
-        // Untouched baseline shipped after that move but before the philosophy
-        // was de-biased (waiting cost, directional lean, absence review). Same
-        // reasoning: no user edit, so the newer default is strictly better.
-        ("trading-philosophy", 0x701f_74f8_3aa4_b270),
-        // Untouched de-biased baseline shipped before target-side fee economics
-        // became deterministic. User-edited philosophy text has a different
-        // fingerprint and remains authoritative.
-        ("trading-philosophy", 0x70bc_d86c_6f81_36cf),
-        // Untouched fee-aware baseline shipped before existing-position lifecycle
-        // and deliberate-hedging decisions became mandatory on every run.
-        ("trading-philosophy", 0x2d67_2800_126d_8227),
-        // Untouched position-lifecycle baseline shipped before ordinary resting
-        // limit orders received an explicit, conditional maker-cost preference.
-        ("trading-philosophy", 0xaddb_6bab_fa83_ff77),
-    ];
     let protected_skill_ids = REQUIRED_AI_SKILL_IDS;
     let mut merged = desic_storage_config::default_ai_skill_definitions();
     for mut item in items {
@@ -4665,6 +5096,233 @@ mod tests {
         )
         .is_err());
     }
+    /// C18：调度规范正文的指纹护栏。
+    ///
+    /// 常量是**当前** shared 默认正文的指纹。任何一次对 `shared/default-ai-config.json`
+    /// 里该 Skill 正文的改动都会让它变化；那时必须把**上一版**的指纹登记进
+    /// `LEGACY_DEFAULT_SKILL_FINGERPRINTS`，否则"未改动的旧副本"不会被升级
+    /// （用户会一直看到"已本地改动"）。
+    #[test]
+    fn orchestration_default_fingerprint_is_pinned_for_legacy_upgrades() {
+        const DESIC_AGENT_ORCHESTRATION_CURRENT_FINGERPRINT: u64 = 0x18ed_c20d_36ac_0536;
+        let current = desic_storage_config::default_ai_skill_definitions()
+            .into_iter()
+            .find(|skill| skill.id == "desic-agent-orchestration")
+            .expect("shared default ships the orchestration skill");
+        assert_eq!(
+            skill_text_fingerprint(&current),
+            DESIC_AGENT_ORCHESTRATION_CURRENT_FINGERPRINT,
+            "shared/default-ai-config.json 的 desic-agent-orchestration 正文变了：请把上一版指纹登记进 LEGACY_DEFAULT_SKILL_FINGERPRINTS 并更新本常量"
+        );
+        // C18：正文必须教批量点名与 mode 语义。
+        assert!(current.content.contains("consult_experts"));
+        assert!(current.content.contains("mode: \"serial\""));
+        assert!(current.content.contains("parallel"));
+        assert!(
+            current.content.contains("at most 5 experts"),
+            "并发上限 5（PROFILE_AGENT_MAX_CONCURRENCY）必须在正文里同步"
+        );
+        // 依赖/顺序语义（C20 起由"无固定管线 + 本轮自行决定顺序"表达）。
+        assert!(
+            current.content.contains("keeping the array order meaningful"),
+            "并发批次与串行屏障的顺序语义必须在正文里"
+        );
+        assert!(
+            current.content.contains("mode: \"serial\" is a barrier")
+                || current.content.contains("serial\" is a barrier")
+                || current.content.contains("barrier"),
+            "serial 屏障语义必须写明"
+        );
+        // C20 新增规则（内容包 §7.2 第 3/5/6/8/9 条）。
+        for expected in [
+            "There is no fixed pipeline",
+            "Never dispatch the whole list just because it is enabled",
+            "Narrow an expert's read-only surface whenever the work allows it",
+            "Degrade explicitly when a role is missing",
+            "In the triage stage the consult tools are unavailable",
+        ] {
+            assert!(
+                current.content.contains(expected),
+                "C20 编排正文缺少规则：{expected}"
+            );
+        }
+        assert!(
+            current.rules.contains("There is no fixed stage order"),
+            "rules 末尾必须声明没有固定管线"
+        );
+        // C22（2026-09-19 董事会）：升级即须委派 + 例外须写 selfAnalysisReason +
+        // 禁止"为完成任务而空派" + 审计标记只标记不阻断（含误报修正的前置条件）。
+        for expected in [
+            "at least one expert",
+            "selfAnalysisReason",
+            "never dispatch an expert to look busy",
+            "selfAnalysisUnjustified",
+            // C23.1：审查/反方类专家**必须**传收窄 scopes（这类专家单点最贵）。
+            "always pass narrowed scopes",
+            // C20.4 降级路径：缺"分析/决策候选"角色时主 Agent 自己分析，但仍必须走反方。
+            "degradation path",
+            "self-produced candidate",
+            "does not relax the escalation rule",
+        ] {
+            assert!(
+                current.content.contains(expected),
+                "C22 委派规则缺少关键词：{expected}"
+            );
+        }
+        assert_eq!(
+            current.content.lines().count(),
+            19,
+            "C22/C23 正文 = 14 条 + C27 的'点名时要写清什么' + 编排提速的 4 条 = 19 条"
+        );
+        assert!(
+            current.description.contains("how missing roles are absorbed"),
+            "description 必须声明缺角色如何吸收"
+        );
+        assert!(
+            current
+                .content
+                .contains("Never dispatch the whole list just because it is enabled"),
+            "必须写明：启用不等于必须全部点名"
+        );
+        // 至少登记两版历史基线（v2 编排文案 / v3 无批量文案），否则旧副本升不上来。
+        assert!(
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .filter(|(id, _)| *id == "desic-agent-orchestration")
+                .count()
+                >= 2,
+            "历史基线必须保留"
+        );
+        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
+            |(id, fingerprint)| *id == "desic-agent-orchestration"
+                && *fingerprint == 0x05b9_9a0d_3f3f_987a
+        ));
+        // C27（2026-09-19 董事会 C 方案）：点名任务不再注入整篇 Profile 长文，改为
+        // "该问什么"由主 Agent 自己写 + 系统注入的 5 行事实块。正文必须写明这三点，
+        // 否则主 Agent 会把"专家没写清"归因到工具而不是自己的 task。
+        for expected in [
+            "Write the dispatch task yourself",
+            "is not forwarded to the expert",
+            "system-injected fact block",
+            "what is explicitly out of scope",
+            "What to ask stays your decision",
+        ] {
+            assert!(
+                current.content.contains(expected),
+                "C27 点名要求缺少关键词：{expected}"
+            );
+        }
+        // 上一版（C20 的 14 条）必须已登记，否则未改动的用户副本升不上来。
+        assert!(
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
+                |(id, fingerprint)| *id == "desic-agent-orchestration"
+                    && *fingerprint == 0xe3a4_f31b_633d_7fd3
+            ),
+            "C27 必须把 C20 版的指纹登记进历史基线"
+        );
+        // 编排提速（2026-09-20 董事会）：取数归主 Agent + 输出规范由主 Agent 当场定义。
+        // 这四条是**行为指导**，不是权限或代码强制：不设 token 上限、不做每角色 schema。
+        for expected in [
+            "Dispatch economics: you gather, experts judge",
+            "You are the only data gatherer in this round",
+            "must not re-gather what you already collected",
+            "targeted verification",
+            "Define each expert's output spec in the task",
+            "no fixed report format and no per-role schema",
+            "do not repeat numbers I already gave you",
+            "if a field has no data, write gap",
+            "Compress expression, never evidence",
+            "do not dispatch it again",
+            "one follow-up",
+        ] {
+            assert!(
+                current.content.contains(expected),
+                "编排提速正文缺少关键词：{expected}"
+            );
+        }
+        // 该章节不得退化成硬限制（董事会明确不做输出 token 上限与每角色 schema）。
+        for forbidden in [
+            "output token limit",
+            "token budget",
+            "maximum output length",
+            "must not exceed",
+        ] {
+            assert!(
+                !current.content.contains(forbidden),
+                "编排提速正文不得引入硬上限：{forbidden}"
+            );
+        }
+        assert!(
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .any(|(id, fingerprint)| {
+                    *id == "desic-agent-orchestration" && *fingerprint == 0x000e_71f5_03dc_5de3
+                }),
+            "编排提速必须把 C27 版的指纹登记进历史基线"
+        );
+    }
+
+    /// C21（契约 §C21.4 / 内容包 §8）：`desic-core-operations` 是**恒注入**的 Skill，
+    /// 因此"分析结果排版规范"必须写进它。改正文会改指纹：这里同时钉住当前指纹
+    /// （防止有人改了共享配置却忘了登记上一版基线）与五小节 / 两套标题的存在。
+    #[test]
+    fn core_operations_default_fingerprint_is_pinned_for_legacy_upgrades() {
+        const DESIC_CORE_OPERATIONS_CURRENT_FINGERPRINT: u64 = 0xedb0_f0b0_1a7e_2839;
+        let current = desic_storage_config::default_ai_skill_definitions()
+            .into_iter()
+            .find(|skill| skill.id == "desic-core-operations")
+            .expect("shared default ships the core operations skill");
+        assert_eq!(
+            skill_text_fingerprint(&current),
+            DESIC_CORE_OPERATIONS_CURRENT_FINGERPRINT,
+            "shared/default-ai-config.json 的 desic-core-operations 正文变了：请把上一版指纹登记进 LEGACY_DEFAULT_SKILL_FINGERPRINTS 并更新本常量"
+        );
+        // 新小节与编号连续（既有 1–27 一个字都没动）。
+        assert!(current.content.contains("V. Analysis-result formatting (run summary)"));
+        for number in 28..=34 {
+            assert!(
+                current.content.contains(&format!("\n{number}. ")),
+                "C21 正文缺条目 {number}"
+            );
+        }
+        // C21.2 冻结的两套小节标题都必须出现在提示词里（正文语言跟用户语言走）。
+        for heading in [
+            "`## 结论`",
+            "`## 事实与证据`",
+            "`## 冲突与缺口`",
+            "`## 观察条件`",
+            "`## 下一步`",
+            "`## Conclusion`",
+            "`## Facts and evidence`",
+            "`## Conflicts and gaps`",
+            "`## Observation conditions`",
+            "`## Next steps`",
+        ] {
+            assert!(
+                current.content.contains(heading),
+                "C21 排版规范缺少标题：{heading}"
+            );
+        }
+        // 审计后果必须告知模型（否则"缺小节"的警告会被当成失败）。
+        assert!(current.content.contains("formatting warning"));
+        assert!(current.content.contains("never fails the run"));
+        // C21.1：不得放进只在有专家名单时才注入的编排 Skill。
+        let orchestration = desic_storage_config::default_ai_skill_definitions()
+            .into_iter()
+            .find(|skill| skill.id == "desic-agent-orchestration")
+            .expect("shared default ships the orchestration skill");
+        assert!(
+            !orchestration.content.contains("Analysis-result formatting"),
+            "C21 排版规范不得放进 desic-agent-orchestration（它只在有专家名单时注入）"
+        );
+        // 至少登记一版历史基线，否则未改动的旧副本升不上来。
+        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
+            |(id, fingerprint)| *id == "desic-core-operations"
+                && *fingerprint == 0x5387_2f01_0cc0_ad05
+        ));
+    }
+
+
 
     /// The active Skill set is the authorization boundary: a loaded Skill may
     /// expose its own documents, an unloaded one may not, and path containment
@@ -4835,7 +5493,49 @@ wire_api = "responses"
             skill_runtime_trust: HashMap::new(),
             open_agent: true,
             workspace_roots: Vec::new(),
+            typesafe: desic_storage_config::AiTypesafeConfig::default(),
+            tool_read_concurrency: None,
+            tool_domain_concurrency: None,
         }
+    }
+
+    /// 调度 Skill 是主 Agent 在名单非空时**原样注入**的正文（`scripts/cline-sidecar.mjs`），
+    /// 因此它必须只描述 v3 的自由调度：不得再教模型使用已删除的后端预算错误、
+    /// "backend-orchestrated mode" 预挂载报告、以及交易机会前的账户风险硬闸门。
+    #[test]
+    fn default_orchestration_skill_describes_free_dispatch_only() {
+        let defaults = desic_storage_config::default_ai_skill_definitions();
+        let skill = defaults
+            .iter()
+            .find(|item| item.id == "desic-agent-orchestration")
+            .expect("desic-agent-orchestration 默认定义缺失");
+        let text = format!("{}\n{}\n{}", skill.description, skill.rules, skill.content);
+        for forbidden in [
+            "budgets are enforced by the backend",
+            "returns a budget error",
+            "Backend-orchestrated mode",
+            "hard-evidence gate",
+            "auto-run a missing expert",
+        ] {
+            assert!(
+                !text.contains(forbidden),
+                "v3 已删除的机制仍留在调度 Skill 正文里：{forbidden}"
+            );
+        }
+        for required in [
+            "Dispatch is yours alone",
+            "no consultation or follow-up limit",
+            "untrusted evidence",
+            "agent.list",
+        ] {
+            assert!(
+                text.contains(required),
+                "调度 Skill 正文缺少 v3 必需表述：{required}"
+            );
+        }
+        // 旧版未编辑副本（含预算错误/backend 编排/硬闸门）通过指纹升级到新正文；
+        // 若新正文与旧指纹相同，升级路径会把自己继续跳过，等于修复失效。
+        assert_ne!(skill_text_fingerprint(skill), 0x3588_dc57_4293_41ee);
     }
 
     #[test]
@@ -4855,6 +5555,102 @@ wire_api = "responses"
                 path.starts_with("references/") && !content.trim().is_empty()
             }));
         }
+    }
+
+    #[test]
+    fn agent_bundle_helpers_reject_traversal_and_id_mismatch() {
+        // id 校验发生在任何文件系统访问之前：目录穿越与非法字符都必须被拒绝。
+        for bad in ["../evil", "..", "a/b", "/abs", "Upper", "", "空格"] {
+            assert!(read_agent_bundle(bad).is_err(), "{bad:?} 应被拒绝");
+            assert!(
+                agent_bundle_markdown_path(bad).is_err(),
+                "{bad:?} 应被拒绝（路径解析）"
+            );
+        }
+        // frontmatter 的 id 与目录名不一致时拒绝写入（防串档）。
+        let root = std::env::temp_dir().join(format!("desic-agent-id-mismatch-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let markdown = desic_agent_automation::builtin_agent_markdown("desic-market-structure")
+            .expect("内置正文");
+        let error = write_agent_bundle_in(&root, "desic-account-risk", &markdown, true)
+            .expect_err("id 不一致应报错");
+        assert!(error.contains("目录名"), "错误信息应说明 id 不一致: {error}");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn agent_bundle_write_is_additive_and_never_overwrites_by_default() {
+        let root = std::env::temp_dir().join(format!("desic-agent-additive-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let markdown = desic_agent_automation::builtin_agent_markdown("desic-market-structure")
+            .expect("内置正文");
+
+        let first = write_agent_bundle_in(&root, "desic-market-structure", &markdown, false)
+            .expect("首次写入");
+        assert!(first.wrote);
+        assert_eq!(
+            read_agent_bundle_in(&root, "desic-market-structure")
+                .expect("读回")
+                .as_deref(),
+            Some(markdown.as_str())
+        );
+
+        // 用户改动后，`overwrite=false`（迁移/内置安装路径）不得覆盖。
+        let edited = format!("{markdown}\n<!-- 本地改动 -->\n");
+        fs::write(
+            root.join("desic-market-structure")
+                .join(desic_agent_automation::AGENT_FILE_NAME),
+            edited.as_bytes(),
+        )
+        .expect("模拟用户改动");
+        let second = write_agent_bundle_in(&root, "desic-market-structure", &markdown, false)
+            .expect("重复写入");
+        assert!(!second.wrote, "已存在且不覆盖时应跳过");
+        assert!(
+            read_agent_bundle_in(&root, "desic-market-structure")
+                .expect("读回")
+                .expect("存在")
+                .contains("本地改动")
+        );
+
+        // 显式覆盖（ai_agent_save 路径）才写回。
+        let third = write_agent_bundle_in(&root, "desic-market-structure", &markdown, true)
+            .expect("覆盖写入");
+        assert!(third.wrote);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn builtin_agent_bundles_install_is_idempotent_and_restores_deleted_files() {
+        let root = std::env::temp_dir().join(format!("desic-agent-install-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+
+        let written = install_builtin_agent_bundles_in(&root).expect("首次安装");
+        let ids = desic_agent_automation::builtin_agent_ids();
+        assert_eq!(written, ids.len(), "首次安装应写满全部内置 Agent");
+        assert_eq!(list_agent_bundle_ids_in(&root), {
+            let mut sorted = ids.clone();
+            sorted.sort();
+            sorted
+        });
+
+        // 二次安装：文件已存在（含用户改动）一律跳过，幂等。
+        assert_eq!(install_builtin_agent_bundles_in(&root).expect("二次安装"), 0);
+
+        // 删除单个文件后再安装：只补回缺失的那个，内容回到内置正文。
+        let victim = &ids[0];
+        fs::remove_file(
+            root.join(victim)
+                .join(desic_agent_automation::AGENT_FILE_NAME),
+        )
+        .expect("删除文件");
+        assert_eq!(install_builtin_agent_bundles_in(&root).expect("补装"), 1);
+        assert_eq!(
+            read_agent_bundle_in(&root, victim).expect("读回").as_deref(),
+            desic_agent_automation::builtin_agent_markdown(victim).as_deref()
+        );
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

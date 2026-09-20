@@ -123,6 +123,43 @@ fn default_ui_language_preference() -> String {
     "system".to_string()
 }
 
+fn default_typesafe_model() -> String {
+    "jev-1.13.0".to_string()
+}
+
+fn default_typesafe_base_url() -> String {
+    "https://api.typesafe.ai".to_string()
+}
+
+/// TypeSafe / Jev 快速判定接入配置（可选，默认关闭）。
+///
+/// Jev 是"判定层"而不是生成层：它返回类型化答案与校准概率，不产出正文。
+/// 这里的开关只决定"是否在 AI 运行中使用 Jev 判定"，不改变既有生成链路、
+/// 也不改变任何交易或权限边界。API Key 明文只落本机敏感配置，对外只回掩码。
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(rename_all = "camelCase")]
+pub struct AiTypesafeConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default = "default_typesafe_model")]
+    pub model: String,
+    #[serde(default = "default_typesafe_base_url")]
+    pub base_url: String,
+}
+
+impl Default for AiTypesafeConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            api_key: String::new(),
+            model: default_typesafe_model(),
+            base_url: default_typesafe_base_url(),
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AiConfig {
@@ -156,6 +193,16 @@ pub struct AiConfig {
     pub open_agent: bool,
     #[serde(default)]
     pub workspace_roots: Vec<String>,
+    /// TypeSafe / Jev 快速判定（可选）。缺字段的旧配置按「关闭 + 默认模型」迁移。
+    #[serde(default)]
+    pub typesafe: AiTypesafeConfig,
+    /// 只读 AI 工具并发上限（可选）。缺省 12，按机器/回退可调，见 `ai_tool_gate`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_read_concurrency: Option<u32>,
+    /// 只读 AI 工具按域并发上限覆盖（可选），如 `{"market": 6, "intelligence": 4}`。
+    /// 未列出的域保持代码缺省值；非法值夹到合法区间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_domain_concurrency: Option<HashMap<String, u32>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -213,6 +260,12 @@ pub struct AiConfigSummary {
     pub skill_runtime_trust: HashMap<String, bool>,
     pub open_agent: bool,
     pub workspace_roots: Vec<String>,
+    /// TypeSafe / Jev 快速判定：是否启用、是否已具备可用 Key、掩码后的 Key、模型与端点。
+    pub typesafe_enabled: bool,
+    pub typesafe_configured: bool,
+    pub typesafe_api_key_masked: String,
+    pub typesafe_model: String,
+    pub typesafe_base_url: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -269,6 +322,11 @@ pub struct AiConfigUpdate {
     pub skill_definitions: Option<Vec<AiSkillDefinition>>,
     pub open_agent: Option<bool>,
     pub workspace_roots: Option<Vec<String>>,
+    /// TypeSafe / Jev：`None` = 不改动（沿用现值）；`Some("")` 表示清空 Key（`api_key` 含 `****` 时同样忽略）。
+    pub typesafe_enabled: Option<bool>,
+    pub typesafe_api_key: Option<String>,
+    pub typesafe_model: Option<String>,
+    pub typesafe_base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -708,7 +766,10 @@ mod tests {
     fn builtin_skill_baselines_match_the_promoted_published_versions() {
         let definitions = default_ai_skill_definitions();
         let expected = [
-            ("desic-core-operations", 0x773a_d6fc_a37c_821c_u64),
+            // C21（2026-09-19 董事会）：desic-core-operations 追加第 V 小节
+            // "Analysis-result formatting (run summary)"（条目 28–34），既有 1–27 一字未改。
+            // 这是**有意的版本提升**（promotion），指纹随正文变化。
+            ("desic-core-operations", 0x74d6_0dbf_7630_a498_u64),
             ("trading-philosophy", 0xebdb_a0a9_c0fd_658d_u64),
             ("okx-market-intelligence", 0xe56e_8dff_915f_7377_u64),
             ("market-radar-research", 0x8fca_9f53_9f40_54ae_u64),
@@ -845,8 +906,19 @@ mod tests {
         }
     }
 
+    /// The shipped default prompt and Skills are English. The **only** CJK allowed is the
+    /// C21.2-frozen Chinese section-heading set, which must appear verbatim (inside inline-code
+    /// spans) because a Chinese run has to use exactly those strings and the Rust soft audit
+    /// accepts only the frozen zh/en sets — see contract C21.2/C21.3 and content pack §8.3 §8.6.
     #[test]
     fn default_prompt_and_skills_are_english() {
+        const C21_FROZEN_ZH_HEADINGS: [&str; 5] = [
+            "`## 结论`",
+            "`## 事实与证据`",
+            "`## 冲突与缺口`",
+            "`## 观察条件`",
+            "`## 下一步`",
+        ];
         let definitions = default_ai_skill_definitions();
         let text = std::iter::once(default_ai_system_prompt())
             .chain(
@@ -856,12 +928,16 @@ mod tests {
             )
             .collect::<Vec<_>>()
             .join("\n");
+        let mut prose = text.clone();
+        for heading in C21_FROZEN_ZH_HEADINGS {
+            prose = prose.replace(heading, "");
+        }
 
         assert!(
-            !text
+            !prose
                 .chars()
                 .any(|ch| ('\u{4e00}'..='\u{9fff}').contains(&ch)),
-            "default AI configuration must not contain CJK text"
+            "default AI configuration must not contain CJK text (只有 C21 冻结的五个中文小节标题例外)"
         );
     }
 

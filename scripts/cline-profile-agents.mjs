@@ -1,39 +1,10 @@
-export const PROFILE_AUTO_MULTI_AGENT_MAX = 8;
-export const PROFILE_CUSTOM_MULTI_AGENT_MAX = 10;
-export const PROFILE_MULTI_AGENT_MAX = PROFILE_AUTO_MULTI_AGENT_MAX;
-export const PROFILE_MULTI_AGENT_REPORT_LIMIT = 12_000;
-export const PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET = 4_000;
-export const PROFILE_MULTI_AGENT_STALL_TIMEOUT_MS = 180_000;
-// D6（DES-7 v2 §5.6）：lead 模式预算护栏为后端硬约束。consult 与 follow_up
-// 独立计数（follow_up 不占用 consult 的每轮额度）；总时限覆盖全部咨询/追问
-// 活动，与 180s 停滞看门狗正交并存（看门狗管卡死，总时限管总长）。
-export const PROFILE_MULTI_AGENT_MAX_CONSULTS_PER_RUN = 8;
-export const PROFILE_MULTI_AGENT_FOLLOW_UPS_PER_EXPERT = 2;
-export const PROFILE_MULTI_AGENT_TOTAL_TIMEOUT_MS = 600_000;
+// v3（docs/multi-agent-dispatch-plan-v3.md §3/§4，契约 C4/C5）：
+// 本模块只保留"内容与结构"侧的纯函数——Profile 勾选名单解析、点名收窄的只读工具
+// 白名单、缺依赖提示、进展心跳与报告回收。预算护栏（报告截断/停滞杀进程/总时限/咨询与
+// 追问次数上限）与 backend 编排器（auto 打分、关键词 boost、复核波）已全部删除：
+// 编排只有一条路，主 Agent 通过 consult_expert / follow_up 自己点名。
 
-export function createProfileAgentStallWatchdog(onStall, options = {}) {
-  const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
-    ? options.timeoutMs
-    : PROFILE_MULTI_AGENT_STALL_TIMEOUT_MS;
-  const schedule = options.schedule || setTimeout;
-  const cancel = options.cancel || clearTimeout;
-  let timer = null;
-  let active = true;
-  return {
-    reset() {
-      if (!active) return;
-      if (timer !== null) cancel(timer);
-      timer = schedule(onStall, timeoutMs);
-    },
-    clear() {
-      active = false;
-      if (timer !== null) cancel(timer);
-      timer = null;
-    }
-  };
-}
-
-const PROFILE_AGENT_SCOPE_TOOLS = Object.freeze({
+const PROFILE_READ_TOOLS_BY_SCOPE = Object.freeze({
   market: [
     "market.readTicker",
     "market.readInstrument",
@@ -108,84 +79,12 @@ const PROFILE_AGENT_SCOPE_TOOLS = Object.freeze({
   ]
 });
 
-const PROFILE_AGENT_ALL_TOOLS = Object.freeze([...new Set(Object.values(PROFILE_AGENT_SCOPE_TOOLS).flat())]);
+// C15：scopes 不再是 Agent 文件字段，只在"主 Agent 点名时收窄"这一个用途上保留：
+// 域 → 该域的只读工具，PROFILE_ALL_READ_TOOLS = 五个域的并集（缺省授予）。
+export const PROFILE_SCOPE_NAMES = Object.freeze(Object.keys(PROFILE_READ_TOOLS_BY_SCOPE));
 
-const AUTO_PROFILE_AGENTS = Object.freeze([
-  {
-    id: "auto-market-structure",
-    name: "市场结构",
-    role: "market_structure",
-    responsibility: "检查多周期价格结构、趋势、波动、成交、盘口和关键失效位，明确事实与推断。",
-    scopes: ["market", "derivatives"],
-    required: true,
-    enabled: true
-  },
-  {
-    id: "auto-order-flow-liquidity",
-    name: "订单流与流动性",
-    role: "order_flow_liquidity",
-    responsibility: "检查盘口深度、买卖价差、逐笔成交、主动买卖和流动性缺口，识别短时冲击与滑点风险。",
-    scopes: ["market"],
-    required: false,
-    enabled: true
-  },
-  {
-    id: "auto-derivatives-positioning",
-    name: "衍生品仓位",
-    role: "derivatives_positioning",
-    responsibility: "检查资金费率、基差、持仓拥挤、爆仓样本和仓位变化，判断杠杆方向及挤压风险。",
-    scopes: ["derivatives", "market"],
-    required: false,
-    enabled: true
-  },
-  {
-    id: "auto-account-risk",
-    name: "账户风险",
-    role: "account_risk",
-    responsibility: "检查仓位、余额、保证金、挂单、集中度与历史相似交易；风险结论只能收紧或否决。",
-    scopes: ["account", "history", "market"],
-    required: true,
-    enabled: true,
-    requiresAccount: true
-  },
-  {
-    id: "auto-intelligence-flow",
-    name: "新闻与宏观",
-    role: "intelligence_flow",
-    responsibility: "检查新闻、宏观日历、事件、情绪与市场反应，标注发布时间、来源、重要性和证据冲突。",
-    scopes: ["intelligence"],
-    required: false,
-    enabled: true,
-    requiresSkill: "okx-market-intelligence"
-  },
-  {
-    id: "auto-smart-money",
-    name: "Smart Money",
-    role: "smart_money",
-    responsibility: "检查精英交易员仓位、绩效、订单历史、共识分歧和资金流趋势，区分领先信号与拥挤跟随。",
-    scopes: ["intelligence", "derivatives"],
-    required: false,
-    enabled: true,
-    requiresSkill: "okx-market-intelligence"
-  },
-  {
-    id: "auto-historical-analogy",
-    name: "历史类比",
-    role: "historical_analogy",
-    responsibility: "检索历史订单、成交、持仓阶段和既有交易机会，比较相似情境、结果分布与失效条件。",
-    scopes: ["history", "market"],
-    required: false,
-    enabled: true
-  },
-  {
-    id: "auto-contrarian-review",
-    name: "反方审查",
-    role: "contrarian",
-    responsibility: "主动寻找反证、过期数据、缺失证据、拥挤交易和相反市场路径，不重复正向结论。",
-    scopes: ["market", "derivatives", "intelligence", "history"],
-    required: false,
-    enabled: true
-  }
+export const PROFILE_ALL_READ_TOOLS = Object.freeze([
+  ...new Set(Object.values(PROFILE_READ_TOOLS_BY_SCOPE).flat())
 ]);
 
 function stringList(value) {
@@ -193,230 +92,144 @@ function stringList(value) {
   return value.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
-export function normalizeProfileMultiAgentMode(value) {
-  const mode = String(value || "off").trim().toLowerCase();
-  return mode === "auto" || mode === "custom" ? mode : "off";
-}
-
-// D4（DES-7 v2 §5.4）：multiAgentMode 仍是主开关（off=关闭）与旧值兼容入口，
-// multiAgentOrchestrator × multiAgentExpertSource 是正交维度。读旧写新：
-// off → 关闭；auto → backend+auto；custom → backend+custom（缺省 expertSource
-// 由旧 mode 推导，显式提供时优先生效）。
-export function normalizeMultiAgentConfig(config = {}) {
+/// C4：运行配置载荷的 `enabledAgents` 是该 Profile 勾选且库中存在的 Agent（含正文）。
+/// 解析规则（冻结）：按 id 去重并保持勾选顺序；丢弃缺 `id` / `name` / `body` 的条目；
+/// **不截断、不打分、不按 requiresAccount / requiresSkill 静默过滤**——缺依赖只在
+/// 该专家的任务前缀里提示（见 profileAgentDependencyNotices）。
+/// C15：Agent 文件与载荷都不再有 `scopes`；旧载荷里带它一律忽略（不报错、不传递）。
+export function normalizeEnabledProfileAgents(config = {}) {
   const source = config && typeof config === "object" ? config : {};
-  const mode = normalizeProfileMultiAgentMode(source.multiAgentMode);
-  const orchestrator = String(source.multiAgentOrchestrator || "").trim().toLowerCase();
-  const expertSource = String(source.multiAgentExpertSource || "").trim().toLowerCase();
+  const raw = Array.isArray(source.enabledAgents) ? source.enabledAgents : [];
+  const seen = new Set();
+  const agents = [];
+  for (const value of raw) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    const id = String(value.id || "").trim();
+    const name = String(value.name || "").trim();
+    const body = String(value.body || "").trim();
+    if (!id || !name || !body) continue;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    const version = Number(value.version);
+    const declaredEnvelope = String(value.envelope || "").trim().toLowerCase();
+    const role = String(value.role || "custom").trim() || "custom";
+    // C15.1：envelope 取严 = 声明 risk 或 role == account_risk（不再由 scopes 推导）。
+    const envelope = declaredEnvelope === "risk" || role === "account_risk" ? "risk" : "standard";
+    agents.push({
+      id,
+      name,
+      role,
+      envelope,
+      skills: stringList(value.skills),
+      requiresAccount: value.requiresAccount === true,
+      source: String(value.source || "").trim() || "custom",
+      version: Number.isInteger(version) ? version : 1,
+      summary: String(value.summary || "").trim(),
+      body
+    });
+  }
+  return agents;
+}
+
+/// C4：缺账户 / 缺 Skill 不剔除专家，只在专家任务前缀里说明，由专家自己在
+/// 数据缺口部分交代。
+export function profileAgentDependencyNotices(agent, config = {}) {
+  const notices = [];
+  const hasAccount = Boolean(String(config?.agentProfileAccountId || "").trim());
+  if (agent?.requiresAccount === true && !hasAccount) {
+    notices.push("当前 Profile 未绑定账户，account 类证据不可用。");
+  }
+  const activeSkills = new Set(stringList(config?.activeSkillIds));
+  for (const skill of stringList(agent?.skills)) {
+    if (activeSkills.has(skill)) continue;
+    notices.push(`Skill ${skill} 未激活，相关工具不可用；请在数据缺口部分说明。`);
+  }
+  return notices;
+}
+
+/// C5：无进展只回调通知，**永不 abort、永不 reject**——本 API 不持有任何中断能力，
+/// 专家长跑不会被侧车杀死。调用方在每次 provider 进展时 reset()，之后每
+/// repeatEveryMs 重复回调一次（默认 120s），直到 clear()。
+export function createProfileAgentProgressPulse({
+  notifyAfterMs = 120_000,
+  repeatEveryMs = 120_000,
+  onNotice = () => {},
+  now = () => Date.now(),
+  schedule = setTimeout,
+  cancel = clearTimeout
+} = {}) {
+  const firstDelayMs = Number.isFinite(notifyAfterMs) && notifyAfterMs > 0 ? notifyAfterMs : 120_000;
+  const repeatDelayMs = Number.isFinite(repeatEveryMs) && repeatEveryMs > 0 ? repeatEveryMs : firstDelayMs;
+  let timer = null;
+  let active = true;
+  let notices = 0;
+  const startedAt = now();
+  let lastProgressAt = startedAt;
+
+  const arm = () => {
+    if (!active) return;
+    if (timer !== null) cancel(timer);
+    timer = schedule(fire, notices === 0 ? firstDelayMs : repeatDelayMs);
+  };
+
+  const fire = () => {
+    if (!active) return;
+    timer = null;
+    notices += 1;
+    const current = now();
+    try {
+      onNotice({
+        elapsedMs: Math.max(0, current - startedAt),
+        silentMs: Math.max(0, current - lastProgressAt)
+      });
+    } catch {
+      // 提示上报失败不得影响专家运行。
+    }
+    arm();
+  };
+
   return {
-    enabled: mode !== "off",
-    mode,
-    orchestrator: orchestrator === "lead" ? "lead" : "backend",
-    expertSource: expertSource === "custom" || expertSource === "auto"
-      ? expertSource
-      : mode === "custom"
-        ? "custom"
-        : "auto"
+    /// 记录一次进展并重新计时（首次调用即启动心跳）。
+    reset() {
+      if (!active) return;
+      lastProgressAt = now();
+      arm();
+    },
+    clear() {
+      active = false;
+      if (timer !== null) cancel(timer);
+      timer = null;
+    }
   };
 }
 
-function normalizeProfileAgent(value, index) {
-  if (!value || typeof value !== "object") return null;
-  const id = String(value.id || `profile-agent-${index + 1}`).trim();
-  const name = String(value.name || `分析 Agent ${index + 1}`).trim();
-  const responsibility = String(value.responsibility || "").trim();
-  const scopes = stringList(value.scopes)
-    .map((scope) => scope.toLowerCase())
-    .filter((scope, scopeIndex, items) => PROFILE_AGENT_SCOPE_TOOLS[scope] && items.indexOf(scope) === scopeIndex);
-  if (!id || !name || !responsibility || value.enabled === false) return null;
-  return {
-    id,
-    name,
-    role: String(value.role || "custom").trim() || "custom",
-    responsibility,
-    scopes,
-    required: value.required === true,
-    enabled: true
-  };
-}
-
+/// C15.2：点名收窄的工具面。不传或空数组 → 全部只读工具（缺省不限制）；传域 →
+/// 这些域的并集。注意：非法域**不在这里静默过滤**——点名时的白名单校验在
+/// cline-sidecar 的 consult_expert/follow_up 入口完成（非法值直接报错）。
 export function profileAgentToolAllowlist(scopes) {
   const declaredScopes = stringList(scopes);
-  if (declaredScopes.length === 0) return [...PROFILE_AGENT_ALL_TOOLS];
+  if (declaredScopes.length === 0) return [...PROFILE_ALL_READ_TOOLS];
   const tools = new Set();
   for (const scope of declaredScopes) {
-    for (const name of PROFILE_AGENT_SCOPE_TOOLS[scope] || []) tools.add(name);
+    for (const name of PROFILE_READ_TOOLS_BY_SCOPE[scope] || []) tools.add(name);
   }
   return Array.from(tools);
 }
 
-export function resolveProfileMultiAgents(config = {}, taskText = "") {
-  if (config.backgroundRun !== true || config.reviewRun === true) return [];
-  const mode = normalizeProfileMultiAgentMode(config.multiAgentMode);
-  if (mode === "off") return [];
-  const parsedMax = Number(config.multiAgentMaxAgents);
-  const modeLimit = mode === "custom"
-    ? PROFILE_CUSTOM_MULTI_AGENT_MAX
-    : PROFILE_AUTO_MULTI_AGENT_MAX;
-  const maxAgents = Math.min(
-    modeLimit,
-    Math.max(2, Number.isInteger(parsedMax) && parsedMax > 0 ? parsedMax : modeLimit)
-  );
-  if (mode === "custom") {
-    const agents = enabledCustomProfileAgents(config);
-    if (agents.length > maxAgents) {
-      throw new Error(`已启用 ${agents.length} 个自定义 Agent，超过当前上限 ${maxAgents}`);
-    }
-    return agents;
-  }
-  const agents = eligibleAutoProfileAgents(config);
-  const task = String(taskText || "");
-  const scores = new Map([
-    ["auto-market-structure", 1_000],
-    ["auto-account-risk", 900],
-    ["auto-contrarian-review", 80],
-    ["auto-intelligence-flow", 75],
-    ["auto-smart-money", 74],
-    ["auto-order-flow-liquidity", 70],
-    ["auto-derivatives-positioning", 65],
-    ["auto-historical-analogy", 60]
-  ]);
-  const boost = (id, amount) => scores.set(id, (scores.get(id) || 0) + amount);
-  if (/新闻|情报|宏观|事件|情绪|公告|news|intelligence|macro|sentiment/i.test(task)) {
-    boost("auto-intelligence-flow", 150);
-  }
-  if (/聪明钱|精英交易员|资金流|smart\s*money|trader\s*flow/i.test(task)) {
-    boost("auto-smart-money", 160);
-    boost("auto-derivatives-positioning", 25);
-  }
-  if (/盘口|订单流|深度|流动性|价差|逐笔|主动买|主动卖|order\s*flow|order\s*book|liquidity|spread/i.test(task)) {
-    boost("auto-order-flow-liquidity", 150);
-    boost("auto-derivatives-positioning", 20);
-  }
-  if (/资金费率|基差|持仓量|爆仓|清算|拥挤|挤压|funding|basis|open\s*interest|liquidation|crowding|squeeze/i.test(task)) {
-    boost("auto-derivatives-positioning", 150);
-  }
-  if (/历史|类比|复盘|相似交易|历史订单|history|historical|analogy|postmortem/i.test(task)) {
-    boost("auto-historical-analogy", 150);
-    boost("auto-contrarian-review", 20);
-  }
-  if (/账户|余额|仓位|保证金|风险|回撤|挂单|account|balance|position|margin|risk|drawdown/i.test(task)) {
-    boost("auto-account-risk", 150);
-    boost("auto-contrarian-review", 40);
-  }
-  return agents
-    .map((agent, index) => ({ agent, index, score: scores.get(agent.id) || 0 }))
-    .sort((left, right) => right.score - left.score || left.index - right.index)
-    .slice(0, maxAgents)
-    .map(({ agent }) => ({
-      id: agent.id,
-      name: agent.name,
-      role: agent.role,
-      responsibility: agent.responsibility,
-      scopes: [...agent.scopes],
-      required: agent.required,
-      enabled: true
-    }));
+/// C15.2：本次实际授予的域——缺省（不传/空数组）为全部五个；收窄时保持声明顺序去重。
+export function grantedProfileScopes(scopes) {
+  const declaredScopes = stringList(scopes);
+  if (declaredScopes.length === 0) return [...PROFILE_SCOPE_NAMES];
+  return declaredScopes
+    .map((scope) => scope.toLowerCase())
+    .filter((scope, index, items) => PROFILE_SCOPE_NAMES.includes(scope) && items.indexOf(scope) === index);
 }
 
-function enabledCustomProfileAgents(config) {
-  return (Array.isArray(config.multiAgents) ? config.multiAgents : [])
-    .map(normalizeProfileAgent)
-    .filter(Boolean);
-}
-
-function eligibleAutoProfileAgents(config) {
-  const activeSkills = new Set(stringList(config.activeSkillIds));
-  const hasAccount = Boolean(String(config.agentProfileAccountId || "").trim());
-  return AUTO_PROFILE_AGENTS.filter((agent) => {
-    if (agent.requiresAccount && !hasAccount) return false;
-    if (agent.requiresSkill && !activeSkills.has(agent.requiresSkill)) return false;
-    return true;
-  });
-}
-
-// D8（DES-7 v2 §5.8）：lead 模式主 Agent 可点名的专家 = Profile 已启用名单。
-// 与 resolveProfileMultiAgents 的资格过滤同源（requiresAccount / requiresSkill /
-// enabled），但不做任务相关性打分与数量截断——目录呈现完整可点名池，配额由
-// D6 预算护栏约束（P2 落地）。
-export function resolveProfileAgentCatalog(config = {}) {
-  const normalized = normalizeMultiAgentConfig(config);
-  if (!normalized.enabled) return { ...normalized, agents: [] };
-  const agents = normalized.expertSource === "custom"
-    ? enabledCustomProfileAgents(config)
-    : eligibleAutoProfileAgents(config).map((agent) => ({
-      id: agent.id,
-      name: agent.name,
-      role: agent.role,
-      responsibility: agent.responsibility,
-      scopes: [...agent.scopes],
-      required: agent.required,
-      enabled: true
-    }));
-  return { ...normalized, agents };
-}
-
-export function truncateProfileAgentReport(value) {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  let bounded = text;
-  let omittedByCharCap = 0;
-  if (bounded.length > PROFILE_MULTI_AGENT_REPORT_LIMIT) {
-    omittedByCharCap = bounded.length - PROFILE_MULTI_AGENT_REPORT_LIMIT;
-    bounded = bounded.slice(0, PROFILE_MULTI_AGENT_REPORT_LIMIT);
-  }
-  const totalTokens = estimateProfileAgentReportTokens(bounded);
-  if (totalTokens <= PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET) {
-    return omittedByCharCap > 0
-      ? `${bounded.trimEnd()}\n[报告已截断：超过 ${PROFILE_MULTI_AGENT_REPORT_LIMIT} 字符绝对上限，尾部省略约 ${omittedByCharCap} 字符]`
-      : bounded;
-  }
-  const headBudget = Math.floor(PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET * 0.7);
-  const tailBudget = PROFILE_MULTI_AGENT_REPORT_TOKEN_BUDGET - headBudget;
-  const head = sliceProfileAgentReportHeadByTokens(bounded, headBudget);
-  const tail = sliceProfileAgentReportTailByTokens(bounded, tailBudget);
-  if (head.length + tail.length >= bounded.length) return bounded;
-  const omittedTokens = totalTokens - headBudget - tailBudget;
-  return [
-    head.trimEnd(),
-    `[报告已截断：中段省略约 ${omittedTokens} token，仅保留头尾；本标注由后端生成，不是报告内容]`,
-    tail.trimStart()
-  ].join("\n");
-}
-
-const PROFILE_AGENT_REPORT_CJK_CHAR = /[\u2e80-\u9fff\u3040-\u30ff\uf900-\ufaff\uff00-\uffef]/;
-
-function estimateProfileAgentReportTokens(text) {
-  let tokens = 0;
-  for (const char of String(text || "")) {
-    tokens += PROFILE_AGENT_REPORT_CJK_CHAR.test(char) ? 1 : 0.25;
-  }
-  return Math.ceil(tokens);
-}
-
-function sliceProfileAgentReportHeadByTokens(text, budget) {
-  const source = String(text || "");
-  if (budget <= 0) return "";
-  let used = 0;
-  let end = 0;
-  for (const char of source) {
-    used += PROFILE_AGENT_REPORT_CJK_CHAR.test(char) ? 1 : 0.25;
-    if (used > budget) break;
-    end += char.length;
-  }
-  return end > 0 ? source.slice(0, end) : source.slice(0, 1);
-}
-
-function sliceProfileAgentReportTailByTokens(text, budget) {
-  if (budget <= 0) return "";
-  const chars = Array.from(String(text || ""));
-  let used = 0;
-  let start = chars.length;
-  for (let index = chars.length - 1; index >= 0; index -= 1) {
-    used += PROFILE_AGENT_REPORT_CJK_CHAR.test(chars[index]) ? 1 : 0.25;
-    if (used > budget) break;
-    start = index;
-  }
-  return start < chars.length ? chars.slice(start).join("") : chars.slice(-1).join("");
+/// C15.2：点名时出现白名单外的域必须报错并列出非法值（禁止静默过滤）。
+export function invalidProfileScopes(scopes) {
+  return stringList(scopes)
+    .map((scope) => scope.toLowerCase())
+    .filter((scope) => !PROFILE_SCOPE_NAMES.includes(scope));
 }
 
 export function profileAgentHistoricalReviewRules(prompt) {
@@ -455,11 +268,12 @@ function parseProfileAgentJson(text) {
   return parsed.length === 1 ? parsed[0] : null;
 }
 
-// D1: report content is never judged by format. A prose report is a valid
-// report; failure comes only from an anomalous finishReason or empty output.
-// A structured JSON object (raw, fenced, or brace-sliced) is optional extra:
-// when it parses it is returned as-is with every field optional, and when it
-// does not the whole text is the report body.
+/// D1: report content is never judged by format. A prose report is a valid
+/// report; failure comes only from an anomalous finishReason or empty output.
+/// A structured JSON object (raw, fenced, or brace-sliced) is optional extra:
+/// when it parses it is returned as-is with every field optional, and when it
+/// does not the whole text is the report body. v3 指令 1：正文不做任何长度变换，
+/// 报告原样回流主 Agent。
 export function collectProfileAgentReport(result) {
   const finishReason = String(result?.finishReason || "error").trim().toLowerCase();
   const text = String(result?.text || "").trim();

@@ -31,14 +31,16 @@ use tokio::{
     net::TcpStream,
     process::Command,
     sync::{
-        mpsc, oneshot, Mutex as AsyncMutex, Notify, RwLock as AsyncRwLock, Semaphore,
-        SemaphorePermit,
+        mpsc, oneshot, Mutex as AsyncMutex, Notify, Semaphore, SemaphorePermit,
     },
     time::{sleep, timeout, Duration},
 };
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
+mod agent_library;
 mod ai_automation;
 mod ai_stream_checkpoint;
+mod ai_tool_gate;
+mod ai_triage;
 mod app_updater;
 mod chart_alerts;
 mod chart_consumers;
@@ -57,14 +59,19 @@ mod systematic;
 mod trade_commands;
 mod trade_domain;
 mod trade_support;
+use crate::agent_library::{
+    ai_agent_delete, ai_agent_duplicate, ai_agent_generate, ai_agent_generate_cancel,
+    ai_agent_read, ai_agent_save, ai_agents_list,
+};
 use crate::ai_automation::{
     ai_agent_profile_delete, ai_agent_profile_run_daily_review, ai_agent_profile_run_now,
-    ai_agent_profile_save, ai_agent_profile_systematic_conflicts, ai_agent_scheme_delete,
-    ai_agent_scheme_save, ai_automation_overview, ai_automation_run_detail,
+    ai_agent_profile_save, ai_agent_profile_systematic_conflicts, ai_automation_force_deep_run,
+    ai_automation_overview, ai_automation_run_detail,
     ai_automation_run_statuses, ai_automation_save_master_enabled, ai_automation_section,
     ai_automation_summary, ai_optimization_suggestion_update, ai_skill_version_discard,
     ai_skill_version_publish, ai_token_usage_summary, ai_user_wake_condition_delete,
     ai_user_wake_condition_save, append_ai_usage_summary_event, background_finish_run,
+    background_report_triage, BackgroundReportTriageInput,
     ensure_ai_message_usage_for_session, notification_feishu_config_save, notification_feishu_send,
     notification_feishu_test, notification_settings_summary,
     notify_automation_run_record_persisted, optimization_suggestion_create,
@@ -1026,6 +1033,8 @@ struct AiRuntime {
     sessions_completing: Arc<Mutex<HashSet<String>>>,
     pending_prompt_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Option<Vec<Value>>, String>>>>>,
     pending_title_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
+    /// `ai_agent_generate` 的一次性请求通道（C9）：requestId → 模型输出原文。
+    pending_agent_draft_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
     title_generating: Arc<Mutex<HashSet<String>>>,
     shutdown_started: Arc<AtomicBool>,
 }
@@ -1835,6 +1844,10 @@ enum AiEvent {
         requested_at: Option<i64>,
         execution_started_at: Option<i64>,
         execution_ended_at: Option<i64>,
+        /// 网关收到请求的时刻（用于把投递延迟与许可排队分开）。
+        received_at: Option<i64>,
+        /// 网关自算排队：requestedAt → executionStartedAt。
+        queue_ms: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -1884,6 +1897,10 @@ enum AiEvent {
         role: Option<String>,
         title: Option<String>,
         task: String,
+        /// C23.2：侧车拼装后的**完整任务原文**（供 `experts_json[i].taskPrompt` 与详情弹层）。
+        /// `serde(default)`：老侧车 / 老事件没有这个键时是 `None`，不影响反序列化。
+        #[serde(default)]
+        task_prompt: Option<String>,
         started_at: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
@@ -1895,6 +1912,26 @@ enum AiEvent {
         result: serde_json::Value,
         error: Option<String>,
         ended_at: Option<i64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    /// C17（P2）：AI 创建 Agent 的草稿流式增量（瞬时事件，不进检查点、不持久化）。
+    /// 草稿会话的 sessionId 由侧车用 `agent-draft-<requestId>` 作为 runtime session，
+    /// 与普通会话隔离；UI 按 `requestId` 关联。
+    AgentDraftDelta {
+        session_id: String,
+        request_id: String,
+        delta: String,
+        chars: i64,
+    },
+    #[serde(rename_all = "camelCase")]
+    /// C11：专家长跑的无进展进度提示（瞬时提示，不进检查点、不持久化）。
+    AgentProgressNotice {
+        session_id: String,
+        agent_id: String,
+        agent_name: String,
+        elapsed_ms: i64,
+        silent_ms: i64,
+        phase: String,
     },
     #[serde(rename_all = "camelCase")]
     TeamEvent {
@@ -3065,7 +3102,7 @@ fn ai_generate_chart_indicator(
             enable_spawn_agent: Some(false),
             enable_agent_teams: Some(false),
             stream_fallback_text: false,
-            max_iterations: Some(8),
+            max_iterations: Some(CHART_INDICATOR_MAX_ITERATIONS),
             tool_allowlist: vec![
                 "script.createOrUpdate".to_string(),
                 "research.webSearch".to_string(),
@@ -13848,10 +13885,10 @@ async fn run_ai_stream(
             .and_then(|value| value.enable_agent_teams)
             .unwrap_or(false)
     };
-    let max_iterations = options
-        .as_ref()
-        .and_then(|value| value.max_iterations)
-        .unwrap_or(if run_context.is_some() { 30 } else { 50 });
+    // 唯一落点：`ai_session_max_iterations`（董事会决定：主 Agent 与专家都不设轮次上限，
+    // 缺省不下发 `maxIterations` 键；只有显式请求才带）。
+    let max_iterations =
+        ai_session_max_iterations(options.as_ref().and_then(|value| value.max_iterations));
     let tool_allowlist = options
         .as_ref()
         .map(|value| value.tool_allowlist.clone())
@@ -13874,8 +13911,26 @@ async fn run_ai_stream(
             .and_then(|value| value.interactive_account_id.clone())
     };
     let required_tool_satisfied = Arc::new(AtomicBool::new(required_tool_name.is_none()));
-    let tool_read_semaphore = Arc::new(Semaphore::new(4));
-    let tool_execution_gate = Arc::new(AsyncRwLock::new(()));
+    // 只读并发闸门：全局可配（缺省 12，见 `ai_tool_gate`）+ 按域上限；写工具仍走独占写锁。
+    // 生命周期与旧 `Semaphore::new(4)` 一致：每 turn 一个，turn 结束即释放，不跨 turn 泄漏许可。
+    let tool_execution_gate = Arc::new(ai_tool_gate::AiToolExecutionGate::new(
+        ai_tool_gate::AiToolConcurrencyLimits::from_config(
+            config.tool_read_concurrency,
+            config.tool_domain_concurrency.as_ref(),
+        ),
+    ));
+    // 把本轮生效的闸门配置写进运行记录（每轮一次）：日后核对"这轮到底跑在几路并发"不靠猜。
+    let tool_gate_snapshot = {
+        let limits = tool_execution_gate.limits();
+        json!({
+            "read": limits.read(),
+            "domains": limits
+                .domains()
+                .iter()
+                .map(|(name, limit)| ((*name).to_string(), json!(limit)))
+                .collect::<serde_json::Map<String, serde_json::Value>>()
+        })
+    };
     let mut turn_started_at = now_ms();
     let mut turn_first_token_at: Option<i64> = None;
     let mut persisted_message_id = format!("a-stream-{}-{}", session_id, turn_started_at);
@@ -13943,7 +13998,7 @@ async fn run_ai_stream(
     let payload = json!({
         "type": "sendMessage",
         "sessionId": session_id,
-        "config": {
+        "config": with_max_iterations(crate::ai_automation::with_request_timeout(json!({
             "provider": config.provider.clone().unwrap_or_else(|| "openai-compatible".to_string()),
             "model": config.model.clone(),
             "baseUrl": config.base_url.clone(),
@@ -13953,41 +14008,44 @@ async fn run_ai_stream(
             "stream": config.stream.unwrap_or(true),
             "permissionMode": config.permission_mode.clone(),
             "reasoningDepth": config.reasoning_depth.clone(),
+
             "agentRole": "main",
             "backgroundRun": run_context.as_ref().map(BackgroundRunContext::is_background).unwrap_or(false),
             "reviewRun": run_context.as_ref().map(BackgroundRunContext::is_review).unwrap_or(false),
             "agentRunId": run_context.as_ref().and_then(|context| context.run_id.clone()),
             "agentProfileId": run_context.as_ref().and_then(|context| context.profile_id.clone()),
             "agentProfileAccountId": run_context.as_ref().and_then(|context| context.account_id.clone()),
+            // C27：子 Agent 是独立会话、看不到 Profile，账号/环境/杠杆/品种/时间这 5 项事实
+            // 必须由系统注入（靠主 Agent 转述时漏写"环境=live"会静默按 demo 判断）。
+            // environment 是 Profile 绑定账户后由 bind_profile_account_environment 归一化的
+            // 权威字段；accountId 是不透明标识，其中的 demo/live 字样不代表环境。
+            "agentProfileEnvironment": run_context.as_ref().and_then(|context| context.environment.clone()),
             "agentProfileTargetLeverage": run_context.as_ref().map(|context| context.target_leverage),
             "agentProfileMaxSingleTradeMarginPct": run_context.as_ref().map(|context| context.max_single_trade_margin_pct),
             "interactiveAccountId": account_context_id.clone(),
             "agentProfileSymbols": run_context.as_ref().map(|context| context.symbols.clone()).unwrap_or_default(),
             "skillVersions": run_context.as_ref().map(|context| context.skill_versions.clone()).unwrap_or_default(),
-            "multiAgentMode": run_context
+            // 契约 C4：旧 multiAgent* 六个键全部删除，只发 enabledAgents
+            // （含 summary 与 body，按勾选顺序去重，无截断/无打分/无资格过滤）。
+            "enabledAgents": run_context
                 .as_ref()
-                .map(|context| context.multi_agent_mode.clone())
-                .unwrap_or_else(|| desic_agent_automation::MULTI_AGENT_OFF_MODE.to_string()),
-            "multiAgentOrchestrator": run_context
-                .as_ref()
-                .map(|context| context.multi_agent_orchestrator.clone())
-                .unwrap_or_else(|| {
-                    desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND.to_string()
-                }),
-            "multiAgentExpertSource": run_context
-                .as_ref()
-                .map(|context| context.multi_agent_expert_source.clone())
-                .unwrap_or_default(),
-            "multiAgentMaxAgents": run_context
-                .as_ref()
-                .map(|context| context.multi_agent_max_agents)
-                .unwrap_or(4),
-            "multiAgents": run_context
-                .as_ref()
-                .map(|context| context.multi_agents.clone())
+                .map(|context| {
+                    context
+                        .enabled_agents
+                        .iter()
+                        .map(crate::agent_library::agent_runtime_payload)
+                        .collect::<Vec<_>>()
+                })
                 .unwrap_or_default(),
             "reviewId": run_context.as_ref().and_then(|context| context.review_id.clone()),
             "episodeId": run_context.as_ref().and_then(|context| context.episode_id.clone()),
+            // C19：只有启用试判的后台 Run 才下发 triage（简报/复盘等豁免 trigger 不下发，
+            // 侧车当作 off）；交互会话同样不下发。
+            "triage": run_context
+                .as_ref()
+                .and_then(|context| context.triage.lock().ok().map(|state| state.config.clone()))
+                .filter(|config| !config.is_off())
+                .map(|config| json!(config)),
             "enableSpawnAgent": enable_spawn_agent,
             "enableAgentTeams": enable_agent_teams,
             "disableSkillsTool": disable_skills_tool,
@@ -13995,14 +14053,13 @@ async fn run_ai_stream(
             "preserveClineConversation": options.as_ref().map(|value| value.preserve_cline_conversation).unwrap_or(false),
             "conversationScope": options.as_ref().and_then(|value| value.conversation_scope.clone()).unwrap_or_else(|| json!({})),
             "strategySessionKind": strategy_session_kind_payload,
-            "maxIterations": max_iterations,
             "toolAllowlist": tool_allowlist.clone(),
             "systemPrompt": config.system_prompt.clone(),
             "customRules": config.custom_rules.clone(),
             "enabledSkills": config.enabled_skills.clone(),
             "activeSkillIds": active_skill_ids.clone(),
             "skillDefinitions": config.skill_definitions.clone()
-        },
+        })), max_iterations),
         "messages": messages
             .into_iter()
             .map(|message| json!({ "id": message.id, "role": message.role, "content": message.content }))
@@ -14166,6 +14223,8 @@ async fn run_ai_stream(
                 requested_at,
                 execution_started_at,
                 execution_ended_at,
+                received_at,
+                queue_ms,
                 ..
             } => {
                 tool_events.push(json!({
@@ -14180,8 +14239,10 @@ async fn run_ai_stream(
                     "startedAt": started_at,
                     "endedAt": ended_at,
                     "requestedAt": requested_at,
+                    "receivedAt": received_at,
                     "executionStartedAt": execution_started_at,
                     "executionEndedAt": execution_ended_at,
+                    "queueMs": queue_ms,
                     "type": "toolResult"
                 }));
             }
@@ -14208,7 +14269,8 @@ async fn run_ai_stream(
                     "startedAt": turn_started_at,
                     "firstTokenAt": turn_first_token_at,
                     "completedAt": started_at,
-                    "source": "desicHost"
+                    "source": "desicHost",
+                    "toolGate": tool_gate_snapshot.clone()
                 }));
                 let completed_usage = append_ai_usage_summary_event(
                     &mut tool_events,
@@ -14362,6 +14424,9 @@ async fn run_ai_stream(
                 }
             }
             AiEvent::PendingPrompts { .. } | AiEvent::PendingPromptSubmitted { .. } => {}
+            // C11 / C17：瞬时提示与草稿增量都无副作用（不写消息、不改会话状态机、
+            // 不进流检查点），只透传给前端。
+            AiEvent::AgentProgressNotice { .. } | AiEvent::AgentDraftDelta { .. } => {}
             AiEvent::AgentStart {
                 agent_id,
                 configured_agent_id,
@@ -14369,19 +14434,20 @@ async fn run_ai_stream(
                 role,
                 title,
                 task,
+                task_prompt,
                 started_at,
                 ..
             } => {
-                tool_events.push(json!({
-                    "type": "agentStart",
-                    "agentId": agent_id,
-                    "configuredAgentId": configured_agent_id,
-                    "parentAgentId": parent_agent_id,
-                    "role": role,
-                    "title": title,
-                    "task": task,
-                    "startedAt": started_at
-                }));
+                tool_events.push(agent_start_tool_event(
+                    agent_id,
+                    configured_agent_id.as_deref(),
+                    parent_agent_id.as_deref(),
+                    role.as_deref(),
+                    title.as_deref(),
+                    task,
+                    task_prompt.as_deref(),
+                    *started_at,
+                ));
             }
             AiEvent::AgentDone {
                 agent_id,
@@ -14482,15 +14548,15 @@ async fn run_ai_stream(
                 let task_api_key = config.api_key.clone();
                 let task_required_tool_name = required_tool_name.clone();
                 let task_required_tool_satisfied = required_tool_satisfied.clone();
-                let task_read_semaphore = tool_read_semaphore.clone();
                 let task_execution_gate = tool_execution_gate.clone();
                 let task_requested_at = requested_at.unwrap_or_else(now_ms);
                 tauri::async_runtime::spawn(async move {
                     let received_at = now_ms();
                     let (result, execution_started_at, execution_ended_at) =
                         if ai_tool_allows_concurrent_execution(&task_tool_name) {
-                            match task_read_semaphore.acquire_owned().await {
-                                Ok(_permit) => {
+                            // 只读：全局许可 → 域许可 → 共享读锁；顺序唯一，与写路径不成环。
+                            match task_execution_gate.acquire_read(&task_tool_name).await {
+                                Ok(_permits) => {
                                     let _read_guard = task_execution_gate.read().await;
                                     let execution_started_at = now_ms();
                                     let result = execute_ai_tool(
@@ -14512,7 +14578,8 @@ async fn run_ai_stream(
                                 }
                             }
                         } else {
-                            let _write_guard = task_execution_gate.write().await;
+                            // 写工具：语义不变，仍独占写锁串行。
+                            let _write_guard = task_execution_gate.acquire_write().await;
                             let execution_started_at = now_ms();
                             let result = execute_ai_tool(
                                 task_app.clone(),
@@ -14577,19 +14644,7 @@ async fn run_ai_stream(
             }
             AiEvent::Status { .. } => {}
         }
-        let checkpoint_changed = matches!(
-            &event,
-            AiEvent::Delta { .. }
-                | AiEvent::ToolCall { .. }
-                | AiEvent::ToolResult { .. }
-                | AiEvent::Usage { .. }
-                | AiEvent::ContextUsage { .. }
-                | AiEvent::AgentStart { .. }
-                | AiEvent::AgentDone { .. }
-                | AiEvent::TeamEvent { .. }
-                | AiEvent::ApprovalRequest { .. }
-                | AiEvent::ApprovalResolved { .. }
-        );
+        let checkpoint_changed = ai_event_triggers_checkpoint(&event);
         if checkpoint_changed
             && last_stream_checkpoint.elapsed()
                 >= Duration::from_millis(ai_stream_checkpoint::AI_STREAM_CHECKPOINT_INTERVAL_MS)
@@ -14639,7 +14694,8 @@ async fn run_ai_stream(
         "startedAt": turn_started_at,
         "firstTokenAt": turn_first_token_at,
         "completedAt": now_ms(),
-        "source": "desicHost"
+        "source": "desicHost",
+        "toolGate": tool_gate_snapshot.clone()
     }));
     let final_usage = append_ai_usage_summary_event(
         &mut tool_events,
@@ -14872,6 +14928,35 @@ async fn ensure_ai_sidecar(
                         Ok(value.get("title").and_then(Value::as_str).unwrap_or_default().to_string())
                     } else {
                         Err(value.get("message").and_then(Value::as_str).unwrap_or("AI title generation failed").to_string())
+                    };
+                    let _ = result_tx.send(result);
+                }
+                continue;
+            }
+            if value.get("type").and_then(Value::as_str) == Some("agentDraftResult") {
+                let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
+                let result_tx = runtime_for_stdout
+                    .pending_agent_draft_commands
+                    .lock()
+                    .ok()
+                    .and_then(|mut pending| pending.remove(request_id));
+                if let Some(result_tx) = result_tx {
+                    let result = if value.get("ok").and_then(Value::as_bool) == Some(true) {
+                        // C9（lead 裁决 1）：侧车回模型输出的角色 JSON 原文；兼容
+                        // 旧字段名 content，frontmatter 一律由 Rust 渲染。
+                        Ok(value
+                            .get("roleJson")
+                            .or_else(|| value.get("role_json"))
+                            .or_else(|| value.get("content"))
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string())
+                    } else {
+                        Err(value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("AI Agent 草稿生成失败")
+                            .to_string())
                     };
                     let _ = result_tx.send(result);
                 }
@@ -15361,7 +15446,7 @@ async fn schedule_ai_session_title(
             "requestId": request_id,
             "sessionId": session_id,
             "prompt": prompt,
-            "config": {
+            "config": crate::ai_automation::with_request_timeout(json!({
                 "provider": model.provider,
                 "model": model.model,
                 "baseUrl": model.base_url,
@@ -15369,7 +15454,7 @@ async fn schedule_ai_session_title(
                 "contextWindow": model.context_window,
                 "permissionMode": "advisor",
                 "reasoningDepth": "none"
-            }
+            }))
         });
         send_ai_sidecar_command(&app, &runtime, payload).await?;
         timeout(Duration::from_secs(24), result_rx)
@@ -15432,6 +15517,56 @@ async fn send_sidecar_command(
         .map_err(|_| "Cline sidecar 写入确认失败".to_string())?
 }
 
+/// C23.2：`agentStart` 的**落盘形状**（`tool_events` → `ai_messages.tool_json` 的唯一来源）。
+///
+/// `taskPrompt` 必须在这里：它是"主 Agent 给专家的完整提问"，`experts_json[i].taskPrompt`
+/// 与详情弹层都靠它。**抽成函数**是为了能在测试里走一遍真实边界——
+/// 之前的 bug 正是这份手工重建的 JSON 漏了该字段（`AiEvent` 里也没有），
+/// 字段在 Rust 边界被静默丢掉，落库只能写空串。
+#[allow(clippy::too_many_arguments)]
+fn agent_start_tool_event(
+    agent_id: &str,
+    configured_agent_id: Option<&str>,
+    parent_agent_id: Option<&str>,
+    role: Option<&str>,
+    title: Option<&str>,
+    task: &str,
+    task_prompt: Option<&str>,
+    started_at: Option<i64>,
+) -> serde_json::Value {
+    json!({
+        "type": "agentStart",
+        "agentId": agent_id,
+        "configuredAgentId": configured_agent_id,
+        "parentAgentId": parent_agent_id,
+        "role": role,
+        "title": title,
+        "task": task,
+        // 原文，不 trim、不截断（缺失时为 null，读侧统一成空字符串落库）。
+        "taskPrompt": task_prompt,
+        "startedAt": started_at
+    })
+}
+
+/// 流检查点（持久化）白名单：只有这些事件会落盘为部分消息。
+/// **C11 的 `AgentProgressNotice` 与 C17 的 `AgentDraftDelta` 都不在其中**——
+/// 它们是瞬时事件，持久化会把会话日志刷满且没有重放价值。
+fn ai_event_triggers_checkpoint(event: &AiEvent) -> bool {
+    matches!(
+        event,
+        AiEvent::Delta { .. }
+            | AiEvent::ToolCall { .. }
+            | AiEvent::ToolResult { .. }
+            | AiEvent::Usage { .. }
+            | AiEvent::ContextUsage { .. }
+            | AiEvent::AgentStart { .. }
+            | AiEvent::AgentDone { .. }
+            | AiEvent::TeamEvent { .. }
+            | AiEvent::ApprovalRequest { .. }
+            | AiEvent::ApprovalResolved { .. }
+    )
+}
+
 fn ai_event_session_id(event: &AiEvent) -> String {
     match event {
         AiEvent::Status { session_id, .. }
@@ -15446,6 +15581,8 @@ fn ai_event_session_id(event: &AiEvent) -> String {
         | AiEvent::TurnStarted { session_id, .. }
         | AiEvent::AgentStart { session_id, .. }
         | AiEvent::AgentDone { session_id, .. }
+        | AiEvent::AgentProgressNotice { session_id, .. }
+        | AiEvent::AgentDraftDelta { session_id, .. }
         | AiEvent::TeamEvent { session_id, .. }
         | AiEvent::ApprovalRequest { session_id, .. }
         | AiEvent::ApprovalResolved { session_id, .. }
@@ -15660,6 +15797,14 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .get("executionEndedAt")
                 .or_else(|| value.get("execution_ended_at"))
                 .and_then(|item| item.as_i64()),
+            received_at: value
+                .get("receivedAt")
+                .or_else(|| value.get("received_at"))
+                .and_then(|item| item.as_i64()),
+            queue_ms: value
+                .get("queueMs")
+                .or_else(|| value.get("queue_ms"))
+                .and_then(|item| item.as_i64()),
         }),
         "usage" => Some(AiEvent::Usage {
             session_id,
@@ -15765,6 +15910,13 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .and_then(|item| item.as_str())
                 .unwrap_or_default()
                 .to_string(),
+            // C23.2：两种字形都认（侧车发 camelCase；老/测试事件可能用 snake_case）。
+            // **不 trim、不截断**：这就是落库与详情弹层要用的原文。
+            task_prompt: value
+                .get("taskPrompt")
+                .or_else(|| value.get("task_prompt"))
+                .and_then(|item| item.as_str())
+                .map(|item| item.to_string()),
             started_at: value
                 .get("startedAt")
                 .or_else(|| value.get("started_at"))
@@ -15799,6 +15951,41 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .or_else(|| value.get("ended_at"))
                 .and_then(|item| item.as_i64())
                 .or_else(|| Some(now_ms())),
+        }),
+        "agentDraftDelta" | "agent_draft_delta" => Some(AiEvent::AgentDraftDelta {
+            session_id,
+            request_id: value
+                .get("requestId")
+                .or_else(|| value.get("request_id"))
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            delta: value
+                .get("delta")
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            chars: value.get("chars").and_then(|item| item.as_i64()).unwrap_or(0),
+        }),
+        "agentProgressNotice" | "agent_progress_notice" => Some(AiEvent::AgentProgressNotice {
+            session_id,
+            agent_id: value
+                .get("agentId")
+                .and_then(|item| item.as_str())
+                .unwrap_or("agent")
+                .to_string(),
+            agent_name: value
+                .get("agentName")
+                .and_then(|item| item.as_str())
+                .unwrap_or_default()
+                .to_string(),
+            elapsed_ms: value.get("elapsedMs").and_then(|item| item.as_i64()).unwrap_or(0),
+            silent_ms: value.get("silentMs").and_then(|item| item.as_i64()).unwrap_or(0),
+            phase: value
+                .get("phase")
+                .and_then(|item| item.as_str())
+                .unwrap_or("consult")
+                .to_string(),
         }),
         "teamEvent" | "team_event" => Some(AiEvent::TeamEvent {
             session_id,
@@ -15991,6 +16178,39 @@ struct AiToolExecutionContext {
     strategy_session_kind: String,
 }
 
+/// 图表指标会话（tool allowlist 仅 `script.createOrUpdate` + `research.webSearch`）的上限。
+///
+/// **这是刻意的小值，与"主 Agent / 专家不做轮次上限"不是同一类**：该会话只会
+/// "必要时一次取数 + 一次写入指标"两步操作，8 轮已明显宽裕；保留小值是为了不放开
+/// 不必要的工具循环（这是产品约束，不是预算护栏）。
+pub(crate) const CHART_INDICATOR_MAX_ITERATIONS: u16 = 8;
+
+/// 本次会话下发给侧车的工具循环上限（`config.maxIterations` 的唯一来源）。
+///
+/// **董事会决定：主 Agent 与专家都不设轮次上限。** 探针（2026-09-19）在 SDK 源码里
+/// 确认了 `while(this.config.maxIterations===void 0 || this.state.iteration<this.config.maxIterations)`
+/// 且 schema 是 `s.number().positive().optional()`，即**不下发该键 = 不设上限**；
+/// SDK 自身没有 8 这一默认值 —— 历史上那句 `exceeded maxIterations (8)` 是我们自己
+/// （侧车 `delegatedAgentMaxIterations`）显式传下去的。
+///
+/// 因此这里返回 `None`（不下发该键）；只有调用方显式请求时才带上。
+/// 图表指标会话不走这条路径（见 `CHART_INDICATOR_MAX_ITERATIONS`）。
+pub(crate) fn ai_session_max_iterations(requested: Option<u16>) -> Option<u16> {
+    requested
+}
+
+/// 把工具循环上限写进 config：`None` → **不出现该键**（不是 null），
+/// 保证"不下发 = 不设上限"的语义不被 `json!` 的 null 破坏。
+pub(crate) fn with_max_iterations(
+    mut config: serde_json::Value,
+    requested: Option<u16>,
+) -> serde_json::Value {
+    if let (Some(iterations), Some(object)) = (requested, config.as_object_mut()) {
+        object.insert("maxIterations".to_string(), json!(iterations));
+    }
+    config
+}
+
 fn ai_tool_allows_concurrent_execution(name: &str) -> bool {
     let canonical = canonical_ai_tool_name(name);
     (canonical.starts_with("market.") && canonical != "market.readDecisionContext")
@@ -16114,32 +16334,20 @@ fn profile_agent_scope_allows_tool(scope: &str, canonical: &str) -> bool {
     }
 }
 
-fn auto_profile_agent_scopes(agent_id: &str) -> Option<&'static [&'static str]> {
-    match agent_id {
-        "auto-market-structure" => Some(&["market", "derivatives"]),
-        "auto-order-flow-liquidity" => Some(&["market"]),
-        "auto-derivatives-positioning" => Some(&["derivatives", "market"]),
-        "auto-account-risk" => Some(&["account", "history", "market"]),
-        "auto-intelligence-flow" => Some(&["intelligence"]),
-        "auto-smart-money" => Some(&["intelligence", "derivatives"]),
-        "auto-historical-analogy" => Some(&["history", "market"]),
-        "auto-contrarian-review" => Some(&["market", "derivatives", "intelligence", "history"]),
-        _ => None,
-    }
-}
 
+/// 点名时声明的收窄范围（C15.2）：白名单 `market / derivatives / intelligence /
+/// account / history`；`all` 是内部表示（等价"不限制"）。
+/// 缺省 / 空数组 = 不限制（全部只读工具，内部展开为 `all`）；含白名单外的值 → 拒，
+/// 错误信息逐字沿用 crate 的校验（列出非法值 + 允许列表），不静默过滤。
 fn normalize_declared_agent_scopes(scopes: &[String]) -> Result<HashSet<String>, String> {
-    let mut normalized = HashSet::new();
-    for scope in scopes {
-        let scope = scope.trim().to_ascii_lowercase();
-        if !matches!(
-            scope.as_str(),
-            "all" | "market" | "derivatives" | "intelligence" | "account" | "history"
-        ) {
-            return Err(format!("delegated agent 声明了未知数据范围：{scope}"));
-        }
-        normalized.insert(scope);
-    }
+    let trimmed = scopes
+        .iter()
+        .map(|scope| scope.trim().to_ascii_lowercase())
+        .filter(|scope| !scope.is_empty() && scope != "all")
+        .collect::<Vec<_>>();
+    desic_agent_automation::validate_agent_scope_values(&trimmed)
+        .map_err(|error| format!("delegated agent 声明非法：{error}"))?;
+    let mut normalized: HashSet<String> = trimmed.into_iter().collect();
     if normalized.is_empty() {
         normalized.insert("all".to_string());
     }
@@ -16167,29 +16375,23 @@ fn authorize_background_delegated_agent(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .ok_or_else(|| "delegated background agent 缺少 configuredAgentId".to_string())?;
-    let declared_scopes = normalize_declared_agent_scopes(&context.configured_agent_scopes)?;
-    let expected_scopes =
-        match desic_agent_automation::normalize_multi_agent_mode(Some(&run.multi_agent_mode)) {
-            desic_agent_automation::MULTI_AGENT_CUSTOM_MODE => run
-                .multi_agents
-                .iter()
-                .find(|agent| agent.enabled && agent.id == configured_agent_id)
-                .map(|agent| normalize_declared_agent_scopes(&agent.scopes))
-                .ok_or_else(|| {
-                    format!("configuredAgentId 不属于当前 Profile 快照：{configured_agent_id}")
-                })??,
-            desic_agent_automation::MULTI_AGENT_AUTO_MODE => {
-                auto_profile_agent_scopes(configured_agent_id)
-                    .map(|scopes| scopes.iter().map(|scope| (*scope).to_string()).collect())
-                    .ok_or_else(|| format!("未知的自动分配 Agent：{configured_agent_id}"))?
-            }
-            _ => return Err("当前后台 Profile 未启用多 Agent，拒绝 delegated agent".to_string()),
-        };
-    if declared_scopes != expected_scopes {
+    if run.enabled_agents.is_empty() {
+        return Err("本次 Profile 未勾选任何专家，拒绝 delegated agent".to_string());
+    }
+    // C15：Agent 文件里已没有 `scopes`，"专家声明必须等于文件/快照值"这条校验删除。
+    // 现在只保证两件事：① 该专家确实在本次勾选名单里（谁上场由主 Agent 决定，
+    // 名单是 Profile 的唯一授权）；② 本次声明的收窄域必须落在白名单内（非法即拒，
+    // 不静默过滤）。缺省 = 不限制（全部只读工具）。
+    if !run
+        .enabled_agents
+        .iter()
+        .any(|agent| agent.id == configured_agent_id)
+    {
         return Err(format!(
-            "delegated agent 数据范围与 Profile 快照不一致：{configured_agent_id}"
+            "configuredAgentId 不属于本次勾选的专家名单：{configured_agent_id}"
         ));
     }
+    let declared_scopes = normalize_declared_agent_scopes(&context.configured_agent_scopes)?;
     if !declared_scopes
         .iter()
         .any(|scope| profile_agent_scope_allows_tool(scope, canonical))
@@ -16210,6 +16412,59 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     let is_main = context.agent_role == "main"
         && context.parent_agent_id.is_none()
         && context.configured_agent_id.is_none();
+    if canonical.starts_with("agent.") {
+        // C6 / C10-4：agent 工具面只对主 Agent 开放；
+        // 写类（create/update）额外要求交互式会话（后台 Run / 复盘 Run 会改自己的专家库）。
+        if !matches!(
+            canonical,
+            "agent.list" | "agent.read" | "agent.create" | "agent.update"
+        ) {
+            return Err(format!("未知的 Agent 库工具：{canonical}"));
+        }
+        if !is_main {
+            return Err(format!(
+                "agent.* 仅允许主 Agent 调用，已拒绝：{canonical}"
+            ));
+        }
+        let in_run = context.run_context.is_some();
+        if in_run && matches!(canonical, "agent.create" | "agent.update") {
+            return Err(format!(
+                "{} 仅允许交互式主会话调用，后台/复盘 Run 一律拒绝",
+                canonical
+            ));
+        }
+        return Ok(());
+    }
+    // C19 试判阶段门（授权层强制，不能只写在提示词里）：
+    // - 试判阶段只放行配置允许的只读域（market / account / intelligence / radar）+
+    //   `background.reportTriage`；verdict 前 `consult_expert(s)` / `follow_up` 一律拒绝；
+    // - enforce 下判定跳过（且非抽样复检）后只允许 `background.finishRun`；
+    // - mode=off / 已放行深度 → 不额外限制（其余硬边界照常执行）。
+    if let Some(run) = context.run_context.as_ref() {
+        if let Ok(state) = run.triage.lock() {
+            ai_triage::triage_allows_tool(
+                &state,
+                canonical,
+                context.account_context_id.as_deref().is_some_and(|id| !id.trim().is_empty())
+                    || run.account_id.as_deref().is_some_and(|id| !id.trim().is_empty()),
+            )?;
+        }
+    }
+    if canonical == "background.reportTriage" {
+        // 试判工具本身只对"启用了试判的后台 Run 主 Agent"开放。
+        if !is_main {
+            return Err("background.reportTriage 仅允许后台 Run 的主 Agent 调用".to_string());
+        }
+        let run = context
+            .run_context
+            .as_ref()
+            .filter(|run| run.is_background())
+            .ok_or_else(|| "background.reportTriage 只能用于后台 Profile Run".to_string())?;
+        if run.triage.lock().map(|state| state.config.is_off()).unwrap_or(true) {
+            return Err("当前 Profile 未启用试判（triage.mode=off），无需提交试判结论".to_string());
+        }
+        return Ok(());
+    }
     if canonical == "skill.run" {
         if !is_main {
             return Err("skill.run 仅允许交互式主 Agent 调用".to_string());
@@ -16265,7 +16520,10 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
     }
     let is_read = matches!(
         canonical,
-        "market.readTicker"
+        // C10-4：只读分类必须包含 agent.list / agent.read（写类绝不列入）。
+        "agent.list"
+            | "agent.read"
+            | "market.readTicker"
             | "market.readInstrument"
             | "market.readOrderBook"
             | "market.readRecentTrades"
@@ -17129,6 +17387,37 @@ async fn execute_ai_tool(
         }
         return systematic_strategy_ai_execute_tool(app, canonical_name, input, session_id).await;
     }
+    // 契约 C6 / C10-3：agent 库工具。四个名字必须有显式分支——文件末尾的
+    // `_ => Err("未知 AI 工具")` 会兜住漏登记。校验与落盘全部复用 crate 的
+    // Agent 库函数（`crate::agent_library`），lib.rs 里不再重复实现。
+    if canonical_name.starts_with("agent.") {
+        ensure_ai_run_is_active(&app, context).await?;
+        return match canonical_name {
+            "agent.list" => crate::agent_library::tool_agent_list(&app),
+            "agent.read" => {
+                let id = input
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default();
+                crate::agent_library::tool_agent_read(&app, id)
+            }
+            "agent.create" => crate::agent_library::tool_agent_create(&app, &input),
+            "agent.update" => {
+                let id = input
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let content = input
+                    .get("content")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                crate::agent_library::tool_agent_update(&app, &id, &content)
+            }
+            other => Err(format!("未知 AI 工具：{other}")),
+        };
+    }
     // Radar DTOs reject unknown model fields; keep trusted execution metadata in
     // the authorization context instead of mixing it into the domain input.
     if canonical_name.starts_with("radar.") {
@@ -17585,6 +17874,15 @@ async fn execute_ai_tool(
             let result = notification_feishu_send(app, request).await?;
             serde_json::to_value(result).map_err(|err| err.to_string())
         }
+        "background.reportTriage" => {
+            let request: BackgroundReportTriageInput =
+                serde_json::from_value(input).map_err(|err| err.to_string())?;
+            let run = context
+                .run_context
+                .as_ref()
+                .ok_or_else(|| "缺少后台 Run 上下文".to_string())?;
+            background_report_triage(app, run, request)
+        }
         "background.finishRun" => {
             let request: BackgroundFinishRunInput =
                 serde_json::from_value(input).map_err(|err| err.to_string())?;
@@ -17749,6 +18047,9 @@ async fn execute_ai_tool(
 
 fn canonical_ai_tool_name(name: &str) -> &str {
     match name {
+        // C19：SDK 序列化会把工具名打成下划线形式（侧车提示词也用这种写法），
+        // 两种字形视为同一个工具。
+        "background_reportTriage" => "background.reportTriage",
         "order.create" | "okx.placeOrder" => "trade.placeOrder",
         "order.cancel" | "okx.cancelOrder" => "trade.cancelOrder",
         "okx.amendOrder" => "trade.amendOrder",
@@ -25004,8 +25305,14 @@ pub fn run() {
             ai_agent_profile_save,
             ai_agent_profile_systematic_conflicts,
             ai_agent_profile_delete,
-            ai_agent_scheme_save,
-            ai_agent_scheme_delete,
+            ai_agents_list,
+            ai_agent_read,
+            ai_agent_save,
+            ai_agent_duplicate,
+            ai_agent_delete,
+            ai_agent_generate,
+            ai_agent_generate_cancel,
+            ai_automation_force_deep_run,
             ai_agent_profile_run_now,
             ai_agent_profile_run_daily_review,
             ai_user_wake_condition_save,
@@ -26155,6 +26462,120 @@ mod tests {
             }
             event => panic!("unexpected event: {event:?}"),
         }
+    }
+
+    /// C23.2 回归：`taskPrompt` 必须活过 Rust 事件边界 ——
+    /// 侧车原始事件（camelCase）→ `cline_event_from_value` → 落盘重建 → 专家聚合 →
+    /// `experts_json[i].taskPrompt` **逐字一致**。缺该字段时为空字符串且键仍在。
+    #[test]
+    fn agent_start_task_prompt_survives_the_event_boundary() {
+        const TASK_PROMPT: &str = "本轮任务：读齐 BTC-USDT-SWAP 的行情/衍生品/新闻。\n依赖提示：与账户专家并行，互不等待。\nProfile 任务：只做 wait/abandon。";
+        const REPORT: &str = "# 数据汇总\n\n## 结论\n证据齐。\n\n| 项 | 值 |\n| --- | --- |\n| OI | `+0.4%` |";
+        let mut events = Vec::new();
+        for raw in [
+            json!({
+                "type": "agentStart",
+                "sessionId": "background:run-c23",
+                "agentId": "desic-data-digest",
+                "configuredAgentId": "desic-data-digest",
+                "role": "data_digest",
+                "title": "数据汇总",
+                "task": "一句话摘要",
+                "taskPrompt": TASK_PROMPT,
+                "startedAt": 1_000
+            }),
+            // 老侧车/老事件：没有 taskPrompt → 落 nil，读侧统一成空串。
+            json!({
+                "type": "agentStart",
+                "sessionId": "background:run-c23",
+                "agentId": "desic-account-state",
+                "configuredAgentId": "desic-account-state",
+                "title": "账户与持仓",
+                "task": "账户状态",
+                "startedAt": 2_000
+            }),
+        ] {
+            let event =
+                cline_event_from_value("background:run-c23", &raw).expect("map agentStart");
+            match event {
+                AiEvent::AgentStart {
+                    agent_id,
+                    configured_agent_id,
+                    parent_agent_id,
+                    role,
+                    title,
+                    task,
+                    task_prompt,
+                    started_at,
+                    ..
+                } => events.push(agent_start_tool_event(
+                    &agent_id,
+                    configured_agent_id.as_deref(),
+                    parent_agent_id.as_deref(),
+                    role.as_deref(),
+                    title.as_deref(),
+                    &task,
+                    task_prompt.as_deref(),
+                    started_at,
+                )),
+                other => panic!("unexpected event: {other:?}"),
+            }
+        }
+        let done = cline_event_from_value(
+            "background:run-c23",
+            &json!({
+                "type": "agentDone",
+                "sessionId": "background:run-c23",
+                "agentId": "desic-data-digest",
+                "configuredAgentId": "desic-data-digest",
+                "status": "done",
+                "result": { "text": REPORT, "usage": { "totalTokens": 1_200 } },
+                "endedAt": 3_000
+            }),
+        )
+        .expect("parse agent done");
+        match done {
+            AiEvent::AgentDone {
+                agent_id,
+                configured_agent_id,
+                status,
+                result,
+                error,
+                ended_at,
+                ..
+            } => events.push(json!({
+                "type": "agentDone",
+                "agentId": agent_id,
+                "configuredAgentId": configured_agent_id,
+                "status": status,
+                "result": result,
+                "error": error,
+                "endedAt": ended_at
+            })),
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let experts = crate::ai_automation::aggregate_expert_activity(&events);
+        assert_eq!(experts.len(), 2, "{experts:?}");
+        let digest = experts
+            .iter()
+            .find(|item| item["configuredAgentId"] == "desic-data-digest")
+            .expect("digest expert");
+        assert_eq!(
+            digest["taskPrompt"], TASK_PROMPT,
+            "提问全文必须逐字活过边界（这正是曾经丢字段的地方）"
+        );
+        assert_eq!(digest["report"], REPORT);
+        assert_eq!(digest["role"], "data_digest");
+        let account = experts
+            .iter()
+            .find(|item| item["configuredAgentId"] == "desic-account-state")
+            .expect("account expert");
+        assert_eq!(account["taskPrompt"], "", "缺字段 = 空字符串");
+        assert!(
+            account.get("taskPrompt").is_some() && account.get("report").is_some(),
+            "键必须始终存在"
+        );
     }
 
     #[test]
@@ -28407,10 +28828,41 @@ mod tests {
         }
     }
 
+    /// 造一个库条目（v3：BackgroundRunContext 只带 Agent 库定义，不再有旧 profile JSON；
+    /// C15 起 Agent 文件里也没有 scopes）。
+    fn test_agent_definition(
+        id: &str,
+        name: &str,
+        role: &str,
+    ) -> desic_agent_automation::AiAgentDefinition {
+        let mut definition = desic_agent_automation::builtin_agent_definition(id)
+            .unwrap_or_else(|| desic_agent_automation::AiAgentDefinition {
+                id: id.to_string(),
+                name: name.to_string(),
+                role: role.to_string(),
+                envelope: desic_agent_automation::AGENT_ENVELOPE_STANDARD.to_string(),
+                skills: Vec::new(),
+                requires_account: role == "account_risk",
+                source: desic_agent_automation::AGENT_SOURCE_CUSTOM.to_string(),
+                version: 1,
+                created_at: 0,
+                summary: String::new(),
+                body: "## 职责
+测试职责。".to_string(),
+                deprecated: false,
+                scopes_deprecated: false,
+                path: std::path::PathBuf::new(),
+            });
+        definition.id = id.to_string();
+        definition.name = name.to_string();
+        definition.role = role.to_string();
+        definition.refresh_summary();
+        definition
+    }
+
     fn test_background_run_context(
         account_id: Option<&str>,
-        multi_agent_mode: &str,
-        multi_agents: Vec<desic_agent_automation::AiProfileSubAgent>,
+        enabled_agents: Vec<desic_agent_automation::AiAgentDefinition>,
     ) -> BackgroundRunContext {
         BackgroundRunContext {
             permission_mode: "advisor".to_string(),
@@ -28428,15 +28880,37 @@ mod tests {
             target_leverage: 20,
             max_single_trade_margin_pct: 30,
             allowed_wake_condition_types: Vec::new(),
-            multi_agent_mode: multi_agent_mode.to_string(),
-            multi_agent_max_agents: 4,
-            multi_agents,
-            multi_agent_orchestrator: desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND
-                .to_string(),
-            multi_agent_expert_source: String::new(),
+            enabled_agents,
+            triage: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::ai_triage::RunTriageState::new(
+                    crate::ai_triage::AiAgentTriageConfig {
+                        mode: crate::ai_triage::TRIAGE_MODE_OFF.to_string(),
+                        ..crate::ai_triage::AiAgentTriageConfig::default()
+                    },
+                    0,
+                    None,
+                    0,
+                ),
+            )),
+            finish_gate: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::ai_automation::FinishGateState::default(),
+            )),
+            single_agent_mode: crate::ai_automation::SINGLE_AGENT_MODE_MINIMAL.to_string(),
+            trigger: json!({}),
             review_id: None,
             episode_id: None,
         }
+    }
+
+    /// C19：把夹具切换成"试判启用（enforce）"的运行上下文。
+    fn enable_triage(context: &mut BackgroundRunContext, mode: &str) {
+        let config = crate::ai_triage::AiAgentTriageConfig {
+            mode: mode.to_string(),
+            skip_sample_rate: 0.0,
+            ..crate::ai_triage::AiAgentTriageConfig::default()
+        };
+        *context.triage.lock().expect("triage lock") =
+            crate::ai_triage::RunTriageState::new(config, 0, None, 0);
     }
 
     #[test]
@@ -28780,11 +29254,7 @@ mod tests {
         assert!(authorize_ai_tool("trade.setLeverage", &copilot).is_err());
 
         let mut profile_copilot = test_ai_tool_context("copilot", "main", false);
-        let mut profile_run = test_background_run_context(
-            Some("account-profile"),
-            desic_agent_automation::MULTI_AGENT_OFF_MODE,
-            Vec::new(),
-        );
+        let mut profile_run = test_background_run_context(Some("account-profile"), Vec::new());
         profile_run.permission_mode = "copilot".to_string();
         profile_copilot.run_context = Some(profile_run);
         assert!(authorize_ai_tool("trade.setLeverage", &profile_copilot).is_ok());
@@ -28849,7 +29319,7 @@ mod tests {
     fn account_tools_fail_closed_for_unbound_background_profiles() {
         let mut context = test_ai_tool_context("advisor", "main", false);
         context.account_context_id = Some("ui-current-account".to_string());
-        context.run_context = Some(test_background_run_context(None, "off", Vec::new()));
+        context.run_context = Some(test_background_run_context(None, Vec::new()));
         assert!(authorize_ai_tool("account.readRisk", &context).is_err());
         assert!(authorize_ai_tool("trade.precheck", &context).is_err());
         assert!(authorize_ai_tool("market.readTicker", &context).is_ok());
@@ -28874,6 +29344,78 @@ mod tests {
             bind_ai_account_context("account.readSnapshot", &mut mismatched_input, &context)
                 .is_err()
         );
+    }
+
+    /// C19.5：试判阶段的工具面门在**授权层**强制（不是提示词约定）。
+    ///
+    /// 说明：`consult_expert(s)` / `follow_up` 由侧车调度控制器拦截、不作为 Rust 工具调用
+    /// 下发，因此它们在本测试里按"授权层的那道门"（`ai_triage::triage_allows_tool`）
+    /// 断言；`authorize_ai_tool` 侧用真实会下发的只读/交易工具断言。
+    #[test]
+    fn rust_ai_tool_authorization_gates_the_triage_phase() {
+        let mut context = test_ai_tool_context("advisor", "main", false);
+        context.declared_agent_run_id = Some("run-test".to_string());
+        context.declared_agent_profile_id = Some("profile-test".to_string());
+        let mut run = test_background_run_context(
+            Some("account-1"),
+            vec![test_agent_definition("desic-data-digest", "数据", "custom")],
+        );
+        enable_triage(&mut run, "enforce");
+        let triage_state = run.triage.clone();
+        context.run_context = Some(run);
+
+        // ① 试判阶段：只读域放行，写类/交易类照旧拒绝。
+        assert!(authorize_ai_tool("market.readTicker", &context).is_ok());
+        assert!(authorize_ai_tool("background.reportTriage", &context).is_ok());
+        assert!(authorize_ai_tool("tradeOpportunity.create", &context).is_err());
+        // 未提交 verdict 前不得点名专家（C19.2-2）。
+        {
+            let state = triage_state.lock().expect("triage lock");
+            for tool in ["consult_expert", "consult_experts", "follow_up"] {
+                let error = crate::ai_triage::triage_allows_tool(&state, tool, true)
+                    .expect_err("triage 阶段点名专家必须被拒");
+                assert!(error.contains("试判"), "{tool}: {error}");
+            }
+            assert!(
+                crate::ai_triage::triage_allows_tool(&state, "market.readTicker", true).is_ok(),
+                "试判阶段必须放行只读域"
+            );
+        }
+
+        // ② 提交 verdict=true → 深度阶段：这道门消失（其余硬边界不变）。
+        {
+            let mut state = triage_state.lock().expect("triage lock");
+            state.verdict = Some(true);
+            assert!(crate::ai_triage::triage_allows_tool(&state, "consult_experts", true).is_ok());
+        }
+        assert!(authorize_ai_tool("market.readTicker", &context).is_ok());
+        assert!(authorize_ai_tool("tradeOpportunity.create", &context).is_err());
+
+        // ③ enforce 下判定跳过 → 只允许收尾（finishRun 仍要求 Run/Profile 身份匹配）。
+        {
+            let mut state = triage_state.lock().expect("triage lock");
+            state.verdict = Some(false);
+            state.skipped = true;
+        }
+        assert!(authorize_ai_tool("background.finishRun", &context).is_ok());
+        let error = authorize_ai_tool("market.readTicker", &context)
+            .expect_err("判定跳过时深度工具必须被拒");
+        assert!(error.contains("跳过"), "{error}");
+
+        // ④ mode=off（夹具缺省）→ 不加任何门，行为与今天完全一致。
+        let mut off = test_ai_tool_context("advisor", "main", false);
+        off.run_context = Some(test_background_run_context(Some("account-1"), Vec::new()));
+        assert!(authorize_ai_tool("market.readTicker", &off).is_ok());
+        {
+            let state = off
+                .run_context
+                .as_ref()
+                .expect("run context")
+                .triage
+                .lock()
+                .expect("triage lock");
+            assert!(crate::ai_triage::triage_allows_tool(&state, "consult_experts", true).is_ok());
+        }
     }
 
     #[test]
@@ -28912,24 +29454,8 @@ mod tests {
 
     #[test]
     fn delegated_background_agents_follow_profile_tool_contract() {
-        let market_agent = desic_agent_automation::AiProfileSubAgent {
-            id: "market".to_string(),
-            name: "市场".to_string(),
-            role: "market_structure".to_string(),
-            responsibility: "市场结构".to_string(),
-            scopes: vec!["market".to_string()],
-            required: true,
-            enabled: true,
-        };
-        let risk_agent = desic_agent_automation::AiProfileSubAgent {
-            id: "risk".to_string(),
-            name: "风险".to_string(),
-            role: "account_risk".to_string(),
-            responsibility: "账户风险".to_string(),
-            scopes: vec!["account".to_string()],
-            required: true,
-            enabled: true,
-        };
+        let market_agent = test_agent_definition("market", "市场", "market_structure");
+        let risk_agent = test_agent_definition("risk", "风险", "account_risk");
         let mut custom = test_ai_tool_context("advisor", "subagent", true);
         custom.configured_agent_id = Some("market".to_string());
         custom.configured_agent_scopes = vec!["market".to_string()];
@@ -28938,7 +29464,6 @@ mod tests {
             .insert("market-radar-research".to_string());
         custom.run_context = Some(test_background_run_context(
             Some("account-test"),
-            "custom",
             vec![market_agent, risk_agent],
         ));
         assert!(authorize_ai_tool("market.readTicker", &custom).is_ok());
@@ -28953,15 +29478,7 @@ mod tests {
                 .is_err()
         );
 
-        let open_agent = desic_agent_automation::AiProfileSubAgent {
-            id: "open".to_string(),
-            name: "开放职责".to_string(),
-            role: "custom".to_string(),
-            responsibility: "用户定义职责".to_string(),
-            scopes: Vec::new(),
-            required: true,
-            enabled: true,
-        };
+        let open_agent = test_agent_definition("open", "开放职责", "custom");
         let mut open = test_ai_tool_context("advisor", "subagent", true);
         open.configured_agent_id = Some("open".to_string());
         open.configured_agent_scopes = Vec::new();
@@ -28969,7 +29486,6 @@ mod tests {
             .insert("okx-market-intelligence".to_string());
         open.run_context = Some(test_background_run_context(
             Some("account-test"),
-            "custom",
             vec![open_agent],
         ));
         assert!(authorize_ai_tool("market.readTicker", &open).is_ok());
@@ -28978,7 +29494,7 @@ mod tests {
         assert!(authorize_ai_tool("trade.placeOrder", &open).is_err());
 
         let mut auto_risk = test_ai_tool_context("advisor", "subagent", true);
-        auto_risk.configured_agent_id = Some("auto-account-risk".to_string());
+        auto_risk.configured_agent_id = Some("desic-account-risk".to_string());
         auto_risk.configured_agent_scopes = vec![
             "account".to_string(),
             "history".to_string(),
@@ -28986,35 +29502,189 @@ mod tests {
         ];
         auto_risk.run_context = Some(test_background_run_context(
             Some("account-test"),
-            "auto",
-            Vec::new(),
+            vec![test_agent_definition(
+                "desic-account-risk",
+                "账户风险",
+                "account_risk",
+            )],
         ));
         assert!(authorize_ai_tool("account.readRisk", &auto_risk).is_ok());
         assert!(authorize_ai_tool("intelligence.news.list", &auto_risk).is_err());
     }
 
+
+    /// 契约 C15.2：专家工具面的唯一授权来源是"主 Agent 点名时声明的收窄范围"——
+    /// 名单外被拒；声明白名单外域被拒；缺省/空数组 = 全部只读工具；收窄 = 子集。
     #[test]
-    fn automatic_agent_scope_contract_matches_sidecar_roster() {
-        let expected = [
-            ("auto-market-structure", &["market", "derivatives"][..]),
-            ("auto-order-flow-liquidity", &["market"][..]),
-            (
-                "auto-derivatives-positioning",
-                &["derivatives", "market"][..],
-            ),
-            ("auto-account-risk", &["account", "history", "market"][..]),
-            ("auto-intelligence-flow", &["intelligence"][..]),
-            ("auto-smart-money", &["intelligence", "derivatives"][..]),
-            ("auto-historical-analogy", &["history", "market"][..]),
-            (
-                "auto-contrarian-review",
-                &["market", "derivatives", "intelligence", "history"][..],
-            ),
+    fn delegated_agent_tools_follow_declared_scopes_within_whitelist() {
+        let catalog = vec![
+            test_agent_definition("desic-market-structure", "市场结构", "market_structure"),
+            test_agent_definition("desic-account-risk", "账户风险", "account_risk"),
+            test_agent_definition("desic-smart-money", "Smart Money", "smart_money"),
         ];
-        for (id, scopes) in expected {
-            assert_eq!(auto_profile_agent_scopes(id), Some(scopes), "{id}");
-        }
-        assert_eq!(auto_profile_agent_scopes("auto-unknown"), None);
+        let context_with = |agents: &[&str], declared: &[&str]| {
+            let selected = catalog
+                .iter()
+                .filter(|agent| agents.contains(&agent.id.as_str()))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut context = test_ai_tool_context("advisor", "subagent", true);
+            context.configured_agent_id = Some(agents[0].to_string());
+            context.configured_agent_scopes =
+                declared.iter().map(|scope| (*scope).to_string()).collect();
+            context.active_skill_ids.insert("okx-market-intelligence".to_string());
+            context.active_skill_ids.insert("market-radar-research".to_string());
+            context.run_context = Some(test_background_run_context(Some("account-test"), selected));
+            context
+        };
+
+        // 收窄：只声明 market → market.* 与 radar.* 放行，account.* 被拒。
+        let narrowed = context_with(&["desic-market-structure"], &["market"]);
+        assert!(authorize_ai_tool("market.readTicker", &narrowed).is_ok());
+        assert!(authorize_ai_tool("radar.readRanking", &narrowed).is_ok());
+        assert!(authorize_ai_tool("account.readRisk", &narrowed).is_err());
+        assert!(authorize_ai_tool("intelligence.news.list", &narrowed).is_err());
+
+        // 缺省（空数组）= 全部只读工具。
+        let default_all = context_with(&["desic-market-structure"], &[]);
+        assert!(authorize_ai_tool("market.readTicker", &default_all).is_ok());
+        assert!(authorize_ai_tool("account.readRisk", &default_all).is_ok());
+        assert!(authorize_ai_tool("intelligence.news.search", &default_all).is_ok());
+        assert!(authorize_ai_tool("account.readHistoricalFills", &default_all).is_ok());
+        // 但写权限/交易工具仍然被拒（专家恒只读）。
+        assert!(authorize_ai_tool("trade.placeOrder", &default_all).is_err());
+        assert!(authorize_ai_tool("tradeOpportunity.create", &default_all).is_err());
+
+        // 声明白名单外域 → 拒（列出非法值，不静默过滤）。
+        let invalid = context_with(&["desic-market-structure"], &["shell"]);
+        let error = authorize_ai_tool("market.readTicker", &invalid)
+            .expect_err("whitelist violation must be rejected");
+        assert!(error.contains("shell"), "{error}");
+        assert!(error.contains("允许"), "{error}");
+
+        // 名单外专家 → 拒；空名单 → 拒。
+        let mut not_listed = test_ai_tool_context("advisor", "subagent", true);
+        not_listed.configured_agent_id = Some("desic-smart-money".to_string());
+        not_listed.run_context = Some(test_background_run_context(
+            Some("account-test"),
+            vec![catalog[0].clone()],
+        ));
+        let error = authorize_ai_tool("intelligence.news.list", &not_listed)
+            .expect_err("agent outside the selection must be rejected");
+        assert!(error.contains("不属于本次勾选的专家名单"), "{error}");
+
+        let mut empty = test_ai_tool_context("advisor", "subagent", true);
+        empty.configured_agent_id = Some("desic-market-structure".to_string());
+        empty.run_context = Some(test_background_run_context(Some("account-test"), Vec::new()));
+        let error = authorize_ai_tool("market.readTicker", &empty)
+            .expect_err("an empty selection must reject every delegated agent");
+        assert!(error.contains("未勾选任何专家"), "{error}");
+    }
+
+    /// C18 ①：批量点名不改变授权粒度——每一位专家仍按**自己的** `configuredAgentId`
+    /// 逐条校验（名单内 + scopes ⊆ 白名单 + 平台门槛 + 写类恒拒）。
+    /// 本用例模拟"一批评点 3 位，只有 2 位在勾选名单内、其中 1 位声明了非法域"，
+    /// 断言不存在"整批任一在名单内就全批放行"的退化。
+    #[test]
+    fn batched_experts_are_authorized_individually() {
+        let catalog = vec![
+            test_agent_definition("desic-market-structure", "市场结构", "market_structure"),
+            test_agent_definition("desic-account-risk", "账户风险", "account_risk"),
+        ];
+        let declare = |expert_id: &str, scopes: &[&str]| {
+            let mut context = test_ai_tool_context("advisor", "subagent", true);
+            context.configured_agent_id = Some(expert_id.to_string());
+            context.configured_agent_scopes =
+                scopes.iter().map(|scope| (*scope).to_string()).collect();
+            context
+                .active_skill_ids
+                .insert("okx-market-intelligence".to_string());
+            context
+                .active_skill_ids
+                .insert("market-radar-research".to_string());
+            context.run_context = Some(test_background_run_context(
+                Some("account-test"),
+                catalog.clone(),
+            ));
+            context
+        };
+
+        // 批内第 1 位：在名单内 + 声明 market → 放行只读行情工具。
+        let first = declare("desic-market-structure", &["market"]);
+        assert!(authorize_ai_tool("market.readTicker", &first).is_ok());
+
+        // 批内第 2 位：在名单内但声明了白名单外的域 → 仍然被拒（不因"整批有人合规"而放行）。
+        let second = declare("desic-account-risk", &["shell"]);
+        let error = authorize_ai_tool("account.readRisk", &second)
+            .expect_err("illegal declared scope must be rejected per expert");
+        assert!(error.contains("shell"), "{error}");
+
+        // 批内第 3 位：**不在**勾选名单内（例如主 Agent 随手多写了一个 id）→ 被拒；
+        // 且批内其它专家的通过不能"顺带"放行它。
+        let third = declare("desic-smart-money", &["intelligence"]);
+        let error = authorize_ai_tool("intelligence.news.list", &third)
+            .expect_err("expert outside the selection must be rejected");
+        assert!(error.contains("不属于本次勾选的专家名单"), "{error}");
+
+        // 名单内的第二位，声明合法域 → 按自己的 scopes 放行（收窄为子集）。
+        let scoped = declare("desic-account-risk", &["account"]);
+        assert!(authorize_ai_tool("account.readRisk", &scoped).is_ok());
+        assert!(authorize_ai_tool("intelligence.news.list", &scoped).is_err());
+
+        // 无论批量与否，专家的写类工具与交易工具恒拒。
+        let writer = declare("desic-market-structure", &[]);
+        assert!(authorize_ai_tool("trade.placeOrder", &writer).is_err());
+        assert!(authorize_ai_tool("tradeOpportunity.create", &writer).is_err());
+        assert!(authorize_ai_tool("agent.create", &writer).is_err());
+    }
+
+    /// 董事会决定（P1）：主 Agent 与专家**不设轮次上限** —— config 里不再出现
+    /// `maxIterations` 键（不是 null）；显式请求仍然生效；图表指标会话保留 8。
+    #[test]
+    fn session_iterations_are_uncapped_unless_explicitly_requested() {
+        // 探针结论（见 `ai_session_max_iterations` 注释）：SDK 的循环守卫是
+        // `maxIterations===void 0 || iteration<maxIterations`，schema 是 optional，
+        // 因此"不下发"就是"不设上限"。
+        assert_eq!(ai_session_max_iterations(None), None, "缺省不下发上限");
+        assert_eq!(ai_session_max_iterations(Some(120)), Some(120), "显式请求优先");
+
+        let config = with_max_iterations(json!({ "provider": "openai-compatible" }), None);
+        assert!(
+            config.get("maxIterations").is_none(),
+            "缺省必须完全没有该键（null 也会被 SDK 当成 limit 语义之外的脏值）：{config}"
+        );
+        let config = with_max_iterations(json!({ "provider": "openai-compatible" }), Some(8));
+        assert_eq!(config["maxIterations"], 8);
+        assert_eq!(config["provider"], "openai-compatible", "其它键不受影响");
+
+        // 图表指标会话是**另一类**会话：刻意的小值，保留。
+        assert_eq!(CHART_INDICATOR_MAX_ITERATIONS, 8);
+    }
+
+    /// C6 / C8 出口条件 5：agent.* 只对主 Agent 开放；写类仅限交互式主会话。
+    #[test]
+    fn agent_tools_are_main_agent_interactive_only() {
+        let main = test_ai_tool_context("advisor", "main", false);
+        assert!(authorize_ai_tool("agent.list", &main).is_ok());
+        assert!(authorize_ai_tool("agent.read", &main).is_ok());
+        assert!(authorize_ai_tool("agent.create", &main).is_ok());
+        assert!(authorize_ai_tool("agent.update", &main).is_ok());
+        assert!(authorize_ai_tool("agent.duplicate", &main).is_err());
+
+        let delegated = test_ai_tool_context("advisor", "subagent", true);
+        assert!(authorize_ai_tool("agent.list", &delegated).is_err());
+        assert!(authorize_ai_tool("agent.read", &delegated).is_err());
+        assert!(authorize_ai_tool("agent.create", &delegated).is_err());
+
+        let mut background = test_ai_tool_context("advisor", "main", false);
+        background.run_context =
+            Some(test_background_run_context(Some("account-test"), Vec::new()));
+        assert!(authorize_ai_tool("agent.list", &background).is_ok());
+        assert!(authorize_ai_tool("agent.read", &background).is_ok());
+        let error = authorize_ai_tool("agent.create", &background)
+            .expect_err("background runs must not create agents");
+        assert!(error.contains("交互式主会话"), "{error}");
+        assert!(authorize_ai_tool("agent.update", &background).is_err());
     }
 
     #[test]
@@ -29037,12 +29707,23 @@ mod tests {
             target_leverage: 20,
             max_single_trade_margin_pct: 30,
             allowed_wake_condition_types: Vec::new(),
-            multi_agent_mode: desic_agent_automation::MULTI_AGENT_OFF_MODE.to_string(),
-            multi_agent_max_agents: 4,
-            multi_agents: Vec::new(),
-            multi_agent_orchestrator: desic_agent_automation::MULTI_AGENT_ORCHESTRATOR_BACKEND
-                .to_string(),
-            multi_agent_expert_source: String::new(),
+            enabled_agents: Vec::new(),
+            triage: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::ai_triage::RunTriageState::new(
+                    crate::ai_triage::AiAgentTriageConfig {
+                        mode: crate::ai_triage::TRIAGE_MODE_OFF.to_string(),
+                        ..crate::ai_triage::AiAgentTriageConfig::default()
+                    },
+                    0,
+                    None,
+                    0,
+                ),
+            )),
+            finish_gate: std::sync::Arc::new(std::sync::Mutex::new(
+                crate::ai_automation::FinishGateState::default(),
+            )),
+            single_agent_mode: crate::ai_automation::SINGLE_AGENT_MODE_MINIMAL.to_string(),
+            trigger: json!({}),
             review_id: None,
             episode_id: None,
         });

@@ -1,4 +1,4 @@
-import { normalizeMultiAgentConfig } from "./cline-profile-agents.mjs";
+import { normalizeEnabledProfileAgents } from "./cline-profile-agents.mjs";
 
 export const AI_PERMISSION_MODES = new Set(["advisor", "copilot", "limited_auto"]);
 export const AI_AGENT_ROLES = new Set(["main", "subagent", "team"]);
@@ -119,6 +119,8 @@ export const OPPORTUNITY_WRITE_TOOLS = new Set([
 
 export const NOTIFICATION_TOOLS = new Set(["notification.feishu.send"]);
 export const BACKGROUND_TOOLS = new Set(["background.finishRun"]);
+// C19：试判阶段的结论提交工具。后台 Run 专属（交互式会话与专家会话都拒绝）。
+export const TRIAGE_TOOLS = new Set(["background.reportTriage"]);
 export const REVIEW_TOOLS = new Set([
   "review.readSkillVersion",
   "review.complete",
@@ -131,6 +133,7 @@ export const OPPORTUNITY_TOOLS = OPPORTUNITY_WRITE_TOOLS;
 export const ORCHESTRATION_TOOLS = new Set([
   "spawn_agent",
   "consult_expert",
+  "consult_experts",
   "follow_up",
   "team_spawn_teammate",
   "team_shutdown_teammate",
@@ -172,6 +175,17 @@ export const TRADE_TOOLS = new Set([
 export const PROHIBITED_TOOLS = new Set([
   "apply_patch",
   "editor"
+]);
+
+// C6/C10: Agent 库写作工具。读类（list/read）主 Agent 的交互研究与后台 Run 都可用；
+// 写类（create/update）只允许主 Agent 的交互式会话——无人值守的后台 Run 不得改自己的
+// 专家库。这里必须与 allKnownToolNames() 同步登记，否则 buildToolPolicies 不会生成
+// 策略，createDesicTools 会静默丢弃工具定义。
+export const AGENT_AUTHORING_TOOLS = new Set([
+  "agent.list",
+  "agent.read",
+  "agent.create",
+  "agent.update"
 ]);
 
 export const DISABLED_SUBAGENT_WRAPPER_TOOLS = new Set([
@@ -241,11 +255,13 @@ export function allKnownToolNames() {
     ...OPPORTUNITY_WRITE_TOOLS,
     ...NOTIFICATION_TOOLS,
     ...BACKGROUND_TOOLS,
+    ...TRIAGE_TOOLS,
     ...REVIEW_TOOLS,
     ...ORCHESTRATION_TOOLS,
     ...TRADE_TOOLS,
     ...PROHIBITED_TOOLS,
-    ...DISABLED_SUBAGENT_WRAPPER_TOOLS
+    ...DISABLED_SUBAGENT_WRAPPER_TOOLS,
+    ...AGENT_AUTHORING_TOOLS
   ]));
 }
 
@@ -292,6 +308,36 @@ export function resolveToolPolicy(name, config = {}) {
     return enabledPolicy("auto-approved:main-interactive-skill-run");
   }
 
+  // C6/C10: Agent 库工具。规则顺序必须在 role !== "main" 兜底之前，否则 delegated
+  // 角色会落到 disabled:unknown-tool 而不是语义明确的 agent-authoring-main-only。
+  // 写类工具的安全边界 = 仅主 Agent + 仅交互式会话（另加 Rust authorize_ai_tool 复核）；
+  // 这里没有逐工具审批流（允许的工具一律 autoApprove），不要依赖审批兜底。
+  //
+  // reviewer R2-3：这里**不能**用 normalizeAgentRole 的结果判断。它对未知/缺失角色
+  // 一律回退 "main"（见 normalizeAgentRole），会让非主角色的调用点静默拿到授权。
+  // 因此要求 config 里**显式声明** agentRole 为 main，缺失或其它角色一律拒绝
+  // （deny-by-default；主会话路径由 createDesicTools 显式注入 agentRole: "main"）。
+  if (AGENT_AUTHORING_TOOLS.has(canonicalName)) {
+    const declaredRole = String(config?.agentRole ?? "").trim().toLowerCase();
+    if (declaredRole !== "main") {
+      return disabledPolicy("disabled:agent-authoring-main-only");
+    }
+    if (
+      boolConfig(config.backgroundRun, false)
+      && (canonicalName === "agent.create" || canonicalName === "agent.update")
+    ) {
+      return disabledPolicy("disabled:agent-authoring-interactive-only");
+    }
+    return enabledPolicy("auto-approved:main-agent-authoring");
+  }
+
+  // C19：试判结论只能由后台 Run 的主 Agent 提交。
+  if (TRIAGE_TOOLS.has(canonicalName)) {
+    if (role !== "main") return disabledPolicy("disabled:triage-report-main-only");
+    if (!boolConfig(config.backgroundRun, false)) return disabledPolicy("disabled:not-background-run");
+    return enabledPolicy("auto-approved:background-run");
+  }
+
   if (ANALYSIS_TOOLS.has(canonicalName)) {
     if (
       (canonicalName.startsWith("strategy.") || canonicalName === "skill.readResource")
@@ -324,20 +370,24 @@ export function resolveToolPolicy(name, config = {}) {
     return disabledPolicy("disabled:unknown-tool");
   }
 
-  // P2b (DES-31, D6/D8 §5.5/§5.8): lead dispatch tools exist only while the
-  // coordinator can actually dispatch — the exact gate as the lead prompt
-  // injection in buildSystemPrompt (enabled + orchestrator=lead + non-review
-  // background run). Everywhere else they are disabled rather than merely
-  // absent from tool lists, so off/backend/reviewRun lists stay byte-identical
-  // to P2a. Subagent/team denial is already handled by the role gate above via
-  // ORCHESTRATION_TOOLS membership.
-  if (canonicalName === "consult_expert" || canonicalName === "follow_up") {
-    const multiAgentConfig = normalizeMultiAgentConfig(config);
-    const leadDispatchActive = multiAgentConfig.enabled
-      && multiAgentConfig.orchestrator === "lead"
-      && boolConfig(config.backgroundRun, false)
-      && config.reviewRun !== true;
-    if (!leadDispatchActive) return disabledPolicy("disabled:lead-dispatch-off");
+  // v3 §4.2（C4/C5）：lead 调度工具（consult_expert / follow_up）的判定条件简化为
+  // 「Profile 勾选名单为空即关闭」。名单非空时交互式研究与后台 Run 共用同一套工具与
+  // 提示词（§3 指令 1 尾句）；backend 编排器与 multiAgentOrchestrator 字段已删除。
+  // Subagent/team 拒绝由上方 role 闸门经 ORCHESTRATION_TOOLS 成员判定处理。
+  if (
+    canonicalName === "consult_expert"
+    || canonicalName === "follow_up"
+    || canonicalName === "consult_experts"
+  ) {
+    if (normalizeEnabledProfileAgents(config).length === 0) {
+      return disabledPolicy("disabled:lead-dispatch-off");
+    }
+    // C19：试判阶段的点名拒绝**不在这里**做。这里的判定同时被三处使用：工具构造
+    // （createDesicLeadDispatchTools 是否入列）、buildToolPolicies 的静态快照（SDK 按调用读它）
+    // 与 executeDesicTool 的即时复核；前两者只在会话启动时求值一次，一旦把"试判中"写进来，
+    // 工具会被**永久地从清单里去掉**——verdict=escalate 之后也回不来
+    // （真实事故 run-1789805717945357000：模型报告"深度阶段未提供 consult_experts"）。
+    // 因此试判门改为 executeDesicTool 里的即时检查：describeTriageDispatchPolicy(name, config)。
     return enabledPolicy("auto-approved:main-lead-dispatch");
   }
 

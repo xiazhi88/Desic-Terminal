@@ -1860,6 +1860,12 @@ export type AiConfigSummary = {
   skillRuntimeTrust: Record<string, boolean>;
   openAgent: boolean;
   workspaceRoots: string[];
+  /** TypeSafe / Jev 快速判定（可选）：是否启用、是否已配置、掩码 Key、模型与端点。 */
+  typesafeEnabled: boolean;
+  typesafeConfigured: boolean;
+  typesafeApiKeyMasked: string;
+  typesafeModel: string;
+  typesafeBaseUrl: string;
 };
 
 export type AiReasoningDepth = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -1991,52 +1997,67 @@ export type AiConfigUpdate = {
   skillDefinitions?: AiSkillDefinition[];
   openAgent?: boolean;
   workspaceRoots?: string[];
+  /** TypeSafe / Jev：缺省 = 不改动现值；`apiKey` 含 `****` 或为空时不覆盖，空串表示显式清空。 */
+  typesafeEnabled?: boolean;
+  typesafeApiKey?: string;
+  typesafeModel?: string;
+  typesafeBaseUrl?: string;
 };
 
 export type AiAutomationTab =
   | "profiles"
+  | "agents"
   | "runs"
   | "wake_conditions"
   | "reviews"
   | "optimization"
   | "notifications";
 
-export type AiProfileSubAgent = {
+/**
+ * Agent 库（契约 v3 C7）。库里以 `<data_dir>/workspace/.cline/agents/<id>/AGENTS.md`
+ * 为唯一真相，列表由 `ai_agents_list` 扫目录返回。
+ */
+export type AiAgentEnvelope = "standard" | "risk";
+
+export type AiAgentSource = "builtin" | "custom" | "ai";
+
+/** 列表项：不返回正文（正文走 `ai_agent_read`）。字段名与 Rust `AiAgentSummary` 逐字一致。 */
+export type AiAgentSummary = {
   id: string;
   name: string;
   role: string;
-  responsibility: string;
-  scopes: string[];
-  required: boolean;
-  enabled: boolean;
+  envelope: AiAgentEnvelope;
+  skills: string[];
+  requiresAccount: boolean;
+  source: AiAgentSource;
+  version: number;
+  updatedAt: number;
+  enabledByProfiles: string[];
+  missingSkills: string[];
+  missingAccount: boolean;
+  modified: boolean;
+  /** C15：旧文件里出现过已废弃的 `scopes` 字段时为 true（只做一行灰字提示，不报错、不阻塞保存）。 */
+  scopesDeprecated?: boolean;
+  /**
+   * C20.5：历史内置角色（已停用）。不被"全选内置"选中，但**手动勾选仍然生效**；
+   * 旧勾选保留在配置里，不静默丢弃用户选择。
+   */
+  deprecated?: boolean;
 };
 
-export type AiAgentTemplatePhase = "primary" | "review" | "final";
+/** 详情：summary 字段 + 完整 AGENTS.md 原文。 */
+export type AiAgentDetail = AiAgentSummary & { content: string };
 
 export type AiCodexTemplatePreview = {
   name: string;
   description: string;
   instructions: string;
   skillIds: string[];
-  phase: AiAgentTemplatePhase;
+  /** 方案模板类型已删除；Codex 预览命令若保留，阶段仍沿用同一枚举。 */
+  phase: "primary" | "review" | "final";
   model?: string | null;
   rejectedFields: string[];
   notes: string[];
-};
-
-export type AiAgentScheme = {
-  id: string;
-  name: string;
-  description: string;
-  builtin: boolean;
-  agents: AiProfileSubAgent[];
-  instructions: string;
-  skillIds: string[];
-  phase: AiAgentTemplatePhase;
-  model?: string | null;
-  reasoningDepth: AiReasoningDepth;
-  createdAt: number;
-  updatedAt: number;
 };
 
 export type AiAgentProfile = {
@@ -2063,14 +2084,111 @@ export type AiAgentProfile = {
   feishuEnabled: boolean;
   dailyReviewEnabled: boolean;
   allowedWakeConditionTypes: string[];
-  multiAgentMode: "off" | "auto" | "custom";
-  multiAgentMaxAgents: number;
-  multiAgentSchemeId?: string | null;
-  multiAgentOrchestrator?: "backend" | "lead" | null;
-  multiAgentExpertSource?: "auto" | "custom" | null;
-  multiAgents: AiProfileSubAgent[];
+  /**
+   * C14 协作编排总开关（载荷闸门）：false → 运行载荷 `enabledAgents` 为空（等价旧 `off`），
+   * 但 `enabledAgentIds` 原样保留，重新开启即恢复；true + 空名单 = 配置不完整提示，不是关闭。
+   */
+  collaborationEnabled: boolean;
+  /** C19：试判阶段配置（默认 enforce；`off` 等价今天的行为）。 */
+  triage: AiTriageConfig;
+  /**
+   * C24：单 Agent 极简模式。仅在 `collaborationEnabled === false` 时生效；
+   * `minimal` = 只调工具、不输出任何正文，收尾 summary 一句话（≤160 字符）。
+   */
+  singleAgentMode: AiSingleAgentMode;
+  /** 勾选的 Agent 库 id（顺序即勾选顺序；重复/不存在的 id 由 Rust 侧丢弃）。 */
+  enabledAgentIds: string[];
+  /** TypeSafe / Jev：本 Profile 运行时是否启用 Jev 快速判定（判定层，默认关闭）。 */
+  typesafeEnabled: boolean;
   createdAt: number;
   updatedAt: number;
+};
+
+/** C24：单 Agent 模式（协作关闭时生效）。 */
+export type AiSingleAgentMode = "standard" | "minimal";
+
+/** C19 试判（triage）：Profile 级配置。字段名逐字对齐契约 C19.1 的 JSON。 */
+export type AiTriageMode = "off" | "shadow" | "enforce";
+
+export type AiTriageEscalate = {
+  /** 持仓 / 挂单发生变化。 */
+  positionOrOrderChanged: boolean;
+  /** 止损距离 ≤ 该百分比（%）即强制深度。 */
+  stopDistancePct: number;
+  /** 维持保证金率阈值（%）。OKX 口径「越大越安全，≤100% 即强平」，默认 150。C25④ 起比较方向固定为此口径。 */
+  marginRatioPct: number;
+  /** 标记位被确认 K 线突破。 */
+  confirmedBreakOfFlaggedLevel: boolean;
+  /** ≥N 个独立条件共振。 */
+  conditionResonance: number;
+  /** 重要事件。 */
+  importantNews: boolean;
+};
+
+export type AiTriageConfig = {
+  mode: AiTriageMode;
+  maxSkips: number;
+  maxSilenceMinutes: number;
+  skipSampleRate: number;
+  escalate: AiTriageEscalate;
+};
+
+export type AiRunTriageVerdict = "skip" | "escalate";
+
+export type AiRunExpert = {
+  id?: string;
+  expertId?: string;
+  /** 运行时 agent id（事件流里的 agentId）。 */
+  agentId?: string;
+  /** 库里的专家 id（= lane 的 id，与 agentStart.configuredAgentId 一致）。 */
+  configuredAgentId?: string;
+  name?: string;
+  expertName?: string;
+  role?: string;
+  mode?: "parallel" | "serial";
+  grantedScopes?: string[];
+  /** 主 Agent 给它的提问全文（侧车拼装后的最终任务）。 */
+  taskPrompt?: string;
+  /** 专家报告全文（Markdown）。 */
+  report?: string;
+  toolCalls?: number;
+  durationMs?: number;
+  startedAt?: number;
+  endedAt?: number;
+  tokenUsage?: { inputTokens?: number; outputTokens?: number; totalTokens?: number } | null;
+  /** 该专家会话没有可用 token 记账（例如老记录或未报告）。 */
+  tokensUnavailable?: boolean;
+};
+
+export type AiRunTriageEvidence = {
+  fact: string;
+  source: string;
+  at: string;
+};
+
+/** C19.3：运行记录里的试判块（未试判时整体缺省）。 */
+export type AiRunTriage = {
+  mode?: AiTriageMode;
+  /**
+   * C25①：Rust 现在发字符串；旧形状只发布尔 `escalate`。两者都读（UI 侧映射：
+   * `escalate === true → "escalate"`，`false → "skip"`），避免历史 `is-true` / 恒假判断。
+   */
+  verdict?: AiRunTriageVerdict | string;
+  escalate?: boolean;
+  /** C19/C25：阶段标记（`triage` / `deep`）；C25⑤ 用它判断是否进入深度分析。 */
+  phase?: string;
+  reasons?: string[];
+  evidence?: AiRunTriageEvidence[];
+  /** 硬升级命中原因（如「止损距离 1.2%」）；非空即视为强制升级。 */
+  forcedBy?: string[];
+  forced?: boolean;
+  /** 抽样复检：skip 判定但按 skipSampleRate 仍执行深度。 */
+  sampled?: boolean;
+  /** 分阶段记账：试判段 token 与深度段 token。 */
+  triageTokens?: number;
+  deepTokens?: number;
+  triageUsage?: AiUsageSummary | null;
+  deepUsage?: AiUsageSummary | null;
 };
 
 export type AiAutomationRun = {
@@ -2078,6 +2196,29 @@ export type AiAutomationRun = {
   profileId: string;
   triggerType: string;
   status: string;
+  /** C19：试判结果（`status: skipped` 时必然存在）。 */
+  triage?: AiRunTriage | null;
+  /**
+   * C21.3 软审计：分析结果的排版提醒（例如「缺小节：观察条件」「事实与证据无时间戳」）。
+   * **不阻断、不改写**正文 —— UI 只加一行 warn 提示，正文仍按原样渲染。
+   */
+  summaryFormatWarnings?: unknown[] | null;
+  /** C20.6 补充：升级了但没有派专家时的解释与"未说明理由"标记。 */
+  audit?: {
+    selfAnalysisReason?: string | null;
+    selfAnalysisUnjustified?: boolean;
+  } | null;
+  /** C24：该次运行的单 Agent 模式（`minimal` 时详情显示「极简模式」徽标）。 */
+  singleAgentMode?: AiSingleAgentMode | string | null;
+  /**
+   * C23.2：逐专家详情（Rust 从事件流落库：`agentStart.taskPrompt` + `agentDone.result.text`）。
+   * 缺字段表示老记录；UI 显示占位，不留空白。
+   */
+  experts?: AiRunExpert[] | null;
+  /** C20.6：本轮结论引用了哪些专家事实（专家 id / 名称 + 证据要点）。 */
+  usedEvidence?: unknown[] | null;
+  /** C20.6：逐条回应反方意见（接受 / 反驳 + 依据；未被回应单独标出）。 */
+  contrarianResolutions?: unknown[] | null;
   summary?: string | null;
   error?: string | null;
   startedAt: number;
@@ -2302,7 +2443,6 @@ export type AiProfilePerformance = {
 export type AiAutomationSummary = {
   masterEnabled: boolean;
   profilePerformance?: AiProfilePerformance[];
-  agentSchemes: AiAgentScheme[];
   profiles: AiAgentProfile[];
   runs: AiAutomationRun[];
   wakeConditions: AiWakeCondition[];
@@ -2315,7 +2455,7 @@ export type AiAutomationSummary = {
 
 export type AiAutomationOverview = Pick<
   AiAutomationSummary,
-  "masterEnabled" | "agentSchemes" | "profiles" | "skillVersions" | "profilePerformance"
+  "masterEnabled" | "profiles" | "skillVersions" | "profilePerformance"
 > & {
   counts: AiAutomationCounts;
 };
@@ -2333,8 +2473,11 @@ export type AiAutomationSection = Pick<
   AiAutomationSummary,
   "runs" | "wakeConditions" | "reviews" | "dailyMarketReviews" | "optimizationSuggestions" | "notificationDeliveries" | "skillVersions"
 > & {
-  section: Exclude<AiAutomationTab, "profiles">;
+  section: Exclude<AiAutomationTab, "profiles" | "agents">;
 };
+
+/** i18n 目录把 "agents" 列在 automation 命名空间下。 */
+export type AiAutomationSectionTab = Exclude<AiAutomationTab, "profiles" | "agents">;
 
 export type NotificationSettingsSummary = {
   feishu: FeishuConfigSummary;
@@ -2439,6 +2582,9 @@ export type AiEvent =
       startedAt?: number;
     }
   | { type: "agentDone"; sessionId: string; agentId: string; configuredAgentId?: string | null; status: string; result: unknown; error?: string | null; endedAt?: number }
+  | { type: "agentProgressNotice"; sessionId: string; agentId: string; agentName: string; elapsedMs: number; silentMs: number; phase: string }
+  /** P2：AI 生成 Agent 草稿的真流式增量（按 `requestId` 关联，不进未读、不进检查点）。 */
+  | { type: "agentDraftDelta"; sessionId: string; requestId: string; delta: string; chars: number }
   | { type: "teamEvent"; sessionId: string; event: unknown }
   | {
       type: "approvalRequest";

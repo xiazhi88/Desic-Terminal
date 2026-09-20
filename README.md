@@ -56,7 +56,7 @@
 | 文档 | 内容 |
 | --- | --- |
 | 📖 [**入门教程**](docs/getting-started.md) | 从安装、配置模拟盘、第一笔交易到 AI 助手与情报，一步步上手 |
-| 🤖 [**AI 自动化指南**](docs/ai-automation-guide.md) | Profile、唤醒条件、Skill 版本、多 Agent、复盘与迭代的完整使用指导 |
+| 🤖 [**AI 自动化指南**](docs/ai-automation-guide.md) | Profile、唤醒条件、Skill 版本、Agent 库与勾选制编排、复盘与迭代的完整使用指导 |
 | 📈 [**系统化策略指南**](docs/systematic-strategy-guide.md) | Python 策略编程、回测、参数调优与实盘 Profile 的完整工作流 |
 | 🔧 [策略协议规范](docs/systematic-python-strategy-protocol.md) | 策略运行时协议、源码策略与安全边界的权威规范 |
 | 🏗 [产品规范](PRODUCT.md) | 产品边界与关键设计决策 |
@@ -68,7 +68,7 @@
 | **实时交易** | OKX Public / Business / Private WebSocket、深度与逐笔、交易票、限价/市价/计划委托、止盈止损、OCO、改单撤单、持仓管理 |
 | **专业图表** | 多周期 K 线、24 个主副图指标、图层与绘图、图表快速交易、多图表独立窗口、K 线数据表与 CSV 导出 |
 | **AI 助手** | 流式推理、白名单工具、账户与市场证据读取、交易机会、图表动作、安全 DSL 自定义指标、多供应商与官方 CLI 通道 |
-| **AI 自动化** | Profile、类型化唤醒条件、受限自动执行、运行审计、多 Agent 编排、仓位复盘、Skill 版本与优化建议 |
+| **AI 自动化** | Profile、类型化唤醒条件、受限自动执行、运行审计、Agent 库与勾选制编排、仓位复盘、Skill 版本与优化建议 |
 | **市场雷达** | 全市场综合排名、分类强弱与市场宽度、排名变化、评分归因、保存筛选、研究提醒和点时历史验证 |
 | **系统化策略** | 免安装 Python、模板策略、最长 366 天 1 分钟级回测、参数调优工作台、实盘 Profile 与信号历史 |
 | **市场情报** | 新闻、事件聚类、币种情绪、经济日历、OI、主动流、拥挤度、资金费率、基差、Smart Money 与系统压力 |

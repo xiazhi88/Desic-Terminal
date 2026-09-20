@@ -3334,6 +3334,21 @@ fn select_smart_money_history_symbols(
     ranked_symbols: &[(String, u8)],
     limit: usize,
 ) -> Vec<String> {
+    // 生产路径行为不变：仍按既有全局轮转游标取偏移（每个优先级组消费一次）。
+    // 内部实现把"取偏移"抽成可注入的闭包，测试因此可以给**确定**的游标，
+    // 不再与并行执行的其它用例争抢这枚全局原子（历史上会偶发失败）。
+    select_smart_money_history_symbols_with_cursor(ranked_symbols, limit, &mut || {
+        SMART_MONEY_HISTORY_CURSOR.fetch_add(1, Ordering::Relaxed) as usize
+    })
+}
+
+/// `select_smart_money_history_symbols` 的内部实现，游标由调用方提供：
+/// 生产传全局原子，测试传确定序列（0,1,2,…）或常量。
+fn select_smart_money_history_symbols_with_cursor(
+    ranked_symbols: &[(String, u8)],
+    limit: usize,
+    next_cursor: &mut dyn FnMut() -> usize,
+) -> Vec<String> {
     if ranked_symbols.len() <= limit {
         return ranked_symbols
             .iter()
@@ -3363,8 +3378,7 @@ fn select_smart_money_history_symbols(
             .saturating_sub(lower_priority_groups)
             .max(1)
             .min(group.len());
-        let offset =
-            SMART_MONEY_HISTORY_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % group.len();
+        let offset = next_cursor() % group.len();
         selected.extend(group.iter().cycle().skip(offset).take(quota).cloned());
     }
     selected
@@ -4746,6 +4760,8 @@ mod tests {
         ));
     }
 
+    /// 同优先级下的轮转：**用确定游标**验证"两次调用给出不同选择"（原意不变），
+    /// 不依赖全局原子，因此与并行用例互不干扰（历史 flake 的根因）。
     #[test]
     fn smart_money_history_selection_rotates_within_same_priority() {
         let ranked = vec![
@@ -4753,11 +4769,35 @@ mod tests {
             ("ETH-USDT-SWAP".to_string(), 2),
             ("SOL-USDT-SWAP".to_string(), 2),
         ];
-        let first = select_smart_money_history_symbols(&ranked, 2);
-        let second = select_smart_money_history_symbols(&ranked, 2);
+        let mut cursor = 0usize;
+        let mut rotating = || {
+            let value = cursor;
+            cursor += 1;
+            value
+        };
+        let first =
+            select_smart_money_history_symbols_with_cursor(&ranked, 2, &mut rotating);
+        let second =
+            select_smart_money_history_symbols_with_cursor(&ranked, 2, &mut rotating);
+        let third =
+            select_smart_money_history_symbols_with_cursor(&ranked, 2, &mut rotating);
         assert_eq!(first.len(), 2);
         assert_eq!(second.len(), 2);
-        assert_ne!(first, second);
+        assert_eq!(third.len(), 2);
+        assert_ne!(first, second, "轮转必须改变选择");
+        assert_ne!(second, third);
+        assert_ne!(first, third);
+        // 三轮把三个同优先级标的各覆盖过至少一次（真正的轮转语义）。
+        let mut seen = first.clone();
+        seen.extend(second.clone());
+        seen.extend(third.clone());
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), 3, "轮转应覆盖同优先级组内全部标的");
+        // 生产包装仍走全局游标：只断言它给出合法子集（跨调用比较是全局态，属于旧 flake 来源）。
+        let via_global = select_smart_money_history_symbols(&ranked, 2);
+        assert_eq!(via_global.len(), 2);
+        assert!(ranked.iter().any(|(symbol, _)| *symbol == via_global[0]));
     }
 
     #[test]
@@ -4771,7 +4811,9 @@ mod tests {
             ("ADA-USDT-SWAP".to_string(), 4),
             ("AVAX-USDT-SWAP".to_string(), 1),
         ];
-        let selected = select_smart_money_history_symbols(&ranked, 5);
+        // 固定游标：该用例只关心"给低优先级保留槽位"，与轮转无关（确定性）。
+        let selected =
+            select_smart_money_history_symbols_with_cursor(&ranked, 5, &mut || 0);
         assert_eq!(selected.len(), 5);
         assert!(selected.contains(&"AVAX-USDT-SWAP".to_string()));
         assert_eq!(

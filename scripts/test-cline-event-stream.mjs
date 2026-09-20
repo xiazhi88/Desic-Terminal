@@ -475,7 +475,7 @@ assert.equal(isTransientAiNetworkError("Reconnecting... 1/5"), true);
 assert.equal(isTransientAiNetworkError("HTTP 401 invalid API key"), false);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli" }), null);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "claude-code" }), null);
-assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native" }), 60_000);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native" }), 240_000);
 assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli", requestTimeoutMs: 500 }), 500);
 
 const localCliSilentState = {
@@ -550,22 +550,189 @@ const activeStreamResult = await runProviderNetworkRetry({
 });
 assert.equal(activeStreamResult.finishReason, "completed");
 assert.ok(Date.now() - activeStreamStartedAt >= 60, "provider activity should extend the idle timeout beyond total duration");
+// 方案 A 之后：看门狗超时是终态，即使 state 里已记录过瞬态错误也不再重试。
+// 真实链路中 provider 自报 503 会经 state.providerErrorReject 先赢得 race（见
+// emitMappedCoreEvent），根本到不了看门狗；这里的预置 state 只是构造"更早尝试留下的
+// 瞬态错误"这一情形，用于验证它只进诊断 text、不改 errorMessage、也不残留。
+const observed503Message = 'error (503): {"message":"Service temporarily unavailable","type":"api_error"}';
 const observed503State = {
   abortController: new AbortController(),
   cancelled: false,
   hasProviderProgress: false,
-  retryableNetworkError: 'error (503): {"message":"Service temporarily unavailable","type":"api_error"}',
+  retryableNetworkError: observed503Message,
   providerErrorReject: null,
   abortRequested: false
 };
+let observed503Attempts = 0;
+let observed503Aborts = 0;
 const observed503Result = await runProviderNetworkRetry({
   sessionId,
   state: observed503State,
-  operation: () => new Promise(() => {}),
-  abort: async () => {},
+  operation: () => {
+    observed503Attempts += 1;
+    return new Promise(() => {});
+  },
+  abort: async () => { observed503Aborts += 1; },
   timeoutMs: 10
 });
-assert.equal(observed503Result.errorMessage, observed503State.retryableNetworkError);
+assert.match(observed503Result.errorMessage, /模型连续 \d+ 秒没有输出/);
+assert.equal(observed503Result.errorMessage.includes(observed503Message), false, "观测到的瞬态错误不得改写 errorMessage");
+assert(observed503Result.text.includes(observed503Message), "观测到的瞬态错误必须保留在诊断 text 里");
+assert.match(observed503Result.text, /空闲看门狗不自动重发/);
+assert.equal(observed503State.retryableNetworkError, "", "终止路径不得残留待重试标记");
+assert.equal(observed503Attempts, 1, "看门狗超时后只尝试一次（方案 A：不重发大上下文）");
+assert.equal(observed503Aborts, 1);
+// ---------------------------------------------------------------------------
+// 2026-09-18 事故回归：provider 空闲看门狗（原 60s 过严 → 240s）与文案区分
+// 事故串：四处真实运行 1m53s–2m44s、每轮已计费约 1.02M input tokens（provider 在出字），
+// 却因续字间隔 > 60s 被自家看门狗掐断，并对外报 provider 无关的 "Request timed out."。
+// ---------------------------------------------------------------------------
+// ① 空闲超时取值（默认 240s 已在上面断言）：显式 requestTimeoutMs 生效、上限 10 分钟、CLI 免看门狗
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native", requestTimeoutMs: 2_500 }), 2_500);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-native", requestTimeoutMs: 900_000 }), 600_000, "显式值上限 10 分钟");
+assert.equal(aiRequestIdleTimeoutMs({ provider: "openai-codex-cli", requestTimeoutMs: undefined }), null);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "claude-code" }), null);
+assert.equal(aiRequestIdleTimeoutMs({ provider: "claude-code", requestTimeoutMs: 1_200 }), 1_200, "显式值优先于 CLI 免看门狗");
+
+// ② 看门狗超时（期间没有任何 provider 活动）→ finishReason=error + 可诊断文案；
+// 不得再对外报裸的 "Request timed out."；text 与 errorMessage 必须一致。
+const idleWatchdogState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: true,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+let idleWatchdogAborts = 0;
+let idleWatchdogAttempts = 0;
+const idleWatchdogResult = await runProviderNetworkRetry({
+  sessionId,
+  state: idleWatchdogState,
+  operation: () => {
+    idleWatchdogAttempts += 1;
+    return new Promise(() => {});
+  },
+  abort: async () => { idleWatchdogAborts += 1; },
+  timeoutMs: 60
+});
+assert.equal(idleWatchdogResult.finishReason, "error");
+assert.match(idleWatchdogResult.errorMessage, /模型连续 \d+ 秒没有输出/, "看门狗超时必须给出可诊断的中文文案");
+assert.notEqual(idleWatchdogResult.errorMessage, "Request timed out.");
+assert(idleWatchdogResult.text.startsWith(idleWatchdogResult.errorMessage), "text 必须保留完整诊断文案前缀");
+assert.match(idleWatchdogResult.text, /本轮第 1 次尝试；空闲看门狗不自动重发/);
+assert.equal(idleWatchdogAborts, 1, "有 provider 进展时不重试，只中止一次");
+
+// ②A 方案 A 核心：**没有** provider 进展时看门狗超时同样是终态 —— 只尝试一次、只 abort 一次，
+// 不再 5 次退避重发（每次都要重发整份上下文，实测单轮 ~1.02M input tokens）。
+const idleNoProgressState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: false,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+let idleNoProgressAttempts = 0;
+let idleNoProgressAborts = 0;
+const idleNoProgressResult = await runProviderNetworkRetry({
+  sessionId,
+  state: idleNoProgressState,
+  operation: () => {
+    idleNoProgressAttempts += 1;
+    return new Promise(() => {});
+  },
+  abort: async () => { idleNoProgressAborts += 1; },
+  timeoutMs: 40
+});
+assert.equal(idleNoProgressAttempts, 1, "idle 超时不得重发整份上下文");
+assert.equal(idleNoProgressAborts, 1);
+assert.equal(idleNoProgressResult.finishReason, "error");
+assert.match(idleNoProgressResult.errorMessage, /模型连续 \d+ 秒没有输出/);
+assert.equal(idleNoProgressState.retryableNetworkError, "", "idle 终态不得污染 retryableNetworkError");
+
+// ④ 文案秒数跟随生效的空闲超时（显式 requestTimeoutMs=2.5s → "3 秒"），而不是常量 240s
+const explicitIdleMs = aiRequestIdleTimeoutMs({ provider: "openai-native", requestTimeoutMs: 2_500 });
+const explicitIdleState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: true,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+const explicitIdleResult = await runProviderNetworkRetry({
+  sessionId,
+  state: explicitIdleState,
+  operation: () => new Promise(() => {}),
+  abort: async () => {},
+  timeoutMs: explicitIdleMs
+});
+assert.match(explicitIdleResult.errorMessage, /模型连续 3 秒没有输出/, `文案秒数应跟随 ${explicitIdleMs}ms`);
+
+// ② 续 瞬态网络错误仍按 DSH 策略重试（方案 A 不动这条），且"重试期写进
+// state.retryableNetworkError 的文案"必须与最终失败文案逐字相等（带上尝试次数就会不一致）。
+// 用 abort 回调在第 2 次失败后打开 hasProviderProgress，让第 3 次直接返回，
+// 既覆盖重试记录路径，又不必等满 5 次退避。
+const transientRetryState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: false,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+const transientNetworkError = new Error("read ECONNRESET");
+let transientRetryAborts = 0;
+let transientRetryAttempts = 0;
+const transientRetryResult = await runProviderNetworkRetry({
+  sessionId,
+  state: transientRetryState,
+  operation: async () => {
+    transientRetryAttempts += 1;
+    throw transientNetworkError;
+  },
+  abort: async () => {
+    transientRetryAborts += 1;
+    if (transientRetryAborts >= 2) transientRetryState.hasProviderProgress = true;
+  },
+  timeoutMs: 5_000
+});
+assert.match(transientRetryResult.errorMessage, /ECONNRESET/);
+assert.equal(transientRetryResult.errorMessage, transientRetryState.retryableNetworkError, "重试期与最终失败文案必须逐字一致（不得带尝试次数）");
+assert.equal(transientRetryAttempts, 3, "第 1 次瞬态失败 → 重试；第 2 次失败后打开进展 → 第 3 次直接返回");
+assert.equal(transientRetryAborts, 3, "每次失败尝试都会被中止（含最后直接返回的那次）");
+
+// ③ provider 自己回 "Request timed out."（无 code）→ 原样透传，不得被改写成看门狗文案
+const providerOwnTimeoutState = {
+  abortController: new AbortController(),
+  cancelled: false,
+  hasProviderProgress: true,
+  retryableNetworkError: "",
+  providerErrorReject: null,
+  abortRequested: false,
+  lastProviderActivityAt: 0
+};
+let providerOwnTimeoutAborts = 0;
+const providerOwnTimeoutResult = await runProviderNetworkRetry({
+  sessionId,
+  state: providerOwnTimeoutState,
+  operation: async () => {
+    const error = new Error("Request timed out.");
+    // 故意不带 code：这是 provider 自己的文本，不是我们的看门狗
+    throw error;
+  },
+  abort: async () => { providerOwnTimeoutAborts += 1; },
+  timeoutMs: 5_000
+});
+assert.equal(providerOwnTimeoutResult.finishReason, "error");
+assert.equal(providerOwnTimeoutResult.errorMessage, "Request timed out.", "provider 原文必须原样透传");
+assert.equal(providerOwnTimeoutAborts, 1);
+
 let failedStatusAttempts = 0;
 let failedStatusAborts = 0;
 const failedStatusRetry = await runProviderNetworkRetry({

@@ -155,7 +155,12 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
           skillDefinitions: AI_SKILL_OPTIONS,
           skillRuntimeTrust: {},
           openAgent: true,
-          workspaceRoots: []
+          workspaceRoots: [],
+          typesafeEnabled: false,
+          typesafeConfigured: false,
+          typesafeApiKeyMasked: "",
+          typesafeModel: "jev-1.13.0",
+          typesafeBaseUrl: "https://api.typesafe.ai"
         }
       : null
   );

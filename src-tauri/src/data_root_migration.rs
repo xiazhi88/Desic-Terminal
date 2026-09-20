@@ -749,6 +749,7 @@ mod tests {
             diagnostics_dir: config_dir.join("diagnostics"),
             work_dir: config_dir.join("workspace"),
             cline_skills_dir: config_dir.join("workspace").join(".cline").join("skills"),
+            cline_agents_dir: config_dir.join("workspace").join(".cline").join("agents"),
         }
     }
 

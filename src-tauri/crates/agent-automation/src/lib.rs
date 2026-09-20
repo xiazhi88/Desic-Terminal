@@ -1,30 +1,63 @@
+mod agent_draft;
+mod agents;
+mod builtin_bodies;
+mod draft_content;
 mod usage;
 
+pub use agent_draft::{
+    agent_draft_few_shot_messages, agent_draft_from_role_json, agent_draft_system_prompt,
+    build_agent_draft_user_prompt, draft_agent_id, draft_summary, normalize_agent_create_role,
+    parse_agent_role_json, validate_agent_source_for_save, AiAgentDraftOutcome,
+    AGENT_DRAFT_DESCRIPTION_PLACEHOLDER, AGENT_DRAFT_KNOWN_SKILLS,
+    AGENT_DRAFT_NAME_LINE_PLACEHOLDER, AI_AGENT_DRAFT_FALLBACK_SKELETON,
+    AI_AGENT_DRAFT_FEW_SHOT_A, AI_AGENT_DRAFT_FEW_SHOT_B, AI_AGENT_DRAFT_FEW_SHOTS,
+    AI_AGENT_DRAFT_SYSTEM_PROMPT, AI_AGENT_DRAFT_USER_PROMPT,
+};
+pub use agents::{
+    agent_role_slug, agent_slug, build_agent_body, builtin_agent_definition,
+    builtin_agent_definitions, builtin_agent_ids, builtin_agent_markdown, builtin_agent_spec,
+    current_time_ms as agent_current_time_ms, custom_agent_from_legacy, is_builtin_agent_id,
+    is_recommended_agent_role, is_valid_agent_id, is_valid_agent_role, legacy_agent_id_alias,
+    normalize_agent_envelope, normalize_agent_source, normalize_enabled_agent_ids,
+    default_enabled_agent_ids, deprecated_builtin_agent_ids,
+    parse_agent_draft_markdown, parse_agent_envelope, parse_agent_markdown,
+    plan_legacy_agent_migration,
+    remove_enabled_agent_id, render_agent_skeleton, resolve_agent_envelope,
+    render_agent_markdown, resolve_agent_id_alias, resolve_enabled_agents, summarize_agent_body,
+    apply_builtin_deprecation, is_deprecated_agent_id, resolve_enabled_agent_selection,
+    unique_custom_agent_id, validate_agent_definition, validate_agent_directory_id,
+    strip_agent_body_wrappers, validate_agent_file, validate_agent_reference_path,
+    validate_agent_scope_values,
+    AgentBodyParts, AiAgentDefinition, EnabledAgentSelection,
+    AiAgentDetail, AiAgentSummary, BuiltinAgentSpec, LegacyAgentMigrationInput,
+    LegacyAgentMigrationPlan, AGENT_BUILTIN_CREATED_AT_MS, AGENT_BODY_SECTION_DUTIES,
+    AGENT_BODY_SECTION_GAP, AGENT_BODY_SECTION_IDENTITY, AGENT_BODY_SECTION_METHOD,
+    AGENT_BODY_SECTION_OUTPUT, AGENT_ENVELOPES, AGENT_ENVELOPE_RISK, AGENT_ENVELOPE_STANDARD,
+    AGENT_FILE_NAME, AGENT_ID_PATTERN_HINT, AGENT_MAX_FILE_BYTES, AGENT_NAME_MAX_CHARS,
+    AGENT_NAME_MIN_CHARS, AGENT_REFERENCES_DIR, AGENT_ROLE_ENUM, AGENT_ROLE_PATTERN_HINT,
+    AGENT_SCOPES, AGENT_SCOPE_ACCOUNT, AGENT_SCOPE_DERIVATIVES, AGENT_SCOPE_HISTORY,
+    AGENT_SCOPE_INTELLIGENCE, AGENT_SCOPE_MARKET, AGENT_SOURCES, AGENT_SOURCE_AI,
+    AGENT_SOURCE_BUILTIN, AGENT_SOURCE_CUSTOM, AGENT_SUMMARY_MAX_CHARS, BUILTIN_AGENT_SPECS,
+};
 pub use usage::{
     build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
     AI_USAGE_SCHEMA_VERSION,
 };
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 
 pub const ADVISOR_MODE: &str = "advisor";
 pub const COPILOT_MODE: &str = "copilot";
 pub const LIMITED_AUTO_MODE: &str = "limited_auto";
+
+/// DEPRECATED（契约 C3 迁移表 / plan v3 §10）：旧 `ai_agent_profiles.multi_agent_mode`
+/// 列只在迁移期被读取。v3 用 Profile 的 `enabledAgentIds` 勾选名单表达"是否协作"
+/// （空数组 = 主 Agent 独立完成），不再有主开关、后端编排器与专家来源维度。
+/// 不要在任何新代码路径里依赖这些常量。
 pub const MULTI_AGENT_OFF_MODE: &str = "off";
 pub const MULTI_AGENT_AUTO_MODE: &str = "auto";
 pub const MULTI_AGENT_CUSTOM_MODE: &str = "custom";
-pub const MULTI_AGENT_MIN_AGENTS: u32 = 2;
-pub const MULTI_AGENT_AUTO_MAX_AGENTS: u32 = 8;
-pub const MULTI_AGENT_CUSTOM_MAX_AGENTS: u32 = 10;
-
-const PROFILE_SUB_AGENT_SCOPES: [&str; 5] = [
-    "market",
-    "derivatives",
-    "intelligence",
-    "account",
-    "history",
-];
 
 pub fn normalize_permission_mode(value: Option<&str>) -> &'static str {
     match value.unwrap_or_default().trim() {
@@ -35,10 +68,10 @@ pub fn normalize_permission_mode(value: Option<&str>) -> &'static str {
     }
 }
 
+/// DEPRECATED：仅用于读旧列做迁移（off/auto/custom）。
+/// INFO (DES-27): trim + ASCII lowercase to match the JS side's `normalize*`
+/// behavior. 新代码请使用 `plan_legacy_agent_migration`。
 pub fn normalize_multi_agent_mode(value: Option<&str>) -> &'static str {
-    // INFO (DES-27): trim + ASCII lowercase to match the JS side's
-    // `normalize*` behavior. Legacy save paths already persist lowercase, so
-    // only garbage-case input (e.g. "AUTO"/"Lead") changes classification.
     match value.unwrap_or_default().trim().to_ascii_lowercase().as_str() {
         MULTI_AGENT_AUTO_MODE => MULTI_AGENT_AUTO_MODE,
         MULTI_AGENT_CUSTOM_MODE => MULTI_AGENT_CUSTOM_MODE,
@@ -47,81 +80,26 @@ pub fn normalize_multi_agent_mode(value: Option<&str>) -> &'static str {
     }
 }
 
-pub const MULTI_AGENT_ORCHESTRATOR_BACKEND: &str = "backend";
-pub const MULTI_AGENT_ORCHESTRATOR_LEAD: &str = "lead";
-pub const MULTI_AGENT_EXPERT_SOURCE_AUTO: &str = "auto";
-pub const MULTI_AGENT_EXPERT_SOURCE_CUSTOM: &str = "custom";
-
-/// Orthogonal multi-agent configuration (DES-7 v2 §5.4): `multiAgentMode`
-/// stays the master on/off + legacy-compat switch, while the two new fields
-/// decide who dispatches (`orchestrator`) and where the expert list comes
-/// from (`expertSource`). Legacy profiles map read-old-write-new:
-/// `off` → disabled, `auto` → backend+auto, `custom` → backend+custom.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct MultiAgentConfig {
+/// 旧 Profile 自定义子 Agent（`multi_agents_json` / `ai_agent_schemes.agents_json`）。
+/// v3 起**只用于迁移读取**：运行时真相源是 Agent 库 frontmatter
+/// （`AiAgentDefinition`），不再有子 Agent 名单校验与并发上限。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AiProfileSubAgent {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub responsibility: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default)]
     pub enabled: bool,
-    pub orchestrator: &'static str,
-    pub expert_source: &'static str,
 }
 
-pub fn normalize_multi_agent_orchestrator(value: Option<&str>) -> &'static str {
-    match value
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        MULTI_AGENT_ORCHESTRATOR_LEAD => MULTI_AGENT_ORCHESTRATOR_LEAD,
-        _ => MULTI_AGENT_ORCHESTRATOR_BACKEND,
-    }
-}
-
-pub fn normalize_multi_agent_expert_source(value: Option<&str>) -> &'static str {
-    match value
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase()
-        .as_str()
-    {
-        MULTI_AGENT_EXPERT_SOURCE_CUSTOM => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
-        MULTI_AGENT_EXPERT_SOURCE_AUTO => MULTI_AGENT_EXPERT_SOURCE_AUTO,
-        _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
-    }
-}
-
-pub fn normalize_multi_agent_config(
-    mode: Option<&str>,
-    orchestrator: Option<&str>,
-    expert_source: Option<&str>,
-) -> MultiAgentConfig {
-    let normalized_mode = normalize_multi_agent_mode(mode);
-    let explicit_expert_source = expert_source
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .map(|value| normalize_multi_agent_expert_source(Some(value)));
-    MultiAgentConfig {
-        enabled: normalized_mode != MULTI_AGENT_OFF_MODE,
-        orchestrator: normalize_multi_agent_orchestrator(orchestrator),
-        // Absent expert source derives from the legacy mode so存量 custom
-        // profiles keep their custom expert list after the split.
-        expert_source: explicit_expert_source.unwrap_or(match normalized_mode {
-            MULTI_AGENT_CUSTOM_MODE => MULTI_AGENT_EXPERT_SOURCE_CUSTOM,
-            _ => MULTI_AGENT_EXPERT_SOURCE_AUTO,
-        }),
-    }
-}
-
-/// P2a (DES-27 / DES-22 review P2-1): the background-Run decision-workflow
-/// wording must state what actually happens in this run instead of claiming a
-/// multi-agent discussion from the static switch. Branches are keyed by the
-/// normalized multi-agent config:
-/// - off: the main agent works alone;
-/// - backend: this run really orchestrates read-only experts before the
-///   coordinator decides, so the multi-agent wording is factual;
-/// - lead: experts are consulted via coordinator tools, so no expert report
-///   exists at prompt time — the wording stays honest and defers to expert
-///   reports actually received during the run (also correct once the P2b
-///   consult tool delivers reports mid-run).
+/// 后台 Run 决策措辞（保留 P2a 的诚实口径，v3 简化为两分支）：策划者只有主 Agent，
+/// 专家是否上场由 Profile 勾选名单决定，专家报告是运行中实际收到的只读证据。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MultiAgentDecisionWording {
     pub analysis_owner: &'static str,
@@ -129,11 +107,12 @@ pub struct MultiAgentDecisionWording {
     pub rerun_workflow: &'static str,
 }
 
-pub fn multi_agent_decision_wording(
-    config: MultiAgentConfig,
+/// `collaboration_enabled == false`（勾选名单为空）时行为与今天的 `off` 完全一致。
+pub fn enabled_agents_decision_wording(
+    collaboration_enabled: bool,
     chinese: bool,
 ) -> MultiAgentDecisionWording {
-    if !config.enabled {
+    if !collaboration_enabled {
         return if chinese {
             MultiAgentDecisionWording {
                 analysis_owner: "由主 Agent 独立完成证据分析并决定是否形成交易候选",
@@ -146,22 +125,6 @@ pub fn multi_agent_decision_wording(
                     "the main Agent independently analyzes the evidence and decides whether to form a trade candidate",
                 confirmed_by: "this run's main-Agent analysis",
                 rerun_workflow: "rerunning the current Profile",
-            }
-        };
-    }
-    if config.orchestrator == MULTI_AGENT_ORCHESTRATOR_BACKEND {
-        return if chinese {
-            MultiAgentDecisionWording {
-                analysis_owner: "由专家 Agent 完成证据分析，主 Agent 比较证据并决定是否形成交易候选",
-                confirmed_by: "本轮多 Agent 讨论",
-                rerun_workflow: "重新运行多 Agent",
-            }
-        } else {
-            MultiAgentDecisionWording {
-                analysis_owner:
-                    "expert Agents analyze evidence and the main Agent compares it before deciding whether to form a trade candidate",
-                confirmed_by: "this run's Multi-Agent review",
-                rerun_workflow: "rerunning the Multi-Agent workflow",
             }
         };
     }
@@ -181,148 +144,6 @@ pub fn multi_agent_decision_wording(
             rerun_workflow: "rerunning the current Profile",
         }
     }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "camelCase")]
-pub struct AiProfileSubAgent {
-    pub id: String,
-    pub name: String,
-    pub role: String,
-    pub responsibility: String,
-    #[serde(default)]
-    pub scopes: Vec<String>,
-    #[serde(default)]
-    pub required: bool,
-    #[serde(default)]
-    pub enabled: bool,
-}
-
-pub fn normalize_profile_sub_agents(
-    mode: &str,
-    agents: Vec<AiProfileSubAgent>,
-) -> Result<Vec<AiProfileSubAgent>, String> {
-    if agents.len() > MULTI_AGENT_CUSTOM_MAX_AGENTS as usize {
-        return Err(format!(
-            "每个 Profile 最多配置 {} 个子 Agent",
-            MULTI_AGENT_CUSTOM_MAX_AGENTS
-        ));
-    }
-    let mut ids = HashSet::new();
-    let mut normalized = Vec::with_capacity(agents.len());
-    for mut agent in agents {
-        agent.id = agent.id.trim().to_string();
-        if !valid_profile_sub_agent_id(&agent.id) {
-            return Err(format!(
-                "子 Agent ID 无效：{}；必须以小写字母开头，只能包含小写字母、数字、-、_，且不超过 32 个字符",
-                agent.id
-            ));
-        }
-        if !ids.insert(agent.id.clone()) {
-            return Err(format!("子 Agent ID 重复：{}", agent.id));
-        }
-        agent.name = agent.name.trim().to_string();
-        let name_len = agent.name.chars().count();
-        if !(1..=40).contains(&name_len) {
-            return Err(format!("子 Agent 名称长度必须为 1-40 个字符：{}", agent.id));
-        }
-        agent.role = agent.role.trim().to_string();
-        if agent.role.chars().count() > 60 {
-            return Err(format!("子 Agent 角色长度不能超过 60 个字符：{}", agent.id));
-        }
-        if agent.role.is_empty() {
-            agent.role = agent.name.clone();
-        }
-        agent.responsibility = agent.responsibility.trim().to_string();
-        let responsibility_len = agent.responsibility.chars().count();
-        if !(1..=500).contains(&responsibility_len) {
-            return Err(format!(
-                "子 Agent 职责长度必须为 1-500 个字符：{}",
-                agent.id
-            ));
-        }
-        let mut scopes = Vec::new();
-        let mut seen_scopes = HashSet::new();
-        for scope in agent.scopes {
-            let scope = scope.trim().to_ascii_lowercase();
-            if !PROFILE_SUB_AGENT_SCOPES.contains(&scope.as_str()) {
-                return Err(format!(
-                    "子 Agent {} 包含不支持的数据范围：{}",
-                    agent.id, scope
-                ));
-            }
-            if seen_scopes.insert(scope.clone()) {
-                scopes.push(scope);
-            }
-        }
-        if scopes.is_empty() {
-            return Err(format!("子 Agent {} 至少选择一个数据范围", agent.id));
-        }
-        agent.scopes = scopes;
-        normalized.push(agent);
-    }
-    if normalize_multi_agent_mode(Some(mode)) == MULTI_AGENT_CUSTOM_MODE
-        && normalized.iter().filter(|agent| agent.enabled).count() < 2
-    {
-        return Err("自定义多 Agent 模式至少需要启用 2 个子 Agent".to_string());
-    }
-    Ok(normalized)
-}
-
-pub fn validate_profile_sub_agent_capacity(
-    mode: &str,
-    max_agents: u32,
-    agents: &[AiProfileSubAgent],
-) -> Result<(), String> {
-    let mode = normalize_multi_agent_mode(Some(mode));
-    let max_allowed = match mode {
-        MULTI_AGENT_AUTO_MODE => MULTI_AGENT_AUTO_MAX_AGENTS,
-        MULTI_AGENT_CUSTOM_MODE | MULTI_AGENT_OFF_MODE => MULTI_AGENT_CUSTOM_MAX_AGENTS,
-        _ => unreachable!("multi-agent mode is normalized"),
-    };
-    if !(MULTI_AGENT_MIN_AGENTS..=max_allowed).contains(&max_agents) {
-        return Err(format!(
-            "{}模式的多 Agent 并发数量必须为 {}-{}",
-            match mode {
-                MULTI_AGENT_AUTO_MODE => "自动",
-                MULTI_AGENT_CUSTOM_MODE => "自定义",
-                _ => "关闭",
-            },
-            MULTI_AGENT_MIN_AGENTS,
-            max_allowed
-        ));
-    }
-    if mode != MULTI_AGENT_CUSTOM_MODE {
-        return Ok(());
-    }
-    let required_enabled = agents
-        .iter()
-        .filter(|agent| agent.enabled && agent.required)
-        .count();
-    if required_enabled > max_agents as usize {
-        return Err(format!(
-            "必需子 Agent 数量 {} 超过本轮上限 {}",
-            required_enabled, max_agents
-        ));
-    }
-    let enabled = agents.iter().filter(|agent| agent.enabled).count();
-    if enabled > max_agents as usize {
-        return Err(format!(
-            "已启用子 Agent 数量 {} 超过本轮上限 {}",
-            enabled, max_agents
-        ));
-    }
-    Ok(())
-}
-
-fn valid_profile_sub_agent_id(value: &str) -> bool {
-    let mut chars = value.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    value.len() <= 32
-        && first.is_ascii_lowercase()
-        && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || matches!(ch, '-' | '_'))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -798,90 +619,29 @@ pub fn orderbook_imbalance(bid_sizes: &[f64], ask_sizes: &[f64], depth: usize) -
 mod tests {
     use super::*;
 
-    #[test]
-    fn multi_agent_config_maps_legacy_modes_without_behavior_change() {
-        let off = normalize_multi_agent_config(Some(MULTI_AGENT_OFF_MODE), None, None);
-        assert!(!off.enabled);
-        assert_eq!(off.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
-        assert_eq!(off.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
 
-        let auto = normalize_multi_agent_config(Some(MULTI_AGENT_AUTO_MODE), None, None);
-        assert!(auto.enabled);
-        assert_eq!(auto.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
-        assert_eq!(auto.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
 
-        let custom = normalize_multi_agent_config(Some(MULTI_AGENT_CUSTOM_MODE), None, None);
-        assert!(custom.enabled);
-        assert_eq!(custom.orchestrator, MULTI_AGENT_ORCHESTRATOR_BACKEND);
-        assert_eq!(custom.expert_source, MULTI_AGENT_EXPERT_SOURCE_CUSTOM);
-    }
+
 
     #[test]
-    fn multi_agent_config_accepts_orthogonal_fields_and_defaults_to_backend() {
-        let lead_auto = normalize_multi_agent_config(
-            Some(MULTI_AGENT_AUTO_MODE),
-            Some("lead"),
-            Some(MULTI_AGENT_EXPERT_SOURCE_AUTO),
-        );
-        assert!(lead_auto.enabled);
-        assert_eq!(lead_auto.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
-        assert_eq!(lead_auto.expert_source, MULTI_AGENT_EXPERT_SOURCE_AUTO);
+    fn decision_wording_tracks_the_enabled_agent_selection() {
+        let off = enabled_agents_decision_wording(false, true);
+        assert_eq!(off.confirmed_by, "本轮主 Agent 分析");
+        assert_eq!(off.rerun_workflow, "重新运行当前 Profile");
+        let off_en = enabled_agents_decision_wording(false, false);
+        assert_eq!(off_en.confirmed_by, "this run's main-Agent analysis");
 
-        let lead_custom = normalize_multi_agent_config(
-            Some(MULTI_AGENT_CUSTOM_MODE),
-            Some(" lead "),
-            None,
-        );
-        assert!(lead_custom.enabled);
-        assert_eq!(lead_custom.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
-        assert_eq!(lead_custom.expert_source, MULTI_AGENT_EXPERT_SOURCE_CUSTOM);
-
-        let unknown_fall_back_to_backend = normalize_multi_agent_config(
-            Some(MULTI_AGENT_AUTO_MODE),
-            Some("board"),
-            Some("builtin"),
-        );
+        let on = enabled_agents_decision_wording(true, true);
         assert_eq!(
-            unknown_fall_back_to_backend.orchestrator,
-            MULTI_AGENT_ORCHESTRATOR_BACKEND
+            on.confirmed_by,
+            "本轮主 Agent 分析（专家意见以本轮实际收到的专家报告为准）"
         );
+        assert!(on.analysis_owner.contains("实际收到的专家报告"));
+        let on_en = enabled_agents_decision_wording(true, false);
         assert_eq!(
-            unknown_fall_back_to_backend.expert_source,
-            MULTI_AGENT_EXPERT_SOURCE_AUTO
+            on_en.confirmed_by,
+            "this run's main-Agent analysis (expert opinions count only through expert reports actually received)"
         );
-    }
-
-    #[test]
-    fn multi_agent_mode_off_disables_lead_orchestrator() {
-        // off → 关闭（两字段不生效）：legacy off switch stays authoritative.
-        let disabled_lead = normalize_multi_agent_config(
-            Some(MULTI_AGENT_OFF_MODE),
-            Some(MULTI_AGENT_ORCHESTRATOR_LEAD),
-            Some(MULTI_AGENT_EXPERT_SOURCE_CUSTOM),
-        );
-        assert!(!disabled_lead.enabled);
-        assert_eq!(disabled_lead.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
-        assert_eq!(
-            disabled_lead.expert_source,
-            MULTI_AGENT_EXPERT_SOURCE_CUSTOM
-        );
-
-        assert_eq!(
-            normalize_multi_agent_mode(Some(MULTI_AGENT_ORCHESTRATOR_LEAD)),
-            MULTI_AGENT_OFF_MODE
-        );
-    }
-
-    fn profile_agent(id: &str, enabled: bool, scopes: &[&str]) -> AiProfileSubAgent {
-        AiProfileSubAgent {
-            id: id.to_string(),
-            name: format!("Agent {id}"),
-            role: "market_structure".to_string(),
-            responsibility: "读取证据并输出事实、冲突和数据缺口".to_string(),
-            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
-            required: false,
-            enabled,
-        }
     }
 
     #[test]
@@ -912,150 +672,12 @@ mod tests {
         );
     }
 
-    #[test]
-    fn multi_agent_normalize_matches_js_case_insensitivity() {
-        // INFO (DES-27): JS normalize* 均 trim + toLowerCase；Rust 侧对齐，
-        // 消除垃圾大小写输入（如 AUTO/Lead）两侧判定漂移。
-        assert_eq!(normalize_multi_agent_mode(Some("AUTO")), MULTI_AGENT_AUTO_MODE);
-        assert_eq!(
-            normalize_multi_agent_mode(Some(" Custom ")),
-            MULTI_AGENT_CUSTOM_MODE
-        );
-        assert_eq!(normalize_multi_agent_mode(Some("OFF")), MULTI_AGENT_OFF_MODE);
-        assert_eq!(
-            normalize_multi_agent_orchestrator(Some("LEAD")),
-            MULTI_AGENT_ORCHESTRATOR_LEAD
-        );
-        assert_eq!(
-            normalize_multi_agent_orchestrator(Some(" Lead ")),
-            MULTI_AGENT_ORCHESTRATOR_LEAD
-        );
-        assert_eq!(
-            normalize_multi_agent_expert_source(Some("CUSTOM")),
-            MULTI_AGENT_EXPERT_SOURCE_CUSTOM
-        );
-        assert_eq!(
-            normalize_multi_agent_expert_source(Some(" Auto ")),
-            MULTI_AGENT_EXPERT_SOURCE_AUTO
-        );
-        let lead = normalize_multi_agent_config(Some("AUTO"), Some("LEAD"), None);
-        assert!(lead.enabled);
-        assert_eq!(lead.orchestrator, MULTI_AGENT_ORCHESTRATOR_LEAD);
-    }
 
-    #[test]
-    fn decision_wording_states_backend_dispatch_as_factual() {
-        let backend = normalize_multi_agent_config(Some(MULTI_AGENT_AUTO_MODE), None, None);
-        let zh = multi_agent_decision_wording(backend, true);
-        assert_eq!(zh.confirmed_by, "本轮多 Agent 讨论");
-        assert_eq!(zh.rerun_workflow, "重新运行多 Agent");
 
-        let en = multi_agent_decision_wording(backend, false);
-        assert_eq!(en.confirmed_by, "this run's Multi-Agent review");
-    }
 
-    #[test]
-    fn decision_wording_off_and_lead_stay_honest() {
-        // off：主 Agent 独立分析。
-        let off = normalize_multi_agent_config(Some(MULTI_AGENT_OFF_MODE), None, None);
-        let zh_off = multi_agent_decision_wording(off, true);
-        assert_eq!(zh_off.confirmed_by, "本轮主 Agent 分析");
-        assert_eq!(zh_off.rerun_workflow, "重新运行当前 Profile");
 
-        // lead：本轮没有预编排专家报告，不得宣称「多 Agent 讨论」；
-        // 专家意见以实际收到的专家报告为准（同时覆盖 P2b consult 语义）。
-        let lead = normalize_multi_agent_config(
-            Some(MULTI_AGENT_AUTO_MODE),
-            Some(MULTI_AGENT_ORCHESTRATOR_LEAD),
-            None,
-        );
-        let zh_lead = multi_agent_decision_wording(lead, true);
-        assert_eq!(
-            zh_lead.confirmed_by,
-            "本轮主 Agent 分析（专家意见以本轮实际收到的专家报告为准）"
-        );
-        assert_eq!(zh_lead.rerun_workflow, "重新运行当前 Profile");
-        assert!(zh_lead.analysis_owner.contains("实际收到的专家报告"));
 
-        let en_lead = multi_agent_decision_wording(lead, false);
-        assert_eq!(
-            en_lead.confirmed_by,
-            "this run's main-Agent analysis (expert opinions count only through expert reports actually received)"
-        );
-        assert_eq!(en_lead.rerun_workflow, "rerunning the current Profile");
-    }
 
-    #[test]
-    fn custom_multi_agent_requires_two_enabled_unique_valid_agents() {
-        let one = vec![profile_agent("market", true, &["market"])];
-        assert!(normalize_profile_sub_agents(MULTI_AGENT_CUSTOM_MODE, one).is_err());
-
-        let duplicate = vec![
-            profile_agent("market", true, &["market"]),
-            profile_agent("market", true, &["history"]),
-        ];
-        assert!(normalize_profile_sub_agents(MULTI_AGENT_CUSTOM_MODE, duplicate).is_err());
-
-        let valid = vec![
-            profile_agent("market", true, &["market", "market"]),
-            profile_agent("risk", true, &["account", "history"]),
-        ];
-        let normalized = normalize_profile_sub_agents(MULTI_AGENT_CUSTOM_MODE, valid)
-            .expect("valid custom agents");
-        assert_eq!(normalized[0].scopes, vec!["market"]);
-        assert_eq!(normalized.len(), 2);
-    }
-
-    #[test]
-    fn multi_agent_validation_rejects_invalid_ids_scopes_and_excess_members() {
-        let invalid_id = vec![profile_agent("Market Agent", true, &["market"])];
-        assert!(normalize_profile_sub_agents(MULTI_AGENT_AUTO_MODE, invalid_id).is_err());
-
-        let invalid_scope = vec![profile_agent("market", true, &["trade"])];
-        assert!(normalize_profile_sub_agents(MULTI_AGENT_AUTO_MODE, invalid_scope).is_err());
-
-        let too_many = (0..11)
-            .map(|index| profile_agent(&format!("agent-{index}"), true, &["market"]))
-            .collect();
-        assert!(normalize_profile_sub_agents(MULTI_AGENT_AUTO_MODE, too_many).is_err());
-    }
-
-    #[test]
-    fn custom_multi_agent_capacity_is_a_hard_limit() {
-        let mut agents = vec![
-            profile_agent("market", true, &["market"]),
-            profile_agent("risk", true, &["account"]),
-            profile_agent("news", true, &["intelligence"]),
-        ];
-        assert!(validate_profile_sub_agent_capacity(MULTI_AGENT_CUSTOM_MODE, 2, &agents).is_err());
-        assert!(validate_profile_sub_agent_capacity(MULTI_AGENT_CUSTOM_MODE, 3, &agents).is_ok());
-
-        for agent in &mut agents {
-            agent.required = true;
-        }
-        let error = validate_profile_sub_agent_capacity(MULTI_AGENT_CUSTOM_MODE, 2, &agents)
-            .expect_err("required agents must not be truncated");
-        assert!(error.contains("必需子 Agent"));
-    }
-
-    #[test]
-    fn multi_agent_capacity_limits_are_mode_aware() {
-        assert!(validate_profile_sub_agent_capacity(MULTI_AGENT_AUTO_MODE, 8, &[]).is_ok());
-        assert!(validate_profile_sub_agent_capacity(MULTI_AGENT_AUTO_MODE, 9, &[]).is_err());
-        assert!(validate_profile_sub_agent_capacity(MULTI_AGENT_OFF_MODE, 10, &[]).is_ok());
-
-        let agents = (0..10)
-            .map(|index| profile_agent(&format!("agent-{index}"), true, &["market"]))
-            .collect::<Vec<_>>();
-        let normalized = normalize_profile_sub_agents(MULTI_AGENT_CUSTOM_MODE, agents)
-            .expect("ten custom agents are supported");
-        assert!(
-            validate_profile_sub_agent_capacity(MULTI_AGENT_CUSTOM_MODE, 10, &normalized).is_ok()
-        );
-        assert!(
-            validate_profile_sub_agent_capacity(MULTI_AGENT_CUSTOM_MODE, 11, &normalized).is_err()
-        );
-    }
 
     #[test]
     fn price_cross_requires_an_actual_cross() {

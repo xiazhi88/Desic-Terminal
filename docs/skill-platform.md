@@ -92,24 +92,21 @@ Before execution, Desic verifies that the Skill is active for the current sessio
 
 The runtime uses JSON stdin/stdout, a timeout, a 64 KiB input limit, and a 256 KiB stdout/stderr limit. A Skill has no direct access to Desic credentials or structured trading controls through this runner. It may still be able to interact with the local operating system within the permissions of the desktop process; users must review open-source bundle code before granting execution trust.
 
-## Agent Templates
+## Agent definitions
 
-An Agent Template is a reusable Profile collaboration preset. It carries only the collaboration topology and bounded reusable guidance:
+Agent Templates have been superseded by the Agent library. A reusable Profile preset with template-level `instructions`, `phase`, `skillIds`, `model`, or `reasoningDepth` is no longer an editing or runtime concept; collaboration is expressed as a per-Profile checklist over the library instead:
 
-- `instructions`: bounded reusable guidance, limited to 4,000 characters
-- Agent name, role, responsibility, enabled state, and required-result state
+- An Agent is `<app workspace>/.cline/agents/<id>/AGENTS.md`, a sibling of the Skill bundles directory. Frontmatter carries `id`, `name`, `role`, `envelope`, `scopes`, `skills`, `requiresAccount`, `source`, `version`, and `createdAt`; the body is that expert's system prompt and optional `references/*.md` files.
+- The Profile stores only the checked list (`enabledAgentIds`). Checking an Agent allows the Main Agent to consult it; an empty list means the Main Agent completes the run alone. Nothing is assigned automatically and there is no check-count limit.
+- Agents never own execution settings: model, reasoning depth, Skills, account, environment, symbols, leverage, margin limits, and wake/run limits stay Profile-owned, and an Agent file cannot declare sandbox, MCP, shell, or filesystem permissions. The fixed runtime shell (read-only role, evidence timestamps, untrusted reports) is prepended by the sidecar and cannot be overridden by an Agent file.
+- `scopes` is an intent declaration over read-only data domains (`market`, `derivatives`, `intelligence`, `account`, `history`); an empty array means all read-only tools. The effective boundary is still enforced at runtime through account binding, Skill requirements, the read-only role, and the tool allowlist — never by the Agent file alone.
+- Built-in Agents are installed idempotently and are never overwritten when a user edits them locally; they can only be duplicated into `custom` Agents.
 
-Profile model, reasoning depth, Skills, account, environment, symbols, limits, and other execution settings remain Profile-owned. The former template-level `phase`, `skillIds`, `model`, and `reasoningDepth` fields are retained only for database compatibility and are ignored by the current editor/runtime. Staged orchestration, if introduced later, must model stages per Agent and implement scheduling semantics explicitly.
-
-Custom Agents do not require a user-defined data-scope list. An unscoped custom Agent receives the Profile-permitted delegated read and precheck tools; the Profile account/environment/symbol and fixed tool safety boundaries still apply. Existing saved scope lists remain readable for compatibility.
-
-Templates are configuration, not authority. Applying one never changes the Profile permission mode, account binding, environment, symbols, leverage, margin limits, wake/run limits, or Profile-owned Skills and model settings. Template instructions are appended after every fixed policy block in the background Run prompt, so they can shape analysis emphasis but cannot override trading rules or tool authority. Custom Agents inherit the Profile-permitted delegated read and precheck tools unless an existing saved scope list is being honored for compatibility; templates cannot declare sandbox, MCP, shell, or filesystem permissions.
+For rollback, the old `ai_agent_schemes` table and the old Profile columns are retained read-only: reading a Profile migrates the old `off` / `auto` / `custom` modes and any old scheme members into library entries (`source: custom`) plus the checked list, and counts template-level `instructions` as dropped in the migration report. Runs keep `templateSnapshotJson` for read-only history display; it is no longer injected into any prompt.
 
 ### Codex preview import
 
-The ordinary Template editor does not ask users for a Codex TOML path and does not expose provider-specific import controls. The backend read-only preview command remains available for a future provider-specific advanced flow; it does not participate in ordinary template editing and never adopts sandbox modes, MCP servers, tool lists, shell commands, approval policy, network access, environment variables, or working directories.
-
-Legacy templates saved before v2 load with empty instructions, no template Skills, compatibility phase `primary`, no model, and `medium` reasoning depth. A queued Run stores its bounded template instruction snapshot at enqueue time, so later template edits or deletion do not change the Run prompt.
+The ordinary Agent editor does not ask users for a Codex TOML path and does not expose provider-specific import controls. The backend read-only preview command (`ai_agent_template_preview_codex`) remains available for a future provider-specific advanced flow; it does not participate in ordinary Agent editing and never adopts sandbox modes, MCP servers, tool lists, shell commands, approval policy, network access, environment variables, or working directories.
 
 ## Contributor guidance
 

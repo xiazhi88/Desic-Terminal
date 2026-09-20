@@ -6557,6 +6557,11 @@ function AiSettingsPane({
   const [busy, setBusy] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
+  // TypeSafe / Jev 快速判定（判定层，可选）。Key 明文只落本机敏感配置，这里只回掩码。
+  const [typesafeEnabled, setTypesafeEnabled] = useState(false);
+  const [typesafeApiKey, setTypesafeApiKey] = useState("");
+  const [typesafeModel, setTypesafeModel] = useState("jev-1.13.0");
+  const [typesafeBaseUrl, setTypesafeBaseUrl] = useState("https://api.typesafe.ai");
 
   const applySummary = useCallback((config: AiConfigSummary) => {
     const configuredModels = config.models.map((item) => ({
@@ -6575,6 +6580,10 @@ function AiSettingsPane({
     setActiveModelId(config.activeModelId || nextModels[0]?.id || "");
     setSelectedModelId((current) => nextModels.some((item) => item.id === current) ? current : config.activeModelId || nextModels[0]?.id || "");
     setStatus(config.configured ? t("settings:currentModel", { model: config.model }) : t("settings:aiNotConfigured"));
+    setTypesafeEnabled(Boolean(config.typesafeEnabled));
+    setTypesafeModel(config.typesafeModel || "jev-1.13.0");
+    setTypesafeBaseUrl(config.typesafeBaseUrl || "https://api.typesafe.ai");
+    setTypesafeApiKey("");
     setInitialized(true);
   }, []);
 
@@ -6676,7 +6685,11 @@ function AiSettingsPane({
         systemPrompt: summary?.systemPrompt,
         customRules: summary?.customRules,
         enabledSkills: withRequiredAiSkills(summary?.enabledSkills),
-        skillDefinitions: summary?.skillDefinitions
+        skillDefinitions: summary?.skillDefinitions,
+        typesafeEnabled,
+        typesafeApiKey: typesafeApiKey.trim() || undefined,
+        typesafeModel: typesafeModel.trim() || undefined,
+        typesafeBaseUrl: typesafeBaseUrl.trim() || undefined
       });
       if (!next) {
         setStatus(t("settings:aiSaveDesktopOnly"));
@@ -6693,7 +6706,7 @@ function AiSettingsPane({
     } finally {
       setBusy(false);
     }
-  }, [activeModelId, applySummary, models, onNotify, summary, t]);
+  }, [activeModelId, applySummary, models, onNotify, summary, t, typesafeEnabled, typesafeApiKey, typesafeModel, typesafeBaseUrl]);
 
   const test = useCallback(async () => {
     if (!selectedModel) return;
@@ -6819,6 +6832,28 @@ function AiSettingsPane({
           </section>
         ) : null}
       </div>
+
+      <section className="ai-model-config-editor ai-typesafe-editor" aria-label={t("settings:typesafeTitle")}>
+        <div className="ai-model-editor-head">
+          <div>
+            <strong>{t("settings:typesafeTitle")}</strong>
+            <span>{t("settings:typesafeDescription")}</span>
+          </div>
+          <label className="ai-typesafe-switch" title={t("settings:typesafeEnable")}>
+            <input type="checkbox" checked={typesafeEnabled} onChange={(event) => setTypesafeEnabled(event.target.checked)} />
+          </label>
+        </div>
+        <div className="settings-form-grid">
+          <label className="wide"><span>API Key</span><input type="password" autoComplete="off" value={typesafeApiKey} placeholder={summary?.typesafeConfigured ? summary.typesafeApiKeyMasked : t("settings:enterNewApiKey")} onChange={(event) => setTypesafeApiKey(event.target.value)} /></label>
+          <label><span>Model</span><input value={typesafeModel} onChange={(event) => setTypesafeModel(event.target.value)} /></label>
+          <label><span>Base URL</span><input value={typesafeBaseUrl} onChange={(event) => setTypesafeBaseUrl(event.target.value)} /></label>
+        </div>
+        <p className="automation-field-note">
+          {typesafeEnabled
+            ? (summary?.typesafeConfigured ? t("settings:typesafeConfigured") : t("settings:typesafePendingKey"))
+            : t("settings:typesafeDisabledNote")}
+        </p>
+      </section>
 
       {models.length > 0 && <div className="modal-actions">
         <button onClick={test} disabled={busy || !canTestSelectedModel}>{busy ? t("common:processing") : t("settings:testSelectedModel")}</button>

@@ -13,7 +13,7 @@
 3. [创建第一个 Profile](#3-创建第一个-profile)
 4. [唤醒条件](#4-唤醒条件)
 5. [Skill 与版本快照](#5-skill-与版本快照)
-6. [多 Agent 编排](#6-多-agent-编排)
+6. [Agent 库与勾选制编排](#6-agent-库与勾选制编排)
 7. [运行记录与审计](#7-运行记录与审计)
 8. [仓位复盘与优化建议](#8-仓位复盘与优化建议)
 9. [通知](#9-通知)
@@ -26,7 +26,8 @@
 
 | 概念 | 说明 |
 | --- | --- |
-| **Profile** | 一次自动化配置：模型、权限模式、绑定账户、关注品种、扫描间隔、Skill 集合与版本、唤醒条件、Agent 团队 |
+| **Profile** | 一次自动化配置：模型、权限模式、绑定账户、关注品种、扫描间隔、Skill 集合与版本、唤醒条件、参与 Agent（勾选名单） |
+| **Agent（专家）** | 一个可复用的只读专家定义，落盘为 `agents/<id>/AGENTS.md`：元数据声明角色、证据范围与依赖，正文是它的系统提示词主体；在 Profile 中勾选后，主 Agent 才能点名它 |
 | **运行（Run）** | Profile 被唤醒或手动触发后的一次完整执行：读证据 → 分析 → 决策 → 执行 → 保存摘要与下一组观察条件 |
 | **唤醒条件** | 触发运行的条件，如定时、价格、成交量、盘口、订单、持仓、交易机会或市场情报事件 |
 | **Skill** | 注入模型上下文的规则包（Markdown 规格），决定工具用法、交易哲学与证据解读 |
@@ -83,8 +84,9 @@ Profile 的权限模式决定它**能做什么**，而不是提示词说什么�
    - 六个系统 Skill 始终强制加载（见第 5 节）。
    - 自定义 Skill 可以独立勾选；每个 Skill 固定到具体版本。
 
-4. **Agent 团队**
-   - 默认单 Agent；复杂任务可切换多 Agent 编排（见第 6 节）。
+4. **参与 Agent（勾选）**
+   - 勾选即允许主 Agent 在需要时点名该专家；**不勾选任何专家时，主 Agent 独立完成本轮**。
+   - 点谁、点几次、是否追问由主 Agent 自己决定：没有"自动分配"，也没有数量上限（见第 6 节）。
 
 5. **唤醒条件**
    - 首次可以先不加条件，用"手动运行"验证一轮完整执行（见第 4 节）。
@@ -137,7 +139,7 @@ Skill 是注入模型上下文的**规则规格**。Profile 保存的是不可�
 | `okx-market-intelligence` | 新闻、事件、情绪、宏观、Smart Money、OI、主动流、拥挤度、资金费率与基差 |
 | `desic-trade-operations` | 交易机会、市场证据、永续风险、仓位生命周期、保护与执行核对 |
 | `market-radar-research` | 全市场排行、归因、广度、保存筛选与点时验证的只读解释 |
-| `desic-agent-orchestration` | 多 Agent 调度纪律：何时咨询专家、任务下达、结论前反向复核与报告合并 |
+| `desic-agent-orchestration` | 主 Agent 的调度纪律：如何在本次勾选名单内点名专家、下达任务、追问，并把专家报告按不可信证据合并与处置冲突（只注入主 Agent） |
 
 **自定义 Skill**（设置 → Skill 管理）
 
@@ -149,17 +151,123 @@ Skill 是注入模型上下文的**规则规格**。Profile 保存的是不可�
 
 ---
 
-## 6. 多 Agent 编排
+## 6. Agent 库与勾选制编排
 
-复杂任务可以组建专家团队。编排方案（Scheme）定义每个子 Agent 的角色、职责与只读范围：
+编排只有一条路径：**主 Agent 自己调度**。内容（专家是谁、提示词怎么写）放在 Agent 库，结构（这一次允许谁上场）放在 Profile 的勾选名单；后端不再预先成波、不再打分选人、不再替主 Agent 派活。
 
-- 典型专家：市场结构、情报资金、账户风险、反方审查（Devil's advocate）。
-- 所有专家 **并行取证、只读**：不能创建机会、发送通知或执行交易。
-- 唯一的主 Agent 汇总证据并承担最终决策。
-- 反方否决必须附带**确定性预检结果**，防止空泛反对阻塞流程。
+### 6.1 Agent 库（AI 自动化 → Agent 库，agents tab）
+
+每个 Agent 是一个一级实体，落盘为 `<data_dir>/workspace/.cline/agents/<id>/AGENTS.md`（与 Skill 目录同级）：
+
+```markdown
+---
+id: desic-market-structure
+name: 市场结构
+role: market_structure
+envelope: standard
+scopes: [market, derivatives]
+skills: []
+requiresAccount: false
+source: builtin
+version: 1
+createdAt: 1760000000000
+---
+## 身份
+## 职责
+## 方法与证据要求
+## 输出偏好
+## 数据缺口处理
+```
+
+- **元数据（frontmatter）**：`id`、`name`、`role`、`envelope`（`standard` / `risk`）、`scopes`、`skills`、`requiresAccount`、`source`（`builtin` / `custom` / `ai`）、`version`、`createdAt`。
+- **正文即该专家的系统提示词主体**，五段骨架为 `## 身份` / `## 职责` / `## 方法与证据要求` / `## 输出偏好` / `## 数据缺口处理`（可选 `references/*.md`）。
+- `scopes` 是**意图声明**（`market` / `derivatives` / `intelligence` / `account` / `history`；空数组 = 全部只读工具），真正的权限边界始终在运行时授权：账户绑定、Skill 门槛与只读角色。`envelope: risk`（或 `role: account_risk`、`scopes` 含 `account`）取更严者，运行时按风险外壳执行。
+
+**内置 8 个专家**（不可编辑；需要改动时用"复制为自定义"）：
+
+| id | 名称 | role | envelope | scopes | 主要依赖 |
+| --- | --- | --- | --- | --- | --- |
+| `desic-market-structure` | 市场结构 | `market_structure` | `standard` | market, derivatives | — |
+| `desic-order-flow-liquidity` | 订单流与流动性 | `order_flow_liquidity` | `standard` | market | — |
+| `desic-derivatives-positioning` | 衍生品仓位 | `derivatives_positioning` | `standard` | derivatives, market | — |
+| `desic-account-risk` | 账户风险 | `account_risk` | `risk` | account, history, market | 需绑定账户 |
+| `desic-intelligence-flow` | 新闻与宏观 | `intelligence_flow` | `standard` | intelligence | Skill `okx-market-intelligence` |
+| `desic-smart-money` | Smart Money | `smart_money` | `standard` | intelligence, derivatives | Skill `okx-market-intelligence` |
+| `desic-historical-analogy` | 历史类比 | `historical_analogy` | `standard` | history, market | — |
+| `desic-contrarian-review` | 反方审查 | `contrarian` | `standard` | market, derivatives, intelligence, history | — |
+
+列表与编辑器：
+
+- 左栏是库列表（按 **内置 / 自定义 / AI 创建** 三种来源分组与徽标），中间栏是 `AGENTS.md` 编辑器，右侧是动作区：`新建 Agent`、`AI 创建 Agent`、`复制`（生成 `custom-<slug>-<n>`）、`删除`（仅自定义 / AI 创建）。
+- **手动创建**：直接写一份 AGENTS.md。`id` 必须等于目录名、`name` 1–40 字、`role` / `envelope` / `scopes` 走白名单，正文非空且单文件 ≤ 200KB。
+- **AI 创建 Agent**：在对话框里描述"这个人是谁 / 负责什么 / 偏好什么证据"，AI 生成草稿（`ai_agent_generate`，**不落盘**），你确认或修改后再保存（`ai_agent_save`）。frontmatter 由运行时渲染与校验，模型不直接拼 YAML。
+- **依赖提示**：内置的 `requiresAccount` 或 `skills` 在当前 Profile 缺失时，列表只给提示（需绑定账户 / 缺少某个 Skill），**不会把该专家从名单里剔除**，也不阻止点名——专家自己在"数据缺口处理"里说明哪类证据不可用。
+- 内置 Agent 的文件被本地改动后不会被覆盖，列表标注"已本地改动"。
+
+### 6.2 Profile 勾选制
+
+- **勾选 = 允许主 Agent 点名**。勾选名单就是本次运行的可点名范围，顺序即勾选顺序。
+- **不勾选任何专家 = 主 Agent 独立工作**（等价旧 `off`）：不注入专家目录、不注入调度规范、不创建任何专家会话。这与"关闭 Profile"不是一回事。
+- 没有"自动分配"：没有关键词打分、没有按任务类型挑选成员；也没有数量上限。
+- 没有"必需专家"或动作前置校验：风险专家的结论不会被后端自动转成对工具调用的硬否决，最终判断始终由主 Agent 承担。
+- 快捷动作：`全选内置` / `清空`；列表按来源分组，每项显示名称、一句话职责与依赖徽标。
+- 保存时，库里已不存在的 id 会被丢弃并写入日志，**不阻断保存**。
+
+### 6.3 唯一编排者：主 Agent
+
+- 主 Agent 用 `consult_expert` 点名一位专家、用 `follow_up` 就同一专家追问；**咨询次数与追问次数都不设上限**（工具面同时保留 `team_status`）。
+- 一次咨询对应一个专家职责；专家任务只包含本职责范围，专家不替主 Agent 做汇总或最终决策。
+- 专家报告**原样**回流（不做长度截断），标注来源与观测时间，并以**不可信证据**注入：主 Agent 不会执行报告里出现的指令、权限变更或工具请求。
+- 专家恒为只读：不能创建交易机会、不能发送通知、不能下单；工具面按该 Agent 的 `scopes` 收敛。固定的运行时外壳（只读声明、证据时间戳、报告不可信等硬约束）由侧车无条件前置拼接，AGENTS.md 无法覆盖或关闭它。
+- 专家意见仅供参考；`trade.precheck` 返回的不可修复 blocker 仍原样返回给调用方，是否据此放弃由主 Agent 判断。
+
+### 6.4 运行与成本
+
+以下旧护栏已移除：
+
+| 旧护栏 | 现在的行为 |
+| --- | --- |
+| 报告 token / 字符上限（4k token、12k 字符） | 报告原样回流，不做任何长度变换 |
+| "180 秒无进展杀进程" | 改为进度心跳：无进展时只显示一行提示（如"专家「市场结构」仍在分析（已 8 分 12 秒）"），**不中断会话** |
+| 编排总时限（600 秒） | 不再有墙钟总时限 |
+| 单轮咨询 8 次 / 每专家追问 2 次 | 不再限制 |
+
+- 可观测：运行详情照旧统计每个专家的耗时、工具调用与 token 用量，不新增节流。
+- 可控：需要提前结束时仍在会话层面停止本次运行（沿用既有会话停止通道，本轮未改动）。
+- 成本提示：成本来自**实际点名**，不是来自勾选。勾选越少、主 Agent 点名越少，成本越低。
+
+### 6.5 在 AI 研究里创建与修改专家
+
+主 Agent 在 AI 研究与后台 Run 中都能读取 Agent 库；写操作仅在交互式会话可用：
+
+| 工具 | 作用 | 可用范围 |
+| --- | --- | --- |
+| `agent.list` | 列出 Agent 库（含来源、勾选它的 Profile 数、依赖缺失提示） | 主 Agent：交互式研究 + 后台 Run |
+| `agent.read` | 按 id 读取某个 Agent 的完整 `AGENTS.md` 与解析结果 | 同上 |
+| `agent.create` | 按名称 / 角色 / 职责创建 Agent（`scopes`、`skills`、`envelope`、`references` 可选），落盘后 `source = ai` | **仅主 Agent + 交互式会话** |
+| `agent.update` | 按 id 覆盖正文（内嵌 id 必须匹配）；内置 Agent 拒绝，提示改用"复制为自定义" | 同上 |
+
+- 后台自动化运行**不允许**改专家库：策略层与运行时授权都会拒绝 `agent.create` / `agent.update`（无人值守的运行不得改自己的专家库）。
+- 非主 Agent（子代理 / 专家）不可使用 `agent.*`。
+- 当前**没有**逐工具审批流：写类工具的边界就是"仅主 Agent + 仅交互式会话 + 运行时授权复核"。
+
+### 6.6 从旧配置迁移
+
+读取 Profile 时按"读旧写新"迁移一次（内存迁移，首次保存才落盘；库文件已存在就不重复写，可反复运行）：
+
+| 旧配置 | 迁移结果 |
+| --- | --- |
+| `multi_agent_mode = off` | 勾选名单为空（主 Agent 独立工作） |
+| `multi_agent_mode = auto` | 勾选 8 个内置 Agent |
+| `multi_agent_mode = custom` + 旧成员列表 | 每个成员落成一份 `agents/<slug>/AGENTS.md`（`source: custom`），id 进入勾选名单 |
+| 旧成员 id 形如 `auto-*` | 按内置别名映射为 `desic-*` |
+| 旧"方案（Scheme）"模板 | 模板里的每个专家迁移成库文件（`source: custom`）；模板级 `instructions` 丢弃并计入迁移报告 |
+
+- 旧字段（多 Agent 模式、数量上限、成员列表、编排者、专家来源、方案 id）不再作为配置写入，配置真相只有勾选名单；旧列与旧表保留一个版本以便回滚。
+- 内置 Agent 的初始内容与旧内置职责逐字一致，因此 `auto` 迁移后名单语义与过去相同，只是不再自动打分。
 
 > [!NOTE]
-> 多 Agent 会成倍增加模型调用与耗时。仅在对决策质量要求高、且单 Agent 证据链不足时使用；日常定时扫描用单 Agent 即可。
+> 专家分析不再受长度或时长硬约束，成本随实际点名增长。日常定时扫描可以先不勾选任何专家，只有在需要更宽证据面时再逐一启用。
 
 ---
 
@@ -222,6 +330,7 @@ Skill 是注入模型上下文的**规则规格**。Profile 保存的是不可�
 4. **唤醒条件设到期**：避免遗留条件在行情剧变时反复触发。
 5. **Skill 变更走版本**：每次修改 Skill 发布新版本、写清变更动机，复盘才能归因。
 6. **定期检查运行记录**：失败的运行要读错误与摘要，而不是只看完成数。
+7. **专家按需勾选**：把勾选名单当作"本 Profile 允许谁上场"，而不是"每轮都要跑一遍"的清单；日常扫描可以先不勾选专家，需要更宽证据面时再逐个启用。
 
 ---
 
@@ -233,8 +342,8 @@ Skill 是注入模型上下文的**规则规格**。Profile 保存的是不可�
 **Q：Agent 能自己加唤醒条件吗？**
 运行结束时 Agent 可以保存下一组观察条件，但同样受账户与品种绑定、到期时间约束；你随时可以删除。
 
-**Q：多 Agent 会增加多少成本？**
-每次运行会为每个专家调用模型。建议按需启用，定期评估专家数量是否与决策质量收益匹配。
+**Q：勾选更多专家会更贵吗？**
+勾选本身不产生模型调用；只有主 Agent 真正点名时才会起一次只读专家会话。所以**勾选越少、点名越少，成本越低**；不勾选任何专家时本轮与单 Agent 完全一致。勾选即授权，主 Agent 按需要点人。
 
 **Q：为什么我的实盘 Profile 无法启用？**
 实盘启用需要：绑定账户的读取与交易权限、与本账户其他自动化/策略 Profile 的冲突审查、以及显式确认。检查运行列表中的错误提示。

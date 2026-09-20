@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, type Dispatch, type SetStateAction } from "re
 import { CheckCircle2, CircleAlert, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { getAiAgentFailure } from "../lib/aiAgentTrace";
+import { expertGrantLabel } from "../lib/aiExpertGrant";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { logger } from "../lib/logger";
 import type { AiContextUsage, AiEvent, AiStoredMessage } from "../types";
@@ -95,6 +96,8 @@ export type AiAgentRun = {
   tools?: AiToolRun[];
   startedAt?: number;
   endedAt?: number;
+  /** 契约 C11 的无进展心跳（`agentProgressNotice`）。仅本次会话内存态，不落盘、不产生未读。 */
+  progressNotice?: { elapsedMs: number; silentMs: number; phase: string; at: number };
 };
 
 type AiTimelineItem =
@@ -854,6 +857,8 @@ function AiToolTraceRow({ tool, now, onOpenStrategy, onOpenArtifact }: { tool: A
   const duration = toolDurationLabel(tool, now);
   const source = toolDataSourceLabel(tool);
   const presentation = getAiToolPresentation(tool.name);
+  // C15.3：专家点名结果带 grantedScopes 时，把"本次授予范围"挂在同一行摘要里。
+  const grant = expertGrantLabel(tool.result, processText);
   const artifact = aiResearchArtifactForTool(tool);
   const opensMarketPanel = artifact?.kind === "market";
   return (
@@ -862,7 +867,7 @@ function AiToolTraceRow({ tool, now, onOpenStrategy, onOpenArtifact }: { tool: A
         <span className={clsx("ai-tool-state-dot", failed && "failed", running && "running")} aria-hidden="true" />
         <AiToolDomainIcon domain={presentation.domain} size={13} />
         <span className="ai-tool-trace-action">{presentation.label}</span>
-        <small className="ai-tool-summary" data-i18n-skip>{tool.summary || presentation.summary}</small>
+        <small className="ai-tool-summary" data-i18n-skip>{[tool.summary || presentation.summary, grant].filter(Boolean).join(" · ")}</small>
         <strong>{toolStatusLabel(tool)}{source ? ` · ${source}` : ""}{duration ? ` · ${duration}` : ""}</strong>
       </summary>
       {strategyActionForTool(tool) && onOpenStrategy ? <button type="button" className="ai-tool-open-strategy" onClick={() => { const action = strategyActionForTool(tool); if (action) onOpenStrategy(action.strategyId, action.runId, action.optimizationId); }}>{processText("openStrategyLab", "Open in Strategy Lab", "在策略实验室打开")}</button> : null}
@@ -931,6 +936,14 @@ function AiAgentCard({ agent, now }: { agent: AiAgentRun; now: number }) {
         <strong>{modelError ? processText("modelError", "Model error", "模型错误") : agentStatusLabel(agent.status)}{duration ? ` · ${duration}` : ""}</strong>
       </summary>
       {agent.task && <p data-i18n-skip>{agent.task}</p>}
+      {agent.progressNotice && agent.status === "running" ? (
+        <small role="status">
+          {processText("agentProgressNotice", "Expert \"{{name}}\" is still analyzing ({{elapsed}} elapsed)", "专家「{{name}}」仍在分析（已 {{elapsed}}）", {
+            name: agent.title,
+            elapsed: formatElapsedNotice(agent.progressNotice.elapsedMs)
+          })}
+        </small>
+      ) : null}
       {agent.tools && agent.tools.length > 0 && (
         <div className="ai-agent-tools">
           {agent.tools.map((tool) => (
@@ -1517,6 +1530,25 @@ export function applyAiEvent(
     );
     return;
   }
+  if (event.type === "agentProgressNotice") {
+    // 契约 C11：无进展心跳只是"仍在分析"的进度提示，绝不中断会话、
+    // 不产生未读徽标（`aiEventProducesUnread` 有意不收录该类型）。
+    const now = Date.now();
+    const agentId = event.agentId;
+    setMessages((items) =>
+      updateLastAssistant(items, (message) => ({
+        ...message,
+        agents: upsertAgentRun(message.agents ?? [], {
+          id: agentId,
+          title: event.agentName || agentId,
+          task: "",
+          status: "running",
+          progressNotice: { elapsedMs: event.elapsedMs, silentMs: event.silentMs, phase: event.phase, at: now }
+        })
+      }))
+    );
+    return;
+  }
   if (event.type === "teamEvent") {
     setStatus("tooling");
     setMessages((items) =>
@@ -2075,6 +2107,16 @@ function minDefined(values: Array<number | undefined>) {
 function maxDefined(values: Array<number | undefined>) {
   const numbers = values.filter((value): value is number => Number.isFinite(value));
   return numbers.length ? Math.max(...numbers) : undefined;
+}
+
+/** 心跳文案里的「已 N 分 M 秒」：与 formatDuration 同属展示层，只做语言分支。 */
+function formatElapsedNotice(elapsedMs: number) {
+  const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  const zh = (i18n.resolvedLanguage || i18n.language || "en-US").toLowerCase().startsWith("zh");
+  if (zh) return minutes > 0 ? `${minutes} 分 ${seconds} 秒` : `${seconds} 秒`;
+  return minutes > 0 ? `${minutes}m ${seconds}s` : `${seconds}s`;
 }
 
 function formatDuration(startedAt?: number, endedAt?: number) {

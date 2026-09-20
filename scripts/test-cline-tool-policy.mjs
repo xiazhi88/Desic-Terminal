@@ -294,28 +294,48 @@ expectPolicy({ permissionMode: "advisor", agentRole: "main", reviewRun: true }, 
 expectPolicy({ permissionMode: "advisor", agentRole: "main", enableSpawnAgent: false }, "spawn_agent", disabled);
 expectPolicy({ permissionMode: "advisor", agentRole: "main", enableAgentTeams: false }, "team_status", disabled);
 
-// P2b (DES-31): consult_expert / follow_up are lead-only coordinator tools.
-// Visible exactly when the lead dispatch gate is active (enabled + orchestrator
-// "lead" + non-review background run); off / backend / reviewRun / interactive
-// runs keep the P2a lists byte-identical, and delegated roles never dispatch.
+// v3 §4.2（C4/C5）：consult_expert / follow_up 是主 Agent 唯一的调度工具，判定条件
+// 简化为「Profile 勾选名单为空即关闭」；交互式 AI 研究与后台 Run 共用同一套工具与
+// 提示词，不再有 multiAgentOrchestrator / multiAgentMode 维度。delegated 角色一律拒绝。
+// C15：Agent 载荷不再有 scopes（旧载荷里带它会被忽略，不报错）。
+const enabledAgent = {
+  id: "desic-market-structure",
+  name: "市场结构",
+  role: "market_structure",
+  envelope: "standard",
+  skills: [],
+  requiresAccount: false,
+  source: "builtin",
+  version: 1,
+  summary: "检查多周期价格结构。",
+  body: "## 身份\n市场结构分析师"
+};
 const leadActiveMain = {
   permissionMode: "copilot",
   agentRole: "main",
   backgroundRun: true,
-  multiAgentMode: "auto",
-  multiAgentOrchestrator: "lead"
+  enabledAgents: [enabledAgent]
 };
 expectPolicy(leadActiveMain, "consult_expert", enabled);
 expectPolicy(leadActiveMain, "follow_up", enabled);
 expectPolicy(leadActiveMain, "spawn_agent", enabled);
-expectPolicy({ ...leadActiveMain, multiAgentMode: "off" }, "consult_expert", disabled);
-expectPolicy({ ...leadActiveMain, multiAgentMode: "off", multiAgentOrchestrator: "lead" }, "follow_up", disabled);
-expectPolicy({ ...leadActiveMain, multiAgentOrchestrator: "backend" }, "consult_expert", disabled);
-expectPolicy({ ...leadActiveMain, multiAgentOrchestrator: "backend" }, "follow_up", disabled);
-expectPolicy({ ...leadActiveMain, reviewRun: true }, "consult_expert", disabled);
-expectPolicy({ ...leadActiveMain, reviewRun: true }, "follow_up", disabled);
-expectPolicy({ permissionMode: "copilot", agentRole: "main", multiAgentMode: "auto", multiAgentOrchestrator: "lead" }, "consult_expert", disabled);
-expectPolicy({ permissionMode: "copilot", agentRole: "main", multiAgentMode: "auto", multiAgentOrchestrator: "lead" }, "follow_up", disabled);
+expectPolicy({ ...leadActiveMain, enabledAgents: [] }, "consult_expert", disabled);
+expectPolicy({ ...leadActiveMain, enabledAgents: [] }, "follow_up", disabled);
+// 交互式研究（非后台 Run）同样可以点名。
+expectPolicy({ ...leadActiveMain, backgroundRun: false }, "consult_expert", enabled);
+// 旧字段（multiAgentMode / multiAgentOrchestrator / multiAgents）只作为**兼容回归**出现在这里：
+// v3 已删除这些字段，读旧写新的迁移在 Rust 侧完成，侧车读到它们必须等同于"未勾选"。
+// 不要在本文件之外继续使用这些名字。
+expectPolicy(
+  { permissionMode: "copilot", agentRole: "main", multiAgentMode: "auto", multiAgentOrchestrator: "lead" },
+  "consult_expert",
+  disabled
+);
+expectPolicy(
+  { permissionMode: "copilot", agentRole: "main", multiAgents: [{ id: "legacy" }] },
+  "follow_up",
+  disabled
+);
 for (const agentRole of ["subagent", "team"]) {
   expectPolicy({ ...leadActiveMain, agentRole }, "consult_expert", disabled);
   expectPolicy({ ...leadActiveMain, agentRole }, "follow_up", disabled);
@@ -324,6 +344,50 @@ for (const agentRole of ["subagent", "team"]) {
   expectPolicy({ ...leadActiveMain, agentRole, toolAllowlist: ["account.readRisk", "trade.precheck"] }, "consult_expert", disabled);
   expectPolicy({ ...leadActiveMain, agentRole, toolAllowlist: ["account.readRisk", "trade.precheck"] }, "follow_up", disabled);
 }
+
+// C15：策略层不感知 scopes —— 旧字段出现在载荷里也不改变任何判定。
+expectPolicy({ ...leadActiveMain, enabledAgents: [{ ...enabledAgent, scopes: ["market"] }] }, "consult_expert", enabled);
+expectPolicy({ ...leadActiveMain, enabledAgents: [{ ...enabledAgent, scopes: ["shell"] }] }, "consult_expert", enabled);
+
+// C6/C10：agent.* 工具（Agent 库）。读类主 Agent 两种会话都可用；写类只允许主 Agent 的
+// 交互式会话——无人值守的后台 Run 不得改自己的专家库。delegated 角色一律拒绝。
+expectPolicy({ permissionMode: "copilot", agentRole: "main" }, "agent.list", enabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", backgroundRun: true }, "agent.list", enabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main" }, "agent.read", enabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", backgroundRun: true }, "agent.read", enabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main" }, "agent.create", enabled);
+expectPolicy({ permissionMode: "advisor", agentRole: "main" }, "agent.update", enabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", backgroundRun: true }, "agent.create", disabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", backgroundRun: true }, "agent.update", disabled);
+expectPolicy({ permissionMode: "copilot", agentRole: "main", reviewRun: true, backgroundRun: true }, "agent.create", disabled);
+for (const agentRole of ["subagent", "team"]) {
+  for (const tool of ["agent.list", "agent.read", "agent.create", "agent.update"]) {
+    expectPolicy({ permissionMode: "copilot", agentRole }, tool, disabled);
+    expectPolicy({ permissionMode: "copilot", agentRole, backgroundRun: true }, tool, disabled);
+  }
+}
+// 拒绝原因必须是两条冻结的策略名，而不是落到 unknown-tool 兜底。
+for (const tool of ["agent.list", "agent.read", "agent.create", "agent.update"]) {
+  const roleDenied = describeToolPolicy(tool, { permissionMode: "copilot", agentRole: "subagent" });
+  if (roleDenied.policy !== "disabled:agent-authoring-main-only") {
+    failures.push(`${tool} 非主 Agent 必须以 disabled:agent-authoring-main-only 拒绝，实际 ${roleDenied.policy}`);
+  }
+  const backgroundDenied = describeToolPolicy(tool, {
+    permissionMode: "copilot",
+    agentRole: "main",
+    backgroundRun: true
+  });
+  if (!backgroundDenied.allowed && ["agent.create", "agent.update"].includes(tool)
+    && backgroundDenied.policy !== "disabled:agent-authoring-interactive-only") {
+    failures.push(`${tool} 后台 Run 必须以 disabled:agent-authoring-interactive-only 拒绝，实际 ${backgroundDenied.policy}`);
+  }
+}
+// 工具白名单仍然是否决性的：scoped 会话（如策略编辑器）拿不到 agent.*。
+expectPolicy(
+  { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["market.readTicker"] },
+  "agent.create",
+  disabled
+);
 expectPolicy(
   { permissionMode: "limited_auto", agentRole: "main", disableSkillsTool: true },
   "skills",

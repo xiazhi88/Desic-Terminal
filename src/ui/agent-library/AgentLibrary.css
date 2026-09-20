@@ -1,0 +1,1482 @@
+/* Agent 库（agents tab）与 Profile 勾选器样式。
+   视觉规格：docs/agent-library-visual-spec.md（§3 令牌 / §4 逐区域 / §4.7 响应式）。
+   列宽机制沿用 systematic-lab：CSS 变量 + localStorage，拖拽条贴被调整面板的边缘。
+   令牌全部局部化（别名全局变量），硬编码只允许出现在本文件的令牌定义处。 */
+
+/* ===== §3 设计令牌 ===== */
+.agent-lib,
+.agent-picker,
+.agent-lib-dialog {
+  /* 背景层级：列体 / 头部同层，深井仅源码框 */
+  --agent-bg: #0a0d12;
+  --agent-bg-head: #0a0d12;
+  --agent-well: #05060a;
+  --agent-hover: color-mix(in srgb, var(--accent) 4.5%, transparent);
+  --agent-selected: color-mix(in srgb, var(--accent) 10.5%, transparent);
+
+  /* 线条 */
+  --agent-line: var(--line);
+  --agent-line-soft: var(--line-soft);
+
+  /* 文字（直接别名全局，禁新增色值） */
+  --agent-text: var(--text);
+  --agent-muted: var(--muted);
+  --agent-weak: var(--weak);
+
+  /* 语义 */
+  --agent-warn: var(--warn);
+  --agent-danger: var(--danger);
+  --agent-accent-fg: #d9cbff;
+  --agent-accent-line: color-mix(in srgb, var(--accent) 38%, transparent);
+  --agent-accent-soft: color-mix(in srgb, var(--accent) 11%, transparent);
+
+  /* 间距刻度（4 的倍数，2 档微调） */
+  --agent-space-2xs: 4px;
+  --agent-space-xs: 6px;
+  --agent-space-sm: 10px;
+  --agent-space-md: 14px;
+  --agent-space-lg: 20px;
+
+  /* 字号刻度（与 lab 同档） */
+  --agent-text-title: 13px;
+  --agent-text-strong: 12px;
+  --agent-text-body: 11px;
+  --agent-text-label: 10px;
+  --agent-text-micro: 9px;
+  --agent-text-nano: 8px;
+
+  /* 圆角 */
+  --agent-radius-control: 6px;
+  --agent-radius-surface: 10px;
+}
+
+/* ===== §3 徽标（chip）统一范式：列表行 / 编辑器头 / rail flag / 勾选器行 ===== */
+.agent-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  max-width: 180px;
+  padding: 1px 5px;
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: var(--agent-radius-control);
+  color: var(--agent-weak);
+  font-size: var(--agent-text-micro);
+  font-style: normal;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-chip.is-accent { color: var(--agent-accent-fg); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.agent-chip.is-warn { color: var(--agent-warn); }
+.agent-chip.is-danger { color: var(--agent-danger); }
+.agent-chip.is-quiet { color: var(--agent-weak); border-style: dashed; }
+
+/* ===== 三栏骨架 ===== */
+/* P2-12：预览页（AutomationPreview）没有 automation-content 外壳，content 区是
+   普通 block 滚动容器——agents 视图需要 flex 链才能把 .agent-lib 铺满剩余高度。 */
+.automation-preview-content:has(> [data-agents-tab]) {
+  display: flex;
+  flex-direction: column;
+}
+
+.automation-content.automation-content--library {
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.automation-content--library .automation-content-view {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* 容器查询挂在 tab 根节点（对齐 SystematicStrategyLab 的做法）：
+     侧栏折叠等外部变化不会触发降级，只有 tab 自身变窄才会。 */
+  container-type: inline-size;
+}
+
+.agent-lib {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  grid-template-columns:
+    var(--agent-lib-list-width, minmax(228px, 288px))
+    minmax(340px, 1fr)
+    var(--agent-lib-rail-width, minmax(240px, 288px));
+  overflow: hidden;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-surface);
+  background: var(--agent-bg);
+}
+
+.agent-lib > aside,
+.agent-lib > section {
+  position: relative;
+  min-width: 0;
+  min-height: 0;
+  display: grid;
+  background: var(--agent-bg);
+}
+
+.agent-lib > aside.agent-lib__list { grid-template-rows: auto auto minmax(0, 1fr); }
+.agent-lib__list,
+.agent-lib__editor { border-right: 1px solid var(--agent-line); }
+
+/* 注意：`.agent-lib > aside, .agent-lib > section` 的 (0,1,1) 特异性高于单列类选择器，
+   行模板必须带父级选择器，否则正文会落到 `auto` 行导致源码框塌陷
+   （2026-09-18 实测定位，smoke 的 240px/55% 断言守着这条回归门）。 */
+.agent-lib > section.agent-lib__editor { grid-template-rows: auto minmax(0, 1fr) auto; }
+.agent-lib > aside.agent-lib__rail { grid-template-rows: auto auto minmax(0, 1fr); }
+
+/* ===== §4.1 pane-head（三列 40px 顶线对齐） ===== */
+.agent-lib__pane-head {
+  min-width: 0;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--agent-space-sm);
+  padding: 0 12px;
+  border-bottom: 1px solid var(--agent-line);
+  background: var(--agent-bg-head);
+}
+
+.agent-lib__pane-title {
+  min-width: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  color: var(--agent-muted);
+  font-size: var(--agent-text-label);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-lib__pane-title svg { flex: 0 0 auto; color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
+
+/* ===== 列宽拖拽（现状保留） ===== */
+.agent-lib-column-resize {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 6;
+  width: 9px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.agent-lib-column-resize::before {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  content: "";
+  transition: background-color 150ms ease-out, box-shadow 150ms ease-out;
+}
+
+.agent-lib-column-resize:hover::before,
+.agent-lib-column-resize:focus-visible::before,
+.agent-lib-column-resize.is-dragging::before {
+  background: var(--accent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.agent-lib-column-resize:focus-visible { outline: none; }
+.agent-lib-column-resize--start { right: auto; left: 0; }
+.agent-lib-column-resize--start::before { right: auto; left: 0; }
+
+/* ===== §4.4 左：列表 ===== */
+.agent-lib__list-tools { flex: 0 0 auto; display: inline-flex; align-items: center; gap: var(--agent-space-xs); }
+.agent-lib__count { font-variant-numeric: tabular-nums; }
+
+.agent-lib__list-tools button,
+.agent-lib__search button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 25px;
+  height: 25px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+}
+
+.agent-lib__list-tools button:hover,
+.agent-lib__search button:hover { color: var(--agent-text); border-color: var(--agent-accent-line); }
+
+.agent-lib__search {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  height: 28px;
+  margin: 7px 9px 6px;
+  padding: 0 8px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  color: var(--agent-weak);
+}
+
+.agent-lib__search:focus-within {
+  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.agent-lib__search input {
+  min-width: 0;
+  border: 0;
+  color: var(--agent-text);
+  background: transparent;
+  font-size: var(--agent-text-body);
+  outline: none;
+}
+
+.agent-lib__list-scroll {
+  min-height: 0;
+  overflow: auto;
+  padding: 2px 0 10px;
+  scrollbar-gutter: stable;
+}
+
+.agent-lib__group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  padding: 10px 12px 4px;
+  color: var(--agent-muted);
+  font-size: var(--agent-text-label);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* P2-10：组图标色微分（内置=accent 60% / 自定义=muted / AI=down 60%） */
+.agent-lib__group-title svg,
+.agent-picker__group-title svg { flex: 0 0 auto; }
+.agent-lib__group-title.is-builtin svg, .agent-picker__group-title.is-builtin svg { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
+.agent-lib__group-title.is-custom svg, .agent-picker__group-title.is-custom svg { color: var(--agent-muted); }
+.agent-lib__group-title.is-ai svg, .agent-picker__group-title.is-ai svg { color: color-mix(in srgb, var(--down) 60%, var(--muted)); }
+
+/* P2-7：计数 chip 紧跟标题，不再漂到行右端 */
+.agent-lib__group-title em,
+.agent-picker__group-title em { font-variant-numeric: tabular-nums; }
+
+.agent-lib__group-note {
+  font-style: normal;
+  font-size: var(--agent-text-nano);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--agent-weak);
+}
+
+.agent-lib__row {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 8px 12px;
+  border: 0;
+  border-bottom: 1px solid var(--agent-line-soft);
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-lib__row:hover { background: var(--agent-hover); }
+.agent-lib__row.is-active { box-shadow: inset 2px 0 0 var(--accent); background: var(--agent-selected); }
+
+.agent-lib__row-title { min-width: 0; display: flex; align-items: baseline; gap: 7px; }
+.agent-lib__row-title strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-text);
+  font-size: var(--agent-text-strong);
+  font-weight: 600;
+}
+
+.agent-lib__row-title small {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-weak);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--agent-text-micro);
+}
+
+.agent-lib__row-meta {
+  min-width: 0;
+  min-height: 15px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--agent-space-2xs);
+}
+
+/* ===== 统一 state 范式（P2-11）：icon + 文案 +（可选）描边小动作 ===== */
+.agent-lib__state,
+.agent-picker__state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  margin: var(--agent-space-sm) 12px;
+  padding: var(--agent-space-lg) 12px;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-body);
+  text-align: center;
+}
+
+.agent-lib__state button,
+.agent-picker__state button {
+  margin-left: auto;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 2px 8px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__state.is-error,
+.agent-picker__state.is-error { color: var(--status-failed, #f2808c); }
+
+.agent-lib__state--stack { flex-direction: column; gap: var(--agent-space-2xs); padding: var(--agent-space-md) 12px; }
+.agent-lib__state--stack .agent-lib__state-line { display: inline-flex; align-items: center; gap: 7px; }
+.agent-lib__state--stack .agent-lib__state-detail { font-size: var(--agent-text-label); line-height: 1.55; }
+
+.agent-lib__list-error {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  margin: 8px 10px 0;
+  border: 1px dashed color-mix(in srgb, var(--agent-danger) 38%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 5px 8px;
+  color: var(--status-failed, #f2808c);
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__list-error span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.agent-lib__list-error button {
+  flex: 0 0 auto;
+  border: 1px solid var(--agent-line);
+  border-radius: 5px;
+  padding: 1px 7px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__empty,
+.agent-lib__editor-empty {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: var(--agent-space-xs);
+  margin: var(--agent-space-sm) 10px;
+  padding: var(--agent-space-lg) 18px;
+  border: 1px dashed color-mix(in srgb, var(--muted) 26%, transparent);
+  border-radius: var(--agent-radius-control);
+  color: var(--agent-weak);
+  text-align: center;
+}
+
+.agent-lib__editor-empty { height: auto; min-height: 180px; }
+
+.agent-lib__empty svg,
+.agent-lib__editor-empty svg { color: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
+
+.agent-lib__empty strong,
+.agent-lib__editor-empty strong { color: var(--agent-text); font-size: var(--agent-text-strong); }
+.agent-lib__empty span,
+.agent-lib__editor-empty span { font-size: var(--agent-text-label); line-height: 1.6; }
+
+.agent-lib__empty button {
+  margin-top: var(--agent-space-2xs);
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  border: 1px solid var(--agent-accent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 5px 10px;
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+  font-size: var(--agent-text-body);
+}
+
+/* ===== §4.2 中：AGENTS.md 编辑器 ===== */
+.agent-lib__editor-head {
+  min-width: 0;
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--agent-space-sm);
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--agent-line);
+  background: var(--agent-bg-head);
+}
+
+/* P1-4：名称与徽章带同一基线，空间不足时徽章带整体换行 */
+.agent-lib__editor-identity {
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--agent-space-xs) var(--agent-space-sm);
+}
+
+.agent-lib__editor-identity strong {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-text);
+  font-size: var(--agent-text-title);
+  font-weight: 650;
+}
+
+.agent-lib__editor-tags { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: var(--agent-space-2xs); }
+.agent-lib__editor-tags .agent-chip.is-source.is-builtin { color: var(--agent-accent-fg); }
+.agent-lib__editor-tags .agent-chip.is-source.is-ai { color: var(--down); }
+.agent-lib__editor-tags .agent-chip.is-risk,
+.agent-lib__editor-tags .agent-chip.is-dirty { color: var(--agent-warn); }
+.agent-lib__editor-tags .agent-chip.is-modified { color: var(--agent-accent-fg); }
+
+.agent-lib__editor-actions { flex: 0 0 auto; display: inline-flex; align-items: center; gap: 8px; }
+
+.agent-lib__mode {
+  display: inline-flex;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  overflow: hidden;
+}
+
+.agent-lib__mode button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 0;
+  padding: 4px 9px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__mode button.active { color: var(--agent-accent-fg); background: var(--agent-accent-soft); }
+
+.agent-lib__head-divider { width: 1px; height: 18px; flex: 0 0 auto; background: var(--agent-line); }
+
+/* P1-4：保存是编辑器头部主动作 → accent-tint 主按钮（lab save-button 同款）；
+   禁用态降低对比而非整钮半透明。 */
+.agent-lib__save {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  min-height: 30px;
+  border: 1px solid color-mix(in srgb, var(--accent) 58%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 0 10px;
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+  box-shadow: inset 0 1px rgba(255, 255, 255, 0.055);
+  cursor: pointer;
+  font-size: var(--agent-text-body);
+}
+
+.agent-lib__save:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 78%, transparent);
+  background: color-mix(in srgb, var(--accent) 23%, transparent);
+}
+
+.agent-lib__save:disabled {
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: color-mix(in srgb, var(--agent-accent-fg) 38%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  box-shadow: none;
+  cursor: not-allowed;
+}
+
+/* P1-5：源码框是唯一"深井"——外圈 padding + 内边框 + 圆角，让"深"成为有意图的 inset。
+   高度断言保护：wrap 用 minmax(0,1fr)，textarea height:100%，编辑器行模板不动。 */
+.agent-lib__editor .agent-lib__source-wrap {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr);
+  padding: 10px 12px 12px;
+}
+
+.agent-lib__source {
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  resize: none;
+  border: 1px solid var(--agent-line-soft);
+  border-radius: 8px;
+  padding: 10px 12px;
+  color: var(--agent-text);
+  background: var(--agent-well);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.65;
+  outline: none;
+  tab-size: 2;
+}
+
+.agent-lib__source:focus { border-color: color-mix(in srgb, var(--accent) 45%, transparent); }
+.agent-lib__source[readonly] { color: var(--agent-muted); }
+
+/* 对话框预览里的源码框贴边填满（深井 inset 由对话框布局承担）。 */
+.agent-lib-dialog .agent-lib__source { border: 0; border-radius: 0; }
+
+.agent-lib__preview { min-height: 0; height: 100%; overflow: auto; padding: 12px 14px; scrollbar-gutter: stable; }
+
+.agent-lib__readonly-note {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  margin: 0;
+  padding: 7px 12px;
+  border-top: 1px solid var(--agent-line-soft);
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+  font-size: var(--agent-text-label);
+}
+
+/* ===== §4.3 右：动作与元数据 rail ===== */
+.agent-lib__rail-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--agent-space-xs);
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--agent-line-soft);
+}
+
+.agent-lib__rail-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--agent-space-xs);
+  min-width: 0;
+  height: 28px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 0 8px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-body);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.agent-lib__rail-actions button:hover:not(:disabled) { color: var(--agent-text); border-color: var(--agent-accent-line); }
+
+.agent-lib__rail-actions button.is-primary {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.agent-lib__rail-actions button.is-primary:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 78%, transparent);
+  background: color-mix(in srgb, var(--accent) 23%, transparent);
+}
+
+.agent-lib__rail-actions button.is-danger {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, var(--agent-danger) 34%, transparent);
+  color: var(--agent-danger);
+}
+
+/* 禁用态：降低对比而非整钮半透明 */
+.agent-lib__rail-actions button:disabled {
+  border-color: color-mix(in srgb, currentColor 18%, transparent);
+  color: color-mix(in srgb, var(--agent-weak) 60%, transparent);
+  cursor: not-allowed;
+}
+
+.agent-lib__rail-body {
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--agent-space-sm);
+  padding: 12px;
+  scrollbar-gutter: stable;
+}
+
+/* facts 收敛为 4 行关键项（角色 / 证据范围 / 版本 / 更新时间） */
+.agent-lib__facts { display: grid; gap: 0; margin: 0; }
+.agent-lib__facts > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--agent-line-soft);
+}
+
+.agent-lib__facts dt {
+  color: var(--agent-weak);
+  font-size: var(--agent-text-micro);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.agent-lib__facts dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--agent-muted);
+  font-size: var(--agent-text-body);
+  overflow-wrap: anywhere;
+}
+
+.agent-lib__facts dd.is-num { font-variant-numeric: tabular-nums; }
+
+/* 状态区：账户/技能/改动/Profile 全部收成 chip 流式行 */
+.agent-lib__rail-flags { display: flex; flex-wrap: wrap; gap: var(--agent-space-2xs); }
+
+/* C15.1：废弃字段提示（一行灰字，不阻断保存） */
+.agent-lib__deprecated-note {
+  margin: 0;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+  line-height: 1.55;
+}
+
+/* 路径降为 rail 底部 pinned footer（纯文本级，去掉虚线框） */
+.agent-lib__path {
+  margin: auto 0 0;
+  padding: 8px 0 0;
+  border-top: 1px solid var(--agent-line-soft);
+  color: var(--agent-weak);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--agent-text-micro);
+  overflow-wrap: anywhere;
+}
+
+/* ===== §4.5 弹窗（新建 / AI 创建） ===== */
+/* 关闭弹层进场动画（desic-popup-enter 380ms + 28ms delay / backdrop 250ms）：
+   动画期间 Playwright 的 stability 检查会失败（"取消"点击偶发超时），截图也会抓到
+   半透明中间帧。这两个对话框即时呈现，换取可视化回归的确定性。 */
+.agent-lib-dialog-backdrop,
+.agent-lib-dialog-backdrop .modal-shell {
+  animation: none;
+}
+
+.agent-lib-dialog {
+  width: min(1080px, calc(100vw - 64px));
+  height: min(720px, calc(100vh - 64px));
+  grid-template-rows: 52px minmax(0, 1fr) auto;
+  border-radius: var(--agent-radius-surface);
+}
+
+.agent-lib-dialog__head span {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib-dialog__body {
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(320px, 0.9fr) minmax(0, 1.1fr);
+  gap: 0;
+  overflow: hidden;
+}
+
+.agent-lib-dialog__form {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  align-content: start;
+  gap: var(--agent-space-sm);
+  padding: 14px;
+  border-right: 1px solid var(--agent-line-soft);
+  scrollbar-gutter: stable;
+}
+
+.agent-lib-dialog__form label { display: grid; gap: 5px; }
+
+.agent-lib-dialog__form label > span {
+  color: var(--agent-weak);
+  font-size: var(--agent-text-micro);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-lib-dialog__form input,
+.agent-lib-dialog__form select,
+.agent-lib-dialog__form textarea {
+  min-width: 0;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 6px 8px;
+  color: var(--agent-text);
+  background: #090c11;
+  font-size: var(--agent-text-body);
+  outline: none;
+}
+
+.agent-lib-dialog__form input,
+.agent-lib-dialog__form select { height: 30px; padding: 0 8px; }
+
+.agent-lib-dialog__form input:focus,
+.agent-lib-dialog__form select:focus,
+.agent-lib-dialog__form textarea:focus {
+  border-color: color-mix(in srgb, var(--accent) 62%, transparent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 12%, transparent);
+}
+
+.agent-lib-dialog__form textarea { min-height: 88px; resize: vertical; line-height: 1.6; }
+.agent-lib-dialog__form textarea[data-agent-ai-description] { min-height: 120px; }
+.agent-lib-dialog__form small { color: var(--agent-weak); font-size: 9.5px; line-height: 1.5; }
+.agent-lib-dialog__check { display: flex !important; align-items: center; gap: 7px; }
+.agent-lib-dialog__check > span { font-size: var(--agent-text-body) !important; font-weight: 400 !important; letter-spacing: 0 !important; text-transform: none !important; color: var(--agent-muted) !important; }
+.agent-lib-dialog__check input { width: auto; height: auto; }
+
+
+/* ===== C16① 「依赖 Skills」多选下拉 ===== */
+.agent-skill-select {
+  position: relative;
+  min-width: 0;
+  display: grid;
+  gap: 6px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 6px 8px;
+  background: #090c11;
+}
+
+.agent-skill-select:focus-within { border-color: color-mix(in srgb, var(--accent) 62%, transparent); }
+.agent-skill-select.is-disabled { opacity: 0.6; }
+
+.agent-skill-select__chips { display: flex; flex-wrap: wrap; align-items: center; gap: var(--agent-space-2xs); }
+
+.agent-skill-select__chip { display: inline-flex; align-items: center; gap: 5px; }
+
+.agent-skill-select__inactive {
+  color: var(--agent-warn);
+  font-size: var(--agent-text-micro);
+  font-style: normal;
+}
+
+.agent-skill-select__remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border: 0;
+  border-radius: 999px;
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+}
+
+.agent-skill-select__remove:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 22%, transparent); }
+.agent-skill-select__remove:disabled { cursor: not-allowed; }
+
+/* 触发按钮：与对话框输入同高、同边框语言，不再另起一套视觉 */
+.agent-skill-select__trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  border: 1px dashed var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 0 8px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-skill-select__trigger:hover:not(:disabled) { color: var(--agent-text); border-color: var(--agent-accent-line); }
+.agent-skill-select__trigger:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.agent-skill-select__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 100%;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  border: 1px solid var(--agent-accent-line);
+  border-radius: var(--agent-radius-control);
+  background: var(--agent-bg-head);
+  box-shadow: 0 18px 40px color-mix(in srgb, #000000 62%, transparent);
+}
+
+.agent-skill-select__search {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--agent-line-soft);
+  color: var(--agent-weak);
+}
+
+.agent-skill-select__search input {
+  height: 24px !important;
+  border: 0 !important;
+  padding: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.agent-skill-select__options { max-height: 210px; overflow: auto; padding: 4px; }
+
+.agent-skill-select__option {
+  width: 100%;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  border: 0;
+  border-radius: var(--agent-radius-control);
+  padding: 6px 7px;
+  color: inherit;
+  background: transparent;
+  cursor: pointer;
+  text-align: left;
+}
+
+.agent-skill-select__option.is-active { background: color-mix(in srgb, var(--accent) 10%, transparent); }
+.agent-skill-select__option.is-selected .agent-skill-select__option-copy strong { color: var(--agent-accent-fg); }
+.agent-skill-select__check { display: inline-flex; align-items: center; justify-content: center; color: var(--accent); }
+.agent-skill-select__option-copy { min-width: 0; display: grid; gap: 1px; }
+.agent-skill-select__option-copy strong { color: var(--agent-text); font-size: var(--agent-text-body); font-weight: 600; }
+.agent-skill-select__option-copy small { overflow: hidden; color: var(--agent-weak); font-size: var(--agent-text-label); text-overflow: ellipsis; white-space: nowrap; }
+.agent-skill-select__empty { margin: 0; padding: 10px 8px; color: var(--agent-weak); font-size: var(--agent-text-label); }
+
+/* ===== C16② 「角色」组合控件（可输入 + 建议下拉） ===== */
+.agent-role-combo { position: relative; min-width: 0; }
+
+.agent-role-combo__menu {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 40;
+  min-width: 100%;
+  max-height: 200px;
+  overflow: auto;
+  display: grid;
+  gap: 1px;
+  border: 1px solid var(--agent-accent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 4px;
+  background: var(--agent-bg-head);
+  box-shadow: 0 18px 40px color-mix(in srgb, #000000 62%, transparent);
+}
+
+.agent-role-combo__option {
+  min-width: 0;
+  display: block;
+  border: 0;
+  border-radius: var(--agent-radius-control);
+  padding: 5px 7px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: left;
+}
+
+.agent-role-combo__option.is-active { background: color-mix(in srgb, var(--accent) 10%, transparent); color: var(--agent-text); }
+.agent-role-combo__option.is-selected { color: var(--agent-accent-fg); }
+
+/* AI 草稿模型选择与"由 <模型> 生成"提示（对话框内沿用既有 note 样式） */
+.agent-lib-dialog__note[data-agent-generated-by] { color: var(--agent-accent-fg); }
+
+
+/* ===== P1/P2/P3：AI 草稿生成过程（进度卡片 + 流式区 + 取消） ===== */
+.agent-draft-progress {
+  min-height: 0;
+  display: grid;
+  align-content: start;
+  gap: var(--agent-space-xs);
+  padding: var(--agent-space-sm);
+  overflow: auto;
+}
+
+.agent-draft-progress__head {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-2xs);
+}
+
+.agent-draft-progress__pulse { display: inline-flex; align-items: center; color: var(--agent-weak); }
+.agent-draft-progress__pulse.is-live { color: var(--agent-accent-fg); }
+.agent-draft-progress__head strong { color: var(--agent-text); font-size: var(--agent-text-strong); font-weight: 650; }
+
+.agent-draft-progress__head em {
+  margin-left: auto;
+  border: 1px solid var(--agent-accent-line);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--agent-accent-fg);
+  font-size: var(--agent-text-micro);
+  font-style: normal;
+}
+
+.agent-draft-progress__facts { display: grid; gap: 0; margin: 0; }
+.agent-draft-progress__facts > div {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 46px minmax(0, 1fr);
+  gap: var(--agent-space-xs);
+  padding: 3px 0;
+  border-bottom: 1px solid var(--agent-line-soft);
+}
+
+.agent-draft-progress__facts dt { color: var(--agent-weak); font-size: var(--agent-text-micro); }
+.agent-draft-progress__facts dd { min-width: 0; margin: 0; color: var(--agent-muted); font-size: var(--agent-text-label); overflow-wrap: anywhere; }
+
+.agent-draft-progress__note {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-2xs);
+  margin: 0;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+}
+
+.agent-draft-progress__note.is-error { color: var(--agent-danger); }
+
+/* 流式区：等宽、保留换行、自动滚到底（模型原始输出，未渲染 frontmatter） */
+.agent-draft-progress__stream {
+  min-height: 120px;
+  max-height: 42vh;
+  margin: 0;
+  overflow: auto;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: var(--agent-space-xs);
+  color: var(--agent-muted);
+  background: var(--agent-well);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: var(--agent-text-label);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  scrollbar-gutter: stable;
+}
+
+.agent-draft-progress__stream:empty::before {
+  content: "";
+  display: block;
+  min-height: 108px;
+}
+
+.agent-lib-dialog__preview-actions { display: flex; justify-content: flex-end; padding: 0 var(--agent-space-sm) var(--agent-space-xs); }
+.agent-lib-dialog__preview-actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 0 9px;
+  color: var(--agent-text);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__cancel {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid color-mix(in srgb, var(--agent-danger) 40%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 0 10px;
+  color: var(--agent-danger);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-lib__cancel:disabled { opacity: 0.55; cursor: not-allowed; }
+
+/* 右栏内容区：head 固定 + body 单一弹性行。
+   2026-09-18 故障复盘：此前 note / 进度卡片与 textarea 一起放在只有两行的 grid 里，
+   `data-agent-generated-by` 那一行吃掉了 `minmax(0,1fr)`，源码框落进隐式 auto 行 →
+   只剩固有高度并被排到面板底部（"源码不显示"同类根因）。现在所有内容都装进本容器，
+   内部用 flex 纵向分配：附加信息 auto、草稿区/流式区 flex:1。 */
+.agent-lib-dialog__preview-body {
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.agent-lib-dialog__preview-body > .agent-lib-dialog__note,
+.agent-lib-dialog__preview-body > .agent-lib-dialog__preview-actions { flex: 0 0 auto; }
+
+.agent-lib-dialog__preview-body > .agent-lib__source,
+.agent-lib-dialog__preview-body > .agent-lib__preview,
+.agent-lib-dialog__preview-body > .agent-lib-dialog__preview-empty,
+.agent-lib-dialog__preview-body > .agent-draft-progress {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.agent-lib-dialog__preview {
+  min-height: 0;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  background: var(--agent-bg);
+}
+
+/* 预览头与编辑器同款分段控件 */
+.agent-lib-dialog__preview-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 40px;
+  padding: 4px 12px;
+  border-bottom: 1px solid var(--agent-line);
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+}
+
+/* 预览空态：居中 icon + 两行引导 + 虚线框（与列表空态同族） */
+.agent-lib-dialog__preview-empty {
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: var(--agent-space-xs);
+  margin: 12px;
+  padding: var(--agent-space-lg);
+  border: 1px dashed color-mix(in srgb, var(--muted) 26%, transparent);
+  border-radius: var(--agent-radius-control);
+  color: var(--agent-weak);
+  text-align: center;
+}
+
+.agent-lib-dialog__preview-empty svg { color: color-mix(in srgb, var(--accent) 55%, var(--muted)); }
+.agent-lib-dialog__preview-empty strong { color: var(--agent-text); font-size: var(--agent-text-strong); }
+.agent-lib-dialog__preview-empty span { font-size: var(--agent-text-label); line-height: 1.6; max-width: 320px; }
+
+.agent-lib-dialog__note,
+.agent-lib-dialog__error,
+.agent-lib-dialog__path,
+.agent-lib-dialog__warnings {
+  margin: 0;
+  font-size: var(--agent-text-label);
+  line-height: 1.6;
+}
+
+.agent-lib-dialog__note { display: flex; align-items: flex-start; gap: var(--agent-space-xs); color: var(--agent-weak); }
+.agent-lib-dialog__error { display: flex; align-items: center; gap: var(--agent-space-xs); color: var(--status-failed, #f2808c); }
+.agent-lib-dialog__path { color: var(--agent-weak); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: var(--agent-text-micro); }
+.agent-lib-dialog__warnings {
+  display: grid;
+  gap: var(--agent-space-2xs);
+  border: 1px dashed color-mix(in srgb, var(--agent-warn) 38%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 8px 10px;
+  color: var(--agent-warn);
+}
+
+.agent-lib-dialog__warnings ul { margin: 0; padding-left: 16px; }
+
+.agent-lib-dialog .modal-actions { border-top: 1px solid var(--agent-line-soft); }
+
+.agent-lib-dialog .modal-actions .confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+}
+
+/* 底部按钮分级：取消 quiet / 生成草稿 accent-tint / 保存 confirm 实心 */
+.agent-lib-dialog .modal-actions .agent-lib__generate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  border-color: color-mix(in srgb, var(--accent) 58%, transparent);
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+
+.agent-lib-dialog .modal-actions .agent-lib__generate:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 78%, transparent);
+  background: color-mix(in srgb, var(--accent) 23%, transparent);
+}
+
+.agent-lib-dialog .modal-actions .agent-lib__generate:disabled {
+  border-color: color-mix(in srgb, var(--accent) 22%, transparent);
+  color: color-mix(in srgb, var(--agent-accent-fg) 38%, transparent);
+  background: color-mix(in srgb, var(--accent) 5%, transparent);
+}
+
+/* ===== §4.6 Profile 编辑器的勾选器 ===== */
+.agent-picker { gap: 10px; }
+
+/* 头部行 1：标题+hint（左）| 计数 chip（右），单基线 */
+.agent-picker__head { min-width: 0; display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.agent-picker__head > div { min-width: 0; display: grid; gap: 3px; }
+.agent-picker__head strong { display: inline-flex; align-items: center; gap: var(--agent-space-xs); color: var(--agent-text); font-size: var(--agent-text-strong); font-weight: 650; }
+.agent-picker__head strong svg { color: color-mix(in srgb, var(--accent) 60%, var(--muted)); }
+.agent-picker__head span { color: var(--agent-weak); font-size: var(--agent-text-label); line-height: 1.55; }
+.agent-picker__count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
+
+/* C14 协作总开关行：整行可点 label，hairline 上下各一条（去卡片边框）。
+   原生 checkbox 保持可见可操作（Playwright check/uncheck 直接打在它上面），
+   用 appearance:none 自定义为 30×17 pill，不做 display/visibility/opacity 隐藏。 */
+.agent-picker__toggle-row {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 7px 0;
+  /* 该行现在是勾选器（`[data-agent-selector]`）的第一个子节点，贴着区块顶部：
+     只保留底部分隔线，去掉顶线，避免与区块边框形成"双线"。 */
+  border-bottom: 1px solid var(--agent-line-soft);
+  cursor: pointer;
+}
+
+/* P0-1③：strong/small 分行（grid gap 2px），无论 key 是否命中永不连排 */
+.agent-picker__toggle-copy { min-width: 0; display: grid; gap: 2px; }
+.agent-picker__toggle-copy strong { color: var(--agent-text); font-size: var(--agent-text-body); font-weight: 600; }
+.agent-picker__toggle-copy small { color: var(--agent-weak); font-size: var(--agent-text-label); line-height: 1.45; }
+
+.agent-picker__toggle-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  flex: 0 0 auto;
+  width: 30px;
+  height: 17px;
+  margin: 0;
+  position: relative;
+  border: 1px solid var(--agent-line);
+  border-radius: 999px;
+  background: #0d1118;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+
+.agent-picker__toggle-row input[type="checkbox"]::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 13px;
+  height: 13px;
+  border-radius: 50%;
+  background: var(--agent-muted);
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+
+.agent-picker__toggle-row input[type="checkbox"]:checked {
+  border-color: color-mix(in srgb, var(--accent) 55%, transparent);
+  background: color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+.agent-picker__toggle-row input[type="checkbox"]:checked::after {
+  transform: translateX(13px);
+  background: #ffffff;
+}
+
+.agent-picker__toggle-row input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 78%, transparent);
+  outline-offset: 2px;
+}
+
+.agent-picker__toggle-row input[type="checkbox"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* C14 关闭提示：warn 色虚线 banner（钩子 data-agent-collaboration-off-hint 挂在这里） */
+.agent-picker__off-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  margin: 0;
+  border: 1px dashed color-mix(in srgb, var(--agent-warn) 38%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 6px 9px;
+  color: var(--agent-warn);
+  font-size: var(--agent-text-label);
+}
+
+/* 关闭时列表区整体降对比（钩子与"不清空名单"逻辑不动） */
+/* 注意：不要再写 `[data-collaboration-enabled="false"] .agent-picker__group/__empty-hint`
+   之类的"关闭态降对比"规则 —— 关闭时整块列表已不挂载（契约 C14），这类规则不可达。 */
+
+/* 动作行 2：快捷动作（左）| 跳转+刷新（右），单行基线 */
+.agent-picker__actions { display: flex; flex-wrap: wrap; align-items: center; gap: var(--agent-space-xs); }
+
+.agent-picker__actions button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 24px;
+  border: 1px solid var(--agent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 0 9px;
+  color: var(--agent-muted);
+  background: transparent;
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-picker__actions button:hover:not(:disabled) { color: var(--agent-text); border-color: var(--agent-accent-line); }
+.agent-picker__actions button:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.agent-picker__jump {
+  margin-left: auto;
+  border-color: var(--agent-accent-line) !important;
+  color: var(--agent-accent-fg) !important;
+}
+
+.agent-picker__jump:hover:not(:disabled) { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.agent-picker__reload { width: 24px; padding: 0 !important; justify-content: center; }
+
+.agent-picker__empty-hint {
+  margin: 0;
+  border: 1px dashed color-mix(in srgb, var(--muted) 26%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: 7px 9px;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+}
+
+.agent-picker__empty {
+  display: grid;
+  justify-items: center;
+  gap: 5px;
+  border: 1px dashed color-mix(in srgb, var(--muted) 26%, transparent);
+  border-radius: var(--agent-radius-control);
+  padding: var(--agent-space-lg) 12px;
+  color: var(--agent-weak);
+  text-align: center;
+}
+
+.agent-picker__empty strong { color: var(--agent-text); font-size: var(--agent-text-body); }
+.agent-picker__empty span { font-size: var(--agent-text-label); line-height: 1.55; }
+
+.agent-picker__empty button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-top: 2px;
+  border: 1px solid var(--agent-accent-line);
+  border-radius: var(--agent-radius-control);
+  padding: 4px 9px;
+  color: var(--agent-accent-fg);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+  cursor: pointer;
+  font-size: var(--agent-text-label);
+}
+
+.agent-picker__group { display: grid; gap: 0; }
+
+.agent-picker__group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--agent-space-xs);
+  padding-top: 6px;
+  color: var(--agent-muted);
+  font-size: var(--agent-text-label);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.agent-picker__group-note {
+  font-style: normal;
+  font-size: var(--agent-text-nano);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--agent-weak);
+}
+
+/* P2-8：行去卡片化——hairline 分隔 + inset 条选中态（lab 行范式） */
+.agent-picker__list { display: grid; }
+
+.agent-picker__row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 10px;
+  border-bottom: 1px solid var(--agent-line-soft);
+  cursor: pointer;
+}
+
+.agent-picker__row:hover { background: var(--agent-hover); }
+
+.agent-picker__row.is-checked {
+  box-shadow: inset 2px 0 0 var(--accent);
+  background: color-mix(in srgb, var(--accent) 6%, transparent);
+}
+
+.agent-picker__row.is-disabled { cursor: not-allowed; }
+
+/* 自定义 14px checkbox：accent 描边，勾选时 accent 底 + 对勾（保持原生可见可操作） */
+.agent-picker__row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 14px;
+  height: 14px;
+  margin: 0;
+  position: relative;
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  border-radius: 4px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.agent-picker__row input[type="checkbox"]:checked { border-color: var(--accent); background: var(--accent); }
+
+.agent-picker__row input[type="checkbox"]:checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid #ffffff;
+  border-width: 0 1.5px 1.5px 0;
+  transform: rotate(45deg);
+}
+
+.agent-picker__row input[type="checkbox"]:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--accent) 78%, transparent);
+  outline-offset: 1px;
+}
+
+.agent-picker__row input[type="checkbox"]:disabled { opacity: 0.45; cursor: not-allowed; }
+
+.agent-picker__row-copy { min-width: 0; display: grid; gap: 1px; }
+.agent-picker__row-copy strong { color: var(--agent-text); font-size: var(--agent-text-body); font-weight: 600; }
+
+.agent-picker__row-copy small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--agent-weak);
+  font-size: var(--agent-text-label);
+  line-height: 1.45;
+}
+
+/* P0-2：tags 区不再 44% 硬上限，自然收缩；单枚 chip 180px 内 ellipsis */
+.agent-picker__row-tags {
+  flex: 0 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: flex-end;
+  gap: var(--agent-space-2xs);
+}
+
+.agent-picker__row-tags .agent-chip.is-risk,
+.agent-picker__row-tags .agent-chip.is-warning { color: var(--agent-warn); }
+.agent-picker__row-tags .agent-chip.is-modified { color: var(--agent-accent-fg); }
+
+/* ===== §4.7 窄窗口降级：容器查询挂在 tab 根节点 ===== */
+@container (max-width: 1040px) {
+  /* 右栏收成底部工具条；拖拽条隐藏；编辑器头部允许徽章带换行。 */
+  .agent-lib {
+    grid-template-columns: minmax(190px, 0.65fr) minmax(320px, 1.55fr);
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+  .agent-lib__list { grid-column: 1; grid-row: 1; }
+  .agent-lib__editor { grid-column: 2; grid-row: 1; border-right: 0; }
+  .agent-lib__rail {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    max-height: 42%;
+    border-top: 1px solid var(--agent-line);
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+  .agent-lib__rail-head { display: none; }
+  .agent-lib__rail-actions {
+    grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+    border-bottom: 1px solid var(--agent-line-soft);
+  }
+  .agent-lib__rail-actions button.is-primary,
+  .agent-lib__rail-actions button.is-danger { grid-column: auto; }
+  .agent-lib__rail-body {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+    align-content: start;
+  }
+  .agent-lib__path { margin-top: 0; }
+  .agent-lib-column-resize { display: none; }
+}
+
+@container (max-width: 760px) {
+  /* 单列堆叠：列表变横向滚动行卡片，编辑器占满剩余高度。 */
+  .agent-lib {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+  .agent-lib__list { grid-column: 1; grid-row: 1; max-height: 190px; border-right: 0; border-bottom: 1px solid var(--agent-line); }
+  .agent-lib__editor { grid-column: 1; grid-row: 2; }
+  .agent-lib__rail { grid-column: 1; grid-row: 3; max-height: 44%; }
+  .agent-lib__list-scroll { display: flex; gap: var(--agent-space-xs); overflow-x: auto; padding: 6px 8px 10px; }
+  .agent-lib__group { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(185px, 185px); gap: var(--agent-space-xs); align-items: start; }
+  .agent-lib__group-title { grid-auto-flow: row; }
+  .agent-lib__row { border: 1px solid var(--agent-line-soft); border-radius: var(--agent-radius-control); }
+  .agent-lib__row.is-active { box-shadow: inset 0 -2px 0 0 var(--accent); }
+}
+
+@container (max-width: 580px) {
+  /* 徽标只留图标 + tooltip；隐藏 is-quiet 计数；编辑器头部强制两行。 */
+  .agent-lib__row-meta .agent-chip.is-quiet,
+  .agent-lib__editor-tags .agent-chip.is-quiet { display: none; }
+  .agent-lib__row-meta .agent-chip,
+  .agent-lib__editor-tags .agent-chip { padding: 1px 4px; }
+  .agent-lib__editor-head { flex-wrap: wrap; }
+  /* 修正笔误：实际类名是 .agent-lib-dialog（旧选择器 .agent-dialog 永不命中）。 */
+  .agent-lib-dialog .agent-lib__preview { display: none; }
+}
+
+@media (max-width: 1180px) {
+  .agent-lib-dialog__body { grid-template-columns: minmax(0, 1fr); }
+  .agent-lib-dialog__form { border-right: 0; border-bottom: 1px solid var(--agent-line-soft); }
+  /* 单栏时预览栏 max-height 40% */
+  .agent-lib-dialog__preview { max-height: 40%; }
+  .agent-picker__row { grid-template-columns: 16px minmax(0, 1fr); }
+  .agent-picker__row-tags { grid-column: 2; flex-wrap: wrap; justify-content: flex-start; }
+}
