@@ -798,19 +798,17 @@ async fn run_public_ws_reconnecting(
             &stream_id,
             kind,
             &symbols,
-            if attempt == 0 {
-                "connecting"
-            } else {
-                "reconnecting"
-            },
-            if attempt == 0 {
-                format!("{} connecting", stream_id)
-            } else {
-                format!("{} reconnecting #{}", stream_id, attempt + 1)
-            },
+            public_stream_status(
+                if attempt == 0 { "connecting" } else { "reconnecting" },
+                if attempt == 0 {
+                    format!("{} connecting", stream_id)
+                } else {
+                    format!("{} reconnecting #{}", stream_id, attempt + 1)
+                },
+                None,
+                None,
+            ),
             attempt,
-            None,
-            None,
         );
         match run_public_ws(
             app.clone(),
@@ -835,11 +833,13 @@ async fn run_public_ws_reconnecting(
                     &stream_id,
                     kind,
                     &symbols,
-                    "reconnecting",
-                    format!("{} closed, retry in {}s", stream_id, delay.as_secs()),
+                    public_stream_status(
+                        "reconnecting",
+                        format!("{} closed, retry in {}s", stream_id, delay.as_secs()),
+                        None,
+                        None,
+                    ),
                     attempt,
-                    None,
-                    None,
                 );
                 tokio::time::sleep(delay).await;
             }
@@ -861,11 +861,13 @@ async fn run_public_ws_reconnecting(
                     &stream_id,
                     kind,
                     &symbols,
-                    "reconnecting",
-                    format!("{} error", stream_id),
+                    public_stream_status(
+                        "reconnecting",
+                        format!("{} error", stream_id),
+                        None,
+                        None,
+                    ),
                     attempt,
-                    None,
-                    None,
                 );
                 tokio::time::sleep(delay).await;
                 attempt = attempt.saturating_add(1);
@@ -1092,11 +1094,13 @@ async fn run_public_ws(
         stream_id,
         kind,
         &symbols,
-        "ready",
-        format!("{} connected", stream_id),
+        public_stream_status(
+            "ready",
+            format!("{} connected", stream_id),
+            Some(now_ms()),
+            None,
+        ),
         0,
-        Some(now_ms()),
-        None,
     );
     let args = public_subscription_args(kind, &symbols);
     for chunk in args.chunks(80) {
@@ -1121,10 +1125,17 @@ async fn run_public_ws(
     let mut stale_data_messages = 0_u8;
     let mut last_data_received_at = now_ms();
     let mut data_recovery_started: Option<Instant> = None;
+    // Local timestamp of the moment the loop became ready to read the socket.
+    // Compare against frame arrival to size the local backlog.
     loop {
+        let probe_issued_at_ms = now_ms();
         tokio::select! {
             message = socket.next() => match message {
                 Some(Ok(Message::Text(text))) => {
+                    let frame_arrived_at_ms = now_ms();
+                    // Time between issuing the read and the frame being handed to
+                    // this task: local backlog, not OKX-side data age.
+                    let frame_wait_ms = frame_arrived_at_ms.saturating_sub(probe_issued_at_ms);
                     last_received = Instant::now();
                     if text != "pong" {
                         let delay_ms = public_message_delay_ms(&runtime, &text);
@@ -1132,6 +1143,19 @@ async fn run_public_ws(
                             return Err(message);
                         }
                         let has_payload = public_message_has_payload(&text);
+                        if kind == PublicStreamKind::Meta && has_payload {
+                            if let Some((channel, inst_id, newest_ts)) =
+                                public_frame_channel_reading(&text)
+                            {
+                                record_public_channel_reading(
+                                    &runtime,
+                                    &inst_id,
+                                    &channel,
+                                    newest_ts,
+                                    frame_arrived_at_ms,
+                                );
+                            }
+                        }
                         if kind == PublicStreamKind::Books
                             && has_payload
                             && delay_ms.is_some_and(|delay| delay > PUBLIC_STALE_RECONNECT_DELAY_MS)
@@ -1168,7 +1192,25 @@ async fn run_public_ws(
                             && (recovered_from_stale
                                 || last_status_emit.elapsed() >= Duration::from_secs(1))
                         {
-                            emit_public_status(&app, stream_id, kind, &symbols, "ready", format!("{} connected", stream_id), 0, Some(last_data_received_at), delay_ms);
+                            let payload = if kind == PublicStreamKind::Meta {
+                                public_meta_status(
+                                    &runtime,
+                                    &symbols,
+                                    "ready",
+                                    format!("{} connected", stream_id),
+                                    Some(last_data_received_at),
+                                    delay_ms,
+                                    Some(frame_wait_ms),
+                                )
+                            } else {
+                                public_stream_status(
+                                    "ready",
+                                    format!("{} connected", stream_id),
+                                    Some(last_data_received_at),
+                                    delay_ms,
+                                )
+                            };
+                            emit_public_status(&app, stream_id, kind, &symbols, payload, 0);
                             last_status_emit = Instant::now();
                         }
                     }
@@ -1207,11 +1249,16 @@ async fn run_public_ws(
                                     stream_id,
                                     kind,
                                     &symbols,
-                                    "stale",
-                                    format!("{} ticker data stale, resubscribing", stream_id),
+                                    public_meta_status(
+                                        &runtime,
+                                        &symbols,
+                                        "stale",
+                                        format!("{} ticker data stale, resubscribing", stream_id),
+                                        Some(last_data_received_at),
+                                        stale_delay_ms,
+                                        None,
+                                    ),
                                     0,
-                                    Some(last_data_received_at),
-                                    stale_delay_ms,
                                 );
                                 resubscribe_public_symbols(&mut socket, kind, &stale_symbols).await?;
                                 data_recovery_started = Some(Instant::now());
@@ -1233,7 +1280,25 @@ async fn run_public_ws(
                         let desired = control.symbols();
                         apply_public_subscription_delta(&mut socket, kind, &symbols, &desired).await?;
                         symbols = desired;
-                        emit_public_status(&app, stream_id, kind, &symbols, "ready", format!("{} subscriptions updated", stream_id), 0, Some(last_data_received_at), None);
+                        let payload = if kind == PublicStreamKind::Meta {
+                            public_meta_status(
+                                &runtime,
+                                &symbols,
+                                "ready",
+                                format!("{} subscriptions updated", stream_id),
+                                Some(last_data_received_at),
+                                None,
+                                None,
+                            )
+                        } else {
+                            public_stream_status(
+                                "ready",
+                                format!("{} subscriptions updated", stream_id),
+                                Some(last_data_received_at),
+                                None,
+                            )
+                        };
+                        emit_public_status(&app, stream_id, kind, &symbols, payload, 0);
                     }
                     None => return Ok(received_data),
                 }
@@ -1245,11 +1310,13 @@ async fn run_public_ws(
         stream_id,
         kind,
         &symbols,
-        "stopped",
-        format!("{} closed", stream_id),
+        public_stream_status(
+            "stopped",
+            format!("{} closed", stream_id),
+            None,
+            None,
+        ),
         0,
-        None,
-        None,
     );
     Ok(received_data)
 }
@@ -3033,28 +3100,171 @@ pub fn market_health_blockers(runtime: &MarketRuntime, environment: &str) -> Vec
     Vec::new()
 }
 
-fn emit_public_status<S: Into<String>>(
+fn public_channel_age_is_fresher(
+    current: Option<&PublicChannelReading>,
+    newest_ts: i64,
+) -> bool {
+    match current {
+        None => true,
+        Some(reading) => reading.newest_ts.is_none_or(|existing| newest_ts >= existing),
+    }
+}
+
+/// Extracts `(channel, instId, newest ts)` from a meta frame. These are the only
+/// meta channels the tooltip reports separately.
+fn public_frame_channel_reading(text: &str) -> Option<(String, String, i64)> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    let channel = value
+        .get("arg")
+        .and_then(|arg| arg.get("channel"))
+        .and_then(|channel| channel.as_str())?
+        .to_string();
+    if channel != "tickers" && channel != "trades" && channel != "trades-all" {
+        return None;
+    }
+    let inst_id = value
+        .get("arg")
+        .and_then(|arg| arg.get("instId"))
+        .and_then(|inst_id| inst_id.as_str())?
+        .to_string();
+    let newest_ts = value
+        .get("data")
+        .and_then(|data| data.as_array())?
+        .iter()
+        .filter_map(public_message_timestamp)
+        .max()?;
+    Some((channel, inst_id, newest_ts))
+}
+
+/// Records the newest `ts` and local arrival time for one meta channel. Ages are
+/// reported per channel so an aged trades/funding frame can no longer masquerade
+/// as ticker lag.
+fn record_public_channel_reading(
+    runtime: &MarketRuntime,
+    inst_id: &str,
+    channel: &str,
+    newest_ts: i64,
+    arrived_at_ms: i64,
+) {
+    let Ok(mut ages) = runtime.public_channel_ages.lock() else {
+        return;
+    };
+    let entry = ages.entry(inst_id.to_string()).or_default();
+    let slot = match channel {
+        "tickers" => &mut entry.tickers,
+        "trades" | "trades-all" => &mut entry.trades,
+        _ => return,
+    };
+    if !public_channel_age_is_fresher(Some(slot), newest_ts) {
+        return;
+    }
+    slot.newest_ts = Some(newest_ts);
+    slot.received_at_ms = Some(arrived_at_ms);
+}
+
+/// Ages for the whole meta stream: the outcome of the freshness bookkeeping, so
+/// the result depends only on which symbols and channels are known.
+fn public_meta_channel_delays(
+    runtime: &MarketRuntime,
+    symbols: &[String],
+    okx_now: i64,
+) -> (Option<i64>, Option<i64>) {
+    let Ok(mut ages) = runtime.public_channel_ages.lock() else {
+        return (None, None);
+    };
+    ages.retain(|inst_id, _| symbols.iter().any(|symbol| symbol == inst_id));
+    let read = |pick: fn(&PublicChannelAge) -> &PublicChannelReading| {
+        symbols
+            .iter()
+            .filter_map(|symbol| ages.get(symbol))
+            .filter_map(|entry| {
+                pick(entry)
+                    .newest_ts
+                    .map(|ts| okx_now.saturating_sub(ts).max(0))
+            })
+            .min()
+    };
+    (
+        read(|entry| &entry.tickers),
+        read(|entry| &entry.trades),
+    )
+}
+
+struct PublicStatusPayload {
+    state: &'static str,
+    status: String,
+    last_received_at: Option<i64>,
+    delay_ms: Option<i64>,
+    ticker_delay_ms: Option<i64>,
+    trades_delay_ms: Option<i64>,
+    queue_lag_ms: Option<i64>,
+}
+
+/// Snapshot for the meta stream: per-channel ages plus the local backlog probe.
+fn public_meta_status(
+    runtime: &MarketRuntime,
+    symbols: &[String],
+    state: &'static str,
+    status: String,
+    last_received_at: Option<i64>,
+    frame_delay_ms: Option<i64>,
+    local_queue_lag_ms: Option<i64>,
+) -> PublicStatusPayload {
+    let okx_now = current_okx_now_ms(runtime);
+    let (ticker_delay_ms, trades_delay_ms) =
+        public_meta_channel_delays(runtime, symbols, okx_now);
+    PublicStatusPayload {
+        state,
+        status,
+        last_received_at,
+        // Keep the frame-level figure as the fallback for streams/channels that
+        // carry no per-channel reading yet.
+        delay_ms: ticker_delay_ms.or(frame_delay_ms),
+        ticker_delay_ms,
+        trades_delay_ms,
+        queue_lag_ms: local_queue_lag_ms,
+    }
+}
+
+fn public_stream_status(
+    state: &'static str,
+    status: String,
+    last_received_at: Option<i64>,
+    delay_ms: Option<i64>,
+) -> PublicStatusPayload {
+    PublicStatusPayload {
+        state,
+        status,
+        last_received_at,
+        delay_ms,
+        ticker_delay_ms: None,
+        trades_delay_ms: None,
+        queue_lag_ms: None,
+    }
+}
+
+fn emit_public_status(
     app: &tauri::AppHandle,
     stream_id: &str,
     kind: PublicStreamKind,
     symbols: &[String],
-    state: &str,
-    status: S,
+    payload: PublicStatusPayload,
     reconnect_attempt: u32,
-    last_received_at: Option<i64>,
-    delay_ms: Option<i64>,
 ) {
     emit_market(
         app,
         MarketEvent::PublicStatus {
             stream_id: stream_id.to_string(),
             kind: kind.as_str().to_string(),
-            state: state.to_string(),
-            status: status.into(),
+            state: payload.state.to_string(),
+            status: payload.status,
             symbols: symbols.to_vec(),
             event_at: now_ms(),
-            last_received_at,
-            delay_ms,
+            last_received_at: payload.last_received_at,
+            delay_ms: payload.delay_ms,
+            ticker_delay_ms: payload.ticker_delay_ms,
+            trades_delay_ms: payload.trades_delay_ms,
+            queue_lag_ms: payload.queue_lag_ms,
             reconnect_attempt,
         },
     );
@@ -3329,6 +3539,133 @@ mod tests {
             ),
             DataRecoveryAction::Reconnect
         );
+    }
+
+    fn public_meta_frame(text: &str) -> (String, String, i64) {
+        public_frame_channel_reading(text).expect("frame should carry a channel reading")
+    }
+
+    #[test]
+    fn meta_channel_reading_targets_only_tickers_and_trades() {
+        let tickers = json!({
+            "arg": { "channel": "tickers", "instId": "BTC-USDT-SWAP" },
+            "data": [{ "instId": "BTC-USDT-SWAP", "last": "100", "ts": "5000" }]
+        })
+        .to_string();
+        assert_eq!(
+            public_meta_frame(&tickers),
+            ("tickers".to_string(), "BTC-USDT-SWAP".to_string(), 5_000)
+        );
+
+        let trades = json!({
+            "arg": { "channel": "trades-all", "instId": "ETH-USDT-SWAP" },
+            "data": [{ "tradeId": "1", "px": "1", "sz": "1", "side": "buy", "ts": "7000" }]
+        })
+        .to_string();
+        assert_eq!(
+            public_meta_frame(&trades),
+            ("trades-all".to_string(), "ETH-USDT-SWAP".to_string(), 7_000)
+        );
+
+        let books = json!({
+            "arg": { "channel": "books", "instId": "BTC-USDT-SWAP" },
+            "data": [{ "instId": "BTC-USDT-SWAP", "ts": "9000" }]
+        })
+        .to_string();
+        assert!(public_frame_channel_reading(&books).is_none());
+
+        let funding = json!({
+            "arg": { "channel": "funding-rate", "instId": "BTC-USDT-SWAP" },
+            "data": [{ "instId": "BTC-USDT-SWAP", "fundingTime": "9000" }]
+        })
+        .to_string();
+        assert!(public_frame_channel_reading(&funding).is_none());
+    }
+
+    #[test]
+    fn channel_readings_keep_the_newest_frame_and_are_pruned_to_visible_symbols() {
+        let runtime = MarketRuntime::default();
+        record_public_channel_reading(&runtime, "BTC-USDT-SWAP", "tickers", 2_000, 2_000);
+        assert!(public_channel_age_is_fresher(
+            Some(&PublicChannelReading {
+                newest_ts: Some(2_000),
+                received_at_ms: Some(2_000),
+            }),
+            2_000
+        ));
+        assert!(!public_channel_age_is_fresher(
+            Some(&PublicChannelReading {
+                newest_ts: Some(2_000),
+                received_at_ms: Some(2_000),
+            }),
+            1_000
+        ));
+        // A backlogged older frame must not roll the reading back.
+        record_public_channel_reading(&runtime, "BTC-USDT-SWAP", "tickers", 1_000, 1_000);
+        {
+            let ages = runtime.public_channel_ages.lock().expect("ages lock");
+            assert_eq!(
+                ages.get("BTC-USDT-SWAP")
+                    .and_then(|entry| entry.tickers.newest_ts),
+                Some(2_000)
+            );
+            assert!(ages
+                .get("BTC-USDT-SWAP")
+                .is_some_and(|entry| entry.trades.newest_ts.is_none()));
+        }
+
+        // A symbol that left the watchlist must not keep reporting an age.
+        record_public_channel_reading(&runtime, "ETH-USDT-SWAP", "tickers", 2_000, 2_000);
+        let symbols = vec!["BTC-USDT-SWAP".to_string()];
+        let (ticker_delay, trades_delay) =
+            public_meta_channel_delays(&runtime, &symbols, current_okx_now_ms(&runtime));
+        assert!(ticker_delay.is_some());
+        assert!(trades_delay.is_none());
+        let ages = runtime.public_channel_ages.lock().expect("ages lock");
+        assert_eq!(ages.len(), 1);
+        assert!(ages.contains_key("BTC-USDT-SWAP"));
+    }
+
+    #[test]
+    fn meta_channel_delays_report_the_freshest_symbol_per_channel() {
+        let mut ages: HashMap<String, PublicChannelAge> = HashMap::new();
+        ages.insert(
+            "BTC-USDT-SWAP".to_string(),
+            PublicChannelAge {
+                tickers: PublicChannelReading {
+                    newest_ts: Some(21_000),
+                    received_at_ms: Some(21_000),
+                },
+                trades: PublicChannelReading {
+                    newest_ts: Some(1_000),
+                    received_at_ms: Some(1_000),
+                },
+            },
+        );
+        ages.insert(
+            "ETH-USDT-SWAP".to_string(),
+            PublicChannelAge {
+                tickers: PublicChannelReading {
+                    newest_ts: Some(30_000),
+                    received_at_ms: Some(30_000),
+                },
+                trades: PublicChannelReading {
+                    newest_ts: Some(29_000),
+                    received_at_ms: Some(29_000),
+                },
+            },
+        );
+        let symbols = vec!["BTC-USDT-SWAP".to_string(), "ETH-USDT-SWAP".to_string()];
+        let read = |pick: fn(&PublicChannelAge) -> &PublicChannelReading| {
+            symbols
+                .iter()
+                .filter_map(|symbol| ages.get(symbol))
+                .filter_map(|entry| pick(entry).newest_ts)
+                .map(|ts| 30_000_i64.saturating_sub(ts).max(0))
+                .min()
+        };
+        assert_eq!(read(|entry| &entry.tickers), Some(0));
+        assert_eq!(read(|entry| &entry.trades), Some(1_000));
     }
 
     #[test]
