@@ -106,15 +106,11 @@ jobs:
         with:
           tagName: v__VERSION__
           releaseName: Desic Terminal v__VERSION__
-          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
-          # 历史问题：v0.1.36 发版时此处仍为 v0.1.35 文案，导致该 Release 说明与产物不符。
-          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
-          # 历史问题：v0.1.36 发版时此处仍为 v0.1.35 文案，导致该 Release 说明与产物不符。
-          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
-          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
-          # 每次发版必须同步更新本段：releaseBody 不会自动跟随版本号。
+          # 只有 __VERSION__ 占位会自动替换（tagName / releaseName / releaseBody 三处）；
+          # releaseBody 里的其余人工正文不会跟随版本号，每次发版必须逐句核对。
+          # 历史事故：v0.1.36 发版时说明文案仍是 v0.1.35 —— 本行保留作为警示。
           releaseBody: |
-            ## Desic Terminal v0.1.41
+            ## Desic Terminal v__VERSION__
 
             ### 策略研究三面板可拖拽调整宽度
             - 策略列表与代码编辑器、代码编辑器与参数栏之间的分界线现在可以直接拖动：热区 9px，光标变为左右拖拽样式，悬停/聚焦/拖动时高亮分界线。
