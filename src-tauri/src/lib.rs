@@ -13890,6 +13890,18 @@ async fn run_ai_stream(
         if let Some(system_prompt) = options.system_prompt.as_ref() {
             config.system_prompt = system_prompt.clone();
         }
+        // 语言规则必须落在**系统提示词**里。默认 systemPrompt 只有一句
+        // "Reply in the user's language"，而后台 Profile 运行没有用户消息可供推断，
+        // 模型于是跟着整段英文系统提示词用英文收尾——界面是中文、结论却是英文。
+        // 用户消息里的那句中文本地化指令（automation_response_instruction）会被
+        // 更长的英文系统提示词压过，所以这里按界面语言显式声明一次（空提示词时即为全部）。
+        let prompt_locale = crate::storage_config::automation_prompt_locale();
+        let language_rule = crate::ai_automation::response_language_rule(&prompt_locale);
+        config.system_prompt = if config.system_prompt.trim().is_empty() {
+            language_rule
+        } else {
+            format!("{}\n{language_rule}", config.system_prompt)
+        };
         if let Some(custom_rules) = options.custom_rules.as_ref() {
             config.custom_rules = custom_rules.clone();
         }

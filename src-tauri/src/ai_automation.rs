@@ -73,6 +73,38 @@ fn automation_prompt_uses_chinese(locale: &str) -> bool {
     matches!(locale, "zh-CN" | "zh-TW")
 }
 
+/// 与 `automation_response_instruction` 同一份语言映射，但以**系统提示词**的口吻给出。
+///
+/// 后台 Profile 运行没有用户消息可推断语言，而默认 systemPrompt 整段是英文，模型因此
+/// 用英文收尾；用户消息里那句中文本地化指令份量不够（实测：界面中文、结论英文）。
+/// 这条规则追加到系统提示词末尾，并显式声明它优先于提示词里其它语言偏好。
+pub(crate) fn response_language_rule(locale: &str) -> String {
+    let language = match locale {
+        "zh-CN" => "Simplified Chinese (简体中文)",
+        "zh-TW" => "Traditional Chinese (繁體中文)",
+        "ja-JP" => "Japanese (日本語)",
+        "ko-KR" => "Korean (한국어)",
+        "de-DE" => "German (Deutsch)",
+        "fr-FR" => "French (Français)",
+        "es-ES" => "Spanish (Español)",
+        "pt-BR" => "Brazilian Portuguese (Português do Brasil)",
+        "ru-RU" => "Russian (Русский)",
+        _ => "English",
+    };
+    // 只有中文运行有本地化的固定标题集；其它语言共用英文标题集，所以这一句按语言
+    // 条件拼接——任何语言都提示"用 ## 结论"只会让英文运行又漂回中文标题。
+    let headings = if automation_prompt_uses_chinese(locale) {
+        " The summary uses its localized heading set: `## 结论` / `## 事实与证据` / `## 冲突与缺口` / `## 观察条件` / `## 下一步`; never mix heading sets inside one summary."
+    } else {
+        " The summary uses the English heading set; never mix heading sets inside one summary."
+    };
+    format!(
+        "Response language: write every user-visible word — analysis, run summary, notes and notifications — in {language}. \
+         This follows the interface language the user selected and outranks any other language preference elsewhere in this prompt. \
+         Keep tool names, tool arguments, record IDs and code identifiers as-is; do not translate them.{headings}"
+    )
+}
+
 #[derive(Clone)]
 pub(crate) struct AiAutomationRuntime {
     notify: Arc<Notify>,
@@ -13464,6 +13496,59 @@ fn load_review_evidence(app: &tauri::AppHandle, episode_id: &str) -> Result<Valu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_system_prompt_language_rule_states_the_interface_language() {
+        let simplified = response_language_rule("zh-CN");
+        assert!(simplified.contains("Simplified Chinese (简体中文)"), "{simplified}");
+        // The heading reminder is what keeps the summary section set consistent.
+        assert!(simplified.contains("## 结论") && simplified.contains("## 下一步"), "{simplified}");
+        assert!(simplified.contains("outranks any other language preference"), "{simplified}");
+        assert!(simplified.contains("do not translate"), "tool ids must survive: {simplified}");
+        for (locale, needle) in [
+            ("zh-TW", "Traditional Chinese"),
+            ("ja-JP", "Japanese"),
+            ("ko-KR", "Korean"),
+            ("de-DE", "German"),
+            ("fr-FR", "French"),
+            ("es-ES", "Spanish"),
+            ("pt-BR", "Brazilian Portuguese"),
+            ("ru-RU", "Russian"),
+            ("en-US", "English"),
+        ] {
+            assert!(
+                response_language_rule(locale).contains(needle),
+                "{locale} must resolve to {needle}"
+            );
+        }
+        // An unknown locale falls back to English instead of producing a rule
+        // that names no language at all.
+        assert!(response_language_rule("xx-YY").contains("English"));
+    }
+
+    #[test]
+    fn the_response_language_rule_agrees_with_the_user_message_instruction() {
+        // Both mappings are derived from the same locale and must never disagree:
+        // a run whose system rule says Chinese but whose user message says English
+        // would put the model back in the original failure mode.
+        for locale in ["zh-CN", "zh-TW", "en-US", "ja-JP", "ru-RU"] {
+            let chinese = automation_prompt_uses_chinese(locale);
+            let system_rule = response_language_rule(locale);
+            // The Chinese heading example is the literal trigger the summary
+            // format rule keys off, so it may only appear for Chinese locales.
+            assert_eq!(
+                system_rule.contains("## 结论"),
+                chinese,
+                "{locale}: the Chinese heading example must follow the locale"
+            );
+            let instruction = automation_response_instruction(locale);
+            assert_eq!(
+                instruction.contains("中文") || instruction.contains("Chinese"),
+                chinese,
+                "{locale}: system rule and user instruction disagree about the language"
+            );
+        }
+    }
 
     #[test]
     fn new_profile_defaults_to_thirty_minute_maximum_silence() {
