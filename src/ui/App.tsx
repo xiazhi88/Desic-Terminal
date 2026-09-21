@@ -2689,7 +2689,11 @@ function TradingTerminal({
     if (last > 0 && cooldownMs > 0 && now - last < cooldownMs) return;
     privateHistorySyncRef.current[key] = -now;
     const maxPages = reason === "deep" ? 12 : reason === "startup" || reason === "reconnect" || reason === "fill" || reason === "periodic" ? 2 : 3;
-    void syncPrivateHistory({ accountId: accountItem.id, maxPages, force: true })
+    // Only an explicit user action spends OKX's strictest archive budget; the
+    // scheduled/startup ticks take the fast interactive pass and the stored
+    // snapshot is reused instead of re-querying the archive endpoints.
+    const forceNetwork = reason === "account-saved" || reason === "manual" || reason === "deep";
+    void syncPrivateHistory({ accountId: accountItem.id, maxPages, force: true, forceNetwork })
       .then((result) => {
         privateHistorySyncRef.current[key] = Date.now();
         if (!result) return;

@@ -245,6 +245,12 @@ export type PublicWsStatus = {
   eventAt: number;
   lastReceivedAt?: number | null;
   delayMs?: number | null;
+  /** Age of the newest ticker frame; never the max across meta channels. */
+  tickerDelayMs?: number | null;
+  /** Age of the newest trades frame, reported separately. */
+  tradesDelayMs?: number | null;
+  /** Frame arrival → event-loop lag: local backlog, not market data age. */
+  queueLagMs?: number | null;
   reconnectAttempt: number;
 };
 
@@ -253,6 +259,12 @@ export type PrivateHistorySyncRequest = {
   instId?: string;
   maxPages?: number;
   force?: boolean;
+  /**
+   * Runs the deep-history archive pass after the interactive pass returns. Only
+   * explicit user actions set it: scheduled and startup syncs keep serving the
+   * stored snapshot instead of re-spending OKX's 5-requests/2s archive budget.
+   */
+  forceNetwork?: boolean;
 };
 
 export type PrivateHistorySyncResult = {

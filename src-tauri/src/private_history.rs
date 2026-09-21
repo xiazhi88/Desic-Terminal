@@ -38,23 +38,126 @@ struct PrivateSyncEndpointState {
     next_retry_at: Option<i64>,
 }
 
-pub(crate) async fn okx_sync_private_history(
-    app: tauri::AppHandle,
-    request: PrivateHistorySyncRequest,
-) -> Result<PrivateHistorySyncResult, String> {
-    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
-    if !account.permissions.read {
-        return Err("OKX API Key 未包含 read 权限，无法补充历史数据".to_string());
+/// Attempts for one user-triggered history sync before the failure reaches the
+/// user. A local bind address is already an explicit timeout, so this only
+/// covers peer writers.
+const PRIVATE_HISTORY_SYNC_ATTEMPTS: u32 = 3;
+
+/// Endpoints whose data the interface shows as soon as a sync finishes, plus
+/// the account-bills read that repairs fills locally. These use OKX's standard
+/// private budget.
+const PHASE_A_SCOPES: [&str; 4] = [
+    "orders-history",
+    "fills",
+    "fills-history",
+    "positions-history",
+];
+
+/// Deep-history endpoints. OKX allows only 5 requests / 2 seconds per User ID on
+/// `/api/v5/account/bills-archive`, so spending these inside the command makes
+/// the caller wait on the strictest budget in the whole backfill.
+const PHASE_B_SCOPES: [&str; 3] = [
+    "orders-history-archive",
+    "account-bills",
+    "account-bills-archive",
+];
+
+/// Which scopes a single pass covers. The completion check requires all seven,
+/// so both phases together must still cover `REQUIRED_SCOPES` exactly.
+fn sync_pass_covers(scopes: &[&str], scope: &str) -> bool {
+    scopes.is_empty() || scopes.contains(&scope)
+}
+
+/// Pages per direction for one pass. The two-phase startup pass keeps this at
+/// one so the first screen is not waiting on a deep backfill.
+fn effective_page_budget(max_pages: u8, single_page: bool) -> u8 {
+    if single_page {
+        1
+    } else {
+        max_pages.max(1)
     }
+}
+
+/// Upper bound on the OKX requests one pass can spend.
+///
+/// `fetch_private_endpoint` runs one Newer and one Older direction, and each
+/// direction is capped by the page budget, so a scope costs at most two requests
+/// per page. The interactive pass is therefore 4 scopes x 2 x 1 page = 8 requests,
+/// and at the 200ms query interval that is the budget the first screen waits on.
+fn private_rest_request_bound(scopes: &[&str], max_pages: u8, single_page: bool) -> usize {
+    scopes.len() * 2 * effective_page_budget(max_pages, single_page) as usize
+}
+
+/// Sentinel stored in the stored cursors of a scope this pass does not cover.
+/// `fetch_private_endpoint` returns an empty result for it instead of calling
+/// OKX, and `mark_private_sync_endpoint_success` stores cursors only when they
+/// are real, so a skipped scope stays untouched for the next pass.
+const SCOPE_SKIPPED: &str = "\u{0}skipped";
+
+/// Per-phase request accounting. Requests counted here are the ones the phase
+/// actually sent, so a reader can tell a clean run from one that merely waited
+/// out a throttle, and `requests=<observed>/<bound>` shows a regression in the
+/// request count instead of leaving it to be inferred from timing.
+fn log_private_rest_pacing(phase: &str, account: &LocalAccount, bound: usize) {
+    let report = crate::okx_rate_limit::take_private_rest_pacing();
+    boot_log(&format!(
+        "private history {phase} phase pacing: requests={}/{} paced_waits={} paced_wait_ms={} (account={}, env={})",
+        report.requests,
+        bound,
+        report.waits,
+        report.waited_ms,
+        account.id,
+        account.environment
+    ));
+}
+
+fn empty_endpoint_sync_output() -> PrivateEndpointSyncOutput {
+    PrivateEndpointSyncOutput {
+        rows: Vec::new(),
+        newest_cursor: None,
+        oldest_cursor: None,
+        fetched: 0,
+        newer_fetched: 0,
+        older_fetched: 0,
+        retried: false,
+    }
+}
+
+
+/// True when a private-history sync failed because a peer writer holds the
+/// database lock rather than because of a real fault. Matched on the text
+/// because the error reaches this layer as a String.
+///
+/// The same three phrases are treated as transient by the automation
+/// scheduler (`ai_automation::is_transient_database_contention`); a change here
+/// belongs there too.
+fn is_private_history_database_contention(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    lowered.contains("database is locked")
+        || lowered.contains("database table is locked")
+        || lowered.contains("database is busy")
+}
+
+/// One sync attempt. Everything up to the first endpoint state sync is a read,
+/// so retrying with a fresh connection is safe.
+///
+/// A fresh Windows install can fail the very first sync with "database is
+/// locked" while startup migration, seeding, or antivirus file inspection holds
+/// the file. The user sees a red notification for what is a transient lock, so
+/// the attempt is retried with a shorter page budget instead of being reported.
+async fn sync_private_history_attempt(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+    inst_id: Option<String>,
+    max_pages: u8,
+    force: bool,
+    scopes: &[&str],
+    single_page: bool,
+) -> Result<PrivateHistorySyncResult, String> {
     let started_at = now_ms();
-    let inst_id = request
-        .inst_id
-        .as_deref()
-        .filter(|value| !value.trim().is_empty())
-        .map(|value| value.trim().to_string());
-    let max_pages = request.max_pages.unwrap_or(3).clamp(1, 20);
-    let mut conn = open_database(&app)?;
-    if !request.force.unwrap_or(false)
+    let max_pages = effective_page_budget(max_pages, single_page);
+    let mut conn = open_database(app)?;
+    if !force
         && private_sync_required_endpoints_complete(
             &conn,
             &account.id,
@@ -73,7 +176,7 @@ pub(crate) async fn okx_sync_private_history(
             // The remote snapshot is still fresh, but account bills or local
             // projections may have repaired a fill since the last network sync.
             previous.fills_upserted +=
-                backfill_trade_fills_from_account_bills(&mut conn, &account, inst_id.as_deref())?;
+                backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref())?;
             rebuild_position_episodes_for_account(
                 &mut conn,
                 &account.id,
@@ -98,10 +201,13 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "ordId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (orders_newest, orders_oldest, orders_retried) =
-        prepare_private_sync_endpoint(&conn, &account, inst_id.as_deref(), orders_endpoint.scope)?;
+    let (orders_newest, orders_oldest, orders_retried) = if sync_pass_covers(scopes, "orders-history") {
+        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), orders_endpoint.scope)?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let orders_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         orders_endpoint,
@@ -115,7 +221,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 orders_endpoint.scope,
                 &error,
@@ -125,13 +231,13 @@ pub(crate) async fn okx_sync_private_history(
     };
     result.orders_fetched = orders_sync.fetched;
     result.orders_upserted =
-        upsert_okx_history_orders(&mut conn, &account, "orders-history", &orders_sync.rows)?;
+        upsert_okx_history_orders(&mut conn, account, "orders-history", &orders_sync.rows)?;
     result.retry_endpoints += usize::from(orders_sync.retried);
     result.new_sync_endpoints += usize::from(orders_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(orders_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "orders-history",
         orders_sync.oldest_cursor.as_deref(),
@@ -147,15 +253,18 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "ordId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (archive_orders_newest, archive_orders_oldest, archive_orders_retried) =
+    let (archive_orders_newest, archive_orders_oldest, archive_orders_retried) = if sync_pass_covers(scopes, "orders-history-archive") {
         prepare_private_sync_endpoint(
             &conn,
-            &account,
+            account,
             inst_id.as_deref(),
             archive_orders_endpoint.scope,
-        )?;
+        )?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let archive_orders_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         archive_orders_endpoint,
@@ -169,7 +278,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 archive_orders_endpoint.scope,
                 &error,
@@ -180,7 +289,7 @@ pub(crate) async fn okx_sync_private_history(
     result.archive_orders_fetched = archive_orders_sync.fetched;
     result.archive_orders_upserted = upsert_okx_history_orders(
         &mut conn,
-        &account,
+        account,
         "orders-history-archive",
         &archive_orders_sync.rows,
     )?;
@@ -189,7 +298,7 @@ pub(crate) async fn okx_sync_private_history(
     result.backfill_endpoints += usize::from(archive_orders_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "orders-history-archive",
         archive_orders_sync.oldest_cursor.as_deref(),
@@ -205,15 +314,18 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "billId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (recent_fills_newest, recent_fills_oldest, recent_fills_retried) =
+    let (recent_fills_newest, recent_fills_oldest, recent_fills_retried) = if sync_pass_covers(scopes, "fills") {
         prepare_private_sync_endpoint(
             &conn,
-            &account,
+            account,
             inst_id.as_deref(),
             recent_fills_endpoint.scope,
-        )?;
+        )?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let recent_fills_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         recent_fills_endpoint,
@@ -227,7 +339,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 recent_fills_endpoint.scope,
                 &error,
@@ -237,13 +349,13 @@ pub(crate) async fn okx_sync_private_history(
     };
     result.recent_fills_fetched = recent_fills_sync.fetched;
     result.recent_fills_upserted =
-        upsert_okx_history_fills(&mut conn, &account, "fills", &recent_fills_sync.rows)?;
+        upsert_okx_history_fills(&mut conn, account, "fills", &recent_fills_sync.rows)?;
     result.retry_endpoints += usize::from(recent_fills_sync.retried);
     result.new_sync_endpoints += usize::from(recent_fills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(recent_fills_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "fills",
         recent_fills_sync.oldest_cursor.as_deref(),
@@ -259,10 +371,13 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "billId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (fills_newest, fills_oldest, fills_retried) =
-        prepare_private_sync_endpoint(&conn, &account, inst_id.as_deref(), fills_endpoint.scope)?;
+    let (fills_newest, fills_oldest, fills_retried) = if sync_pass_covers(scopes, "fills-history") {
+        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), fills_endpoint.scope)?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let fills_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         fills_endpoint,
@@ -276,7 +391,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 fills_endpoint.scope,
                 &error,
@@ -286,13 +401,13 @@ pub(crate) async fn okx_sync_private_history(
     };
     result.fills_fetched = fills_sync.fetched;
     result.fills_upserted =
-        upsert_okx_history_fills(&mut conn, &account, "fills-history", &fills_sync.rows)?;
+        upsert_okx_history_fills(&mut conn, account, "fills-history", &fills_sync.rows)?;
     result.retry_endpoints += usize::from(fills_sync.retried);
     result.new_sync_endpoints += usize::from(fills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(fills_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "fills-history",
         fills_sync.oldest_cursor.as_deref(),
@@ -308,10 +423,13 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "billId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (bills_newest, bills_oldest, bills_retried) =
-        prepare_private_sync_endpoint(&conn, &account, inst_id.as_deref(), bills_endpoint.scope)?;
+    let (bills_newest, bills_oldest, bills_retried) = if sync_pass_covers(scopes, "account-bills") {
+        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), bills_endpoint.scope)?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let bills_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         bills_endpoint,
@@ -325,7 +443,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 bills_endpoint.scope,
                 &error,
@@ -335,13 +453,13 @@ pub(crate) async fn okx_sync_private_history(
     };
     result.bills_fetched = bills_sync.fetched;
     result.bills_upserted =
-        upsert_okx_account_bills(&mut conn, &account, "account-bills", &bills_sync.rows)?;
+        upsert_okx_account_bills(&mut conn, account, "account-bills", &bills_sync.rows)?;
     result.retry_endpoints += usize::from(bills_sync.retried);
     result.new_sync_endpoints += usize::from(bills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(bills_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "account-bills",
         bills_sync.oldest_cursor.as_deref(),
@@ -357,15 +475,18 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "billId",
         extra_query: &[("instType", "SWAP")],
     };
-    let (archive_bills_newest, archive_bills_oldest, archive_bills_retried) =
+    let (archive_bills_newest, archive_bills_oldest, archive_bills_retried) = if sync_pass_covers(scopes, "account-bills-archive") {
         prepare_private_sync_endpoint(
             &conn,
-            &account,
+            account,
             inst_id.as_deref(),
             archive_bills_endpoint.scope,
-        )?;
+        )?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let archive_bills_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         archive_bills_endpoint,
@@ -379,7 +500,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 archive_bills_endpoint.scope,
                 &error,
@@ -390,7 +511,7 @@ pub(crate) async fn okx_sync_private_history(
     result.archive_bills_fetched = archive_bills_sync.fetched;
     result.archive_bills_upserted = upsert_okx_account_bills(
         &mut conn,
-        &account,
+        account,
         "account-bills-archive",
         &archive_bills_sync.rows,
     )?;
@@ -399,7 +520,7 @@ pub(crate) async fn okx_sync_private_history(
     result.backfill_endpoints += usize::from(archive_bills_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "account-bills-archive",
         archive_bills_sync.oldest_cursor.as_deref(),
@@ -413,7 +534,7 @@ pub(crate) async fn okx_sync_private_history(
     // fills-history. Repair missing fills from trade-class account bills so a
     // completed close cannot leave the local position episode open forever.
     result.fills_upserted +=
-        backfill_trade_fills_from_account_bills(&mut conn, &account, inst_id.as_deref())?;
+        backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref())?;
 
     let positions_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/account/positions-history",
@@ -421,14 +542,18 @@ pub(crate) async fn okx_sync_private_history(
         cursor_field: "uTime",
         extra_query: &[("instType", "SWAP")],
     };
-    let (positions_newest, positions_oldest, positions_retried) = prepare_private_sync_endpoint(
+    let (positions_newest, positions_oldest, positions_retried) = if sync_pass_covers(scopes, "positions-history") {
+        prepare_private_sync_endpoint(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         positions_endpoint.scope,
-    )?;
+    )?
+    } else {
+        (Some(SCOPE_SKIPPED.to_string()), None, false)
+    };
     let positions_sync = match fetch_private_endpoint(
-        &account,
+        account,
         inst_id.as_deref(),
         max_pages,
         positions_endpoint,
@@ -442,7 +567,7 @@ pub(crate) async fn okx_sync_private_history(
         Err(error) => {
             let _ = mark_private_sync_endpoint_failed(
                 &conn,
-                &account,
+                account,
                 inst_id.as_deref(),
                 positions_endpoint.scope,
                 &error,
@@ -452,13 +577,13 @@ pub(crate) async fn okx_sync_private_history(
     };
     result.positions_fetched = positions_sync.fetched;
     result.positions_upserted =
-        upsert_okx_history_positions(&mut conn, &account, &positions_sync.rows)?;
+        upsert_okx_history_positions(&mut conn, account, &positions_sync.rows)?;
     result.retry_endpoints += usize::from(positions_sync.retried);
     result.new_sync_endpoints += usize::from(positions_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(positions_sync.older_fetched > 0);
     mark_private_sync_endpoint_success(
         &conn,
-        &account,
+        account,
         inst_id.as_deref(),
         "positions-history",
         positions_sync.oldest_cursor.as_deref(),
@@ -485,6 +610,168 @@ pub(crate) async fn okx_sync_private_history(
         inst_id.as_deref(),
     )
     .map_err(|err| format!("历史持仓重建失败: {err}"))?;
+    Ok(result)
+}
+
+/// Runs the interactive part of a history backfill and leaves the deep-history
+/// endpoints to a follow-up pass.
+///
+/// A single unpaced pass over all seven endpoints spends 20+ requests, and OKX
+/// allows only 5 per 2 seconds per User ID on the archive endpoints. Waiting for
+/// that inside the command made a first-start sync take seconds before the user
+/// saw anything, so the pass is split: the endpoints the interface reads run
+/// first and return, the archive endpoints run afterwards on the strict budget
+/// and their result reaches the interface through the usual status refresh.
+async fn sync_private_history_phase(
+    app: &tauri::AppHandle,
+    account: &LocalAccount,
+    inst_id: &Option<String>,
+    max_pages: u8,
+    force: bool,
+    scopes: &[&str],
+    single_page: bool,
+    allow_retry: bool,
+) -> Result<PrivateHistorySyncResult, String> {
+    let mut attempt = 1_u32;
+    loop {
+        let result = sync_private_history_attempt(
+            app,
+            account,
+            inst_id.clone(),
+            max_pages,
+            force,
+            scopes,
+            single_page,
+        )
+        .await;
+        let message = match result {
+            Ok(value) => return Ok(value),
+            Err(message) => message,
+        };
+        if !allow_retry
+            || attempt >= PRIVATE_HISTORY_SYNC_ATTEMPTS
+            || !is_private_history_database_contention(&message)
+        {
+            return Err(message);
+        }
+        let delay = Duration::from_secs(1 << attempt);
+        boot_log(&format!(
+            "private history sync database contention (attempt {attempt}/{PRIVATE_HISTORY_SYNC_ATTEMPTS}, account={}, env={}): {message}; retrying in {} ms",
+            account.id,
+            account.environment,
+            delay.as_millis()
+        ));
+        sleep(delay).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+/// The deferred pass. It writes its own endpoint states, so a failure here only
+/// costs a later retry: the interactive pass has already succeeded.
+fn spawn_deferred_history_phase(
+    app: &tauri::AppHandle,
+    account: LocalAccount,
+    inst_id: Option<String>,
+    max_pages: u8,
+    force: bool,
+) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let started = Instant::now();
+        let _ = crate::okx_rate_limit::take_private_rest_pacing();
+        let outcome = sync_private_history_phase(
+            &app,
+            &account,
+            &inst_id,
+            max_pages,
+            force,
+            &PHASE_B_SCOPES,
+            true,
+            false,
+        )
+        .await;
+        match outcome {
+            Ok(result) => boot_log(&format!(
+                "private history archive phase done in {}ms (account={}, env={}, orders_archive={}, bills={}, bills_archive={})",
+                started.elapsed().as_millis(),
+                account.id,
+                account.environment,
+                result.archive_orders_upserted,
+                result.bills_upserted,
+                result.archive_bills_upserted
+            )),
+            Err(error) => boot_log(&format!(
+                "private history archive phase failed after {}ms (account={}, env={}): {error}",
+                started.elapsed().as_millis(),
+                account.id,
+                account.environment
+            )),
+        }
+        log_private_rest_pacing(
+            "archive",
+            &account,
+            private_rest_request_bound(&PHASE_B_SCOPES, max_pages, true),
+        );
+    });
+}
+
+pub(crate) async fn okx_sync_private_history(
+    app: tauri::AppHandle,
+    request: PrivateHistorySyncRequest,
+) -> Result<PrivateHistorySyncResult, String> {
+    let account = load_local_account_secret(&app, request.account_id.as_deref())?;
+    if !account.permissions.read {
+        return Err("OKX API Key 未包含 read 权限，无法补充历史数据".to_string());
+    }
+    let inst_id = request
+        .inst_id
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+        .map(|value| value.trim().to_string());
+    let force = request.force.unwrap_or(false);
+    let max_pages = request.max_pages.unwrap_or(3).clamp(1, 20);
+    let force_network = request.force_network.unwrap_or(false);
+    let started = Instant::now();
+    let _ = crate::okx_rate_limit::take_private_rest_pacing();
+    let result = sync_private_history_phase(
+        &app,
+        &account,
+        &inst_id,
+        max_pages,
+        force,
+        &PHASE_A_SCOPES,
+        true,
+        true,
+    )
+    .await?;
+    boot_log(&format!(
+        "private history interactive phase done in {}ms (account={}, env={}, orders={}, fills={}, positions={})",
+        started.elapsed().as_millis(),
+        account.id,
+        account.environment,
+        result.orders_upserted,
+        result.recent_fills_upserted + result.fills_upserted,
+        result.positions_upserted
+    ));
+    log_private_rest_pacing(
+        "interactive",
+        &account,
+        private_rest_request_bound(&PHASE_A_SCOPES, max_pages, true),
+    );
+    // The archive scopes must be filled whether or not this request asked for
+    // network work: the completion check requires all seven, so a user who never
+    // opens the history panel would otherwise keep seeing "缺少补数接口". An
+    // explicit request runs the pass straight away; a scheduled tick only runs it
+    // when the stored archive state is still incomplete.
+    let archives_still_missing = !private_sync_required_endpoints_complete(
+        &open_database(&app)?,
+        &account.id,
+        &account.environment,
+        inst_id.as_deref(),
+    )?;
+    if force_network || archives_still_missing {
+        spawn_deferred_history_phase(&app, account, inst_id, max_pages, force);
+    }
     Ok(result)
 }
 
@@ -751,6 +1038,9 @@ async fn fetch_private_endpoint(
     stored_oldest: Option<String>,
     retried: bool,
 ) -> Result<PrivateEndpointSyncOutput, String> {
+    if stored_newest.as_deref() == Some(SCOPE_SKIPPED) {
+        return Ok(empty_endpoint_sync_output());
+    }
     let mut rows = Vec::new();
     let mut newest_cursor = stored_newest.clone();
     let mut oldest_cursor = stored_oldest.clone();
@@ -1101,6 +1391,99 @@ fn private_sync_required_endpoints_complete(
 mod tests {
     use super::*;
 
+    /// The two-phase split must still cover every scope the completion check
+    /// requires; a missing scope keeps reporting "缺少补数接口" to the user.
+    #[test]
+    fn the_two_sync_phases_cover_every_required_scope_exactly_once() {
+        let mut union: Vec<&str> = PHASE_A_SCOPES
+            .iter()
+            .chain(PHASE_B_SCOPES.iter())
+            .copied()
+            .collect();
+        union.sort_unstable();
+        let mut expected = union.clone();
+        expected.dedup();
+        assert_eq!(union, expected, "a scope must not appear in both phases");
+
+        for scope in [
+            "orders-history",
+            "orders-history-archive",
+            "fills",
+            "fills-history",
+            "account-bills",
+            "account-bills-archive",
+            "positions-history",
+        ] {
+            assert!(
+                union.contains(&scope),
+                "required scope {scope} is missing from both phases"
+            );
+        }
+        assert_eq!(union.len(), 7, "the phases must not invent extra scopes");
+    }
+
+    #[test]
+    fn a_pass_only_touches_the_scopes_it_owns() {
+        assert!(sync_pass_covers(&PHASE_A_SCOPES, "positions-history"));
+        assert!(!sync_pass_covers(&PHASE_A_SCOPES, "account-bills-archive"));
+        assert!(sync_pass_covers(&PHASE_B_SCOPES, "account-bills-archive"));
+        assert!(!sync_pass_covers(&PHASE_B_SCOPES, "orders-history"));
+        // An empty list means "everything", which is how the pre-split path ran.
+        assert!(sync_pass_covers(&[], "orders-history"));
+        assert!(sync_pass_covers(&[], "account-bills-archive"));
+    }
+
+    #[test]
+    fn a_skipped_scope_is_a_cache_miss_instead_of_a_network_call() {
+        let skipped = empty_endpoint_sync_output();
+        assert_eq!(skipped.fetched, 0);
+        assert!(skipped.rows.is_empty());
+        assert!(skipped.newest_cursor.is_none());
+        assert!(!skipped.retried);
+    }
+
+    #[test]
+    fn the_interactive_pass_is_capped_to_one_page_per_direction() {
+        assert_eq!(effective_page_budget(5, true), 1);
+        assert_eq!(effective_page_budget(1, true), 1);
+        assert_eq!(effective_page_budget(5, false), 5);
+        // A zero page budget would fetch nothing, so it still has to ask once.
+        assert_eq!(effective_page_budget(0, false), 1);
+    }
+
+    /// The first screen waits on this: 4 scopes x 2 directions x 1 page.
+    #[test]
+    fn the_interactive_pass_stays_within_eight_requests() {
+        assert_eq!(private_rest_request_bound(&PHASE_A_SCOPES, 5, true), 8);
+        assert_eq!(private_rest_request_bound(&PHASE_B_SCOPES, 5, true), 6);
+        // A deep pass is allowed to spend more, and the bound has to follow.
+        assert_eq!(private_rest_request_bound(&PHASE_A_SCOPES, 3, false), 24);
+        assert_eq!(private_rest_request_bound(&[], 2, true), 0);
+        // At the 200ms query interval the interactive pass waits about 1.6s.
+        let interactive_wait_ms =
+            private_rest_request_bound(&PHASE_A_SCOPES, 5, true) as u64 * 200;
+        assert!(
+            interactive_wait_ms <= 2_000,
+            "the interactive pass must stay near 1.6s, would wait {interactive_wait_ms}ms"
+        );
+    }
+
+    #[test]
+    fn the_deferred_archive_pass_is_opt_in() {
+        let scheduled: PrivateHistorySyncRequest =
+            serde_json::from_str(r#"{"accountId":"account-a","maxPages":2,"force":true}"#)
+                .expect("scheduled payload");
+        assert_eq!(
+            scheduled.force_network, None,
+            "a scheduled tick must not re-spend the archive budget"
+        );
+        let explicit: PrivateHistorySyncRequest = serde_json::from_str(
+            r#"{"accountId":"account-a","maxPages":3,"force":true,"forceNetwork":true}"#,
+        )
+        .expect("explicit payload");
+        assert_eq!(explicit.force_network, Some(true));
+    }
+
     #[test]
     fn trade_account_bill_normalizes_close_long_fill() {
         let normalized = normalized_trade_fill_from_account_bill(json!({
@@ -1220,5 +1603,26 @@ mod tests {
             "billId": "funding-bill"
         }))
         .is_none());
+    }
+
+    #[test]
+    fn only_peer_lock_contention_is_retried() {
+        assert!(is_private_history_database_contention("database is locked"));
+        assert!(is_private_history_database_contention(
+            "数据库同步失败：database is locked"
+        ));
+        assert!(is_private_history_database_contention("Database Is Busy"));
+        assert!(is_private_history_database_contention(
+            "database table is locked"
+        ));
+        // Genuine faults must reach the user instead of being retried.
+        assert!(!is_private_history_database_contention(
+            "OKX API Key 未包含 read 权限，无法补充历史数据"
+        ));
+        assert!(!is_private_history_database_contention(
+            "database disk image is malformed"
+        ));
+        assert!(!is_private_history_database_contention(""));
+        assert_eq!(PRIVATE_HISTORY_SYNC_ATTEMPTS, 3);
     }
 }

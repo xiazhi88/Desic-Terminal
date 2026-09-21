@@ -7,6 +7,11 @@ pub struct PrivateHistorySyncRequest {
     pub inst_id: Option<String>,
     pub max_pages: Option<u8>,
     pub force: Option<bool>,
+    /// Runs the deep-history archive pass after the interactive pass returns.
+    /// Defaults to false, so a scheduled tick serves the stored snapshot instead
+    /// of re-spending OKX's strictest per-User-ID budget.
+    #[serde(default)]
+    pub force_network: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default)]
