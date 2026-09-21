@@ -51,6 +51,7 @@ mod intelligence;
 mod market_radar;
 mod market_radar_workspace;
 mod market_ws;
+mod okx_rate_limit;
 mod private_history;
 mod skill_runtime;
 mod storage_config;
@@ -895,6 +896,26 @@ struct MarketSnapshot {
     private_snapshots: HashMap<String, PrivateAccountSnapshot>,
 }
 
+/// Per-symbol freshness of the `public-meta` channels.
+///
+/// The tooltip used to report one number for the whole meta stream, so an aged
+/// frame in any single channel made the row look degraded. Keeping the newest
+/// `ts` and the local receive time per channel lets the UI report each channel
+/// on its own clock instead of a single max.
+#[derive(Clone, Copy, Default)]
+struct PublicChannelReading {
+    /// `ts` carried by the newest frame of the channel (OKX server time).
+    newest_ts: Option<i64>,
+    /// Local `now_ms()` when that frame was observed.
+    received_at_ms: Option<i64>,
+}
+
+#[derive(Clone, Default)]
+struct PublicChannelAge {
+    tickers: PublicChannelReading,
+    trades: PublicChannelReading,
+}
+
 #[derive(Clone)]
 struct MarketRuntime {
     public_tasks: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>>,
@@ -906,6 +927,7 @@ struct MarketRuntime {
     private_account_fingerprints: Arc<Mutex<HashMap<String, String>>>,
     store: Arc<Mutex<MarketStore>>,
     health: Arc<Mutex<MarketHealth>>,
+    public_channel_ages: Arc<Mutex<HashMap<String, PublicChannelAge>>>,
     private_trade: Arc<tokio::sync::Mutex<HashMap<String, PrivateTradeSocketHandle>>>,
     account_config_cache: Arc<Mutex<HashMap<String, CachedAccountConfig>>>,
 }
@@ -922,6 +944,7 @@ impl Default for MarketRuntime {
             private_account_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             store: Arc::new(Mutex::new(MarketStore::default())),
             health: Arc::new(Mutex::new(MarketHealth::default())),
+            public_channel_ages: Arc::new(Mutex::new(HashMap::new())),
             private_trade: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             account_config_cache: Arc::new(Mutex::new(HashMap::new())),
         }
@@ -967,6 +990,14 @@ enum MarketEvent {
         last_received_at: Option<i64>,
         #[serde(rename = "delayMs")]
         delay_ms: Option<i64>,
+        /// Age of the newest ticker frame (not the max across channels).
+        #[serde(rename = "tickerDelayMs")]
+        ticker_delay_ms: Option<i64>,
+        #[serde(rename = "tradesDelayMs")]
+        trades_delay_ms: Option<i64>,
+        /// Frame arrival → event-loop processing lag, the local backlog probe.
+        #[serde(rename = "queueLagMs")]
+        queue_lag_ms: Option<i64>,
         #[serde(rename = "reconnectAttempt")]
         reconnect_attempt: u32,
     },
@@ -21110,6 +21141,46 @@ fn open_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     Ok(conn)
 }
 
+/// Records what a failing connection actually landed on. A first launch can
+/// report "database is locked" without a peer holding a long transaction (for
+/// example a Windows profile where another process opens the database), and the
+/// journal mode and SQLite build are what tell the two cases apart.
+fn probe_database_connection(app: &tauri::AppHandle) -> Result<(), String> {
+    let path = database_path(app)?;
+    let read_pragmas = |conn: &Connection| -> Result<(String, i64, i64), String> {
+        let journal_mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .map_err(|err| err.to_string())?;
+        let busy_timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .map_err(|err| err.to_string())?;
+        let user_version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .map_err(|err| err.to_string())?;
+        Ok((journal_mode, busy_timeout, user_version))
+    };
+    let outcome = Connection::open(&path)
+        .map_err(|err| err.to_string())
+        .and_then(|conn| read_pragmas(&conn));
+    match outcome {
+        Ok((journal_mode, busy_timeout, user_version)) => {
+            boot_log(&format!(
+                "database probe: journal_mode={journal_mode} busy_timeout={busy_timeout}ms sqlite={} schema=V{user_version} path={}",
+                rusqlite::version(),
+                path.display()
+            ));
+            Ok(())
+        }
+        Err(error) => {
+            boot_log(&format!(
+                "database probe FAILED: {error}; path={}",
+                path.display()
+            ));
+            Err(error)
+        }
+    }
+}
+
 fn open_read_database(app: &tauri::AppHandle) -> Result<Connection, String> {
     app.state::<DatabaseRuntime>().wait_until_ready()?;
     let path = database_path(app)?;
@@ -23786,6 +23857,7 @@ where
             message: classify_reqwest_error("OKX Public REST", path, &err),
         })?;
     let status = response.status();
+    let retry_after = crate::okx_rate_limit::retry_after_seconds(response.headers());
     let body = response.text().await.map_err(|err| RestRequestError {
         retryable: reqwest_error_retryable(&err),
         retry_delay_ms: None,
@@ -23795,8 +23867,8 @@ where
         let retryable = http_status_retryable(status.as_u16());
         return Err(RestRequestError {
             retryable,
-            retry_delay_ms: if status.as_u16() == 429 {
-                Some(OKX_PUBLIC_REST_RATE_LIMIT_RETRY_MS)
+            retry_delay_ms: if retryable {
+                Some(crate::okx_rate_limit::default_backoff_ms(retry_after, 0))
             } else {
                 None
             },
@@ -23821,8 +23893,8 @@ where
         })?;
     if envelope.code != "0" {
         let retryable = okx_public_code_retryable(&envelope.code, &envelope.msg);
-        let retry_delay_ms = if envelope.code == "50011" {
-            Some(OKX_PUBLIC_REST_RATE_LIMIT_RETRY_MS)
+        let retry_delay_ms = if envelope.code == crate::okx_rate_limit::OKX_CODE_RATE_LIMITED {
+            Some(crate::okx_rate_limit::default_backoff_ms(retry_after, 0))
         } else {
             None
         };
@@ -24127,6 +24199,26 @@ fn okx_timestamp_error(body: &str) -> bool {
     })
 }
 
+/// OKX reports throttling as HTTP 429 with code 50011. History backfill issues
+/// several endpoints back to back at startup, and OKX is strictest on the
+/// archive endpoints, so a rate limit here is expected rather than a fault.
+fn okx_rate_limit_error(status: reqwest::StatusCode, body: &str) -> bool {
+    crate::okx_rate_limit::is_rate_limited(status, body)
+}
+
+/// Attempts allowed for one GET once it starts returning rate-limit responses.
+const OKX_PRIVATE_RATE_LIMIT_MAX_ATTEMPTS: u32 = 3;
+
+/// Backoff for a rate-limited GET: honour `Retry-After` when OKX sends it,
+/// otherwise step through the shared ladder.
+fn okx_rate_limit_delay_ms(retry_after_seconds: Option<u64>, rate_limit_attempt: u32) -> u64 {
+    crate::okx_rate_limit::default_backoff_ms(retry_after_seconds, rate_limit_attempt)
+}
+
+fn retry_after_seconds(headers: &reqwest::header::HeaderMap) -> Option<u64> {
+    crate::okx_rate_limit::retry_after_seconds(headers)
+}
+
 fn okx_private_http_error(
     source: &str,
     path: &str,
@@ -24175,14 +24267,34 @@ async fn okx_private_get_response(
     path: &str,
 ) -> Result<(reqwest::StatusCode, String), String> {
     let mut last_send_error = None;
+    let mut rate_limit_attempt = 0_u32;
     for attempt in 0..3 {
+        // Spend this path's documented budget before sending: OKX counts the
+        // limit per endpoint and per User ID, so an unpaced backfill throttles
+        // itself and anything else running on the same account.
+        let _slot = crate::okx_rate_limit::acquire_private_rest_slot(path).await?;
         let timestamp = okx_rest_timestamp()?;
         let headers = okx_private_headers(account, &timestamp, "GET", path, "")?;
         match client.get(url).headers(headers).send().await {
             Ok(response) => {
                 let status = response.status();
+                let retry_after = retry_after_seconds(response.headers());
                 match response.text().await {
-                    Ok(body) => return Ok((status, body)),
+                    Ok(body) => {
+                        // Retry throttling here instead of failing the caller:
+                        // the sync path treats the error as a failed endpoint,
+                        // which then needs a manual or scheduled re-run.
+                        if okx_rate_limit_error(status, &body)
+                            && rate_limit_attempt + 1 < OKX_PRIVATE_RATE_LIMIT_MAX_ATTEMPTS
+                        {
+                            let delay =
+                                okx_rate_limit_delay_ms(retry_after, rate_limit_attempt);
+                            rate_limit_attempt = rate_limit_attempt.saturating_add(1);
+                            sleep(Duration::from_millis(delay)).await;
+                            continue;
+                        }
+                        return Ok((status, body));
+                    }
                     Err(err) => {
                         let retryable = reqwest_error_retryable(&err);
                         last_send_error =
@@ -24961,8 +25073,20 @@ fn load_market_assets_summary(
         return Ok(None);
     }
     let content = fs::read_to_string(&index_path).map_err(|err| err.to_string())?;
-    let mut summary =
-        serde_json::from_str::<MarketAssetsSummary>(&content).map_err(|err| err.to_string())?;
+    let mut summary = match serde_json::from_str::<MarketAssetsSummary>(&content) {
+        Ok(summary) => summary,
+        // A truncated or partially written cache is a cache miss, not a fault:
+        // the caller refetches the contract list. Reporting the parse error
+        // surfaced a startup "EOF while parsing" failure with nothing the user
+        // could act on. Read errors above still propagate.
+        Err(error) => {
+            boot_log(&format!(
+                "market assets cache ignored ({}): {error}",
+                index_path.display()
+            ));
+            return Ok(None);
+        }
+    };
     if summary.cache_version < MARKET_ASSETS_CACHE_VERSION {
         summary.cache_version = MARKET_ASSETS_CACHE_VERSION;
     }
@@ -25616,6 +25740,10 @@ async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
         Ok(()) => {
             if !BOOTSTRAP_WORKERS_STARTED.swap(true, Ordering::AcqRel) {
                 boot_log("bootstrap: database ready; starting workers");
+                // Probe once the schema is final: this is the state every later
+                // writer runs under. A "database is locked" report with a healthy
+                // probe points at peer writers rather than the file itself.
+                let _ = probe_database_connection(app);
                 start_trade_execution_recovery(app.clone());
                 instrument_operations::start_instrument_operation_recovery(app.clone());
                 start_ai_automation_worker(app.clone());
@@ -30212,5 +30340,27 @@ mod tests {
             account_input.get("accountId").and_then(Value::as_str),
             Some("account-profile")
         );
+    }
+    #[test]
+    fn okx_rate_limit_helpers_delegate_to_the_shared_module() {
+        // The rules themselves are covered by okx_rate_limit::tests; this only
+        // pins that the private-REST path uses them.
+        assert!(okx_rate_limit_error(
+            reqwest::StatusCode::TOO_MANY_REQUESTS,
+            ""
+        ));
+        assert!(okx_rate_limit_error(
+            reqwest::StatusCode::OK,
+            r#"{"code":"50011","msg":"Too Many Requests"}"#
+        ));
+        assert!(!okx_rate_limit_error(
+            reqwest::StatusCode::OK,
+            r#"{"code":"50013","msg":"System busy"}"#
+        ));
+        let mut headers = reqwest::header::HeaderMap::new();
+        headers.insert(reqwest::header::RETRY_AFTER, "3".parse().expect("header"));
+        assert_eq!(retry_after_seconds(&headers), Some(3));
+        assert_eq!(okx_rate_limit_delay_ms(Some(3), 0), crate::okx_rate_limit::default_backoff_ms(Some(3), 0));
+        assert_eq!(OKX_PRIVATE_RATE_LIMIT_MAX_ATTEMPTS, 3);
     }
 }

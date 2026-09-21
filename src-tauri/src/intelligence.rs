@@ -727,11 +727,25 @@ fn retry_after_delay(value: Option<&str>) -> Option<Duration> {
         .map(Duration::from_secs)
 }
 
+/// Hard ceiling for this collector's cooldown. Smart Money backfill tolerates a
+/// much longer wait than an interactive request, so it keeps its own ladder
+/// while the parsing and clamping come from `okx_rate_limit`.
+const SMART_MONEY_RATE_LIMIT_MAX_BACKOFF_MS: u64 = 15_000;
+
 fn smart_money_rate_limit_retry_delay(attempt: u32, retry_after: Option<Duration>) -> Duration {
-    retry_after.unwrap_or_else(|| {
-        SMART_MONEY_RATE_LIMIT_RETRY_DELAYS
-            [(attempt as usize).min(SMART_MONEY_RATE_LIMIT_RETRY_DELAYS.len().saturating_sub(1))]
-    })
+    // An explicit Retry-After is the server's own instruction and outranks this
+    // client's ladder, so it is passed through unclamped.
+    if let Some(delay) = retry_after {
+        return delay;
+    }
+    let ladder: [u64; SMART_MONEY_RATE_LIMIT_RETRY_DELAYS.len()] =
+        SMART_MONEY_RATE_LIMIT_RETRY_DELAYS.map(|delay| delay.as_millis() as u64);
+    Duration::from_millis(crate::okx_rate_limit::backoff_ms(
+        None,
+        attempt,
+        &ladder,
+        SMART_MONEY_RATE_LIMIT_MAX_BACKOFF_MS,
+    ))
 }
 
 fn log_smart_money_rate_limit(
@@ -4737,14 +4751,19 @@ mod tests {
     fn smart_money_rate_limit_uses_retry_after_and_long_backoff() {
         assert_eq!(retry_after_delay(Some("12")), Some(Duration::from_secs(12)));
         assert_eq!(retry_after_delay(Some("invalid")), None);
-        assert_eq!(
-            smart_money_rate_limit_retry_delay(0, None),
-            Duration::from_secs(5)
+        // The ladder steps now carry the shared ceiling's jitter band, so they
+        // are asserted as a range instead of an exact second.
+        let first_step = smart_money_rate_limit_retry_delay(0, None);
+        assert!(
+            (Duration::from_secs(5)..=Duration::from_millis(5_150)).contains(&first_step),
+            "first step, got {first_step:?}"
         );
-        assert_eq!(
-            smart_money_rate_limit_retry_delay(1, None),
-            Duration::from_secs(15)
+        let second_step = smart_money_rate_limit_retry_delay(1, None);
+        assert!(
+            (Duration::from_secs(15)..=Duration::from_millis(15_150)).contains(&second_step),
+            "second step, got {second_step:?}"
         );
+        // An explicit Retry-After stays exact: it is the server's instruction.
         assert_eq!(
             smart_money_rate_limit_retry_delay(1, Some(Duration::from_secs(42))),
             Duration::from_secs(42)
