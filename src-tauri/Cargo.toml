@@ -1,6 +1,6 @@
 [package]
 name = "desic-terminal"
-version = "0.1.41"
+version = "0.2.0"
 description = "Desic Terminal desktop trading application"
 authors = ["Desic Terminal"]
 license = "MIT"
