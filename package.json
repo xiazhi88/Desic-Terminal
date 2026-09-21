@@ -28,6 +28,7 @@
     "test:ai-claude-integration": "node scripts/test-claude-cli-sidecar.mjs",
     "test:windows-process-policy": "node scripts/test-windows-child-process.mjs",
     "test:i18n": "node scripts/test-i18n.mjs",
+    "test:fastlane-gate": "node scripts/test-fastlane-code-quality-gate.mjs",
     "test:systematic-python": "node scripts/systematic/test-python-strategy-runner.mjs",
     "smoke:systematic-preview": "node scripts/systematic/smoke-systematic-preview.mjs",
     "smoke:systematic-month-preview": "node scripts/systematic/smoke-systematic-preview.mjs --month",

@@ -360,7 +360,9 @@ fn market_consumer_symbols(consumers: &MarketConsumerRegistry) -> Vec<String> {
         .collect()
 }
 
-fn reconcile_public_market_consumers(
+/// 把消费者注册表算出的订阅增量落到公开流上（增删都会自动生效）。
+/// `pub(crate)`：C29 快判采集器用同一个引用计数路径自起/释放"只订阅该 inst"的订阅。
+pub(crate) fn reconcile_public_market_consumers(
     app: &tauri::AppHandle,
     runtime: &MarketRuntime,
     diff: MarketSubscriptionDiff,

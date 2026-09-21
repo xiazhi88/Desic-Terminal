@@ -4748,6 +4748,7 @@ pub(crate) async fn systematic_strategy_ai_send_message(
                 "strategyId": strategy_id,
             })),
             strategy_session_kind: Some("editor".to_string()),
+            fastlane: None,
         };
         if let Err(message) = run_ai_stream(
             app_handle.clone(),
