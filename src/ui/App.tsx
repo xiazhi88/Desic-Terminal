@@ -203,6 +203,7 @@ import {
   testProxyConfig
 } from "../lib/okx";
 import { calcChange, fmtCompact, fmtDelay, fmtPrice } from "../lib/format";
+import { formatPublicStreamChannelNote, publicStreamAgeMs } from "../lib/publicStreamStatus";
 import { mergeTickerSnapshot } from "../lib/marketRadar";
 import {
   buildHistoricalFillMarkers,
@@ -1519,23 +1520,23 @@ function HotConnectionStatus({
   const publicRows = [...Object.values(publicStreamStatuses)]
     .sort((left, right) => publicStreamSortKey(left.streamId).localeCompare(publicStreamSortKey(right.streamId)))
     .map((status) => {
-      const receivedAge = typeof status.lastReceivedAt === "number"
-        ? Math.max(0, clockTick - status.lastReceivedAt)
-        : 0;
-      const delay = typeof status.delayMs === "number"
-        ? Math.max(0, status.delayMs + receivedAge)
-        : typeof status.lastReceivedAt === "number"
-          ? receivedAge
-          : undefined;
+      // See src/lib/publicStreamStatus.ts: the reported age is the larger of the
+      // data age and the snapshot age, never their sum.
+      const delay = publicStreamAgeMs(status, clockTick);
+      const detail = status.kind === "meta"
+        ? `${t("trading:tickerTradesFunding")} · ${status.symbols.join(", ")}`
+        : status.symbols.join(", ");
+      const note = status.kind === "meta"
+        ? formatPublicStreamChannelNote(status, fmtDelay, { trades: "成交", queue: "本地排队" })
+        : undefined;
       return {
         key: status.streamId,
         label: formatPublicStreamLabel(status, t),
         status: formatWsStatus(status.status, t),
         delay,
         state: status.state,
-        detail: status.kind === "meta"
-          ? `${t("trading:tickerTradesFunding")} · ${status.symbols.join(", ")}`
-          : status.symbols.join(", ")
+        detail,
+        note
       };
     });
   const privateRows = accounts
@@ -1589,7 +1590,7 @@ function HotConnectionStatus({
       <div className="connection-tooltip" id="wss-latency-tooltip" role="tooltip" onClick={(event) => event.stopPropagation()}>
         <div className="connection-tooltip-head"><strong>{t("trading:wssConnectionStatus")}</strong><span>{t("trading:recentDataMessages")}</span></div>
         {publicRows.length > 0
-          ? publicRows.map((row) => <ConnectionTooltipRow key={row.key} label={row.label} status={row.status} delay={row.delay} state={row.state} detail={row.detail} />)
+          ? publicRows.map((row) => <ConnectionTooltipRow key={row.key} label={row.label} status={row.status} delay={row.delay} state={row.state} detail={row.detail} note={row.note} />)
           : <ConnectionTooltipRow label="Public WS" status={formatWsStatus(publicWsStatus, t)} delay={dataDelay} state={publicWsStatus} />}
         <ConnectionTooltipRow label="Business WS" status={formatWsStatus(businessWsStatus, t)} delay={businessDataDelay} state={businessWsStatus} />
         {privateRows.length > 0
@@ -11148,13 +11149,16 @@ function ConnectionTooltipRow({
   status,
   delay,
   state,
-  detail
+  detail,
+  note
 }: {
   label: string;
   status: string;
   delay?: number;
   state?: string;
   detail?: string;
+  /** Secondary per-channel reading; rendered under the label. */
+  note?: string;
 }) {
   const normalized = `${state ?? ""} ${status}`.toLowerCase();
   const tone = normalized.includes("failed") || normalized.includes("认证失败")
@@ -11167,7 +11171,10 @@ function ConnectionTooltipRow({
   return (
     <div className="connection-tooltip-row">
       <span className={clsx("connection-state-dot", tone)} aria-hidden="true" />
-      <span className="connection-tooltip-label" title={detail}>{label}</span>
+      <span className="connection-tooltip-name">
+        <span className="connection-tooltip-label" title={detail}>{label}</span>
+        {note ? <span className="connection-tooltip-note">{note}</span> : null}
+      </span>
       <strong>{typeof delay === "number" ? fmtDelay(delay) : "--"}</strong>
       <small>{status}</small>
     </div>

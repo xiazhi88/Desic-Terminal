@@ -2286,6 +2286,12 @@ button {
   background: var(--danger);
 }
 
+.connection-tooltip-name {
+  display: grid;
+  min-width: 0;
+  row-gap: 1px;
+}
+
 .connection-tooltip-label {
   min-width: 0;
   overflow: hidden;
@@ -2293,6 +2299,16 @@ button {
   white-space: nowrap;
   color: rgba(255, 255, 255, 0.86);
   font-size: 11px;
+}
+
+.connection-tooltip-note {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--weak);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
 }
 
 .connection-tooltip-row strong {
