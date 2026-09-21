@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AiLocalCliStatus } from "../types";
 import { loadAiLocalAuthStatus } from "../lib/ai";
+import { aiProviderCatalogOptions, aiRecommendedProviderOptions, isBuiltInProviderId } from "../lib/aiProviderCatalog";
 import openaiIcon from "../assets/ai-providers/openai.svg";
 import anthropicIcon from "../assets/ai-providers/anthropic.svg";
 import geminiIcon from "../assets/ai-providers/gemini.svg";
@@ -16,6 +17,9 @@ import minimaxIcon from "../assets/ai-providers/minimax.svg";
 import zhipuIcon from "../assets/ai-providers/zhipu.svg";
 import { TerminalSelect, type TerminalSelectOption } from "./TerminalSelect";
 import "./AiProviderSetupFlow.css";
+
+/** Sentinel option: reveals the free-text Provider field for unlisted SDK ids. */
+const CUSTOM_PROVIDER_OPTION_VALUE = "__custom-provider-id__";
 
 export type AiProviderTemplateId =
   | "openai"
@@ -481,6 +485,30 @@ export function AiProviderSetupFlow({
     contextWindow: undefined,
   });
   const [validationMessage, setValidationMessage] = useState("");
+  // True while the custom connection is typing a Provider id that the catalog
+  // does not list; the dropdown stays the default path.
+  const [useCustomProviderId, setUseCustomProviderId] = useState(false);
+  // A custom connection only needs "which protocol", and every vendor/gateway
+  // is reached through one of the recommended ids. The full SDK list stays one
+  // click away for the rare endpoint that needs its own entry.
+  const [showAllProviders, setShowAllProviders] = useState(false);
+  const customProviderOptions = useMemo<TerminalSelectOption[]>(
+    () => [
+      ...(showAllProviders ? aiProviderCatalogOptions() : aiRecommendedProviderOptions()),
+      {
+        value: CUSTOM_PROVIDER_OPTION_VALUE,
+        label: t("settings:providerCustomOption"),
+        description: t("settings:providerCustomOptionDescription")
+      }
+    ],
+    [showAllProviders, t]
+  );
+  // True when the draft id is not one the visible options offer, so the select
+  // and the free-text field cannot disagree about what is selected.
+  const usesTypedProviderId =
+    useCustomProviderId ||
+    draft.provider.trim() === "" ||
+    !customProviderOptions.some((option) => option.value === draft.provider.trim());
   const [authMode, setAuthMode] = useState<"api-key" | "local-cli">("api-key");
   const [localStatuses, setLocalStatuses] = useState<AiLocalCliStatus[]>([]);
   const [checkingLocalAuth, setCheckingLocalAuth] = useState(false);
@@ -504,6 +532,7 @@ export function AiProviderSetupFlow({
     const baseName = template.id === "custom" ? t("settings:customModelName") : t(`settings:aiProviderName_${template.id}`);
     setSelectedId(template.id);
     setAuthMode("api-key");
+    setUseCustomProviderId(false);
     setDraft({
       name: createUniqueAiModelName(baseName, existingNames),
       provider: template.provider,
@@ -660,7 +689,42 @@ export function AiProviderSetupFlow({
         </label>
         <label>
           <span>Provider</span>
-          <input value={draft.provider} readOnly={!isCustom} onChange={(event) => updateDraft({ provider: event.target.value })} />
+          {isCustom ? (
+            <>
+              <TerminalSelect
+                value={usesTypedProviderId ? CUSTOM_PROVIDER_OPTION_VALUE : draft.provider.trim()}
+                options={customProviderOptions}
+                onChange={(value) => {
+                  if (value === CUSTOM_PROVIDER_OPTION_VALUE) {
+                    setUseCustomProviderId(true);
+                    return;
+                  }
+                  setUseCustomProviderId(false);
+                  updateDraft({ provider: value });
+                }}
+                ariaLabel="Provider"
+              />
+              {usesTypedProviderId ? (
+                <input
+                  aria-label="Provider"
+                  value={draft.provider}
+                  placeholder="openai-compatible"
+                  onChange={(event) => updateDraft({ provider: event.target.value })}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="ai-provider-catalog-toggle"
+                  aria-expanded={showAllProviders}
+                  onClick={() => setShowAllProviders((value) => !value)}
+                >
+                  {t(showAllProviders ? "settings:providerCatalogHideAll" : "settings:providerCatalogShowAll")}
+                </button>
+              )}
+            </>
+          ) : (
+            <input value={draft.provider} readOnly />
+          )}
           <small>{t(isCustom ? "settings:customProviderHelp" : "settings:templateProviderHelp")}</small>
         </label>
         <label className="wide ai-provider-model-field">

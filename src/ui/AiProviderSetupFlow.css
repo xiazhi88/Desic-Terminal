@@ -659,3 +659,22 @@
     transition: none;
   }
 }
+
+/* Keeps the Provider dropdown short by default; the full SDK list is opt-in. */
+.ai-provider-catalog-toggle {
+  justify-self: start;
+  border: none;
+  background: none;
+  padding: 0;
+  color: var(--weak);
+  font: inherit;
+  font-size: 10px;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+
+.ai-provider-catalog-toggle:hover,
+.ai-provider-catalog-toggle:focus-visible {
+  color: var(--text);
+}

@@ -2647,10 +2647,22 @@ function TradingTerminal({
       // code so a report identifies where the throw came from.
       const origin = lines.slice(1).find((line) => /\.(t|j)sx?|\.mjs/.test(line))?.trim();
       const summary = detail && origin ? `${detail} @ ${origin}` : detail;
+      // A classified, self-healing backend failure is not a frontend fault:
+      // report the explanation it carries instead of the raw envelope.
+      const parsed = parseClassifiedOkxError(entry.error ?? entry.message);
+      const retryable = parsed?.retryable === true;
       pushNotification({
-        kind: "error",
-        title: entry.level === "fatal" ? uiText("前端致命异常", "Fatal frontend error") : uiText("前端代码异常", "Frontend error"),
-        message: summary ? `${entry.message}${chineseUi ? "：" : ": "}${summary}` : entry.message
+        kind: retryable ? "warning" : "error",
+        title: entry.level === "fatal"
+          ? uiText("前端致命异常", "Fatal frontend error")
+          : retryable
+            ? uiText("后台任务稍后重试", "Background task will retry")
+            : uiText("前端代码异常", "Frontend error"),
+        message: parsed
+          ? `${entry.message}${chineseUi ? "：" : ": "}${formatUiErrorMessage(entry.error ?? entry.message)}`
+          : summary
+            ? `${entry.message}${chineseUi ? "：" : ": "}${summary}`
+            : entry.message
       });
     });
   }, [chineseUi, pushNotification, uiText]);
@@ -2718,9 +2730,19 @@ function TradingTerminal({
       })
       .catch((error) => {
         privateHistorySyncRef.current[key] = 0;
-        const message = error instanceof Error ? error.message : String(error);
-        logger.error("private OKX history sync failed", error, { reason, accountId: accountItem.id });
-        pushNotification({ kind: "warning", title: uiText("历史交易数据补充失败", "Trade history backfill failed"), message });
+        const message = formatUiErrorMessage(error);
+        // A retryable classification (throttling, OKX 5xx) is retried by the
+        // scheduled sync, so it must not raise a red error card.
+        if (isRetryableClassifiedError(error)) {
+          logger.warn("private OKX history sync deferred", { reason, accountId: accountItem.id, message });
+        } else {
+          logger.error("private OKX history sync failed", error, { reason, accountId: accountItem.id });
+        }
+        pushNotification({
+          kind: isRetryableClassifiedError(error) ? "warning" : "error",
+          title: uiText("历史交易数据补充失败", "Trade history backfill failed"),
+          message
+        });
       });
   }, [chineseUi, pushNotification, refreshPrivateHistoryStatus, uiText]);
 
@@ -11110,6 +11132,28 @@ function parseClassifiedOkxError(error: unknown): ClassifiedOkxError | null {
     return null;
   }
   return null;
+}
+
+/**
+ * Human-readable text for a backend error.
+ *
+ * `classified_okx_error` answers with a JSON envelope carrying
+ * `userMessage`/`suggestion`, and history sync surfaces it verbatim, so a
+ * notification used to show the raw blob instead of the explanation inside it.
+ */
+function formatUiErrorMessage(error: unknown) {
+  const raw = error instanceof Error ? error.message : String(error);
+  const parsed = parseClassifiedOkxError(error);
+  if (!parsed) return raw;
+  const category = parsed.category ? formatOkxErrorCategory(parsed.category) : "";
+  const head = [category, parsed.userMessage || parsed.message || raw].filter(Boolean).join("：");
+  const origin = [parsed.operation, parsed.code ? `OKX ${parsed.code}` : ""].filter(Boolean).join(" · ");
+  return [head, parsed.suggestion, origin].filter(Boolean).join("；");
+}
+
+/** True when the backend already classified this as a self-healing failure. */
+function isRetryableClassifiedError(error: unknown) {
+  return parseClassifiedOkxError(error)?.retryable === true;
 }
 
 function formatTradeErrorMessage(error: unknown) {
