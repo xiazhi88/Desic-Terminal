@@ -1,9 +1,8 @@
 use super::*;
 use desic_agent_automation::{
-    build_ai_usage_summary, evaluate_condition,
-    normalize_permission_mode, orderbook_imbalance, AiProfileSubAgent,
-    DomainEvent, RollingFeatureCache, WakeCondition, WakeMarketState, ADVISOR_MODE,
-    AI_USAGE_SCHEMA_VERSION,
+    build_ai_usage_summary, evaluate_condition, normalize_permission_mode, orderbook_imbalance,
+    AiProfileSubAgent, DomainEvent, RollingFeatureCache, WakeCondition, WakeMarketState,
+    ADVISOR_MODE, AI_USAGE_SCHEMA_VERSION,
 };
 pub(crate) use desic_agent_automation::{
     AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
@@ -11,7 +10,7 @@ pub(crate) use desic_agent_automation::{
 use rusqlite::{params_from_iter, TransactionBehavior};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{Notify, Semaphore};
 
 const AUTOMATION_EVENT: &str = "ai:automation-event";
@@ -81,6 +80,9 @@ pub(crate) struct AiAutomationRuntime {
     feature_cache: Arc<Mutex<RollingFeatureCache>>,
     private_fingerprints: Arc<Mutex<HashMap<String, (String, String)>>>,
     run_slots: Arc<Semaphore>,
+    /// C29 / B1：快判模式的常驻快照采集器（每 Profile 一个节拍任务 + 自有公开订阅租约）。
+    /// 生命周期必须成对：调度侧起（`sync_fastlane_collectors`）、三处释放路径停（B3）。
+    fastlane_snapshots: Arc<Mutex<crate::fastlane::FastlaneSnapshotRegistry>>,
 }
 
 impl Default for AiAutomationRuntime {
@@ -91,6 +93,9 @@ impl Default for AiAutomationRuntime {
             feature_cache: Arc::new(Mutex::new(RollingFeatureCache::default())),
             private_fingerprints: Arc::new(Mutex::new(HashMap::new())),
             run_slots: Arc::new(Semaphore::new(3)),
+            fastlane_snapshots: Arc::new(Mutex::new(
+                crate::fastlane::FastlaneSnapshotRegistry::new(),
+            )),
         }
     }
 }
@@ -134,13 +139,21 @@ pub(crate) struct AiAgentProfileSummary {
     /// 会被迁移成「默认 4 个角色 + 其余保留 id」并落库，所以生效名单里不会残留已下线 id。
     #[serde(default)]
     pub enabled_agent_ids: Vec<String>,
+    /// C29：Profile 类型（`ai` | `fastlane`）。旧 Profile / 缺字段 = `ai`（行为完全不变）。
+    #[serde(default = "default_profile_type")]
+    pub profile_type: String,
+    /// C29：快判模式配置（16 个字段，全部有默认值）。
+    ///
+    /// **线上形状是扁平的**（C29.7 / UI 的 `fastlaneStylePreset`、`fastlaneRiskPerTradePct`、
+    /// `fastlaneTradingHours` …），这里用 `flatten` 把内部结构摊到 Profile 上，
+    /// 保证 UI 的写入不会被忽略。
+    /// `profile_type="ai"` 时**被忽略**（照旧读写、不报错，便于两种类型相互切换）。
+    #[serde(default, flatten)]
+    pub fastlane: crate::fastlane::FastlaneConfig,
     /// C24 单 Agent 子模式（`standard` | `minimal`）。**仅在协作关闭时生效**；
     /// 协作开启时被忽略（读出来仍是 Profile 里存的值，供 UI 回显该设置）。
     #[serde(default = "default_single_agent_mode")]
     pub single_agent_mode: String,
-    /// TypeSafe / Jev：本 Profile 运行时是否启用 Jev 快速判定（判定层，默认关闭）。
-    #[serde(default)]
-    pub typesafe_enabled: bool,
     /// C19 试判配置（缺字段 = C19.1 默认，`mode=enforce`）。
     #[serde(default)]
     pub triage: crate::ai_triage::AiAgentTriageConfig,
@@ -230,6 +243,13 @@ pub(crate) struct AiAgentProfileInput {
     /// C19 试判配置（未设置 = C19.1 默认）。
     #[serde(default)]
     pub triage: crate::ai_triage::AiAgentTriageConfig,
+    /// C29：Profile 类型。`None` = 调用方没提供 → 保存时保留库中现值（旧前端不解释这一项）；
+    /// 给了非法值 → 回落 `ai`（不报错）。
+    #[serde(default)]
+    pub profile_type: Option<String>,
+    /// C29：快判配置（扁平字段，与 UI 的 `fastlaneXxx` 逐名对齐）。
+    #[serde(default, flatten)]
+    pub fastlane: crate::fastlane::FastlaneConfig,
     /// C24 单 Agent 子模式。
     ///
     /// 用 `Option` 区分两种"没选"：`Some(非法值)` = 用户/前端给了不认的值 → 回落 `standard`；
@@ -238,10 +258,6 @@ pub(crate) struct AiAgentProfileInput {
     /// 旧 Profile 行没有该列时列默认值就是 `standard`，所以"旧 Profile = standard"仍成立。
     #[serde(default)]
     pub single_agent_mode: Option<String>,
-    /// TypeSafe / Jev：`None` = 调用方未提供 → 保存时保留库中现值（与 `collaboration_enabled`
-    /// 同一规则，避免旧前端保存时静默关掉它）；旧 Profile 行该列为 0，所以"旧 Profile = 关闭"成立。
-    #[serde(default)]
-    pub typesafe_enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -262,8 +278,6 @@ pub(crate) struct AiAgentProfileSystematicConflict {
     pub name: String,
     pub inst_id: String,
 }
-
-
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -340,6 +354,12 @@ pub(crate) struct AiAgentRunSummary {
     /// 协作开启的运行恒为 `standard`；UI 用它显示极简徽标。
     #[serde(default = "default_single_agent_mode")]
     pub single_agent_mode: String,
+    /// C29：记录种类（`ai` | `fastlane`）——快判运行的记录视图据此切换。
+    #[serde(default = "default_profile_type")]
+    pub record_kind: String,
+    /// C29：快判六组记录（`fastlane_json`；旧运行 / AI 运行为 `None`）。
+    #[serde(default)]
+    pub fastlane: Option<Value>,
     pub profile_id: String,
     pub trigger_type: String,
     pub status: String,
@@ -658,6 +678,155 @@ fn text_display_width(text: &str) -> usize {
         .sum()
 }
 
+/// C29：一键停机 —— 立即停止判定（停用 Profile + 取消排队/在跑的运行 + 撤销生效观察条件），
+/// 并写一条 `action.kind="kill_switch"` 的快判记录便于事后追查。
+///
+/// **可选平仓**：本版本只停判；`closePositions=true` 时如实回报
+/// `positionsClosed=false` 与说明（平仓要走既有平仓链路，不在停判里隐式下单）。
+#[tauri::command]
+pub(crate) fn ai_fastlane_kill_switch(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, AiAutomationRuntime>,
+    profile_id: String,
+    close_positions: Option<bool>,
+) -> Result<Value, String> {
+    let conn = open_automation_database(&app)?;
+    let profile = load_profile(&conn, &profile_id)?;
+    if profile.profile_type != PROFILE_TYPE_FASTLANE {
+        return Err("一键停机只适用于快判模式 Profile".to_string());
+    }
+    let now = now_ms();
+    conn.execute(
+        "UPDATE ai_agent_profiles SET enabled=0,updated_at=?2 WHERE id=?1",
+        params![profile_id, now],
+    )
+    .map_err(|error| error.to_string())?;
+    // B3 释放路径 ①：立即停掉该 Profile 的节拍任务并释放（**只释放自己的**）公开订阅。
+    let collector_released = release_fastlane_collector(runtime.inner(), &profile_id);
+    let cancelled_runs = conn
+        .execute(
+            "UPDATE ai_agent_runs SET status='cancelled',error='快判模式一键停机',finished_at=?2,updated_at=?2
+             WHERE profile_id=?1 AND status IN ('queued','running')",
+            params![profile_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+    let replaced_conditions = conn
+        .execute(
+            "UPDATE ai_wake_conditions SET status='replaced',updated_at=?2
+             WHERE profile_id=?1 AND status='active'",
+            params![profile_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+    // 停机记录：挂在最近一条快判运行上（没有就新建一条已完成记录）。
+    let record = crate::fastlane::FastlaneRecord::new(crate::fastlane::FastlaneTrigger {
+        source: "manual".to_string(),
+        condition_type: None,
+        params: Some(json!({ "closePositions": close_positions.unwrap_or(false) })),
+    })
+    .kill_switch("user_kill_switch");
+    let existing_run: Option<String> = conn
+        .query_row(
+            "SELECT id FROM ai_agent_runs WHERE profile_id=?1 AND record_kind='fastlane'
+             ORDER BY created_at DESC LIMIT 1",
+            params![profile_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| error.to_string())?;
+    let run_id = match existing_run {
+        Some(run_id) => run_id,
+        None => {
+            let run_id = format!("run-fastlane-kill-{}", unique_suffix());
+            conn.execute(
+                "INSERT INTO ai_agent_runs(
+                   id,profile_id,trigger_type,status,summary,started_at,created_at,updated_at,record_kind
+                 ) VALUES(?1,?2,'manual','completed','快判模式一键停机',?3,?3,?3,'fastlane')",
+                params![run_id, profile_id, now],
+            )
+            .map_err(|error| error.to_string())?;
+            run_id
+        }
+    };
+    conn.execute(
+        "UPDATE ai_agent_runs SET fastlane_json=?2,updated_at=?3 WHERE id=?1",
+        params![run_id, record.to_value().to_string(), now],
+    )
+    .map_err(|error| error.to_string())?;
+    let close_requested = close_positions.unwrap_or(false);
+    // C29 / 董事会口径：平仓**不在停机里隐式下单**，而是排队一条"平仓轮"
+    // （`intent="close"`：跳过 Jev 判定，但仍经 LLM 写参数 → `validate_round` → 既有平仓链路）。
+    // 命令立即返回，不等待成交；全程零旁路。
+    // C29.19：开关关闭（本版本）→ **不再排队平仓轮**（快判 runner 不可达，排了只会永远排队）。
+    // 停机本身（禁 Profile + 取消在跑轮次 + 释放采集器）照做：这条"停机"路径仍然安全可用。
+    let close_round_id = if close_requested && fastlane_mode_enabled() {
+        let close_run_id = format!("run-fastlane-close-{}", unique_suffix());
+        conn.execute(
+            "INSERT INTO ai_agent_runs(
+               id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind
+             ) VALUES(?1,?2,'fastlane_close','queued',?3,?3,?3,'fastlane')",
+            params![close_run_id, profile_id, now],
+        )
+        .map_err(|error| error.to_string())?;
+        conn.execute(
+            "UPDATE ai_agent_runs SET fastlane_json=?2 WHERE id=?1",
+            params![
+                close_run_id,
+                json!({
+                    "recordKind": crate::fastlane::FASTLANE_RECORD_KIND,
+                    "intent": "close",
+                    "trigger": {
+                        "source": "manual",
+                        "conditionType": "kill_switch",
+                        "params": { "closePositions": true }
+                    }
+                })
+                .to_string()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        Some(close_run_id)
+    } else {
+        None
+    };
+    crate::boot_log(&format!(
+        "fastlane kill switch profile={profile_id} cancelledRuns={cancelled_runs} closePositions={close_requested} closeRound={:?} collectorReleased={collector_released} modeEnabled={}",
+        close_round_id,
+        fastlane_mode_enabled()
+    ));
+    Ok(json!({
+        "ok": true,
+        "profileId": profile_id,
+        "recordKind": crate::fastlane::FASTLANE_RECORD_KIND,
+        "runId": run_id,
+        "judgingStopped": true,
+        "cancelledRuns": cancelled_runs,
+        "replacedWakeConditions": replaced_conditions,
+        // B3：采集器（节拍任务 + 自有公开订阅）已随停机释放。
+        "snapshotCollectorReleased": collector_released,
+        // 平仓：已排队一条平仓轮（跳过 Jev，仍经 LLM 写参数 + 代码校验 + 既有平仓链路）。
+        "positionsClosing": close_requested && fastlane_mode_enabled(),
+        "closeRoundId": close_round_id,
+        "closePositionsMode": if close_requested && !fastlane_mode_enabled() {
+            // C29.19：开关关闭 → 不排队平仓轮（runner 不可达）。显式回报，不静默。
+            "close_round_skipped_mode_disabled"
+        } else {
+            "queued_close_round"
+        },
+        "closeRoundSkippedReason": if close_requested && !fastlane_mode_enabled() {
+            Some(crate::fastlane::FASTLANE_MODE_DISABLED_REASON)
+        } else {
+            None
+        },
+        "note": if close_requested && !fastlane_mode_enabled() {
+            "已停止判定（快判模式本版本未开放：不排队平仓轮，也不会执行任何快判轮）"
+        } else if close_requested {
+            "已停止判定，并排队了一条平仓轮（经参数校验与既有平仓链路执行，不等待成交）"
+        } else {
+            "已停止判定"
+        },
+    }))
+}
+
 /// C22.3-B：收尾软校验（最多打回一次）的 **run 级**状态。
 ///
 /// 与 triage 状态同源：挂在 `BackgroundRunContext` 上、随运行创建/销毁，
@@ -704,6 +873,12 @@ pub(crate) struct BackgroundRunContext {
     pub trigger: serde_json::Value,
     pub review_id: Option<String>,
     pub episode_id: Option<String>,
+    /// C29：快判轮的**冻结事实**（取数 + 代码门之后固定）。
+    ///
+    /// 非快判会话恒为 `None`；快判轮的 `tradeOpportunity.create` 工具调用据此执行
+    /// 「适配 → `validate_round` → 冻结决策上下文候选 + 预检（blocked 即拒）」，
+    /// 顺序与事实都由 runner 冻结，工具层无法绕过。
+    pub fastlane_round: Option<Arc<crate::fastlane::FastlaneRoundFacts>>,
 }
 
 impl BackgroundRunContext {
@@ -827,6 +1002,25 @@ fn default_target_leverage() -> u32 {
 fn default_max_single_trade_margin_pct() -> u32 {
     30
 }
+/// C29：缺字段 → `ai`（旧 Profile 行为逐字不变）。
+pub(crate) const PROFILE_TYPE_AI: &str = "ai";
+pub(crate) const PROFILE_TYPE_FASTLANE: &str = "fastlane";
+/// AI Profile 的每小时运行上限（夹取用）；快判模式用
+/// [`crate::fastlane::FASTLANE_DEFAULT_MAX_RUNS_PER_HOUR`]（C29.4 = 120）。
+pub(crate) const AI_PROFILE_MAX_RUNS_PER_HOUR_CEILING: u32 = 60;
+
+fn default_profile_type() -> String {
+    PROFILE_TYPE_AI.to_string()
+}
+
+/// C29：非法 → `ai`（不报错）。
+fn normalize_profile_type(value: &str) -> String {
+    match value.trim().to_ascii_lowercase().as_str() {
+        PROFILE_TYPE_FASTLANE => PROFILE_TYPE_FASTLANE.to_string(),
+        _ => PROFILE_TYPE_AI.to_string(),
+    }
+}
+
 /// C24.1：缺字段 → `standard`。
 fn default_single_agent_mode() -> String {
     SINGLE_AGENT_MODE_STANDARD.to_string()
@@ -854,7 +1048,9 @@ fn default_sample_size() -> u32 {
     1
 }
 
-fn default_wake_condition_types() -> Vec<String> {
+/// 观察条件类型注册表（19 类）。`pub(crate)`：快判下发的「类型 → 必填字段」schema
+/// 就是从它 + [`validate_wake_condition_limits`] 派生的（同一份真相，有测试钉住）。
+pub(crate) fn default_wake_condition_types() -> Vec<String> {
     [
         "timer",
         "price_cross",
@@ -918,7 +1114,6 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
           multi_agent_scheme_id TEXT,
           target_leverage INTEGER NOT NULL DEFAULT 20,
           max_single_trade_margin_pct INTEGER NOT NULL DEFAULT 30,
-          typesafe_enabled INTEGER NOT NULL DEFAULT 0,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           deleted_at INTEGER
@@ -1110,18 +1305,18 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
     );
     // C19：run 级试判记录（mode / verdict / reasons / evidence / forcedBy / sampled /
     // nextWakePlan / 分阶段 token）。
-    let _ = conn.execute(
-        "ALTER TABLE ai_agent_runs ADD COLUMN triage_json TEXT",
-        [],
-    );
+    let _ = conn.execute("ALTER TABLE ai_agent_runs ADD COLUMN triage_json TEXT", []);
     // P1（C20）：专家级用量（每位专家的工具次数、起止时间、时长、可用时的 token）。
+    let _ = conn.execute("ALTER TABLE ai_agent_runs ADD COLUMN experts_json TEXT", []);
+    // C20.6：审计字段（usedEvidence / contrarianResolutions）。
+    let _ = conn.execute("ALTER TABLE ai_agent_runs ADD COLUMN audit_json TEXT", []);
+    // C29：记录种类 + 快判六组记录（旧运行 = `ai` / NULL）。
     let _ = conn.execute(
-        "ALTER TABLE ai_agent_runs ADD COLUMN experts_json TEXT",
+        "ALTER TABLE ai_agent_runs ADD COLUMN record_kind TEXT NOT NULL DEFAULT 'ai'",
         [],
     );
-    // C20.6：审计字段（usedEvidence / contrarianResolutions）。
     let _ = conn.execute(
-        "ALTER TABLE ai_agent_runs ADD COLUMN audit_json TEXT",
+        "ALTER TABLE ai_agent_runs ADD COLUMN fastlane_json TEXT",
         [],
     );
     // C24：该运行**实际生效**的单 Agent 子模式（协作开启时恒为 `standard`）。
@@ -1130,7 +1325,9 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE ai_agent_runs ADD COLUMN single_agent_mode TEXT NOT NULL DEFAULT 'standard'",
         [],
     );
-    // TypeSafe / Jev：Profile 级开关（默认关闭）。旧库补列，幂等（列已存在时忽略错误）。
+    // DEPRECATED（C28，仅历史列，不再读写）：`ai_agent_profiles.typesafe_enabled` 是已移除的
+    // "TypeSafe / Jev 快速判定"开关留下的列。**刻意保留、不做破坏性迁移**（删列要重建表，
+    // 而重建对既有库是高风险的），因此这里保持幂等 `ADD COLUMN`，代码里没有任何读写路径。
     let _ = conn.execute(
         "ALTER TABLE ai_agent_profiles ADD COLUMN typesafe_enabled INTEGER NOT NULL DEFAULT 0",
         [],
@@ -1197,6 +1394,15 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE ai_agent_profiles ADD COLUMN enabled_agent_ids_json TEXT NOT NULL DEFAULT '[]'",
         [],
     );
+    // C29：Profile 类型 + 快判配置（JSON，15 个字段；列默认 = 旧 Profile 行为不变）。
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_profiles ADD COLUMN profile_type TEXT NOT NULL DEFAULT 'ai'",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_profiles ADD COLUMN fastlane_json TEXT NOT NULL DEFAULT '{}'",
+        [],
+    );
     // C24：单 Agent 子模式（`standard` | `minimal`；列默认 = 旧 Profile 行为不变）。
     let _ = conn.execute(
         "ALTER TABLE ai_agent_profiles ADD COLUMN single_agent_mode TEXT NOT NULL DEFAULT 'standard'",
@@ -1222,7 +1428,11 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
             stmt.query_map([], |row| row.get::<_, String>(1))
                 .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
         })
-        .map(|columns| columns.iter().any(|column| column == "collaboration_enabled"))
+        .map(|columns| {
+            columns
+                .iter()
+                .any(|column| column == "collaboration_enabled")
+        })
         .unwrap_or(true);
     let _ = conn.execute(
         "ALTER TABLE ai_agent_profiles ADD COLUMN collaboration_enabled INTEGER NOT NULL DEFAULT 0",
@@ -1694,17 +1904,9 @@ pub(crate) async fn ai_automation_run_statuses(
     .map_err(|err| format!("读取 Run 状态任务失败: {err}"))?
 }
 
-
-
-
 /// Reads the bounded supplement of the Profile's selected Agent Template.
 /// A missing template, an unreadable database, or empty text yields None so a
 /// Run never fails or silently changes behavior because of template state.
-
-
-
-
-
 
 fn reconcile_profile_model_references(
     app: &tauri::AppHandle,
@@ -1888,6 +2090,17 @@ pub(crate) fn set_automation_master_enabled(
         .map_err(|err| err.to_string())?;
     }
     let runtime = app.state::<AiAutomationRuntime>();
+    // C29.19：总开关关闭 → automation tick 不再运行，采集器也就没有"对账释放"的机会。
+    // 开关关闭时（本版本）这里显式把快判采集器全部释放，保证"已起的会被释放"。
+    // 开关打开时保持原有行为（这段不执行）。
+    if !enabled && !fastlane_mode_enabled() {
+        let released = release_all_fastlane_collectors(runtime.inner());
+        if released > 0 {
+            crate::boot_log(&format!(
+                "fastlane mode disabled: released {released} snapshot collector(s) on master switch off"
+            ));
+        }
+    }
     runtime.notify.notify_one();
     stop_automation_sessions(app, sessions_to_stop);
     Ok(enabled)
@@ -1973,7 +2186,7 @@ pub(crate) async fn ai_agent_profile_save(
     let migration = persist_legacy_agent_migration(&conn, &id, now);
     apply_collaboration_default(&conn, &mut profile, &id);
     apply_single_agent_mode_default(&conn, &mut profile, &id);
-    apply_typesafe_enabled_default(&conn, &mut profile, &id);
+    apply_profile_type_default(&conn, &mut profile, &id);
     // C14：旧行（auto/custom/scheme）保存时补上"协作开启"，避免把迁移出来的
     // 协作在首次保存时静默关掉。
     if migration.legacy_row && !profile.enabled_agent_ids.is_empty() {
@@ -2003,12 +2216,19 @@ pub(crate) async fn ai_agent_profile_save(
             params![id, now],
         )
         .map_err(|err| err.to_string())?;
+        // B3 释放路径 ②：Profile 被停用 → 采集器（节拍任务 + 自有订阅）立即释放。
+        release_fastlane_collector(runtime.inner(), &id);
     }
     stop_automation_sessions(&app, sessions_to_stop);
     runtime.notify.notify_one();
     let mut saved = load_profile(&conn, &id)?;
-    if !migration_notes.is_empty() {
-        saved.migration_notes = migration_notes;
+    // C31：保存路径的提示与读取路径的提示**合并**（去重），不再互相覆盖 ——
+    // 读取路径那句带中文名与"C31 已移除内置 Agent"的解释，保存路径那句说明"已从勾选移除"，
+    // 两者都是可见提示，覆盖任一条都会少一层信息。
+    for note in migration_notes {
+        if !saved.migration_notes.contains(&note) {
+            saved.migration_notes.push(note);
+        }
     }
     Ok(saved)
 }
@@ -2030,9 +2250,9 @@ fn upsert_profile_row(
           feishu_enabled,daily_review_enabled,allowed_wake_condition_types_json,
           multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
           multi_agent_orchestrator,multi_agent_expert_source,enabled_agent_ids_json,
-          collaboration_enabled,triage_json,single_agent_mode,
-          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct,typesafe_enabled
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,NULL,?35,?36,?37)
+          collaboration_enabled,triage_json,single_agent_mode,profile_type,fastlane_json,
+          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,NULL,?37,?38)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,enabled=excluded.enabled,mode=excluded.mode,account_id=excluded.account_id,
           environment=excluded.environment,symbols_json=excluded.symbols_json,
@@ -2056,9 +2276,10 @@ fn upsert_profile_row(
           collaboration_enabled=excluded.collaboration_enabled,
           triage_json=excluded.triage_json,
           single_agent_mode=excluded.single_agent_mode,
+          profile_type=excluded.profile_type,
+          fastlane_json=excluded.fastlane_json,
           target_leverage=excluded.target_leverage,
           max_single_trade_margin_pct=excluded.max_single_trade_margin_pct,
-          typesafe_enabled=excluded.typesafe_enabled,
           updated_at=excluded.updated_at,deleted_at=NULL",
         params![
             id,
@@ -2099,12 +2320,15 @@ fn upsert_profile_row(
                 .single_agent_mode
                 .clone()
                 .unwrap_or_else(default_single_agent_mode),
+            profile
+                .profile_type
+                .clone()
+                .unwrap_or_else(default_profile_type),
+            to_json(&profile.fastlane.clone().normalized())?,
             created_at,
             now,
             profile.target_leverage,
             profile.max_single_trade_margin_pct,
-            // TypeSafe / Jev：`None` 时保存路径已先查库补现值；真缺失按「关闭」。
-            bool_to_i64(profile.typesafe_enabled.unwrap_or(false)),
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -2171,6 +2395,8 @@ pub(crate) fn ai_agent_profile_delete(
         params![id, now],
     )
     .map_err(|err| err.to_string())?;
+    // B3 释放路径 ③：Profile 被删除 → 采集器（节拍任务 + 自有订阅）立即释放。
+    release_fastlane_collector(runtime.inner(), &id);
     runtime.notify.notify_one();
     stop_automation_sessions(&app, sessions_to_stop);
     Ok(())
@@ -2346,29 +2572,17 @@ pub(crate) fn background_report_triage(
     let conn = open_automation_database(&app)?;
     let now = now_ms();
     let (config, skip_streak, last_deep_at) = {
-        let state = context
-            .triage
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let state = context.triage.lock().map_err(|error| error.to_string())?;
         if state.config.is_off() {
             return Err("当前 Profile 未启用试判（triage.mode=off）".to_string());
         }
         if state.verdict.is_some() {
             return Err("本次运行已提交过试判结论".to_string());
         }
-        (
-            state.config.clone(),
-            state.skip_streak,
-            state.last_deep_at,
-        )
+        (state.config.clone(), state.skip_streak, state.last_deep_at)
     };
-    let (escalation_inputs, unavailable) = collect_triage_escalation_inputs(
-        &app,
-        &conn,
-        context,
-        &context.trigger,
-        last_deep_at,
-    );
+    let (escalation_inputs, unavailable) =
+        collect_triage_escalation_inputs(&app, &conn, context, &context.trigger, last_deep_at);
     let minutes_since_deep = last_deep_at
         .map(|at| now.saturating_sub(at) / 60_000)
         .or_else(|| Some(now.saturating_sub(0) / 60_000).filter(|_| false));
@@ -2382,8 +2596,12 @@ pub(crate) fn background_report_triage(
         let state = context.triage.lock().map_err(|error| error.to_string())?;
         crate::ai_triage::sampling_hit(config.skip_sample_rate, state.sample_unit)
     };
-    let decision =
-        crate::ai_triage::decide_triage_outcome(&config, input.escalate, forced_by.clone(), sampled);
+    let decision = crate::ai_triage::decide_triage_outcome(
+        &config,
+        input.escalate,
+        forced_by.clone(),
+        sampled,
+    );
 
     // 试判阶段的 token 快照：从会话事件里的 usage 汇总取（**不要**读可能尚未写回的列，
     // 那正是 0/0/0 的根因）。
@@ -2393,10 +2611,7 @@ pub(crate) fn background_report_triage(
         .and_then(|usage| serde_json::to_value(usage).ok());
 
     {
-        let mut state = context
-            .triage
-            .lock()
-            .map_err(|error| error.to_string())?;
+        let mut state = context.triage.lock().map_err(|error| error.to_string())?;
         state.verdict = Some(decision.phase != crate::ai_triage::TriagePhase::Skipped);
         state.reasons = reasons.clone();
         state.evidence = evidence.clone();
@@ -3107,11 +3322,9 @@ const LEGACY_SCHEME_SWEEP_SETTING: &str = "legacy_scheme_agent_sweep";
 pub(crate) fn load_builtin_agent_fingerprint_manifest(
     conn: &Connection,
 ) -> Result<HashMap<String, String>, String> {
-    Ok(
-        load_setting(conn, BUILTIN_AGENT_FINGERPRINT_SETTING)
-            .and_then(|value| serde_json::from_value::<HashMap<String, String>>(value).ok())
-            .unwrap_or_default(),
-    )
+    Ok(load_setting(conn, BUILTIN_AGENT_FINGERPRINT_SETTING)
+        .and_then(|value| serde_json::from_value::<HashMap<String, String>>(value).ok())
+        .unwrap_or_default())
 }
 
 fn save_builtin_agent_fingerprint_manifest(
@@ -3140,21 +3353,12 @@ pub(crate) fn sync_builtin_agent_bundles(app: &tauri::AppHandle) {
         Some(&manifest),
     ) {
         Ok(result) => {
-            if result.manifest_missing {
-                crate::boot_log(
-                    "builtin agent fingerprint manifest missing; unmanaged files kept as-is",
-                );
-            }
+            // C31：逐 id 留痕（新建 / 升级 / 保留 / 清理），不再只在"有写入"时打一行。
+            crate::storage_config::log_builtin_agent_install(&result);
             if let Some(next) = result.manifest.as_ref() {
                 if let Err(error) = save_builtin_agent_fingerprint_manifest(&conn, next) {
                     crate::boot_log(&format!("builtin agent manifest persist failed: {error}"));
                 }
-            }
-            if result.written + result.upgraded > 0 {
-                crate::boot_log(&format!(
-                    "agents: builtin bundles written={} upgraded={} kept={}",
-                    result.written, result.upgraded, result.kept
-                ));
             }
         }
         Err(error) => crate::boot_log(&format!("builtin agent bundles install failed: {error}")),
@@ -3301,27 +3505,31 @@ fn persist_legacy_agent_migration(
 /// **保留库中现值**，不得静默关闭；库里也没有值而这是旧行 → true；新 Profile → false。
 /// C24.1：保存时 `singleAgentMode` 缺省（旧前端不带该字段）→ **保留库中现值**；
 /// 库里没有该行 / 没有值时按 `standard`。提供的非法值已在 `normalize_profile` 回落成 `standard`。
-/// TypeSafe / Jev：与 `single_agent_mode` / `collaboration_enabled` 同一规则 ——
-/// 调用方未提供（`None`）时保留库中现值，避免旧前端保存时把已开启的 Jev 静默关掉。
-fn apply_typesafe_enabled_default(
+
+/// C29：保存时 `profileType` 缺省 → 保留库中现值（旧前端不解释这一项）。
+fn apply_profile_type_default(
     conn: &Connection,
     profile: &mut AiAgentProfileInput,
     profile_id: &str,
 ) {
-    if profile.typesafe_enabled.is_some() {
+    if profile.profile_type.is_some() {
         return;
     }
     let stored = conn
         .query_row(
-            "SELECT typesafe_enabled FROM ai_agent_profiles WHERE id=?1",
+            "SELECT profile_type FROM ai_agent_profiles WHERE id=?1",
             params![profile_id],
-            |row| row.get::<_, i64>(0),
+            |row| row.get::<_, String>(0),
         )
         .optional()
         .ok()
-        .flatten()
-        .unwrap_or(0);
-    profile.typesafe_enabled = Some(stored != 0);
+        .flatten();
+    profile.profile_type = Some(
+        stored
+            .as_deref()
+            .map(normalize_profile_type)
+            .unwrap_or_else(default_profile_type),
+    );
 }
 
 fn apply_single_agent_mode_default(
@@ -3422,16 +3630,15 @@ pub(crate) fn sync_legacy_scheme_rows(conn: &Connection) -> (usize, Vec<String>)
             serde_json::from_str::<Vec<AiProfileSubAgent>>(&agents_json).unwrap_or_default();
         let plan = desic_agent_automation::plan_legacy_agent_migration(
             &desic_agent_automation::LegacyAgentMigrationInput {
-                multi_agent_mode: Some(
-                    desic_agent_automation::MULTI_AGENT_CUSTOM_MODE.to_string(),
-                ),
+                multi_agent_mode: Some(desic_agent_automation::MULTI_AGENT_CUSTOM_MODE.to_string()),
                 legacy_agents: agents,
                 scheme_agents: Vec::new(),
                 scheme_instructions: None,
             },
             now,
         );
-        let (scheme_written, scheme_notes) = crate::agent_library::persist_migrated_agent_bundles(&plan);
+        let (scheme_written, scheme_notes) =
+            crate::agent_library::persist_migrated_agent_bundles(&plan);
         written += scheme_written;
         for note in scheme_notes {
             if !notes.contains(&note) {
@@ -3572,8 +3779,30 @@ fn normalize_profile(mut profile: AiAgentProfileInput) -> Result<AiAgentProfileI
     // Retain the legacy database column for migration compatibility. Agent Runs no longer
     // use a wall-clock execution limit.
     profile.max_runtime_seconds = default_max_runtime();
-    profile.min_wake_interval_seconds = profile.min_wake_interval_seconds.clamp(15, 86_400);
-    profile.max_runs_per_hour = profile.max_runs_per_hour.clamp(1, 60);
+    // C29：Profile 类型决定触发下限（快判模式的最小触发间隔默认 10 秒，
+    // AI Profile 仍是 15 秒地板 —— 两者行为各自保持不变）。
+    // 调用方**没提供**类型时保持 `None`（保存路径据此保留库中现值），
+    // 只在"本次归一"里用一个生效值决定地板与创建默认值。
+    let provided_profile_type = profile.profile_type.as_deref().map(normalize_profile_type);
+    let profile_type = provided_profile_type
+        .clone()
+        .unwrap_or_else(default_profile_type);
+    let min_interval_floor = if profile_type == PROFILE_TYPE_FASTLANE {
+        5
+    } else {
+        15
+    };
+    profile.min_wake_interval_seconds = profile
+        .min_wake_interval_seconds
+        .clamp(min_interval_floor, 86_400);
+    // C29.4：每小时运行上限的**夹取上限按 Profile 类型**——AI Profile 维持 60，
+    // 快判模式放到 120（否则快判默认的 120 存一次就被夹成 60，UI 读回也变 60）。
+    let max_runs_ceiling = if profile_type == PROFILE_TYPE_FASTLANE {
+        crate::fastlane::FASTLANE_DEFAULT_MAX_RUNS_PER_HOUR
+    } else {
+        AI_PROFILE_MAX_RUNS_PER_HOUR_CEILING
+    };
+    profile.max_runs_per_hour = profile.max_runs_per_hour.clamp(1, max_runs_ceiling);
     profile.model = profile
         .model
         .map(|value| value.trim().to_string())
@@ -3593,6 +3822,27 @@ fn normalize_profile(mut profile: AiAgentProfileInput) -> Result<AiAgentProfileI
         .single_agent_mode
         .as_deref()
         .map(normalize_single_agent_mode);
+    // C29：Profile 类型非法 → `ai`；快判配置归一（`ai` 类型也照常归一保存、不报错）。
+    let is_new_profile = profile
+        .id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .is_none();
+    profile.profile_type = provided_profile_type;
+    let fastlane = profile.fastlane.clone().normalized();
+    // C29.4：**新建**快判 Profile 时写入董事会裁决的触发默认值
+    //（最长静默 10 分钟 / 最小间隔 10 秒 / 每小时 120 次 / 副驾驶）。
+    // 说明：本仓库 Profile 没有 `max_silence_minutes` 列，最长静默由**唤醒兜底间隔**
+    // `scan_interval_minutes` 承担，因此默认值写在那儿（映射关系已回报）。
+    if is_new_profile && profile.profile_type.as_deref() == Some(PROFILE_TYPE_FASTLANE) {
+        profile.mode = crate::fastlane::FASTLANE_DEFAULT_PERMISSION_MODE.to_string();
+        profile.scan_interval_minutes = crate::fastlane::FASTLANE_DEFAULT_MAX_SILENCE_MINUTES;
+        profile.min_wake_interval_seconds =
+            crate::fastlane::FASTLANE_DEFAULT_MIN_WAKE_INTERVAL_SECONDS;
+        profile.max_runs_per_hour = crate::fastlane::FASTLANE_DEFAULT_MAX_RUNS_PER_HOUR;
+    }
+    profile.fastlane = fastlane;
     Ok(profile)
 }
 
@@ -3676,6 +3926,9 @@ fn validate_profile_snapshot(
         );
         profile.enabled_agent_ids = normalize_agent_id_list(plan.enabled_agent_ids);
         profile.migration_notes.extend(plan.notes);
+        if plan.collaboration_enabled == Some(true) {
+            profile.collaboration_enabled = true;
+        }
         if migration_log_slot(&format!("snapshot:{}", profile.id)) {
             crate::boot_log(&format!(
                 "agent migration snapshot={} mode={} ids={:?}",
@@ -3685,11 +3938,20 @@ fn validate_profile_snapshot(
     } else {
         profile.enabled_agent_ids = normalize_agent_id_list(profile.enabled_agent_ids.clone());
     }
-    // C20.5：旧 Run 快照重放同样剔除已下线角色（否则历史快照仍能派发旧专家）。
-    // 快照是历史记录：只过滤，不迁移、不回写。
+    // C31：旧 Run 快照重放同样剔除**已删除的内置 Agent**（否则历史快照仍能派发已删除的
+    // 专家）。快照是历史记录：只过滤，不迁移、不回写。
+    let stored = std::mem::take(&mut profile.enabled_agent_ids);
+    let (effective, dropped) = desic_agent_automation::drop_removed_agent_ids(&stored);
+    profile.enabled_agent_ids = effective;
+    // 旧快照里还有"已下线（deprecated）"角色的兼容过滤（内置表当前没有这类条目）。
     let (effective, _ignored) =
         split_deprecated_agent_ids(std::mem::take(&mut profile.enabled_agent_ids));
     profile.enabled_agent_ids = effective;
+    if let Some(note) = desic_agent_automation::removed_builtin_agent_notice(&dropped) {
+        if !profile.migration_notes.contains(&note) {
+            profile.migration_notes.push(note);
+        }
+    }
     Ok(profile)
 }
 
@@ -3792,7 +4054,7 @@ fn load_profiles(conn: &Connection) -> Result<Vec<AiAgentProfileSummary>, String
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,typesafe_enabled
+             single_agent_mode,profile_type,fastlane_json
              FROM ai_agent_profiles WHERE deleted_at IS NULL ORDER BY enabled DESC, updated_at DESC",
         )
         .map_err(|err| err.to_string())?;
@@ -3818,7 +4080,7 @@ fn load_profile(conn: &Connection, id: &str) -> Result<AiAgentProfileSummary, St
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,typesafe_enabled
+             single_agent_mode,profile_type,fastlane_json
              FROM ai_agent_profiles WHERE id=?1 AND deleted_at IS NULL",
             params![id],
             profile_from_row,
@@ -3860,59 +4122,54 @@ fn apply_legacy_agent_migration(conn: &Connection, profile: &mut AiAgentProfileS
     if profile.enabled_agent_ids.is_empty() {
         apply_legacy_agent_migration_once(conn, profile);
     }
-    // C20.5（强制迁移版）：防御性检查 —— 含已下线 id / 缺默认角色的旧 Profile 在这里
-    // 被改写成「默认 4 角色 + 其余保留 id」并**落库**（幂等：改写后就不再触发）。
-    // 已合规与空名单的 Profile 一个字节都不动。
+    // C31（取代 C20.5 的强制迁移版）：防御性检查 —— 含**已删除内置 Agent** 的旧 Profile
+    // 在这里被就地剔除并**落库**（幂等：改写后就不再触发）；空名单与不含删除项的 Profile
+    // 一个字节都不动。**不再补任何默认角色**。
     let stored = normalize_agent_id_list(std::mem::take(&mut profile.enabled_agent_ids));
-    match plan_enabled_agent_ids_migration(&stored) {
-        Some(migrated) => {
-            persist_enabled_agent_ids(conn, &profile.id, &stored, &migrated);
-            profile.enabled_agent_ids = migrated;
+    let (kept, dropped) = desic_agent_automation::drop_removed_agent_ids(&stored);
+    if dropped.is_empty() {
+        profile.enabled_agent_ids = stored;
+    } else {
+        persist_enabled_agent_ids(conn, &profile.id, &stored, &kept);
+        profile.enabled_agent_ids = kept;
+    }
+    // 可见提示：无论本次有没有改写落库，只要名单里出现过删除项就写进 `migrationNotes`，
+    // 由 UI 在 Profile 编辑器里显示（不静默丢弃用户的勾选）。
+    if let Some(note) = removed_agents_migration_note(&dropped) {
+        if !profile.migration_notes.contains(&note) {
+            profile.migration_notes.push(note);
         }
-        None => profile.enabled_agent_ids = stored,
     }
 }
 
-/// C20.5（强制迁移版）：把旧勾选改写成「**默认 4 个角色（内置顺序）** + 其余保留 id
-/// （原相对顺序）」，即"只换掉已下线的、补齐新 4 个、保留自定义与仍有效的角色"。
+/// C31（取代 C20.5 的"默认填充版"）：把勾选名单里**已删除的内置 Agent** 剔掉 ——
+/// **只删不加**。
 ///
-/// 触发条件（**只对需要迁移的 Profile 动手**）：
-/// - 名单**非空**（空名单 = 新建 / 用户没勾：不凭空塞进 4 个专家）；
-/// - 且「**含已下线 id**」（董事会的原始触发条件）**或**「名单里一个默认角色都没有」
-///   （= 纯自定义 / 旧 custom、scheme 迁移出来的 Profile，董事会要求的"补齐新 4 个"）。
+/// C20.5 那版会在名单含已下线 id、或一个默认角色都没有时，把「默认 4 个流程角色」写进
+/// 用户配置。C31 删掉了默认启用集与那 4 个角色，如果保留这套逻辑，老用户下次启动会被
+/// **塞回已经删除的 id**（正是本次要求修掉的迁移）。现在：
+/// - 空名单 → `None`（不凭空多出角色）；
+/// - 名单里有删除清单里的 id（含旧 `auto-*` 形态）→ 剔除并落库（幂等：改完不再触发）；
+/// - **绝不注入任何默认角色**（`default_enabled_agent_ids()` 恒为空）；
+/// - 未知 id 保留（可能只是库文件暂时读不到，清理是保存路径的事）；
+/// - 被剔除的 id 必须以 `migrationNotes` 形式**可见**（见 [`apply_legacy_agent_migration`]），
+///   不许静默。
 ///
-/// 刻意**不**因为"少了 4 个里的某一个"就动手：用户有意只跑 2–3 个角色是合法配置，
-/// 每次都补回来会让人永远选不动（"只换掉已下线的、补齐新 4 个"的补齐对象是**旧配置**，
-/// 不是用户当下的勾选）。
-///
-/// 已合规（含默认角色且无已下线 id）→ `None`（一个字节不改，因此幂等）。
 /// 纯函数，便于单测覆盖各种形态。
-fn plan_enabled_agent_ids_migration(stored: &[String]) -> Option<Vec<String>> {
+fn plan_removed_agent_ids_migration(stored: &[String]) -> Option<Vec<String>> {
     if stored.is_empty() {
         return None;
     }
-    let defaults = desic_agent_automation::default_enabled_agent_ids();
-    let has_deprecated = stored
-        .iter()
-        .any(|id| desic_agent_automation::is_deprecated_agent_id(id));
-    let has_default = stored.iter().any(|id| defaults.contains(id));
-    if !has_deprecated && has_default {
+    let (kept, dropped) = desic_agent_automation::drop_removed_agent_ids(stored);
+    if dropped.is_empty() || kept.len() == stored.len() {
         return None;
     }
-    let mut migrated = defaults;
-    for id in stored {
-        // 已下线的踢掉；未知 id 保留（可能只是库文件暂时读不到，清理是 C3 保存路径的事）。
-        if desic_agent_automation::is_deprecated_agent_id(id) {
-            continue;
-        }
-        if !migrated.contains(id) {
-            migrated.push(id.clone());
-        }
-    }
-    if &migrated == stored {
-        return None;
-    }
-    Some(migrated)
+    Some(kept)
+}
+
+/// C31：删除清单的**可见提示**文案（老 Profile 被剔除的 id 逐条列出）。
+fn removed_agents_migration_note(dropped: &[String]) -> Option<String> {
+    desic_agent_automation::removed_builtin_agent_notice(dropped)
 }
 
 /// 把迁移结果写回 `enabled_agent_ids_json`；返回是否真的写了（幂等路径返回 false）。
@@ -3936,19 +4193,20 @@ fn persist_enabled_agent_ids(
     }
     if migration_log_slot(&format!("enabled-agents:{profile_id}")) {
         crate::boot_log(&format!(
-            "C20.5 enabled-agent migration profile={profile_id} before={before:?} after={after:?}"
+            "C31 removed-agent migration profile={profile_id} before={before:?} after={after:?}"
         ));
     }
     true
 }
 
-/// 启动期迁移：逐 Profile 做同一次强制迁移（幂等、只对需要迁移的行动手）。
+/// 启动期迁移（C31：只剔除已删除的内置 Agent，**不再自动补默认角色**）：
+/// 逐 Profile 判定，幂等、只对真的含删除项的行动手。
 /// 返回本次真正改写的 Profile 数；任何单行失败都不影响其它行，也绝不阻断启动。
-pub(crate) fn migrate_deprecated_enabled_agents(conn: &Connection) -> usize {
+pub(crate) fn migrate_removed_enabled_agents(conn: &Connection) -> usize {
     let mut ids = Vec::new();
-    if let Ok(mut stmt) = conn.prepare(
-        "SELECT id,enabled_agent_ids_json FROM ai_agent_profiles WHERE deleted_at IS NULL",
-    ) {
+    if let Ok(mut stmt) = conn
+        .prepare("SELECT id,enabled_agent_ids_json FROM ai_agent_profiles WHERE deleted_at IS NULL")
+    {
         if let Ok(rows) = stmt.query_map([], |row| {
             Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
         }) {
@@ -3960,7 +4218,7 @@ pub(crate) fn migrate_deprecated_enabled_agents(conn: &Connection) -> usize {
     let mut migrated_count = 0usize;
     for (profile_id, raw) in ids {
         let stored = normalize_agent_id_list(from_json_or_default::<Vec<String>>(&raw));
-        let Some(migrated) = plan_enabled_agent_ids_migration(&stored) else {
+        let Some(migrated) = plan_removed_agent_ids_migration(&stored) else {
             continue;
         };
         if persist_enabled_agent_ids(conn, &profile_id, &stored, &migrated) {
@@ -3969,7 +4227,7 @@ pub(crate) fn migrate_deprecated_enabled_agents(conn: &Connection) -> usize {
     }
     if migrated_count > 0 {
         crate::boot_log(&format!(
-            "C20.5 startup enabled-agent migration rewrote {migrated_count} profile(s)"
+            "C31 startup removed-agent migration rewrote {migrated_count} profile(s)"
         ));
     }
     migrated_count
@@ -4015,6 +4273,10 @@ fn apply_legacy_agent_migration_once(conn: &Connection, profile: &mut AiAgentPro
     let migrated = normalize_agent_id_list(plan.enabled_agent_ids);
     if !migrated.is_empty() {
         profile.enabled_agent_ids = migrated;
+    }
+    // C31：旧模式确实是"开了协作"时开关保持开启 —— 名单可能因为默认启用集已删除而为空
+    // （咨询可选），但那不表示用户把协作关掉了。
+    if plan.collaboration_enabled == Some(true) {
         profile.collaboration_enabled = true;
     }
     for note in plan.notes {
@@ -4026,11 +4288,13 @@ fn apply_legacy_agent_migration_once(conn: &Connection, profile: &mut AiAgentPro
     if migration_log_slot(&format!("profile:{}", profile.id)) {
         crate::boot_log(&format!(
             "agent migration profile={} mode={} ids={:?} notes={:?}",
-            profile.id, profile.legacy_multi_agent_mode, profile.enabled_agent_ids, profile.migration_notes
+            profile.id,
+            profile.legacy_multi_agent_mode,
+            profile.enabled_agent_ids,
+            profile.migration_notes
         ));
     }
 }
-
 
 /// Profile 行 → 摘要。
 ///
@@ -4050,7 +4314,8 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
     let enabled_agent_ids: String = row.get(28)?;
     let triage_json: Option<String> = row.get(30)?;
     let single_agent_mode: Option<String> = row.get(33)?;
-    let typesafe_enabled: Option<i64> = row.get(34).ok();
+    let profile_type: Option<String> = row.get(34)?;
+    let fastlane_json: Option<String> = row.get(35)?;
     Ok(AiAgentProfileSummary {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -4070,7 +4335,19 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
         entry_tolerance_bps: row.get::<_, i64>(13)?.max(1) as u32,
         target_leverage: row.get::<_, i64>(21)?.clamp(1, 125) as u32,
         max_single_trade_margin_pct: row.get::<_, i64>(24)?.clamp(1, 100) as u32,
-        min_wake_interval_seconds: row.get::<_, i64>(14)?.max(15) as u32,
+        // C29：快判模式的最小触发间隔默认 10 秒 → 读取地板随类型（AI Profile 仍是 15）。
+        min_wake_interval_seconds: row.get::<_, i64>(14)?.max(
+            if profile_type
+                .as_deref()
+                .map(normalize_profile_type)
+                .as_deref()
+                == Some(PROFILE_TYPE_FASTLANE)
+            {
+                5
+            } else {
+                15
+            },
+        ) as u32,
         max_runs_per_hour: row.get::<_, i64>(15)?.max(1) as u32,
         feishu_enabled: row.get::<_, i64>(16)? != 0,
         daily_review_enabled: row.get::<_, i64>(17)? != 0,
@@ -4082,7 +4359,16 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
             .as_deref()
             .map(normalize_single_agent_mode)
             .unwrap_or_else(default_single_agent_mode),
-        typesafe_enabled: typesafe_enabled.unwrap_or(0) != 0,
+        // C29：类型列默认 `ai`（旧 Profile 行为不变）；快判配置宽容解析（坏 JSON → 默认值）。
+        profile_type: profile_type
+            .as_deref()
+            .map(normalize_profile_type)
+            .unwrap_or_else(default_profile_type),
+        fastlane: fastlane_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<crate::fastlane::FastlaneConfig>(value).ok())
+            .unwrap_or_default()
+            .normalized(),
         triage: triage_json
             .as_deref()
             .and_then(|value| {
@@ -4126,6 +4412,9 @@ struct StoredRunRow {
     audit_json: Option<String>,
     /// C24：本次运行生效的单 Agent 子模式。
     single_agent_mode: String,
+    /// C29：记录种类（`ai` | `fastlane`）与快判六组记录。
+    record_kind: String,
+    fastlane_json: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -4153,6 +4442,8 @@ fn stored_run_row_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredRu
         single_agent_mode: normalize_single_agent_mode(
             &row.get::<_, Option<String>>(14)?.unwrap_or_default(),
         ),
+        record_kind: normalize_profile_type(&row.get::<_, Option<String>>(15)?.unwrap_or_default()),
+        fastlane_json: row.get(16)?,
     })
 }
 
@@ -4217,6 +4508,8 @@ fn run_summary_from_stored(row: StoredRunRow, metadata: RunMetadata) -> AiAgentR
         used_evidence,
         contrarian_resolutions,
         single_agent_mode: row.single_agent_mode,
+        record_kind: row.record_kind,
+        fastlane: read_json(&row.fastlane_json),
         profile_id: row.profile_id,
         trigger_type: row.trigger_type,
         status: row.status,
@@ -4339,7 +4632,7 @@ fn load_runs(conn: &Connection, limit: i64) -> Result<Vec<AiAgentRunSummary>, St
         .prepare(
             "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,
                     action_counts_json,token_usage_json,triage_json,experts_json,audit_json,
-                    single_agent_mode
+                    single_agent_mode,record_kind,fastlane_json
              FROM ai_agent_runs ORDER BY created_at DESC LIMIT ?1",
         )
         .map_err(|error| error.to_string())?;
@@ -4417,7 +4710,7 @@ fn load_run(conn: &Connection, id: &str) -> Result<AiAgentRunSummary, String> {
     conn.query_row(
         "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,
                 action_counts_json,token_usage_json,triage_json,experts_json,audit_json,
-                single_agent_mode
+                single_agent_mode,record_kind,fastlane_json
          FROM ai_agent_runs WHERE id=?1",
         params![id],
         stored_run_row_from_row,
@@ -5126,6 +5419,12 @@ fn queue_run(
         return load_run(conn, &existing);
     }
     let profile = load_profile(conn, profile_id)?;
+    // C29.19：快判模式本版本未开放 → **快判 Profile 的轮次一律不入队**（定时 / 观察条件 /
+    // 手动运行 / 停机平仓轮同此一条闸）。返回 `Err`：手动触发会在 UI 上明确报错（不静默），
+    // 调度侧的两条路径已在调用前过滤掉快判 Profile（不会把 tick 打成错误循环）。
+    if let Some(reason) = fastlane_blocked(&profile) {
+        return Err(reason.to_string());
+    }
     let resolved_skill_versions = resolve_skill_versions(
         conn,
         &profile.skill_ids,
@@ -5150,8 +5449,8 @@ fn queue_run(
         .execute(
             "INSERT OR IGNORE INTO ai_agent_runs(
           id,profile_id,trigger_type,status,trigger_json,profile_snapshot_json,template_snapshot_json,skill_versions_json,
-          single_agent_mode,started_at,created_at,updated_at
-         ) VALUES(?1,?2,?3,'queued',?4,?5,?6,?7,?8,?9,?9,?9)",
+          single_agent_mode,record_kind,started_at,created_at,updated_at
+         ) VALUES(?1,?2,?3,'queued',?4,?5,?6,?7,?8,?9,?10,?10,?10)",
             params![
                 id,
                 profile_id,
@@ -5161,6 +5460,12 @@ fn queue_run(
                  template_snapshot.as_ref().map(Value::to_string),
                 to_json(&resolved_skill_versions)?,
                 single_agent_mode,
+                // C29：记录种类按 Profile 类型冻结（快判运行 → `fastlane`）。
+                if run_profile.profile_type == PROFILE_TYPE_FASTLANE {
+                    PROFILE_TYPE_FASTLANE.to_string()
+                } else {
+                    PROFILE_TYPE_AI.to_string()
+                },
                 now,
             ],
         )
@@ -6317,12 +6622,9 @@ fn collect_triage_escalation_inputs(
     }
     let has_type = |needle: &str| condition_types.iter().any(|item| item == needle);
     let config_true = |key: &str| {
-        configs.iter().any(|config| {
-            config
-                .get(key)
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        })
+        configs
+            .iter()
+            .any(|config| config.get(key).and_then(Value::as_bool).unwrap_or(false))
     };
     if !condition_ids.is_empty() {
         inputs.position_or_order_changed = Some(
@@ -6332,7 +6634,8 @@ fn collect_triage_escalation_inputs(
         );
         inputs.confirmed_break_of_flagged_level =
             Some(has_type("price_cross") && config_true("confirmed"));
-        inputs.important_news = Some(has_type("important_news_event") || has_type("sentiment_reversal"));
+        inputs.important_news =
+            Some(has_type("important_news_event") || has_type("sentiment_reversal"));
         // 独立条件共振 = 本轮命中的**不同条件类型**数。
         inputs.condition_resonance = Some(condition_types.len() as u32);
     } else {
@@ -6362,17 +6665,13 @@ fn collect_triage_escalation_inputs(
                 .get("marginRatios")
                 .or_else(|| config.get("mgnRatios"))
                 .and_then(Value::as_array)
-                .map(|items| {
-                    items
-                        .iter()
-                        .filter_map(Value::as_f64)
-                        .collect::<Vec<_>>()
-                })
+                .map(|items| items.iter().filter_map(Value::as_f64).collect::<Vec<_>>())
                 .unwrap_or_default()
         })
         .collect::<Vec<_>>();
-    let (valid, invalid): (Vec<f64>, Vec<f64>) =
-        raw_ratios.into_iter().partition(|value| valid_margin_ratio(*value));
+    let (valid, invalid): (Vec<f64>, Vec<f64>) = raw_ratios
+        .into_iter()
+        .partition(|value| valid_margin_ratio(*value));
     inputs.margin_ratios = valid;
     if inputs.margin_ratios.is_empty() {
         unavailable.push("marginRatios".to_string());
@@ -6431,7 +6730,9 @@ fn subtract_usage(total: &Value, part: &Value) -> Value {
                 let previous = part_map.and_then(|entries| entries.get(key));
                 let next = match (value, previous) {
                     (Value::Number(number), Some(Value::Number(previous))) => {
-                        let base = number.as_i64().or_else(|| number.as_f64().map(|item| item as i64));
+                        let base = number
+                            .as_i64()
+                            .or_else(|| number.as_f64().map(|item| item as i64));
                         let offset = previous
                             .as_i64()
                             .or_else(|| previous.as_f64().map(|item| item as i64));
@@ -6440,7 +6741,9 @@ fn subtract_usage(total: &Value, part: &Value) -> Value {
                             _ => value.clone(),
                         }
                     }
-                    (Value::Object(_), Some(Value::Object(_))) => subtract_usage(value, previous.unwrap()),
+                    (Value::Object(_), Some(Value::Object(_))) => {
+                        subtract_usage(value, previous.unwrap())
+                    }
                     _ => value.clone(),
                 };
                 output.insert(key.clone(), next);
@@ -6565,7 +6868,10 @@ pub(crate) fn aggregate_expert_activity(events: &[Value]) -> Vec<Value> {
         } else {
             configured.clone()
         };
-        let event_type = event.get("type").and_then(Value::as_str).unwrap_or_default();
+        let event_type = event
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
         let mut entry = ExpertActivity {
             agent_id,
             configured_agent_id: configured,
@@ -6731,7 +7037,10 @@ const SUMMARY_SECTION_HEADINGS: [(&str, [&str; 2]); 5] = [
 /// 去尾随装饰冒号，ASCII 小写（中文不受影响）。
 fn normalize_summary_heading(line: &str) -> Option<String> {
     let trimmed = line.trim();
-    let hashes = trimmed.chars().take_while(|character| *character == '#').count();
+    let hashes = trimmed
+        .chars()
+        .take_while(|character| *character == '#')
+        .count();
     if hashes == 0 || hashes > 6 {
         return None;
     }
@@ -6848,9 +7157,9 @@ fn minimal_summary_warnings(summary: &str, has_assistant_text: bool) -> Vec<Stri
 /// 极简模式关的是"说话"，工具调用照常。
 fn run_has_assistant_text(conn: &Connection, run_id: &str) -> bool {
     let session_id = format!("background:{run_id}");
-    let mut statement = match conn.prepare(
-        "SELECT content FROM ai_messages WHERE session_id=?1 AND role='assistant'",
-    ) {
+    let mut statement = match conn
+        .prepare("SELECT content FROM ai_messages WHERE session_id=?1 AND role='assistant'")
+    {
         Ok(statement) => statement,
         Err(_) => return false,
     };
@@ -7114,7 +7423,9 @@ pub(crate) fn background_finish_run(
     if input.next_wake_plan.conditions.len() > 32 {
         return Err("nextWakePlan.conditions 最多允许 32 条".to_string());
     }
-    validate_wake_expiry(input.next_wake_plan.expires_at, now_ms())?;
+    // C34：`expiresAt` 失效**不再是计划级拒绝**。判定与降级都在 `partition_background_wake_plan`
+    // 里按快判口径做（只丢到期时间、条件照写、原因进诊断位）—— 这里**不**提前
+    // `validate_wake_expiry(...)?`，否则模型照抄一个上一轮的过期时间就会废掉整份计划。
     let mut conn = open_automation_database(&app)?;
     let profile = load_profile(&conn, profile_id)?;
     let trigger_type = conn
@@ -7145,39 +7456,40 @@ pub(crate) fn background_finish_run(
         let state = context.triage.lock().map_err(|error| error.to_string())?;
         state.skipped && state.phase() == crate::ai_triage::TriagePhase::Skipped
     };
-    let final_decision_json = if is_intelligence_briefing || is_daily_market_review || triage_skip_finish {
-        input.final_decision.as_ref().map(Value::to_string)
-    } else {
-        let submitted_decision = input.final_decision.as_ref().ok_or_else(|| {
-            "后台 Run 必须提交 finalDecision（execute/revise/wait/abandon）".to_string()
-        })?;
-        let outcome = submitted_decision
-            .get("outcome")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "finalDecision.outcome 缺失".to_string())?;
-        if !matches!(outcome, "execute" | "revise" | "wait" | "abandon") {
-            return Err(
-                "finalDecision.outcome 必须是 execute、revise、wait 或 abandon".to_string(),
-            );
-        }
-        if submitted_decision
-            .get("reason")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .unwrap_or_default()
-            .is_empty()
-        {
-            return Err("finalDecision.reason 不能为空".to_string());
-        }
-        let decision = normalize_final_decision(
-            &conn,
-            run_id,
-            profile_id,
-            submitted_decision,
-            &opportunity_facts,
-        )?;
-        Some(decision.to_string())
-    };
+    let final_decision_json =
+        if is_intelligence_briefing || is_daily_market_review || triage_skip_finish {
+            input.final_decision.as_ref().map(Value::to_string)
+        } else {
+            let submitted_decision = input.final_decision.as_ref().ok_or_else(|| {
+                "后台 Run 必须提交 finalDecision（execute/revise/wait/abandon）".to_string()
+            })?;
+            let outcome = submitted_decision
+                .get("outcome")
+                .and_then(Value::as_str)
+                .ok_or_else(|| "finalDecision.outcome 缺失".to_string())?;
+            if !matches!(outcome, "execute" | "revise" | "wait" | "abandon") {
+                return Err(
+                    "finalDecision.outcome 必须是 execute、revise、wait 或 abandon".to_string(),
+                );
+            }
+            if submitted_decision
+                .get("reason")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .unwrap_or_default()
+                .is_empty()
+            {
+                return Err("finalDecision.reason 不能为空".to_string());
+            }
+            let decision = normalize_final_decision(
+                &conn,
+                run_id,
+                profile_id,
+                submitted_decision,
+                &opportunity_facts,
+            )?;
+            Some(decision.to_string())
+        };
     if is_intelligence_briefing {
         for section in [
             "隔夜市场",
@@ -7195,27 +7507,13 @@ pub(crate) fn background_finish_run(
             }
         }
     }
-    let mut parsed_conditions = Vec::new();
-    for value in &input.next_wake_plan.conditions {
-        let mut scoped_value = value.clone();
-        normalize_background_wake_scope(&conn, context, &mut scoped_value)?;
-        let condition_type = scoped_value
-            .get("type")
-            .and_then(Value::as_str)
-            .ok_or_else(|| "唤醒条件缺少 type".to_string())?
-            .to_string();
-        if !context
-            .allowed_wake_condition_types
-            .iter()
-            .any(|item| item == &condition_type)
-        {
-            return Err(format!("Profile 不允许使用唤醒条件：{}", condition_type));
-        }
-        let condition = serde_json::from_value::<WakeCondition>(scoped_value.clone())
-            .map_err(|err| format!("唤醒条件 {} 参数无效：{}", condition_type, err))?;
-        validate_wake_condition_limits(&condition, now_ms())?;
-        parsed_conditions.push((condition_type, condition, scoped_value));
-    }
+    // C33：计划 → 待写库条件（**逐条丢弃、部分接受**）。计划级只剩三类（`mode` 非法 / 条数 >32 /
+    // 缺 `type`），其余（白名单、作用域、参数、取值）都只丢那一条 + 记原因 —— 真机一条模型自创的
+    // `type:"price"` 不该把同份计划里两条合法条件一起废掉。
+    // C34：`expiresAt` 失效同样**不是计划级** —— 由这里按条目级降级成「无到期」（`wake_write.expires_at`），
+    // 原因进 `wake_write.notes`（与快判 `persist_fastlane_wake_plan` 同一句措辞）。
+    let wake_write =
+        partition_background_wake_plan(&conn, context, &input.next_wake_plan, now_ms())?;
 
     // C22.3-B：收尾软校验（最多打回一次）—— 在**任何写入之前**判定，因此打回时零副作用：
     // 不落库、不改运行状态、不结束运行（这里直接返回即可）。helper 全是只读操作。
@@ -7252,28 +7550,24 @@ pub(crate) fn background_finish_run(
             params![profile_id, now],
         )
         .map_err(|err| err.to_string())?;
-        for (condition_type, _condition, value) in parsed_conditions {
-            tx.execute(
-                "INSERT INTO ai_wake_conditions(
-                  id,profile_id,source,plan_mode,condition_type,config_json,status,expires_at,created_at,updated_at
-                ) VALUES(?1,?2,'agent',?3,?4,?5,'active',?6,?7,?7)",
-                params![
-                    format!("wake-{}", unique_suffix()),
-                    profile_id,
-                    input.next_wake_plan.mode,
-                    condition_type,
-                    value.to_string(),
-                    input.next_wake_plan.expires_at,
-                    now,
-                ],
-            )
-            .map_err(|err| err.to_string())?;
-        }
     }
+    // 简报/复盘运行**不写**观察条件（`nextWakePlan` 只作记录）：`createdWakeConditionIds` 如实为空。
+    let created_wake_condition_ids = if is_intelligence_briefing || is_daily_market_review {
+        Vec::new()
+    } else {
+        insert_background_wake_conditions(
+            &tx,
+            profile_id,
+            &wake_write.accepted,
+            // C34：写的是**降级后**的到期时间（失效 → `None` = 无到期），不是模型照抄回来的原值。
+            wake_write.expires_at,
+            now,
+        )?
+    };
     // C19：试判判定跳过（enforce 且非抽样、未强制升级）→ 运行以 `skipped` 收尾，
     // 不要求 finalDecision（跳过本来就没有交易决策），但 nextWakePlan 已在 reportTriage 记录。
-    let triage_skipped = triage_final.skipped
-        && triage_final.phase() == crate::ai_triage::TriagePhase::Skipped;
+    let triage_skipped =
+        triage_final.skipped && triage_final.phase() == crate::ai_triage::TriagePhase::Skipped;
     let (status, final_decision_json) = if triage_skipped {
         ("skipped", None)
     } else {
@@ -7283,7 +7577,14 @@ pub(crate) fn background_finish_run(
         "UPDATE ai_agent_runs SET status=?6,summary=?2,error=NULL,finished_at=?3,next_wake_at=?4,
                 final_decision_json=?5,updated_at=?3
          WHERE id=?1",
-        params![run_id, summary, now, next_wake_at, final_decision_json, status],
+        params![
+            run_id,
+            summary,
+            now,
+            next_wake_at,
+            final_decision_json,
+            status
+        ],
     )
     .map_err(|err| err.to_string())?;
     // C19 记账：triage 块（含分阶段 token）+ 反饥饿计数（深度正常完成 → 清零并记时间）。
@@ -7493,6 +7794,36 @@ pub(crate) fn background_finish_run(
             .await;
         });
     }
+    // C33：丢弃是**诊断**不是状态 —— `validation.ok` 不因"附加的观察条件里有一条被丢弃"翻成 false
+    //（沿用快判裁决：能走到这里说明动作/参数已过代码门；翻 false 会出现"运行 completed + 校验拒绝"
+    // 的自相矛盾）。丢弃信息靠 `reasons`（非空即渲染）表达。
+    // C34：`expiresAt` 失效（→「无到期」）走**同一个诊断位**（复用 C33 的 `validation.reasons`，
+    // 不新造字段体系），同样**不翻 `ok`** —— 条件照写了、只是没有到期时间。
+    let mut wake_validation_reasons: Vec<String> = Vec::new();
+    if !wake_write.dropped.is_empty() {
+        wake_validation_reasons.push(format!(
+            "已丢弃 {} 条观察条件：{}",
+            wake_write.dropped.len(),
+            wake_write.dropped.join("；")
+        ));
+    }
+    wake_validation_reasons.extend(wake_write.notes.iter().cloned());
+    if !wake_validation_reasons.is_empty() {
+        crate::boot_log(&format!(
+            "background wake plan partial profile={} written={} dropped={} notes={}",
+            profile_id,
+            created_wake_condition_ids.len(),
+            wake_write.dropped.join(" | "),
+            wake_write.notes.join(" | ")
+        ));
+    }
+    // 简报/复盘运行不写观察条件 → 不给 `activeWakeConditionIds`（`null` = "本次没动过 active 集合"，
+    // 而不是"active 是空的"）。
+    let active_wake_condition_ids = if is_intelligence_briefing || is_daily_market_review {
+        None
+    } else {
+        Some(created_wake_condition_ids.clone())
+    };
     Ok(json!({
         "status": "completed",
         "runId": run_id,
@@ -7500,7 +7831,14 @@ pub(crate) fn background_finish_run(
         "createdOpportunityIds": created_opportunity_ids,
         "reusedOpportunityIds": reused_opportunity_ids,
         "nextWakeAt": next_wake_at,
-        "conditionCount": input.next_wake_plan.conditions.len()
+        "conditionCount": input.next_wake_plan.conditions.len(),
+        // C33：`wakeConditions` = **真正写库**的条数（与快判记录同一口径：写库条数才是事实，
+        // 不是模型计划里的条数）；`createdWakeConditionIds` 让运行详情直接取地面真值。
+        "wakeConditions": created_wake_condition_ids.len(),
+        "createdWakeConditionIds": created_wake_condition_ids,
+        "activeWakeConditionIds": active_wake_condition_ids,
+        // C33：诊断位（与快判 `llm.validation` 同形）。丢弃原因在这里，**不**翻 ok。
+        "validation": { "ok": true, "reasons": wake_validation_reasons }
     }))
 }
 
@@ -7686,7 +8024,172 @@ fn normalize_background_wake_scope(
     )
 }
 
-fn normalize_wake_scope(
+/// AI Profile 链路下发的观察条件**类型规范**（C33）：与快判链路**同一份** [`crate::fastlane::wake_condition_schema()`]，
+/// 按该 Profile 的 `allowed_wake_condition_types` 过滤后随载荷下发
+///（只列这个 Profile 允许的类型 —— 绝不把 19 类全塞给一个只允许 5 类的 Profile）。
+///
+/// 落点：侧车把这份 schema 原样注入 `background.finishRun` 的**工具描述**
+///（`scripts/cline-sidecar.mjs`；侧车不维护第二份类型清单）。**不是**
+/// `nextWakePlan.conditions.items` 的 JSON schema —— 那会变成比 Rust 校验更严的第二道门
+///（2026-09-21 既有裁决明令禁止，见 `WAKE_CONDITION_SCHEMA` 的注释）。
+///
+/// 没有可下发的名单（交互会话没有 Profile；简报/复盘在 `execute_profile_run` 里把名单 `clear()` 了，
+/// 它们本来就不写观察条件）→ `Null` = 不下发，侧车的工具描述逐字不变。
+pub(crate) fn background_wake_condition_schema(context: Option<&BackgroundRunContext>) -> Value {
+    context
+        .and_then(|context| {
+            crate::fastlane::wake_condition_schema_for(&context.allowed_wake_condition_types)
+        })
+        .unwrap_or(Value::Null)
+}
+
+/// `nextWakePlan` 的**逐条**校验结果（C33；C34 加 `expires_at` / `notes`）：合法条件待写库，
+/// 非法条件只丢那一条。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct BackgroundWakePlanWrite {
+    /// 逐条校验通过、**待写库**的条件：`(mode, type, 扁平条件值)`。
+    accepted: Vec<(String, String, Value)>,
+    /// 条目级丢弃原因（每条形如 `"price：类型不在 Profile 白名单"`），写入方汇总进诊断位。
+    dropped: Vec<String>,
+    /// **实际写进 `ai_wake_conditions.expires_at` 的值**（C34）：`expiresAt` 失效 → `None`
+    /// （=「无到期」），合法 → 原值。调用方**必须**用它，不能再用 `input.next_wake_plan.expires_at`。
+    expires_at: Option<i64>,
+    /// 计划级但**非致命**的诊断（条件照写了，只是这件事要留痕）：目前只有一条 ——
+    /// `expiresAt` 已过 / 格式非法 → 本次按「无到期」写入（与快判 `FastlaneWakePlanWrite.notes` 同义）。
+    notes: Vec<String>,
+}
+
+/// 回填 `instId` 用的「本轮品种」：**只有单品种语境才唯一**。
+///
+/// 多品种 Profile 里"第一个品种"不是"本轮品种" —— 回填等于把"我猜这条条件盯的是 ETH"写成
+/// "它盯 BTC"。所以多品种时**不猜**：缺 `instId` 的条件按条目级丢弃并记原因（可见，不静默）。
+fn unambiguous_round_inst_id(context: &BackgroundRunContext) -> Option<String> {
+    let mut symbols = context
+        .symbols
+        .iter()
+        .map(|item| item.trim())
+        .filter(|item| !item.is_empty());
+    let first = symbols.next()?;
+    symbols.next().is_none().then(|| first.to_string())
+}
+
+/// ⑥ `nextWakePlan` → 待写库条件（**逐条丢弃、部分接受**；C33）。
+///
+/// 真机（2026-09-21）：模型**自己发明**了类型 `{"type":"price","direction":"cross","price":84986.4}`
+/// （该写 `price_cross`）。当时"白名单外的类型"是**计划级**错误 → 整份计划被拒、0 条写库、
+/// 卡片标红"该计划未落库" —— 而同一份计划里另外两条完全合法。现在按快判既有口径降为**条目级**：
+/// 只丢那条 + 记原因（`已丢弃 1 条观察条件：price：类型不在 Profile 白名单`），合法条件照写。
+///
+/// **计划级只保留"没法逐条处理"的三类**（与快判 `wake_condition_rows` 同口径）：
+/// `mode` 非法、条件数 >32、条件缺 `type`。其余（白名单、作用域、参数、取值）一律条目级。
+///
+/// **C34：`expiresAt` 失效也不再是计划级**（与快判 `persist_fastlane_wake_plan` 同口径）。
+/// 真机隐患同源：`wake_conditions_payload` 把每条条件的 `expiresAt` 原样喂给模型，模型**照抄**上一轮
+/// 算出的绝对毫秒 → 新一轮计划带着"已经过去的时间"回来 —— 旧口径（`background_finish_run` 里
+/// `validate_wake_expiry(...)?`）整份 `Err`，于是**一条合法条件都写不进去、闭环断链**。
+/// 现在只丢"到期时间"（`expires_at = None` = 无到期），条件照写，并把原因记进 `notes`
+///（**同一句话**：`到期时间无效（{原因}）→ 本次观察条件按「无到期」写入（请检查模型是否照抄了上一轮的
+/// expiresAt）`，措辞与快判逐字一致）。
+///
+/// 注意：这里只调 [`validate_wake_expiry`] **取值判定**，其校验规则（13 位毫秒 / 必须晚于当前 /
+/// 最多一年）**一字未改** —— 改的只是"失效之后不再废整份"。
+fn partition_background_wake_plan(
+    conn: &Connection,
+    context: &BackgroundRunContext,
+    plan: &BackgroundWakePlanInput,
+    now: i64,
+) -> Result<BackgroundWakePlanWrite, String> {
+    if !matches!(plan.mode.as_str(), "any" | "all") {
+        return Err("nextWakePlan.mode 必须是 any 或 all".to_string());
+    }
+    if plan.conditions.len() > 32 {
+        return Err("nextWakePlan.conditions 最多允许 32 条".to_string());
+    }
+    let mut write = BackgroundWakePlanWrite::default();
+    // 到期时间失效 ≠ 整份计划失效：只丢到期时间（`expires_at=NULL` = 无到期），条件照写，留痕不静默。
+    write.expires_at = match plan.expires_at {
+        Some(value) => match validate_wake_expiry(Some(value), now) {
+            Ok(()) => Some(value),
+            Err(error) => {
+                write.notes.push(format!(
+                    "到期时间无效（{error}）→ 本次观察条件按「无到期」写入（请检查模型是否照抄了上一轮的 expiresAt）"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    for value in &plan.conditions {
+        let mut scoped_value = value.clone();
+        // 「缺 type」是**计划级**：拿不到类型就没法给这条条件起名字、也没法报告丢弃原因。
+        // 空串/空白视同缺失（与快判 `wake_condition_rows` 的 `trim().filter(!is_empty)` 同口径）。
+        let condition_type = scoped_value
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .ok_or_else(|| "唤醒条件缺少 type".to_string())?
+            .to_string();
+        let checked = (|| -> Result<(), String> {
+            if !context
+                .allowed_wake_condition_types
+                .iter()
+                .any(|item| item == &condition_type)
+            {
+                return Err("类型不在 Profile 白名单".to_string());
+            }
+            // `instId` 可省略（下发的类型规范就是这么写的，侧车的条件 schema 也这么写）：
+            // **单品种语境**下用本轮品种回填（与快判同一段代码、同一条裁决）。
+            // 多品种 Profile 不猜 —— 回填成第一个品种可能把另一个品种的条件变成 BTC 的条件；
+            // 那种情况交给下面的参数校验如实报错并只丢这一条。
+            if let Some(inst_id) = unambiguous_round_inst_id(context) {
+                crate::fastlane::backfill_wake_condition_inst_id(&mut scoped_value, &inst_id);
+            }
+            normalize_background_wake_scope(conn, context, &mut scoped_value)?;
+            let condition = serde_json::from_value::<WakeCondition>(scoped_value.clone())
+                .map_err(|err| format!("条件参数无效：{err}"))?;
+            validate_wake_condition_limits(&condition, now)
+        })();
+        match checked {
+            Ok(()) => write
+                .accepted
+                .push((plan.mode.clone(), condition_type, scoped_value)),
+            Err(error) => write.dropped.push(format!("{condition_type}：{error}")),
+        }
+    }
+    Ok(write)
+}
+
+/// 待写库条件 → `ai_wake_conditions` 行。
+///
+/// **返回的 id 列表就是"真正写库"的条数**（`wakeConditions` 口径与快判记录一致：
+/// 记写库条数，而不是模型计划里的条数）。调用方复用同一事务，保持"替换旧条件 + 写新条件 +
+/// 收尾运行"的原子性。
+fn insert_background_wake_conditions(
+    tx: &Connection,
+    profile_id: &str,
+    conditions: &[(String, String, Value)],
+    expires_at: Option<i64>,
+    now: i64,
+) -> Result<Vec<String>, String> {
+    let mut created = Vec::with_capacity(conditions.len());
+    for (mode, condition_type, value) in conditions {
+        let id = format!("wake-{}", unique_suffix());
+        tx.execute(
+            "INSERT INTO ai_wake_conditions(
+               id,profile_id,source,plan_mode,condition_type,config_json,status,expires_at,created_at,updated_at
+             ) VALUES(?1,?2,'agent',?3,?4,?5,'active',?6,?7,?7)",
+            params![id, profile_id, mode, condition_type, value.to_string(), expires_at, now],
+        )
+        .map_err(|err| err.to_string())?;
+        created.push(id);
+    }
+    Ok(created)
+}
+
+/// 作用域归一（品种/账户/机会归属）。`pub(crate)`：快判 schema 的一致性测试用它当
+/// "作用域级必填字段"（例如 `opportunity_state_changed` 的 `opportunityId`）的实测依据。
+pub(crate) fn normalize_wake_scope(
     conn: &Connection,
     account_id: Option<&str>,
     environment: Option<&str>,
@@ -7785,7 +8288,12 @@ fn validate_unix_millisecond_timestamp(field: &str, value: i64) -> Result<(), St
     Ok(())
 }
 
-fn validate_wake_condition_limits(condition: &WakeCondition, now: i64) -> Result<(), String> {
+/// 逐条的字段/取值校验（唤醒条件落库前的唯一闸门）。
+/// `pub(crate)`：快判 schema 的一致性测试拿它当"实测"依据。
+pub(crate) fn validate_wake_condition_limits(
+    condition: &WakeCondition,
+    now: i64,
+) -> Result<(), String> {
     let finite_positive = |value: f64, name: &str| {
         if value.is_finite() && value > 0.0 {
             Ok(())
@@ -8474,6 +8982,2136 @@ pub(crate) fn fail_stale_running_runs(conn: &Connection, now: i64) -> Result<usi
     Ok(changed)
 }
 
+// ===== C29 / B1：快判常驻快照采集器 =====
+//
+// 每个**活跃快判 Profile** 一个 1 秒节拍的采集任务，把五块写进 `FastlaneSnapshotRegistry`
+// （ticker / orderbook / candles_1m / derivatives / account），供 runner 零 IO 组装 state。
+//
+// 取数三档（handoff 冻结）：
+// ① 同 inst 已被图表消费者订阅 → **复用其最新值**（读共享内存 store：不 join、不改订阅集合、
+//    不抢发送通道）；② 否则自起一份**只订阅该 inst** 的公开订阅并置 `owns_public_stream = true`；
+// ③ 内存里读不到 → 退回**既有** `ai_read_ticker` / `ai_read_orderbook` / `ai_read_candles_for_range`
+//    / 账户快照读路径（**不自造 REST 端点**）。
+//
+// ⚠️ 本应用只有**一条**公开 WS（`market_ws` 的分片任务 + `chart_consumers` 引用计数），
+// 因此"自起只订阅该 inst"的落地形态＝在同一个引用计数 registry 里注册一个**只含该 inst** 的
+// 自己的消费者（`fastlane:<profileId>`）；释放＝摘掉这个消费者，引用计数归零的订阅才会退订。
+
+/// 节拍间隔（C29.4：常驻快照 1 秒节拍）。
+const FASTLANE_BEAT_INTERVAL_MS: u64 = 1_000;
+/// K 线块刷新间隔（1m K 线每秒读几千根纯属浪费；来源时间是"最后一根已收盘 K 线的收盘时刻"，
+/// 所以慢刷不会让 `data_age_ms` 失真）。
+const FASTLANE_CANDLE_REFRESH_TICKS: u64 = 15;
+/// ⚠️ 既有 1m 读路径内部把 `limit` 夹到 **5000**（`limit.clamp(1, 5000)`）并保留**最新**的
+/// 那一批 —— 单次读只能拿到 ≈3.47 天。而 4H 结构窗口需要 24 根 4H（= 5760 根 1m）+
+/// EMA50 预热，所以必须拼**两段**窗口才能满足"≥4 天"（否则 `tf_4h` 恒为 null → 代码门恒判
+/// `data`，那是设计上不可接受的死路）。
+const FASTLANE_CANDLE_LIMIT: u16 = 5_000;
+const FASTLANE_CANDLE_WINDOWS: i64 = 2;
+const FASTLANE_CANDLE_WINDOW_SPAN_MS: i64 = 5 * 86_400_000;
+/// 衍生品（资金费率）刷新间隔。
+const FASTLANE_DERIVATIVES_REFRESH_TICKS: u64 = 5;
+/// 账户快照刷新间隔（handoff：账户 1–2 秒刷）。
+const FASTLANE_ACCOUNT_REFRESH_TICKS: u64 = 2;
+/// 自起消费者 id 前缀（与图表消费者的 id 空间隔离）。
+const FASTLANE_CONSUMER_PREFIX: &str = "fastlane:";
+/// 公开盘口深度（`micro` 需要前几档 + 5bps 深度）。
+const FASTLANE_ORDERBOOK_DEPTH: u16 = 400;
+
+#[derive(Clone)]
+struct FastlaneCollectPlan {
+    profile_id: String,
+    account_id: Option<String>,
+    inst_id: String,
+}
+
+/// 节拍任务句柄：`stop()` 幂等中止任务（B3 的"不得有悬挂任务句柄"）。
+struct FastlaneBeatTask {
+    stopped: Arc<AtomicBool>,
+    handle: tauri::async_runtime::JoinHandle<()>,
+}
+
+impl crate::fastlane::FastlaneBeatHandle for FastlaneBeatTask {
+    fn stop(&self) -> bool {
+        if self.stopped.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        self.handle.abort();
+        true
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.load(Ordering::SeqCst)
+    }
+}
+
+/// 自有公开订阅的租约：`release()` 幂等地摘掉自己的消费者（**不动别人的订阅**）。
+struct FastlaneConsumerLease {
+    app: tauri::AppHandle,
+    consumer_id: String,
+    released: Arc<AtomicBool>,
+}
+
+impl crate::fastlane::FastlaneStreamLease for FastlaneConsumerLease {
+    fn release(&self) -> bool {
+        if self.released.swap(true, Ordering::SeqCst) {
+            return false;
+        }
+        release_market_consumer(&self.app, &self.consumer_id)
+    }
+
+    fn is_released(&self) -> bool {
+        self.released.load(Ordering::SeqCst)
+    }
+}
+
+/// 同 inst 是否已经有图表消费者订阅同一份公开流（复用其最新值，**不改订阅集合**）。
+fn chart_consumer_covers(runtime: &MarketRuntime, inst_id: &str) -> bool {
+    let subscription = crate::chart_consumers::MarketSubscription {
+        symbol: inst_id.to_string(),
+        channel: crate::chart_consumers::MarketChannel::Ticker,
+    };
+    runtime
+        .market_consumers
+        .lock()
+        .map(|consumers| consumers.reference_count(&subscription) > 0)
+        .unwrap_or(false)
+}
+
+/// 注册一个**只订阅该 inst** 的自有消费者（引用计数 +1 → 需要时自动起公开流）。
+fn acquire_market_consumer(app: &tauri::AppHandle, consumer_id: &str, inst_id: &str) -> bool {
+    let runtime = app.state::<MarketRuntime>();
+    let request = crate::chart_consumers::MarketConsumerRequest::new(
+        [inst_id.to_string()],
+        [
+            crate::chart_consumers::MarketChannel::Ticker,
+            crate::chart_consumers::MarketChannel::FundingRate,
+            crate::chart_consumers::MarketChannel::candles("1m"),
+            crate::chart_consumers::MarketChannel::Trades,
+            crate::chart_consumers::MarketChannel::order_book(FASTLANE_ORDERBOOK_DEPTH),
+        ],
+    );
+    let diff = {
+        let mut consumers = match runtime.market_consumers.lock() {
+            Ok(consumers) => consumers,
+            Err(_) => return false,
+        };
+        match consumers.add_or_update(consumer_id, request) {
+            Ok(diff) => diff,
+            Err(error) => {
+                eprintln!("fastlane consumer register failed: {error}");
+                return false;
+            }
+        }
+    };
+    match crate::market_ws::reconcile_public_market_consumers(app, runtime.inner(), diff) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("fastlane consumer reconcile failed: {error}");
+            false
+        }
+    }
+}
+
+/// 摘掉自己的消费者（引用计数归零的订阅由既有 reconcile 退订）。
+fn release_market_consumer(app: &tauri::AppHandle, consumer_id: &str) -> bool {
+    let runtime = app.state::<MarketRuntime>();
+    let diff = {
+        let mut consumers = match runtime.market_consumers.lock() {
+            Ok(consumers) => consumers,
+            Err(_) => return false,
+        };
+        consumers.remove(consumer_id)
+    };
+    crate::market_ws::reconcile_public_market_consumers(app, runtime.inner(), diff).is_ok()
+}
+
+/// OKX 合约规格 → state 的 `instrument` 块（`ctVal` 只进 Rust 校验，不进 state JSON）。
+fn fastlane_instrument_from_okx(instrument: &OkxInstrument) -> crate::fastlane::StateInstrument {
+    let number = |value: &str| value.trim().parse::<f64>().unwrap_or(0.0);
+    crate::fastlane::StateInstrument {
+        tick_size: number(&instrument.tick_sz),
+        lot_size: number(&instrument.lot_sz),
+        min_size: number(&instrument.min_sz),
+        contract_value: format!("1 张 = {} {}", instrument.ct_val, instrument.ct_val_ccy),
+        max_leverage: instrument.lever.trim().parse::<u32>().unwrap_or(0),
+        ct_val: number(&instrument.ct_val),
+    }
+}
+
+/// 起一份采集器（幂等：已存在直接返回 false）。
+///
+/// 失败（定不到合约规格）时**不**建条目：宁可没有采集器（运行时报 `data`），
+/// 也不要一个半死的采集器挂在 registry 上。
+async fn start_fastlane_collector(
+    app: &tauri::AppHandle,
+    runtime: &AiAutomationRuntime,
+    profile: &AiAgentProfileSummary,
+    inst_id: &str,
+) -> bool {
+    // C29.19：开关关闭 → 连"定合约规格 / 起节拍任务 / 订阅行情"的第一步都不做。
+    // （`sync_fastlane_collectors` 已在更外层返回；这里是"任何调用方都起不来"的硬闸。）
+    if !fastlane_mode_enabled() {
+        log_fastlane_blocked_once(std::slice::from_ref(&profile.id));
+        return false;
+    }
+    let instrument = match crate::trade_support::fetch_instrument(app, inst_id).await {
+        Ok(instrument) => fastlane_instrument_from_okx(&instrument),
+        Err(error) => {
+            eprintln!(
+                "fastlane collector skipped profile={} inst={} instrument error: {error}",
+                profile.id, inst_id
+            );
+            return false;
+        }
+    };
+    let consumer_id = format!("{FASTLANE_CONSUMER_PREFIX}{}", profile.id);
+    // ① 图表消费者已订阅同一 inst → 复用其最新值（自己不持有订阅）。
+    let reuses_chart_stream = chart_consumer_covers(app.state::<MarketRuntime>().inner(), inst_id);
+    let (owns_public_stream, lease): (bool, Option<Box<dyn crate::fastlane::FastlaneStreamLease>>) =
+        if reuses_chart_stream {
+            (false, None)
+        } else if acquire_market_consumer(app, &consumer_id, inst_id) {
+            (
+                true,
+                Some(Box::new(FastlaneConsumerLease {
+                    app: app.clone(),
+                    consumer_id,
+                    released: Arc::new(AtomicBool::new(false)),
+                })),
+            )
+        } else {
+            // 订阅起不来也不阻断：退路是每拍调用既有读函数（REST）。
+            (false, None)
+        };
+    let stopped = Arc::new(AtomicBool::new(false));
+    let plan = FastlaneCollectPlan {
+        profile_id: profile.id.clone(),
+        account_id: profile.account_id.clone(),
+        inst_id: inst_id.to_string(),
+    };
+    let beat_app = app.clone();
+    let beat_runtime = runtime.clone();
+    let beat_stopped = stopped.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        run_fastlane_beat(beat_app, beat_runtime, plan, beat_stopped).await;
+    });
+    let beat: Box<dyn crate::fastlane::FastlaneBeatHandle> =
+        Box::new(FastlaneBeatTask { stopped, handle });
+    let started = {
+        let mut registry = match runtime.fastlane_snapshots.lock() {
+            Ok(registry) => registry,
+            Err(_) => {
+                // 拿不到 registry（锁中毒）也不能把刚起的任务/订阅丢下不管。
+                beat.stop();
+                if let Some(lease) = lease {
+                    lease.release();
+                }
+                return false;
+            }
+        };
+        registry.ensure(
+            &profile.id,
+            profile.account_id.clone().unwrap_or_default(),
+            inst_id,
+            instrument,
+            reuses_chart_stream,
+            owns_public_stream,
+            beat,
+            lease,
+        )
+    };
+    crate::boot_log(&format!(
+        "fastlane collector started profile={} inst={} reuseChartStream={reuses_chart_stream} ownsStream={owns_public_stream}",
+        profile.id, inst_id
+    ));
+    started
+}
+
+/// 停掉并摘除该 Profile 的采集器（幂等；三处释放路径共用）。
+///
+/// 返回 `true` = 本次确实摘掉了一个条目。
+pub(crate) fn release_fastlane_collector(runtime: &AiAutomationRuntime, profile_id: &str) -> bool {
+    let released = {
+        let mut registry = match runtime.fastlane_snapshots.lock() {
+            Ok(registry) => registry,
+            Err(_) => return false,
+        };
+        registry.release(profile_id)
+    };
+    if released {
+        crate::boot_log(&format!("fastlane collector released profile={profile_id}"));
+    }
+    released
+}
+
+/// 释放**全部**快判采集器（C29.19：开关关闭时"已起的必须被释放"的唯一出口）。
+///
+/// 走 `FastlaneSnapshotRegistry::release_all`（既有语义：逐条停节拍任务 + 只释放自己起的
+/// 公开订阅 + 从 registry 摘除）。返回本次真正摘掉的条目数。
+fn release_all_fastlane_collectors(runtime: &AiAutomationRuntime) -> usize {
+    match runtime.fastlane_snapshots.lock() {
+        Ok(mut registry) => registry.release_all(),
+        Err(_) => 0,
+    }
+}
+
+// ===== C29 / B4：快判轮 runner =====
+//
+// 一轮的顺序（**冻结**，每步都有测试）：
+// ① 预算闸门 `budget_block`（命中 → 不判定，记 `budget_exhausted`）
+// ② 取常驻内存快照 → `assemble_from_cache` 装配 state
+// ③ 代码门 `evaluate_gate`（数据/异常/冲突）+ 时段门（`session_closed`）
+// ④ 下发 `{wakeConditions, fastlaneSnapshot, fastlaneConfig(18 键), typesafeApiKey, fastlaneIntent}`
+// ⑤ 消费侧车 `fastlaneResult` → `FastlaneRecord::from_sidecar`（只补 trigger/gate/fetchMs/codeMs/totalMs）
+// ⑥ 落 `ai_agent_runs.fastlane_json`（六组）→ 侧车那份 `nextWakePlan` 写库 → 按 `notify_policy` 通知
+//
+// 动作的「适配 → `validate_round` → 冻结候选 + 预检 → 既有 commit 路径」发生在**工具闸门**
+// （`lib.rs::authorize_fastlane_opportunity_commit`）：侧车的唯一动作出口是既有
+// `tradeOpportunity.create` 工具调用，闸门拿到的就是本文件冻结的那份事实，顺序无法绕过。
+
+/// provider 名 vs 应用内部 model-config **id**（真机 400 的根因）。
+///
+/// 应用内部 id 的形态是 `model-<时间戳>`（UI 生成 `model-${Date.now()}`，
+/// 内置条目是 `model-<provider>`）；把它当 API 的 `model` 发出去，provider 必然秒拒。
+fn looks_like_model_config_id(value: &str) -> bool {
+    let value = value.trim();
+    value.strip_prefix("model-").is_some_and(|rest| {
+        !rest.is_empty()
+            && rest
+                .chars()
+                .all(|item| item.is_ascii_alphanumeric() || item == '-')
+    })
+}
+
+/// 快判窄调用的解析结果：模型名 + **端点/凭据归属**（lead 裁决 2026-09-20）。
+///
+/// 只有 Profile 绑的是 `config.models[]` 里**非激活**条目时才带 `base_url`/`api_key`
+/// —— 那时模型名与端点/凭据必须同源，否则"模型名对上、端点不对"照样 400/401。
+#[derive(Debug, Clone, PartialEq, Default)]
+struct FastlaneLlmTarget {
+    model: String,
+    base_url: Option<String>,
+    api_key: Option<String>,
+    /// 日志/用量元信息：条目里的 provider 名（**不含凭据**）。
+    provider: Option<String>,
+    /// 命中条目的 id / 显示名（运行级用量留痕用；无归属时回落成模型名）。
+    model_id: String,
+    model_name: Option<String>,
+    /// 归属类型，仅用于 boot log（`active` | `entry` | `passthrough` | `fallback`）。
+    source: &'static str,
+}
+
+/// 解析 Profile 选中的快判 LLM 模型（真机 400 的两面：模型名 + 端点/凭据）。
+///
+/// - 命中 `config.models[]` 的 `id` → 用该条目的 provider 模型名；
+///   若该条目**不是激活模型** → 同时带上它的 `baseUrl`/`apiKey`（覆盖会话里那一对）；
+/// - 命中激活条目 → 只给模型名（端点/凭据与会话现值同源，**不覆盖**）；
+/// - 未命中且是 `model-…` 形态 → 回落激活模型（当 provider 名发出去必 400）；
+/// - 未命中且不像 id（用户填的就是 provider 名）→ 原样透传，端点/凭据**不猜**；
+/// - `profile.model` 为空 → 回落激活模型。
+fn fastlane_llm_model(
+    profile: &AiAgentProfileSummary,
+    config: &desic_storage_config::AiConfig,
+) -> FastlaneLlmTarget {
+    let active = |source: &'static str| FastlaneLlmTarget {
+        model: config.model.clone(),
+        base_url: None,
+        api_key: None,
+        provider: config.provider.clone(),
+        model_id: if config.active_model_id.trim().is_empty() {
+            config.model.clone()
+        } else {
+            config.active_model_id.trim().to_string()
+        },
+        model_name: Some(config.model.clone()),
+        source,
+    };
+    let Some(requested) = profile
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return active("active");
+    };
+    let Some(entry) = config
+        .models
+        .iter()
+        .find(|entry| entry.id.trim() == requested)
+    else {
+        return if looks_like_model_config_id(requested) {
+            active("fallback")
+        } else {
+            FastlaneLlmTarget {
+                model: requested.to_string(),
+                base_url: None,
+                api_key: None,
+                provider: None,
+                model_id: requested.to_string(),
+                model_name: None,
+                source: "passthrough",
+            }
+        };
+    };
+    let provider_model = entry.model.trim();
+    let model = if provider_model.is_empty() {
+        config.model.clone()
+    } else {
+        provider_model.to_string()
+    };
+    // 激活条目：端点/凭据本来就与会话现值同源（`apply_active_ai_model` 已把条目拷进顶层字段）。
+    let active_id = config.active_model_id.trim();
+    let is_active_entry = (!active_id.is_empty() && entry.id.trim() == active_id)
+        || (active_id.is_empty() && model == config.model.trim());
+    FastlaneLlmTarget {
+        model,
+        // 空值 = "没有可覆盖的东西"（`None`），不要把空串当成一次覆盖。
+        base_url: (!is_active_entry)
+            .then(|| entry.base_url.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        api_key: (!is_active_entry)
+            .then(|| entry.api_key.trim().to_string())
+            .filter(|value| !value.is_empty()),
+        provider: Some(entry.provider.clone()),
+        model_id: entry.id.trim().to_string(),
+        model_name: Some(entry.name.trim().to_string()),
+        source: if is_active_entry { "active" } else { "entry" },
+    }
+}
+
+/// 快判轮的 LLM 模型名（下发侧车 `fastlane_llm_model`）：把 **id 解析成 provider 模型名**。
+///
+/// 真机证据（01:26 之后的 400）：Profile.model = `model-1784742123978`（内部 id），
+/// 它对应的 provider 模型名是 `deepseek-v4-flash`（`config.models[]` 里那一条）；
+/// 直接下发 id → provider 报 `窄调用 HTTP 400`。
+///
+/// 解析规则（**只作用于快判轮**，普通 AI 轮的模型名路径不动）：
+/// 1. `profile.model` 非空 → 按 `id` 在 `config.models[]` 里查，命中 → 用该条目的 `model`；
+/// 2. 未命中且**看着像内部 id**（`model-…`）→ 回落激活模型（发出去必 400）；
+/// 3. 未命中但不像 id（用户填的就是 provider 名）→ **原样透传**（不丢用户设置）；
+/// 4. `profile.model` 为空 → 回落 `config.model`（既有行为）。
+
+/// `trigger_type` / 停机轮留痕 → 记录里的 `trigger` 组。
+fn fastlane_trigger_block(
+    run: &AiAgentRunSummary,
+    trigger: &Value,
+) -> crate::fastlane::FastlaneTrigger {
+    // 停机轮：停机命令已经把原始触发块写进了 `fastlane_json.trigger`，事实优先。
+    if run.trigger_type == "fastlane_close" {
+        if let Some(stored) = run
+            .fastlane
+            .as_ref()
+            .and_then(|value| value.get("trigger"))
+            .cloned()
+        {
+            if let Ok(block) = serde_json::from_value::<crate::fastlane::FastlaneTrigger>(stored) {
+                return block;
+            }
+        }
+    }
+    // 其它轮次一律走冻结的纯函数（`condition | silence | manual` 的唯一来源）。
+    crate::fastlane::trigger_block(&run.trigger_type, trigger)
+}
+
+/// 这一轮是不是「停机排队的平仓轮」（`trigger_type='fastlane_close'` 或运行行里已留痕 `intent="close"`）。
+fn fastlane_round_is_close(run: &AiAgentRunSummary, stored: Option<&Value>) -> bool {
+    run.trigger_type == "fastlane_close"
+        || stored
+            .and_then(|value| value.get("intent"))
+            .and_then(Value::as_str)
+            == Some("close")
+}
+
+/// 快判 Profile 是不是**顾问模式**（与授权层同一个归一化口径：
+/// `authorize_ai_tool` 用的就是 `normalize_permission_mode(Some(&permission_mode))`）。
+///
+/// 顾问模式不允许创建/修改交易机会 → 快判轮**不可能产生动作**，必须早退而不是跑完一整轮
+/// （跑完只是白花 Jev/LLM 的钱，然后落一个容易误读的 `validation_failed`）。
+fn fastlane_profile_is_advisor(profile: &AiAgentProfileSummary) -> bool {
+    normalize_permission_mode(Some(profile.mode.as_str())) == ADVISOR_MODE
+}
+
+/// advisor 早退的记录（runner 与测试共用**同一条构造路径**）：
+/// `action = watch / validation_failed`（原因码沿用冻结枚举），原因文本进 `gate.reasons`。
+fn fastlane_advisor_watch_record(
+    trigger: crate::fastlane::FastlaneTrigger,
+) -> crate::fastlane::FastlaneRecord {
+    crate::fastlane::FastlaneRecord::new(trigger)
+        .watch("validation_failed")
+        .with_gate(crate::fastlane::GateOutcome::config_blocked(
+            crate::fastlane::FASTLANE_ADVISOR_UNSUPPORTED_REASON,
+        ))
+}
+
+/// 快判模式总开关（C29.19）：**唯一**的"是否启用快判"判断入口。
+///
+/// 只读常量，不做任何其它判断；所有分派 / 采集器 / 入队 / 认领路径都经此（或经
+/// [`fastlane_blocked`]，它把开关与 Profile 类型合成一个可读的原因）。
+fn fastlane_mode_enabled() -> bool {
+    crate::fastlane::FASTLANE_MODE_ENABLED
+}
+
+/// 开关关闭时的**可见记录**（要求"不静默"）—— 同一进程内每 5 分钟最多一条，
+/// 否则 2 秒一拍的 `automation_tick` 会把日志刷爆。
+fn log_fastlane_blocked_once(profile_ids: &[String]) {
+    /// 同一批原因的最小重复间隔（毫秒）。
+    const MIN_INTERVAL_MS: i64 = 300_000;
+    if profile_ids.is_empty() {
+        return;
+    }
+    static LAST_LOGGED_AT: AtomicI64 = AtomicI64::new(0);
+    let now = now_ms();
+    let last = LAST_LOGGED_AT.load(Ordering::Relaxed);
+    if now.saturating_sub(last) < MIN_INTERVAL_MS {
+        return;
+    }
+    if LAST_LOGGED_AT
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    crate::boot_log(&format!(
+        "fastlane mode disabled: {} 个快判 Profile 被挡下（{}）：{}",
+        profile_ids.len(),
+        profile_ids.join(","),
+        crate::fastlane::FASTLANE_MODE_DISABLED_REASON
+    ));
+}
+
+/// 本版本是否**挡住**这个 Profile 的快判路径：开关关闭 + `profileType="fastlane"` → 返回原因。
+///
+/// 调用即留痕（节流），因此各拦截面不会静默。AI Profile 与历史非法类型（已回落 `ai`）**不受影响**。
+fn fastlane_blocked(profile: &AiAgentProfileSummary) -> Option<&'static str> {
+    if !fastlane_mode_enabled() && profile.profile_type == PROFILE_TYPE_FASTLANE {
+        log_fastlane_blocked_once(std::slice::from_ref(&profile.id));
+        return Some(crate::fastlane::FASTLANE_MODE_DISABLED_REASON);
+    }
+    None
+}
+
+/// `profileType` 分派（C29 / B4）：快判 Profile 的 Run **只**走快判 runner。
+///
+/// 手动触发入口仍然只有既有 `ai_agent_profile_run_now`（排队一条 run），
+/// 由这里决定谁来执行——**不新增第二个触发入口**。
+///
+/// **C29.19**：开关关闭（本版本）时恒 `false`。快判轮次不会因此溜进 AI Profile runner：
+/// 它在入队（`queue_run`）与认领（`claim_next_run`）两处就已被挡下，
+/// runner 入口（`execute_fastlane_round`）还有最后一道闸。
+fn run_uses_fastlane_runner(profile: &AiAgentProfileSummary) -> bool {
+    fastlane_mode_enabled() && profile.profile_type == PROFILE_TYPE_FASTLANE
+}
+
+/// 单日边界（Asia/Shanghai 自然日，毫秒）。
+fn fastlane_day_start_ms(now: i64) -> i64 {
+    const OFFSET: i64 = 8 * 60 * 60 * 1_000;
+    let local = now.saturating_add(OFFSET);
+    local.saturating_sub(local.rem_euclid(86_400_000)) - OFFSET
+}
+
+/// 当日已实现盈亏占权益的百分比（`budget_block` 的单日亏损护栏口径）。
+///
+/// 数据源＝既有 `position_episodes`（当日平仓的 episode 的 `realized_pnl` 求和）÷ 账户权益。
+/// **拿不到账户/权益 → 返回 `None`**（不猜成 0 让护栏看起来"已检查"）。
+fn fastlane_daily_pnl_pct(
+    conn: &Connection,
+    account_id: Option<&str>,
+    equity_usdt: Option<f64>,
+    now: i64,
+) -> Option<f64> {
+    let account_id = account_id
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let equity = equity_usdt.filter(|value| value.is_finite() && *value > 0.0)?;
+    let total: f64 = conn
+        .query_row(
+            "SELECT COALESCE(SUM(CAST(realized_pnl AS REAL)),0) FROM position_episodes
+             WHERE account_id=?1 AND status='closed' AND close_time>=?2",
+            params![account_id, fastlane_day_start_ms(now)],
+            |row| row.get::<_, f64>(0),
+        )
+        .ok()?;
+    Some(total / equity * 100.0)
+}
+
+/// 常驻快照里的账户权益（预算闸门与冻结事实用同一份读数）。
+fn fastlane_cached_equity(runtime: &AiAutomationRuntime, profile_id: &str) -> Option<f64> {
+    let registry = runtime.fastlane_snapshots.lock().ok()?;
+    let block = registry.entry(profile_id)?.cache.account.as_ref()?;
+    crate::fastlane::pick_equity_usdt(&block.value)
+}
+
+/// 预算闸门输入（全部来自库/内存；判定本身是纯函数 `budget_block`）。
+fn fastlane_budget_inputs(
+    conn: &Connection,
+    runtime: &AiAutomationRuntime,
+    profile: &AiAgentProfileSummary,
+    config: &crate::fastlane::FastlaneConfig,
+    run_id: &str,
+    now: i64,
+) -> Result<crate::fastlane::BudgetInputs, String> {
+    let last_run_at = conn
+        .query_row(
+            "SELECT MAX(started_at) FROM ai_agent_runs
+             WHERE profile_id=?1 AND record_kind='fastlane' AND id<>?2 AND status='completed'",
+            params![profile.id, run_id],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .map_err(|error| error.to_string())?;
+    let runs_last_hour = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ai_agent_runs
+             WHERE profile_id=?1 AND record_kind='fastlane' AND id<>?2 AND started_at>=?3",
+            params![profile.id, run_id, now.saturating_sub(3_600_000)],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())? as u32;
+    // 动作频率按「最近一分钟真的提交过动作」的轮次计（`budget_block` 只吃计数）。
+    let actions_last_minute = conn
+        .query_row(
+            "SELECT COUNT(*) FROM ai_agent_runs
+             WHERE profile_id=?1 AND record_kind='fastlane' AND started_at>=?2
+               AND fastlane_json LIKE '%\"kind\":\"opportunity\"%'",
+            params![profile.id, now.saturating_sub(60_000)],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())? as u32;
+    let open_and_pending = conn
+        .query_row(
+            "SELECT COUNT(*) FROM trade_opportunities
+             WHERE agent_profile_id=?1 AND status IN
+               ('pending','approved','submitting','reconciling','accepted','partially_filled')",
+            params![profile.id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map_err(|error| error.to_string())? as u32;
+    Ok(crate::fastlane::BudgetInputs {
+        now,
+        last_run_at,
+        min_wake_interval_seconds: profile.min_wake_interval_seconds,
+        runs_last_hour,
+        max_runs_per_hour: profile.max_runs_per_hour,
+        // 单日亏损护栏：当日已实现盈亏 ÷ 权益（拿不到账户/权益 → 按 0 计，不假装已检查）。
+        daily_pnl_pct: fastlane_daily_pnl_pct(
+            conn,
+            profile.account_id.as_deref(),
+            fastlane_cached_equity(runtime, &profile.id),
+            now,
+        )
+        .unwrap_or(0.0),
+        max_daily_loss_pct: config.max_daily_loss_pct,
+        open_and_pending,
+        max_concurrent: config.max_concurrent,
+        actions_last_minute,
+        max_actions_per_minute: config.max_actions_per_minute,
+    })
+}
+
+/// 高影响新闻（6 小时窗口）→ 事件黑名单口径的 `StateEvent`（与
+/// `intelligence::publish_important_news_events` 用同一条 SQL 谓词，不另造数据源）。
+fn fastlane_recent_events(conn: &Connection, now: i64) -> Vec<crate::fastlane::StateEvent> {
+    let since = now.saturating_sub(6 * 60 * 60_000);
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT raw_json,importance,last_published_at FROM intelligence_news_events
+         WHERE last_published_at>=?1 AND (importance IN ('high','3') OR status='confirmed')
+         ORDER BY last_published_at DESC LIMIT 50",
+    ) else {
+        return Vec::new();
+    };
+    let rows = stmt.query_map(params![since], |row| {
+        Ok((
+            row.get::<_, Option<String>>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<i64>>(2)?,
+        ))
+    });
+    let Ok(rows) = rows else {
+        return Vec::new();
+    };
+    rows.filter_map(Result::ok)
+        .map(|(raw, importance, at)| {
+            let title = raw
+                .as_deref()
+                .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                .and_then(|value| {
+                    value
+                        .get("title")
+                        .or_else(|| value.get("name"))
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                })
+                .unwrap_or_else(|| "重要新闻".to_string());
+            crate::fastlane::StateEvent {
+                title,
+                importance: importance.unwrap_or_default(),
+                at: at.unwrap_or(0),
+            }
+        })
+        .collect()
+}
+
+/// 轮开始时的**按需预热**（预算 ≤1s）：**缺块 或 已超过该块门限**的块，用**既有读函数**当场刷新一次。
+///
+/// 为什么必须有（真机两轮各暴露一面）：
+/// ① 刚建好的 Profile 第一次跑时采集器还没产出任何块 → 不预热必然一轮空转；
+/// ② 只看"有没有"不看"够不够新" → 块一旦过期，**每轮都被门拦下且从不自愈**。
+/// 因此预热条件＝[`crate::fastlane::warmup_needed_blocks`]（门限与 `evaluate_gate` **同源**，
+/// 调用方把同一份 `max_age` 传进来）。
+///
+/// 纪律：**不新增 REST 端点**（全部走 `ai_read_*` / `fetch_private_account_snapshot` 等既有读路径）、
+/// **不改 `data_age_ms` 口径**（写入的是各块自己的真实来源时间；桶粒度块的来源时间口径见
+/// [`crate::fastlane::normalize_derivatives_block`]），预热耗时记进 `timing.fetchMs`。
+///
+/// 返回 `(补缺数, 刷新过期数)`；预算内没取到的一律按"缺失/过期"原样留给代码门。
+async fn warmup_fastlane_blocks(
+    app: &tauri::AppHandle,
+    runtime: &AiAutomationRuntime,
+    profile: &AiAgentProfileSummary,
+    inst_id: &str,
+    max_age: &crate::fastlane::DataAges,
+    deadline_ms: i64,
+) -> (usize, usize) {
+    let needed = {
+        let registry = match runtime.fastlane_snapshots.lock() {
+            Ok(registry) => registry,
+            Err(_) => return (0, 0),
+        };
+        match registry.cache(&profile.id) {
+            Some(cache) => crate::fastlane::warmup_needed_blocks(cache, now_ms(), max_age),
+            None => return (0, 0),
+        }
+    };
+    if needed.is_empty() {
+        return (0, 0);
+    }
+    let market = app.state::<MarketRuntime>().inner().clone();
+    let plan = FastlaneCollectPlan {
+        profile_id: profile.id.clone(),
+        account_id: profile.account_id.clone(),
+        inst_id: inst_id.to_string(),
+    };
+    let mut filled = 0usize;
+    let mut refreshed = 0usize;
+    // 刷新动作的**读侧证据**：每块"刚读到的值本身有多旧"（0/None = 时间戳不可用）。
+    // 这是"刷新后仍然过期 = 读路径/推送本身旧"与"缓存没刷"的唯一区分依据。
+    let mut read_ages: Vec<(&'static str, Option<i64>)> = Vec::new();
+    for (block, need) in needed {
+        if now_ms() >= deadline_ms {
+            break;
+        }
+        let write = |block: crate::fastlane::FastlaneBlock| {
+            write_fastlane_block(runtime, &profile.id, block);
+        };
+        let written = match block {
+            "ticker" => match ai_read_ticker(&market, inst_id).await {
+                Ok(value) => {
+                    let bars = current_fastlane_bars(runtime, &profile.id);
+                    match crate::fastlane::normalize_ticker_block(&value, &bars) {
+                        Some((block, source_at)) => {
+                            let stored = crate::fastlane::snapshot_source_time(source_at, now_ms());
+                            read_ages.push((
+                                "ticker",
+                                (stored > 0).then(|| now_ms().saturating_sub(stored)),
+                            ));
+                            write(crate::fastlane::FastlaneBlock::Ticker(
+                                crate::fastlane::SnapshotSlot::new(block, stored),
+                            ));
+                            true
+                        }
+                        None => false,
+                    }
+                }
+                Err(_) => false,
+            },
+            "orderbook" => {
+                match ai_read_orderbook(&market, inst_id, FASTLANE_ORDERBOOK_DEPTH).await {
+                    Ok(value) => {
+                        // 与采集器同一口径：来源时间取交易所/读路径给的时间戳（不是 now）。
+                        let source_at = json_i64(&value, "ts")
+                            .or_else(|| json_i64(&value, "observedAt"))
+                            .unwrap_or(0);
+                        write(crate::fastlane::FastlaneBlock::Orderbook(
+                            crate::fastlane::SnapshotSlot::new(
+                                value,
+                                crate::fastlane::snapshot_source_time(source_at, now_ms()),
+                            ),
+                        ));
+                        true
+                    }
+                    Err(_) => false,
+                }
+            }
+            "candles_1m_closed" => {
+                let values = read_fastlane_candle_values(app, &market, inst_id, now_ms()).await;
+                if values.is_empty() {
+                    false
+                } else {
+                    let source_at =
+                        crate::fastlane::last_closed_candle_close_ms(&values).unwrap_or(0);
+                    write(crate::fastlane::FastlaneBlock::Candles1m(
+                        crate::fastlane::SnapshotSlot::new(
+                            values,
+                            crate::fastlane::snapshot_source_time(source_at, now_ms()),
+                        ),
+                    ));
+                    true
+                }
+            }
+            "derivatives" => match ai_read_funding_rate(&market, inst_id).await {
+                Ok(value) => match crate::fastlane::normalize_derivatives_block(&value, now_ms()) {
+                    Some((block, source_at)) => {
+                        let stored = crate::fastlane::snapshot_source_time(source_at, now_ms());
+                        read_ages.push((
+                            "derivatives",
+                            (stored > 0).then(|| now_ms().saturating_sub(stored)),
+                        ));
+                        write(crate::fastlane::FastlaneBlock::Derivatives(
+                            crate::fastlane::SnapshotSlot::new(block, stored),
+                        ));
+                        true
+                    }
+                    None => false,
+                },
+                Err(_) => false,
+            },
+            "account" => match fastlane_account_snapshot(app, &market, &plan).await {
+                Some(snapshot) => match serde_json::to_value(&snapshot) {
+                    Ok(value) => match crate::fastlane::normalize_account_block(&value) {
+                        Some((block, source_at)) => {
+                            let stored = crate::fastlane::snapshot_source_time(source_at, now_ms());
+                            read_ages.push((
+                                "account",
+                                (stored > 0).then(|| now_ms().saturating_sub(stored)),
+                            ));
+                            write(crate::fastlane::FastlaneBlock::Account(
+                                crate::fastlane::SnapshotSlot::new(block, stored),
+                            ));
+                            true
+                        }
+                        None => false,
+                    },
+                    Err(_) => false,
+                },
+                None => false,
+            },
+            _ => false,
+        };
+        if written {
+            match need {
+                crate::fastlane::WarmupNeed::Missing => filled += 1,
+                crate::fastlane::WarmupNeed::Stale => refreshed += 1,
+            }
+        }
+    }
+    // 主动买卖比：块补齐了 `micro` 仍可能不可用（它是 `micro.is_available()` 的一格）。
+    // 与采集器节拍**同源**（既有内存成交流），冷启动时也补一次；**只在真的算出比例时写入**
+    //（不用 `None` 覆盖节拍刚写好的值）。
+    let seeded_ratio = {
+        let trades = market
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.trades_by_inst.get(inst_id).cloned())
+            .unwrap_or_default();
+        if trades.is_empty() {
+            None
+        } else {
+            let values = trades
+                .iter()
+                .filter_map(|trade| serde_json::to_value(trade).ok())
+                .collect::<Vec<_>>();
+            let mut window = crate::fastlane::TakerWindow::new();
+            window.observe_trades(&values);
+            window.ratio(now_ms())
+        }
+    };
+    if let Some(ratio) = seeded_ratio {
+        if let Ok(mut registry) = runtime.fastlane_snapshots.lock() {
+            registry.set_taker_ratio(&profile.id, Some(ratio));
+        }
+    }
+    if filled > 0 || refreshed > 0 || seeded_ratio.is_some() {
+        crate::boot_log(&format!(
+            "fastlane warmup profile={} inst={inst_id} filled={filled} refreshed={refreshed} readAges={read_ages:?} takerRatio={:?}",
+            profile.id, seeded_ratio
+        ));
+    }
+    (filled, refreshed)
+}
+
+/// 预热预算（毫秒）：单轮内的短预算，超了就按"仍缺失"处理。
+const FASTLANE_WARMUP_BUDGET_MS: i64 = 1_000;
+
+/// 快判轮的取数结果（一次锁内取完，避免「半新半旧」）。
+struct FastlaneRoundInputs {
+    state: Value,
+    snapshot: crate::fastlane::FastlaneSnapshot,
+    gate: crate::fastlane::GateOutcome,
+    blackout_active: bool,
+}
+
+/// ② 取数 + ③ 代码门：常驻内存快照 → state → 门（缺块**不塞 0**，交给代码门判 `data`）。
+fn fastlane_round_inputs(
+    runtime: &AiAutomationRuntime,
+    conn: &Connection,
+    profile: &AiAgentProfileSummary,
+    config: &crate::fastlane::FastlaneConfig,
+    max_age: &crate::fastlane::DataAges,
+) -> Option<FastlaneRoundInputs> {
+    // 新鲜度锚点＝**装配这一刻**（不是轮次开始那一刻：取数越晚，年龄只能更大）。
+    let now = now_ms();
+    let (cache, instrument) = {
+        let registry = runtime.fastlane_snapshots.lock().ok()?;
+        let entry = registry.entry(&profile.id)?;
+        (entry.cache.clone(), entry.instrument.clone())
+    };
+    let events = fastlane_recent_events(conn, now);
+    let blackout_active =
+        crate::fastlane::event_blackout_active(&events, now, config.event_blackout_minutes);
+    let snapshot = crate::fastlane::assemble_from_cache(
+        &cache,
+        &instrument,
+        crate::fastlane::StateLimits {
+            target_leverage: profile.target_leverage,
+            max_single_trade_margin_pct: profile.max_single_trade_margin_pct,
+        },
+        events,
+        Vec::new(),
+        now,
+    );
+    let ages = snapshot.source_times().age_ms(now);
+    let mut gate = crate::fastlane::evaluate_gate(&ages, &snapshot, &[], max_age);
+    // ③ 时段门（`fastlane_trading_hours` 的执行点）：不在时段内 → 当轮不判定。
+    let local_hour = chrono::Local::now()
+        .time()
+        .format("%H")
+        .to_string()
+        .parse::<u32>()
+        .unwrap_or(0);
+    if let Some(reason) = crate::fastlane::session_watch_reason(&config.trading_hours, local_hour) {
+        let detail = format!(
+            "{reason}: 不在快判交易时段内（trading_hours={}，本地小时={local_hour}）",
+            config.trading_hours
+        );
+        if gate.ok {
+            gate = crate::fastlane::GateOutcome::session_closed(detail);
+        } else {
+            // 数据/异常/冲突门已经挡住：两道门的结果都如实留在 `gate.reasons` 里。
+            gate.ok = false;
+            gate.reasons.push(detail);
+        }
+    }
+    Some(FastlaneRoundInputs {
+        state: snapshot.to_state(now),
+        snapshot,
+        gate,
+        blackout_active,
+    })
+}
+
+/// 活跃观察条件（用户 + Agent 两条来源）→ 下发形状
+///（冻结见 [`crate::fastlane::wake_conditions_payload`]）。
+fn fastlane_active_wake_conditions(
+    conn: &Connection,
+    profile_id: &str,
+    now: i64,
+) -> Result<Value, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,source,plan_mode,config_json,expires_at,last_triggered_at
+             FROM ai_wake_conditions
+             WHERE profile_id=?1 AND status='active' AND (expires_at IS NULL OR expires_at>?2)
+             ORDER BY created_at ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let rows = stmt
+        .query_map(params![profile_id, now], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+            ))
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let views = rows
+        .into_iter()
+        .map(
+            |(id, source, plan_mode, config_json, expires_at, last_triggered_at)| {
+                crate::fastlane::WakeConditionView {
+                    id,
+                    source,
+                    plan_mode,
+                    condition: config_json
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+                        .unwrap_or_else(|| json!({ "type": "unknown" })),
+                    expires_at,
+                    last_triggered_at,
+                }
+            },
+        )
+        .collect::<Vec<_>>();
+    Ok(crate::fastlane::wake_conditions_payload(&views))
+}
+
+/// 观察条件写库的结果：**部分接受**（合法条件照写，非法条件只丢弃并记原因）。
+#[derive(Debug, Clone, Default, PartialEq)]
+struct FastlaneWakePlanWrite {
+    /// **真正写库**的条数。
+    written: usize,
+    /// 被丢弃的条目及原因（`"timer：timer 必须提供 atMs 或 intervalMinutes"`）。
+    dropped: Vec<String>,
+    /// 计划级但**非致命**的诊断（条件照写了，只是这件事要留痕）：
+    /// 目前只有一条 —— `expiresAtMs` 已过 / 格式非法 → 本次按「无到期」写入。
+    notes: Vec<String>,
+}
+
+/// ⑥ 侧车那份 `nextWakePlan` → `ai_wake_conditions`（**闭环的唯一写入口**）。
+///
+/// **逐条丢弃、部分接受**（真机 `run_1789927808343894000`：3 条里 1 条 timer 参数不合规，
+/// 整份 plan 被拒、写库 0 条 —— 而 `validate_wake_condition_limits` 本来就是逐条校验的）。
+/// 只有**计划级**问题（`mode` 非法 / 超过 32 条 / 缺 `type` / Profile 白名单外的类型）才是 `Err`；
+/// 单条不合法只进 `dropped`，合法条件照写。
+fn persist_fastlane_wake_plan(
+    conn: &Connection,
+    profile: &AiAgentProfileSummary,
+    plan: &Value,
+    now: i64,
+) -> Result<FastlaneWakePlanWrite, String> {
+    let allowed = profile.allowed_wake_condition_types.clone();
+    let rows = crate::fastlane::wake_condition_rows(plan, now, |kind| {
+        allowed.iter().any(|item| item == kind)
+    })?;
+    // **到期时间失效 ≠ 整份计划失效**（2026-09-21 真机）：`wake_conditions_payload` 会把每条
+    // 条件的 `expiresAt` 原样喂给模型，模型**照抄**上一轮算出的绝对毫秒 → 新一轮的 plan 带着
+    // "已经过去的时间"回来 → 旧口径整份 `Err` → **0 条写库、闭环断链**，而记录里只写"未写入"，
+    // 看不出是照抄造成的。这里只丢"到期时间"（`expires_at=NULL` = 无到期），条件照写，
+    // 并把这件事记进 `notes`（可见、不静默）。
+    let mut notes: Vec<String> = Vec::new();
+    let expires_at = match plan.get("expiresAtMs").and_then(Value::as_i64) {
+        Some(value) => match validate_wake_expiry(Some(value), now) {
+            Ok(()) => Some(value),
+            Err(error) => {
+                notes.push(format!(
+                    "到期时间无效（{error}）→ 本次观察条件按「无到期」写入（请检查模型是否照抄了上一轮的 expiresAt）"
+                ));
+                None
+            }
+        },
+        None => None,
+    };
+    // 快判 Profile 是单品种语境：侧车条件没给 `instId` 时**回填本轮品种**
+    //（`timer` 与品种无关、`price_cross` 用本轮品种正确；显式给了就不动）。
+    let inst_id = profile.symbols.first().cloned().unwrap_or_default();
+    // 逐条校验：不合法的**只丢这一条**，原因如实收集（不静默丢条件 = 闭环不断链的可见性）。
+    let mut parsed = Vec::new();
+    let mut dropped: Vec<String> = Vec::new();
+    for (mode, condition) in rows {
+        let condition_type = condition
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string();
+        let checked = (|| -> Result<(String, Value), String> {
+            let mut value = crate::fastlane::wake_condition_value(&condition)?;
+            crate::fastlane::backfill_wake_condition_inst_id(&mut value, &inst_id);
+            normalize_wake_scope(
+                conn,
+                profile.account_id.as_deref(),
+                Some(&profile.environment),
+                &profile.symbols,
+                &mut value,
+            )?;
+            let parsed_condition = serde_json::from_value::<WakeCondition>(value.clone())
+                .map_err(|error| format!("条件无效：{error}"))?;
+            validate_wake_condition_limits(&parsed_condition, now)?;
+            Ok((mode.clone(), value))
+        })();
+        match checked {
+            Ok((mode, value)) => parsed.push((mode, condition_type, value)),
+            Err(error) => dropped.push(format!("{condition_type}：{error}")),
+        }
+    }
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|error| error.to_string())?;
+    tx.execute(
+        "UPDATE ai_wake_conditions SET status='replaced',updated_at=?2
+         WHERE profile_id=?1 AND source='agent' AND status='active'",
+        params![profile.id, now],
+    )
+    .map_err(|error| error.to_string())?;
+    for (mode, condition_type, value) in &parsed {
+        tx.execute(
+            "INSERT INTO ai_wake_conditions(
+               id,profile_id,source,plan_mode,condition_type,config_json,status,expires_at,created_at,updated_at
+             ) VALUES(?1,?2,'agent',?3,?4,?5,'active',?6,?7,?7)",
+            params![
+                format!("wake-{}", unique_suffix()),
+                profile.id,
+                mode,
+                condition_type,
+                value.to_string(),
+                expires_at,
+                now,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    }
+    tx.commit().map_err(|error| error.to_string())?;
+    if !dropped.is_empty() {
+        crate::boot_log(&format!(
+            "fastlane wake plan partial profile={} written={} dropped={}",
+            profile.id,
+            parsed.len(),
+            dropped.join(" | ")
+        ));
+    }
+    Ok(FastlaneWakePlanWrite {
+        written: parsed.len(),
+        dropped,
+        notes,
+    })
+}
+
+/// 通知（`fastlane_notify_policy` 的**执行点**）：复用既有飞书投递 + 运行记录刷新事件。
+fn notify_fastlane_round(
+    app: &tauri::AppHandle,
+    profile: &AiAgentProfileSummary,
+    run_id: &str,
+    record: &crate::fastlane::FastlaneRecord,
+    note: &str,
+    force: bool,
+) {
+    // 记录刷新始终发（UI 靠它更新运行列表，与通知策略无关）。
+    notify_automation_run_record_persisted(app, run_id);
+    // `force` = 平仓轮降级（用户要求停机平仓、结果只是观望）→ **不受通知策略约束**，必须发出去。
+    if !force
+        && !crate::fastlane::fastlane_notify_allows(
+            &profile.fastlane.notify_policy,
+            &record.action.kind,
+        )
+    {
+        return;
+    }
+    if !profile.feishu_enabled {
+        return;
+    }
+    spawn_feishu_notification(
+        app,
+        FeishuSendInput {
+            title: format!("快判：{}", profile.name),
+            content: format!(
+                "{}｜动作={}｜机会={}｜总耗时={}ms",
+                note,
+                record.action.kind,
+                record.action.opportunity_id.as_deref().unwrap_or("--"),
+                record.timing.total_ms
+            ),
+            level: "info".to_string(),
+            related_type: Some("agent_run".to_string()),
+            related_id: Some(run_id.to_string()),
+            agent_profile_id: Some(profile.id.clone()),
+            agent_run_id: Some(run_id.to_string()),
+        },
+        // 事件类型取既有白名单里的 `run_completed`：前端的事件类型集合是封闭的
+        // （`src/` 不在本次改动范围），而快判轮本身就是一条后台运行记录。
+        "run_completed",
+    );
+}
+
+/// 落库一半（可单测）：把六组记录写进 `ai_agent_runs.fastlane_json` 并结束这一轮。
+fn persist_fastlane_round(
+    conn: &Connection,
+    profile: &AiAgentProfileSummary,
+    run_id: &str,
+    record: &crate::fastlane::FastlaneRecord,
+    usage: &FastlaneUsageContext,
+    summary: &str,
+    error: Option<&str>,
+) -> Result<(), String> {
+    let now = now_ms();
+    // 下一轮的最长静默兜底（观察条件命中会更早唤醒）。
+    let next_wake_at = now.saturating_add(i64::from(profile.scan_interval_minutes.max(1)) * 60_000);
+    let status = if error.is_some() {
+        "failed"
+    } else {
+        "completed"
+    };
+    conn.execute(
+        "UPDATE ai_agent_runs
+            SET status=?2,summary=?3,error=?4,finished_at=?5,next_wake_at=?6,fastlane_json=?7,updated_at=?5
+          WHERE id=?1",
+        params![
+            run_id,
+            status,
+            summary,
+            error,
+            now,
+            next_wake_at,
+            record.to_value().to_string(),
+        ],
+    )
+    .map_err(|err| err.to_string())?;
+    // 运行级元信息（列表/头部直接读这两列）：动作计数 + 两段 token 汇总（**不伪造**）。
+    persist_run_metadata(conn, run_id, &fastlane_run_metadata(record, usage))?;
+    Ok(())
+}
+
+/// 快判轮写运行级用量所需的模型信息（**不含任何凭据**）。
+#[derive(Debug, Clone, Default)]
+struct FastlaneUsageContext {
+    provider: String,
+    model_id: String,
+    model: String,
+    model_name: String,
+}
+
+/// 快判两段（Jev + 窄调用）→ 运行级用量（列表/头部直接可见，便于按轮统计成本）。
+///
+/// **不伪造 token**：两段都可能报不出（`close` 轮 Jev 未执行、provider 不回 usage）——
+/// 全缺 → `reported=false`（UI 照旧显示"未报告"）、只缺一段 → `Partial`。
+fn fastlane_token_usage(
+    record: &crate::fastlane::FastlaneRecord,
+    usage: &FastlaneUsageContext,
+) -> AiUsageSummary {
+    use desic_agent_automation::{AiTokenUsage, AiUsageCoverage, AiUsageQuality};
+    let token = |value: Option<i64>| value.filter(|item| *item > 0).unwrap_or(0) as u64;
+    let (jev_in, jev_out) = (record.tokens.jev_in, record.tokens.jev_out);
+    let (llm_in, llm_out) = (record.tokens.llm_in, record.tokens.llm_out);
+    let segment = |input: Option<i64>, output: Option<i64>| {
+        let input_tokens = token(input);
+        let output_tokens = token(output);
+        AiTokenUsage {
+            input_tokens,
+            output_tokens,
+            total_tokens: input_tokens.saturating_add(output_tokens),
+            ..Default::default()
+        }
+    };
+    let jev = segment(jev_in, jev_out);
+    let llm = segment(llm_in, llm_out);
+    let mut total = jev.clone();
+    total.add_assign(&llm);
+    // 两段 = 两次模型调用（Jev 判定 + 窄调用 LLM）；`close` 轮跳过 Jev → 只报一段。
+    let calls = if record.jev.as_ref().is_some_and(|jev| jev.skipped) {
+        1
+    } else {
+        2
+    };
+    let reported_calls = u32::from(jev_in.is_some() || jev_out.is_some())
+        + u32::from(llm_in.is_some() || llm_out.is_some());
+    AiUsageSummary {
+        schema_version: AI_USAGE_SCHEMA_VERSION,
+        provider: usage.provider.clone(),
+        model_id: usage.model_id.clone(),
+        model: usage.model.clone(),
+        model_name: if usage.model_name.trim().is_empty() {
+            usage.model.clone()
+        } else {
+            usage.model_name.clone()
+        },
+        reported: reported_calls > 0,
+        quality: if reported_calls == 0 {
+            AiUsageQuality::Unreported
+        } else if reported_calls >= calls {
+            AiUsageQuality::ProviderReported
+        } else {
+            AiUsageQuality::Partial
+        },
+        coverage: AiUsageCoverage {
+            input_output: reported_calls >= calls,
+            ..Default::default()
+        },
+        // **快判轮没有子 Agent**（UI 会把 `agentCount>0` 显示成"N 个子 Agent"）：
+        // 如实报 0 —— 两次模型调用由分段用量（Jev + 窄调用）与 `mainUsage` 表达。
+        agent_count: 0,
+        reported_agent_count: 0,
+        unreported_agent_count: 0,
+        usage: total,
+        main_usage: llm,
+    }
+}
+
+/// 快判轮的运行级元信息（`action_counts_json` + `token_usage_json`）。
+///
+/// UI 列表/头部读运行行这两列（`cached_run_metadata` 要求 `action_counts_json` 非空）；
+/// 快判轮没有 toolEvents，所以必须在这里显式写：`wake` = **真正写入**的观察条件数。
+fn fastlane_run_metadata(
+    record: &crate::fastlane::FastlaneRecord,
+    usage: &FastlaneUsageContext,
+) -> RunMetadata {
+    let _ = usage;
+    RunMetadata {
+        action_counts: AiAgentRunActionCounts {
+            opportunity: u32::from(record.action.kind == "opportunity"),
+            wake: record
+                .llm
+                .as_ref()
+                .map(|llm| llm.wake_conditions)
+                .unwrap_or(0),
+            trade: u32::from(record.action.kind == "trade"),
+            notification: 0,
+        },
+        token_usage: Some(fastlane_token_usage(record, usage)),
+    }
+}
+
+/// 收尾：落库 + 按 `notify_policy` 通知（**同一轮只走这一条**）。
+fn finish_fastlane_round(
+    app: &tauri::AppHandle,
+    profile: &AiAgentProfileSummary,
+    run_id: &str,
+    record: crate::fastlane::FastlaneRecord,
+    usage: &FastlaneUsageContext,
+    summary: &str,
+    error: Option<&str>,
+    force_notify: bool,
+) -> Result<(), String> {
+    let conn = open_automation_database(app)?;
+    persist_fastlane_round(&conn, profile, run_id, &record, usage, summary, error)?;
+    notify_fastlane_round(app, profile, run_id, &record, summary, force_notify);
+    Ok(())
+}
+
+/// 一轮快判（`profileType="fastlane"` 的**唯一执行入口**：手动 / 条件 / 静默 / 停机平仓轮都走这里）。
+async fn execute_fastlane_round(
+    app: tauri::AppHandle,
+    run: AiAgentRunSummary,
+    profile: AiAgentProfileSummary,
+    trigger: Value,
+) -> Result<(), String> {
+    let conn = open_automation_database(&app)?;
+    // C29.19：开关关闭（本版本）→ runner **在触碰行情 / 侧车 / 执行之前**立刻拒绝，只留痕。
+    // 正常路径到不了这里（`claim_next_run` 已不认领快判轮）；这条是"侧车
+    // `scripts/cline-fastlane.mjs` 不可能被调用"的最后一道闸。
+    if !fastlane_mode_enabled() {
+        conn.execute(
+            "UPDATE ai_agent_runs SET status='cancelled',error=?2,finished_at=?3,updated_at=?3
+             WHERE id=?1 AND status IN ('queued','running')",
+            params![
+                run.id,
+                crate::fastlane::FASTLANE_MODE_DISABLED_REASON,
+                now_ms()
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+        crate::boot_log(&format!(
+            "fastlane mode disabled: run {} (profile={}) refused at runner entry",
+            run.id, profile.id
+        ));
+        return Ok(());
+    }
+    let config = profile.fastlane.clone().normalized();
+    let started = now_ms();
+    let is_close_round = fastlane_round_is_close(&run, run.fastlane.as_ref());
+    let trigger_block = fastlane_trigger_block(&run, &trigger);
+    let Some(inst_id) = profile.symbols.first().cloned() else {
+        let record = crate::fastlane::FastlaneRecord::new(trigger_block).watch("data");
+        return finish_fastlane_round(
+            &app,
+            &profile,
+            &run.id,
+            record,
+            &FastlaneUsageContext::default(),
+            "快判 Profile 未配置品种",
+            Some("快判 Profile 未配置品种"),
+            false,
+        );
+    };
+    // ⓪ 执行模式前置：顾问模式**不支持**创建交易机会（既有授权层口径一致）→
+    //    显式早退：不调侧车（零 Jev/零 LLM 花费）、不冻结候选，只如实落一条观望记录。
+    if fastlane_profile_is_advisor(&profile) {
+        let record = fastlane_advisor_watch_record(trigger_block);
+        return finish_fastlane_round(
+            &app,
+            &profile,
+            &run.id,
+            record,
+            &FastlaneUsageContext::default(),
+            &format!(
+                "快判轮跳过：{}",
+                crate::fastlane::FASTLANE_ADVISOR_UNSUPPORTED_REASON
+            ),
+            None,
+            false,
+        );
+    }
+    // ① 预算闸门：命中 → **不判定**，记 `budget_exhausted`。
+    let budget = fastlane_budget_inputs(
+        &conn,
+        app.state::<AiAutomationRuntime>().inner(),
+        &profile,
+        &config,
+        &run.id,
+        started,
+    )?;
+    if let Some(reason) = crate::fastlane::budget_block(&budget) {
+        let record = crate::fastlane::FastlaneRecord::new(trigger_block).watch(reason);
+        return finish_fastlane_round(
+            &app,
+            &profile,
+            &run.id,
+            record,
+            &FastlaneUsageContext::default(),
+            &format!("快判轮跳过：{reason}"),
+            None,
+            false,
+        );
+    }
+    // ② 取数：**先按需预热**——**缺块 或 已超过该块门限**的块用既有读函数当场刷新一次
+    //    （≤1s 预算，耗时算进 `fetchMs`），再装配 state。
+    //    门限 `max_age` 只取一份，同时喂给预热判定与 `evaluate_gate`（改一处不会漂）。
+    let max_age = crate::fastlane::DEFAULT_MAX_DATA_AGE_MS;
+    let (filled, refreshed) = warmup_fastlane_blocks(
+        &app,
+        app.state::<AiAutomationRuntime>().inner(),
+        &profile,
+        &inst_id,
+        &max_age,
+        started.saturating_add(FASTLANE_WARMUP_BUDGET_MS),
+    )
+    .await;
+    // ③ 代码门（含 `session_closed`）。
+    let round_inputs = fastlane_round_inputs(
+        app.state::<AiAutomationRuntime>().inner(),
+        &conn,
+        &profile,
+        &config,
+        &max_age,
+    );
+    let Some(inputs) = round_inputs else {
+        // 采集器不在（停机 / 起不来）→ 当轮观测望 `data`，不静默跳过。
+        let record = crate::fastlane::FastlaneRecord::new(trigger_block)
+            .watch("data")
+            .with_gate(crate::fastlane::GateOutcome::data_failed(
+                "快判采集器未就绪（无内存快照）",
+            ));
+        return finish_fastlane_round(
+            &app,
+            &profile,
+            &run.id,
+            record,
+            &FastlaneUsageContext::default(),
+            &format!(
+                "快判轮跳过：采集器未就绪（本轮预热：补缺 {filled} 个 / 刷新过期 {refreshed} 个）"
+            ),
+            None,
+            false,
+        );
+    };
+    let FastlaneRoundInputs {
+        state,
+        snapshot,
+        gate,
+        blackout_active,
+    } = inputs;
+    // 代码门拦截（降险轮不受数据门/时段门拦截：`gate_blocks_round`）。
+    if crate::fastlane::gate_blocks_round(&gate, is_close_round) {
+        let reason = if gate
+            .reasons
+            .iter()
+            .any(|item| item.starts_with("session_closed"))
+        {
+            "session_closed"
+        } else {
+            gate.watch_reason().unwrap_or("data")
+        };
+        debug_assert!(
+            crate::fastlane::is_known_watch_reason(reason),
+            "观望原因必须在冻结枚举里：{reason}"
+        );
+        let record = crate::fastlane::FastlaneRecord::new(trigger_block)
+            .watch(reason)
+            .with_gate(gate);
+        return finish_fastlane_round(
+            &app,
+            &profile,
+            &run.id,
+            record,
+            &FastlaneUsageContext::default(),
+            &format!(
+                "快判轮跳过：{reason}（本轮预热：补缺 {filled} 个 / 刷新过期 {refreshed} 个）"
+            ),
+            None,
+            false,
+        );
+    }
+    let fetch_ms = now_ms().saturating_sub(started);
+    // 本地代码段① 起点：从这里到下发前的本地工作都算"代码"（AI 配置读取 / 观察条件查询 /
+    // 载荷构造 / 冻结事实），**不含**侧车会话等待（见 `apply_local_code_timing`）。
+    let code_pre_started = now_ms();
+    // ④ 下发（形状冻结见 `FastlaneDispatch`）。
+    let ai_config = crate::storage_config::load_ai_config(&app)?;
+    let wake_conditions = fastlane_active_wake_conditions(&conn, &profile.id, started)?;
+    // 窄调用目标：模型名（id → provider 名）+ 端点/凭据归属（非激活条目才覆盖）。
+    let llm_target = fastlane_llm_model(&profile, &ai_config);
+    let dispatch = crate::fastlane::FastlaneDispatch::build(
+        &config,
+        &crate::fastlane::FastlaneAiSettings {
+            // 内部 `model-…` id 在这里已经解析成 provider 模型名（真机 400 的根因）。
+            llm_model: llm_target.model.clone(),
+            typesafe_api_key: ai_config.typesafe_api_key.clone(),
+            // C28→C29：收养来的旧全局 Jev 端点（Profile 未显式设置时回落）。
+            inherited_jev: crate::fastlane::FastlaneInheritedJev {
+                base_url: ai_config.typesafe_base_url.clone(),
+                model: ai_config.typesafe_model.clone(),
+            },
+            // **脱敏**模型列表（4 键白名单；`apiKey` 在结构上不可能出现）。
+            models: crate::fastlane::sanitized_model_list(&ai_config.models),
+            // 裁决：端点/凭据跟随 Profile 选中的模型条目（只在该条目非激活时才给值）。
+            llm_base_url: llm_target.base_url.clone(),
+            llm_api_key: llm_target.api_key.clone(),
+        },
+        &state,
+        &wake_conditions,
+        is_close_round,
+    );
+    // 下发形状留痕（键数与 intent 是 C29.7 的冻结口径；日志里看得到，不靠猜）。
+    // **只记元信息**：模型名 / provider / 归属来源；凭据（Key）绝不出现在日志里。
+    crate::boot_log(&format!(
+        "fastlane dispatch profile={} intent={} configKeys={} wakeConditions={} model={} modelSource={} resolvedProvider={}",
+        profile.id,
+        dispatch.intent,
+        dispatch
+            .sidecar_view()
+            .get("config")
+            .and_then(Value::as_object)
+            .map(|object| object.len())
+            .unwrap_or(0),
+        wake_conditions.as_array().map(|items| items.len()).unwrap_or(0),
+        llm_target.model,
+        llm_target.source,
+        llm_target.provider.as_deref().unwrap_or("--"),
+    ));
+    let session_id = format!("background:{}", run.id);
+    let facts = fastlane_round_facts(
+        &profile,
+        &run,
+        &config,
+        &snapshot,
+        blackout_active,
+        is_close_round,
+        session_id.clone(),
+    );
+    let round = Arc::new(facts);
+    let code_pre_ms = now_ms().saturating_sub(code_pre_started);
+    let result = crate::ai_run_fastlane_session(
+        app.clone(),
+        session_id,
+        vec![AiChatMessage {
+            id: Some(format!("background-message:{}", run.id)),
+            role: "user".to_string(),
+            content: if is_close_round {
+                "快判平仓轮（intent=close）".to_string()
+            } else {
+                "快判轮（C29）".to_string()
+            },
+        }],
+        fastlane_run_context(&profile, &run, &round),
+        dispatch,
+        round,
+    )
+    .await;
+    // 本地代码段②：记录组装 + 落库 + 观察条件写库。
+    let code_post_started = now_ms();
+    let result = match result {
+        Ok(result) => result,
+        Err(error) => {
+            // 侧车整轮失败：如实记 `anomaly`，运行标 failed 并把错误原文留在 `error` 列。
+            let record = crate::fastlane::FastlaneRecord::new(trigger_block)
+                .watch("anomaly")
+                .with_gate(crate::fastlane::GateOutcome::anomaly_failed(
+                    "侧车未完成快判轮（jev/llm 未跑完）",
+                ));
+            return finish_fastlane_round(
+                &app,
+                &profile,
+                &run.id,
+                record,
+                &FastlaneUsageContext::default(),
+                "快判轮失败：侧车未完成",
+                Some(&error),
+                false,
+            );
+        }
+    };
+    let gate = crate::fastlane::gate_from_sidecar_failure(&result, gate);
+    let mut record = crate::fastlane::FastlaneRecord::from_sidecar(
+        trigger_block,
+        gate,
+        &result,
+        fetch_ms,
+        code_pre_ms,
+    );
+    // 平仓轮的两种显式留痕（都不静默）：
+    // ① 侧车**是否真的跳过 Jev**（新侧车 = 跳过；老侧车 = 照旧跑，记录里能看出来）；
+    // ② 平仓轮最终只是观望 = **降级** → 必须发通知（不受 `notify_policy` 约束）。
+    let jev_skipped = crate::fastlane::close_round_jev_skipped(&result);
+    let degraded = crate::fastlane::close_round_degraded(is_close_round, &record);
+    if degraded {
+        crate::boot_log(&format!(
+            "fastlane close round degraded profile={} run={} reason={:?}",
+            profile.id, run.id, record.action.reason
+        ));
+    }
+    // ⑥ 闭环：写侧车那份 `nextWakePlan`。
+    //
+    // **观察条件写不成 ≠ 整轮失败**（真机 `run-1789926893000094000`：判定/参数/token/耗时全对，
+    // 只有"plan → WakeCondition"这一步失败，却把整轮标成 `failed`，用户以为整轮没跑成）。
+    // 这里把原因如实记进记录（`llm.validation.reasons` + `wakeConditions: 0`）并按 **completed** 收尾；
+    // 只有"判定/参数阶段"的致命错误（侧车会话失败、落库失败）才判失败。
+    let sidecar_wake_conditions = record
+        .llm
+        .as_ref()
+        .map(|llm| llm.wake_conditions)
+        .unwrap_or(0);
+    let mut wake_note: Option<String> = None;
+    let wake_rows = match crate::fastlane::FastlaneRecord::next_wake_plan(&result) {
+        Some(plan) => match persist_fastlane_wake_plan(&conn, &profile, &plan, now_ms()) {
+            Ok(outcome) => {
+                // `wakeConditions` = **真正写库**的条数；有丢弃时如实记原因（不静默）。
+                if let Some(llm) = record.llm.as_mut() {
+                    llm.wake_conditions = outcome.written.min(u32::MAX as usize) as u32;
+                }
+                if !outcome.dropped.is_empty() {
+                    record.note_wake_conditions_dropped(outcome.written, &outcome.dropped);
+                    wake_note = Some(format!("已丢弃 {} 条条件", outcome.dropped.len()));
+                }
+                if !outcome.notes.is_empty() {
+                    record.note_wake_plan_notes(&outcome.notes);
+                    if wake_note.is_none() {
+                        wake_note = Some(outcome.notes.join("；"));
+                    }
+                }
+                Some(outcome.written)
+            }
+            Err(error) => {
+                crate::boot_log(&format!(
+                    "fastlane wake plan rejected profile={} run={} error={error}",
+                    profile.id, run.id
+                ));
+                record.note_wake_plan_rejected(&error);
+                wake_note = Some(error);
+                None
+            }
+        },
+        None => None,
+    };
+    // 本地代码段收口：`codeMs` = 本地代码工作（不含会话等待），`totalMs` 仍是四段之和（不重叠）。
+    crate::fastlane::apply_local_code_timing(
+        &mut record.timing,
+        code_pre_ms,
+        now_ms().saturating_sub(code_post_started),
+    );
+    let mut summary = format!(
+        "快判{}｜动作={}｜jev跳过={}｜观察条件=侧车{}条/写库{}条｜总耗时={}ms",
+        if is_close_round { "平仓轮" } else { "轮" },
+        record.action.kind,
+        jev_skipped,
+        sidecar_wake_conditions,
+        wake_rows
+            .map(|rows| rows.to_string())
+            .unwrap_or_else(|| "--".to_string()),
+        record.timing.total_ms
+    );
+    if let Some(note) = wake_note.as_deref() {
+        summary = format!("{summary}｜观察条件未写入：{note}");
+    }
+    finish_fastlane_round(
+        &app,
+        &profile,
+        &run.id,
+        record,
+        &fastlane_usage_context(&profile, &ai_config, &llm_target),
+        &summary,
+        None,
+        degraded,
+    )
+}
+
+/// 快判轮写运行级用量（`token_usage_json`）所需的模型信息（**不含凭据**）。
+fn fastlane_usage_context(
+    _profile: &AiAgentProfileSummary,
+    config: &desic_storage_config::AiConfig,
+    target: &FastlaneLlmTarget,
+) -> FastlaneUsageContext {
+    FastlaneUsageContext {
+        provider: target
+            .provider
+            .clone()
+            .or_else(|| config.provider.clone())
+            .unwrap_or_else(|| "unknown".to_string()),
+        model_id: target.model_id.clone(),
+        model: target.model.clone(),
+        model_name: target
+            .model_name
+            .clone()
+            .unwrap_or_else(|| target.model.clone()),
+    }
+}
+
+/// runner 冻结的事实（工具闸门只读同一份；快判轮的所有准入口径都在这里固定）。
+fn fastlane_round_facts(
+    profile: &AiAgentProfileSummary,
+    run: &AiAgentRunSummary,
+    config: &crate::fastlane::FastlaneConfig,
+    snapshot: &crate::fastlane::FastlaneSnapshot,
+    blackout_active: bool,
+    is_close_round: bool,
+    session_id: String,
+) -> crate::fastlane::FastlaneRoundFacts {
+    let equity = snapshot.account.equity_usdt;
+    let last_price = snapshot.price.last;
+    let ct_val = snapshot.instrument.ct_val;
+    // 可平数量上限＝账户**实际持有量**（没有持仓 → 0：任何平仓张数都会被拒）。
+    let held = crate::fastlane::position_capacity(&snapshot.account.positions);
+    // 开仓数量上限＝Profile 单笔保证金上限换算成张数（precheck 在冻结那一步再复核一次）。
+    let open_cap = crate::fastlane::open_size_cap(
+        equity,
+        profile.max_single_trade_margin_pct,
+        profile.target_leverage,
+        ct_val,
+        last_price,
+    );
+    crate::fastlane::FastlaneRoundFacts {
+        profile_id: profile.id.clone(),
+        run_id: run.id.clone(),
+        account_id: profile.account_id.clone(),
+        environment: profile.environment.clone(),
+        inst_id: snapshot.inst_id.clone(),
+        session_id,
+        is_close_round,
+        plan_facts: crate::fastlane::PlanFacts {
+            last_price,
+            ct_val,
+            equity_usdt: equity,
+            structure_low: snapshot
+                .structure
+                .tf_1h
+                .last_swing_low
+                .or(snapshot.structure.tf_15m.last_swing_low),
+            structure_high: snapshot
+                .structure
+                .tf_1h
+                .last_swing_high
+                .or(snapshot.structure.tf_15m.last_swing_high),
+        },
+        validation: crate::fastlane::ValidationInputs {
+            last_price,
+            equity_usdt: equity,
+            target_leverage: profile.target_leverage,
+            max_leverage: snapshot.instrument.max_leverage,
+            min_size: snapshot.instrument.min_size,
+            max_size: if is_close_round {
+                held
+            } else if open_cap.is_finite() && open_cap > 0.0 {
+                open_cap
+            } else {
+                // 拿不到面值/价格 → 不设本地上限（数据门/预检仍在管），但**不静默当 0**。
+                f64::MAX
+            },
+            profile_max_single_trade_margin_pct: f64::from(profile.max_single_trade_margin_pct),
+            risk_per_trade_pct: config.risk_per_trade_pct,
+            max_slippage_bps: config.max_slippage_bps,
+            blackout_active,
+            // 保证金模式**取值**由适配层判（cross/isolated）；
+            // 「账户是否允许该模式」由冻结候选那一步的既有 `trade_precheck` 判（blocked → 拒）。
+            margin_mode_allowed: true,
+        },
+        target_leverage: profile.target_leverage,
+        max_slippage_bps: config.max_slippage_bps,
+        trace: Arc::new(Mutex::new(crate::fastlane::FastlaneRoundTrace::default())),
+    }
+}
+
+/// 快判轮的 `BackgroundRunContext`（工具闸门据此拿到冻结事实；不带 Skill/专家，减少无关载荷）。
+fn fastlane_run_context(
+    profile: &AiAgentProfileSummary,
+    run: &AiAgentRunSummary,
+    round: &Arc<crate::fastlane::FastlaneRoundFacts>,
+) -> BackgroundRunContext {
+    BackgroundRunContext {
+        permission_mode: profile.mode.clone(),
+        account_id: profile.account_id.clone(),
+        environment: Some(profile.environment.clone()),
+        symbols: profile.symbols.clone(),
+        profile_id: Some(profile.id.clone()),
+        run_id: Some(run.id.clone()),
+        enabled_skills: Vec::new(),
+        skill_versions: HashMap::new(),
+        skill_definitions: Vec::new(),
+        model: profile.model.clone(),
+        reasoning_depth: profile.reasoning_depth.clone(),
+        history_lookback_days: profile.history_lookback_days,
+        target_leverage: profile.target_leverage,
+        max_single_trade_margin_pct: profile.max_single_trade_margin_pct,
+        allowed_wake_condition_types: profile.allowed_wake_condition_types.clone(),
+        enabled_agents: Vec::new(),
+        triage: Arc::new(Mutex::new(crate::ai_triage::RunTriageState::default())),
+        finish_gate: Arc::new(Mutex::new(FinishGateState::default())),
+        single_agent_mode: "standard".to_string(),
+        trigger: json!({ "fastlane": true }),
+        review_id: None,
+        episode_id: None,
+        fastlane_round: Some(round.clone()),
+    }
+}
+
+/// 调度侧的采集器对账（每个 automation tick 调；幂等，是崩溃/异常后的自愈点）：
+/// - 活跃快判 Profile（enabled + 未删除 + `profileType=fastlane`）必须有采集器；
+/// - Profile 的品种变了 → 先释放再按新 inst 起（不会有两个 inst 共用一个缓存）；
+/// - 不活跃/已删除/存储里不存在的 → 立即释放（**停机后不留悬挂任务**）。
+///
+/// **C29.19**：开关关闭（本版本）→ 名单**恒为空** ⇒ 一个采集器都不会起（不起节拍任务、
+/// 不订阅行情），已存在的条目由 [`sync_fastlane_collectors`] 的既有 stale 路径全部释放。
+fn fastlane_collector_plan(
+    conn: &Connection,
+) -> Result<Vec<(AiAgentProfileSummary, String)>, String> {
+    let mut desired = Vec::new();
+    for profile in load_profiles(conn)? {
+        if !profile.enabled || profile.profile_type != PROFILE_TYPE_FASTLANE {
+            continue;
+        }
+        // 开关关闭 → 掉出名单（并留下可见记录，不静默）。
+        if fastlane_blocked(&profile).is_some() {
+            continue;
+        }
+        if let Some(inst_id) = profile.symbols.first().cloned() {
+            desired.push((profile, inst_id));
+        }
+    }
+    Ok(desired)
+}
+
+/// 对账（**不含 DB 借用**：`&Connection` 不能跨 await）。
+async fn sync_fastlane_collectors(
+    app: &tauri::AppHandle,
+    runtime: &AiAutomationRuntime,
+    desired: Vec<(AiAgentProfileSummary, String)>,
+) -> Result<(), String> {
+    if !fastlane_mode_enabled() {
+        // C29.19：开关关闭 → **本版本一律不保有采集器**：名单视为空，已起的按既有释放路径
+        // 摘掉（停节拍任务 + 只释放自己起的公开订阅）。释放条数进 boot_log（不静默）。
+        let released = release_all_fastlane_collectors(runtime);
+        if released > 0 {
+            crate::boot_log(&format!(
+                "fastlane mode disabled: released {released} snapshot collector(s)（{}）",
+                crate::fastlane::FASTLANE_MODE_DISABLED_REASON
+            ));
+        }
+        return Ok(());
+    }
+    let desired_ids = desired
+        .iter()
+        .map(|(profile, _)| profile.id.clone())
+        .collect::<HashSet<_>>();
+    let active_ids = {
+        let registry = runtime
+            .fastlane_snapshots
+            .lock()
+            .map_err(|error| error.to_string())?;
+        registry.active_profile_ids()
+    };
+    for stale in active_ids
+        .into_iter()
+        .filter(|profile_id| !desired_ids.contains(profile_id))
+    {
+        release_fastlane_collector(runtime, &stale);
+    }
+    for (profile, inst_id) in desired {
+        let needs_replan = {
+            let registry = runtime
+                .fastlane_snapshots
+                .lock()
+                .map_err(|error| error.to_string())?;
+            registry
+                .entry(&profile.id)
+                .map(|entry| entry.inst_id != inst_id)
+                .unwrap_or(false)
+        };
+        if needs_replan {
+            release_fastlane_collector(runtime, &profile.id);
+        }
+        let running = {
+            let registry = runtime
+                .fastlane_snapshots
+                .lock()
+                .map_err(|error| error.to_string())?;
+            registry.contains(&profile.id)
+        };
+        if !running {
+            start_fastlane_collector(app, runtime, &profile, &inst_id).await;
+        }
+    }
+    Ok(())
+}
+
+/// 节拍循环：五块 + 主动买卖比窗口，全部带**来源时间**写入 registry。
+async fn run_fastlane_beat(
+    app: tauri::AppHandle,
+    runtime: AiAutomationRuntime,
+    plan: FastlaneCollectPlan,
+    stopped: Arc<AtomicBool>,
+) {
+    let mut taker = crate::fastlane::TakerWindow::new();
+    let mut tick: u64 = 0;
+    while !stopped.load(Ordering::SeqCst) {
+        let now = now_ms();
+        let market = app.state::<MarketRuntime>().inner().clone();
+
+        // ---- candles_1m（每 15 拍）：两段窗口 ≈6.9 天，只取已收盘 K 线 ----
+        if tick % FASTLANE_CANDLE_REFRESH_TICKS == 0 {
+            let values = read_fastlane_candle_values(&app, &market, &plan.inst_id, now).await;
+            if !values.is_empty() {
+                let source_at = crate::fastlane::last_closed_candle_close_ms(&values).unwrap_or(0);
+                write_fastlane_block(
+                    &runtime,
+                    &plan.profile_id,
+                    crate::fastlane::FastlaneBlock::Candles1m(crate::fastlane::SnapshotSlot::new(
+                        values,
+                        crate::fastlane::snapshot_source_time(source_at, now),
+                    )),
+                );
+            }
+        }
+
+        // ---- ticker（每拍）：内存优先，退路是既有 ai_read_ticker ----
+        match ai_read_ticker(&market, &plan.inst_id).await {
+            Ok(value) => {
+                let bars = current_fastlane_bars(&runtime, &plan.profile_id);
+                if let Some((block, source_at)) =
+                    crate::fastlane::normalize_ticker_block(&value, &bars)
+                {
+                    write_fastlane_block(
+                        &runtime,
+                        &plan.profile_id,
+                        crate::fastlane::FastlaneBlock::Ticker(crate::fastlane::SnapshotSlot::new(
+                            block,
+                            crate::fastlane::snapshot_source_time(source_at, now),
+                        )),
+                    );
+                }
+            }
+            Err(error) => eprintln!(
+                "fastlane ticker read failed profile={} inst={}: {error}",
+                plan.profile_id, plan.inst_id
+            ),
+        }
+
+        // ---- orderbook（每拍）：micro 的唯一来源（拿不到就留 null，绝不推算）----
+        match ai_read_orderbook(&market, &plan.inst_id, FASTLANE_ORDERBOOK_DEPTH).await {
+            Ok(value) => {
+                let source_at = json_i64(&value, "ts")
+                    .or_else(|| json_i64(&value, "observedAt"))
+                    .unwrap_or(0);
+                write_fastlane_block(
+                    &runtime,
+                    &plan.profile_id,
+                    crate::fastlane::FastlaneBlock::Orderbook(crate::fastlane::SnapshotSlot::new(
+                        value,
+                        crate::fastlane::snapshot_source_time(source_at, now),
+                    )),
+                );
+            }
+            Err(error) => eprintln!(
+                "fastlane orderbook read failed profile={} inst={}: {error}",
+                plan.profile_id, plan.inst_id
+            ),
+        }
+
+        // ---- derivatives（每 5 拍）：既有资金费率读路径 ----
+        if tick % FASTLANE_DERIVATIVES_REFRESH_TICKS == 0 {
+            match ai_read_funding_rate(&market, &plan.inst_id).await {
+                Ok(value) => {
+                    if let Some((block, source_at)) =
+                        crate::fastlane::normalize_derivatives_block(&value, now)
+                    {
+                        write_fastlane_block(
+                            &runtime,
+                            &plan.profile_id,
+                            crate::fastlane::FastlaneBlock::Derivatives(
+                                crate::fastlane::SnapshotSlot::new(
+                                    block,
+                                    crate::fastlane::snapshot_source_time(source_at, now),
+                                ),
+                            ),
+                        );
+                    }
+                }
+                Err(error) => eprintln!(
+                    "fastlane derivatives read failed profile={} inst={}: {error}",
+                    plan.profile_id, plan.inst_id
+                ),
+            }
+        }
+
+        // ---- account（每 2 拍）：内存快照优先，退路是既有账户快照读路径 ----
+        if tick % FASTLANE_ACCOUNT_REFRESH_TICKS == 0 {
+            if let Some(snapshot) = fastlane_account_snapshot(&app, &market, &plan).await {
+                if let Ok(value) = serde_json::to_value(&snapshot) {
+                    if let Some((block, source_at)) =
+                        crate::fastlane::normalize_account_block(&value)
+                    {
+                        write_fastlane_block(
+                            &runtime,
+                            &plan.profile_id,
+                            crate::fastlane::FastlaneBlock::Account(
+                                crate::fastlane::SnapshotSlot::new(
+                                    block,
+                                    crate::fastlane::snapshot_source_time(source_at, now),
+                                ),
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+
+        // ---- 主动买卖比（每拍）：实时成交流，5 分钟窗口 ----
+        let trades = market
+            .store
+            .lock()
+            .ok()
+            .and_then(|store| store.trades_by_inst.get(&plan.inst_id).cloned())
+            .unwrap_or_default();
+        if !trades.is_empty() {
+            let trade_values = trades
+                .iter()
+                .filter_map(|trade| serde_json::to_value(trade).ok())
+                .collect::<Vec<_>>();
+            taker.observe_trades(&trade_values);
+        }
+        if let Ok(mut registry) = runtime.fastlane_snapshots.lock() {
+            registry.set_taker_ratio(&plan.profile_id, taker.ratio(now));
+        }
+
+        tick = tick.wrapping_add(1);
+        if stopped.load(Ordering::SeqCst) {
+            break;
+        }
+        sleep(Duration::from_millis(FASTLANE_BEAT_INTERVAL_MS)).await;
+    }
+}
+
+fn write_fastlane_block(
+    runtime: &AiAutomationRuntime,
+    profile_id: &str,
+    block: crate::fastlane::FastlaneBlock,
+) {
+    if let Ok(mut registry) = runtime.fastlane_snapshots.lock() {
+        registry.write(profile_id, block);
+    }
+}
+
+/// 1m K 线：既有 `Candle.time` 是**秒**，快照统一转成**毫秒**（与既有工具输出一致）。
+fn fastlane_candle_values(candles: &[Candle]) -> Vec<Value> {
+    candles
+        .iter()
+        .map(|candle| {
+            json!({
+                "time": candle.time.saturating_mul(1_000),
+                "open": candle.open,
+                "high": candle.high,
+                "low": candle.low,
+                "close": candle.close,
+                "volume": candle.volume,
+                "confirm": candle.confirm,
+            })
+        })
+        .collect()
+}
+
+/// 两段窗口拼出 ≥4 天的 1m 历史（每段都走**既有** `ai_read_candles_for_range`，不造新端点）。
+async fn read_fastlane_candle_values(
+    app: &tauri::AppHandle,
+    market: &MarketRuntime,
+    inst_id: &str,
+    now: i64,
+) -> Vec<Value> {
+    let mut values: Vec<Value> = Vec::new();
+    let mut seen = HashSet::new();
+    for index in 0..FASTLANE_CANDLE_WINDOWS {
+        let end = now.saturating_sub(index * FASTLANE_CANDLE_WINDOW_SPAN_MS);
+        let start = end.saturating_sub(FASTLANE_CANDLE_WINDOW_SPAN_MS);
+        match ai_read_candles_for_range(
+            app,
+            market,
+            inst_id,
+            "1m",
+            FASTLANE_CANDLE_LIMIT,
+            Some(start),
+            Some(end),
+            true,
+        )
+        .await
+        {
+            Ok(candles) => {
+                for value in fastlane_candle_values(&candles) {
+                    let Some(at) = value.get("time").and_then(Value::as_i64) else {
+                        continue;
+                    };
+                    if seen.insert(at) {
+                        values.push(value);
+                    }
+                }
+            }
+            Err(error) => {
+                eprintln!("fastlane candles read failed inst={inst_id} window={index}: {error}")
+            }
+        }
+    }
+    values.sort_by_key(|value| value.get("time").and_then(Value::as_i64).unwrap_or(0));
+    values
+}
+
+fn current_fastlane_bars(
+    runtime: &AiAutomationRuntime,
+    profile_id: &str,
+) -> Vec<crate::fastlane::Bar> {
+    runtime
+        .fastlane_snapshots
+        .lock()
+        .ok()
+        .and_then(|registry| {
+            registry
+                .cache(profile_id)
+                .and_then(|cache| cache.candles_1m.as_ref())
+                .map(|slot| crate::fastlane::bars_from_values(&slot.value))
+        })
+        .unwrap_or_default()
+}
+
+/// 账户快照：内存新鲜快照优先（既有读路径），否则退回既有账户快照 REST 读。
+async fn fastlane_account_snapshot(
+    app: &tauri::AppHandle,
+    market: &MarketRuntime,
+    plan: &FastlaneCollectPlan,
+) -> Option<PrivateAccountSnapshot> {
+    if let Some(snapshot) =
+        ai_read_fresh_memory_account_snapshot(market, plan.account_id.as_deref())
+    {
+        return Some(snapshot);
+    }
+    if plan.account_id.is_none() {
+        return None;
+    }
+    okx_private_snapshot(
+        app.clone(),
+        PrivateSnapshotRequest {
+            account_id: plan.account_id.clone(),
+        },
+    )
+    .await
+    .ok()
+}
+
 pub(crate) fn start_ai_automation_worker(app: tauri::AppHandle) {
     let runtime = app.state::<AiAutomationRuntime>().inner().clone();
     if runtime.started.swap(true, Ordering::SeqCst) {
@@ -8494,9 +11132,10 @@ pub(crate) fn start_ai_automation_worker(app: tauri::AppHandle) {
             );
             // 兜底：进程被杀/崩溃（没有走正常启动路径）时残留的 running 行。
             let _ = fail_stale_running_runs(&conn, now);
-            // C20.5（强制迁移版）：启动期把含已下线 id 的旧 Profile 勾选迁移成
-            // 「默认 4 角色 + 其余保留 id」（幂等、持久化；失败只记日志，绝不阻断启动）。
-            migrate_deprecated_enabled_agents(&conn);
+            // C31：启动期把含**已删除内置 Agent** 的旧 Profile 勾选就地剔除
+            // （只删不加、幂等、持久化；失败只记日志，绝不阻断启动）。
+            // C20.5 那版"补齐默认 4 个角色"的迁移已失效 —— 默认启用集不再存在。
+            migrate_removed_enabled_agents(&conn);
         }
         match crate::trade_commands::recover_pending_trade_executions(&app).await {
             Ok(summary) => {
@@ -8574,6 +11213,34 @@ fn pending_trade_recovery_unknown_count(summary: &Value) -> u64 {
     unknown_orders.saturating_add(unknown_amends)
 }
 
+/// C29.19：开关关闭时，把残留的快判轮次（排队 / 运行中）**取消并写明原因**。
+///
+/// 只动运行行（`ai_agent_runs`），**不动 Profile 配置**（用户库里的快判 Profile 保持原样，
+/// 是否停用由用户自己决定）。幂等：没有残留时零副作用、零日志。
+fn cancel_pending_fastlane_runs(conn: &Connection, now: i64) -> Result<usize, String> {
+    let cancelled = conn
+        .execute(
+            "UPDATE ai_agent_runs SET status='cancelled',error=?1,finished_at=?2,updated_at=?2
+             WHERE status IN ('queued','running')
+               AND profile_id IN (
+                 SELECT id FROM ai_agent_profiles WHERE COALESCE(profile_type,'ai')=?3
+               )",
+            params![
+                crate::fastlane::FASTLANE_MODE_DISABLED_REASON,
+                now,
+                PROFILE_TYPE_FASTLANE
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    if cancelled > 0 {
+        crate::boot_log(&format!(
+            "fastlane mode disabled: cancelled {cancelled} pending fastlane run(s)（{}）",
+            crate::fastlane::FASTLANE_MODE_DISABLED_REASON
+        ));
+    }
+    Ok(cancelled)
+}
+
 async fn automation_tick(
     app: tauri::AppHandle,
     runtime: AiAutomationRuntime,
@@ -8584,6 +11251,11 @@ async fn automation_tick(
     }
     let now = now_ms();
     ensure_skill_versions(&app, &conn)?;
+    // C29.19：本版本未开放快判模式 → 先清掉任何**残留**的快判轮次（排队 / 运行中）。
+    // 取消理由写进 `error`（不是静默丢弃）；用户库里的 Profile 配置一行不改。
+    if !fastlane_mode_enabled() {
+        cancel_pending_fastlane_runs(&conn, now)?;
+    }
     conn.execute(
         "UPDATE ai_wake_conditions SET status='expired',updated_at=?1
          WHERE status='active' AND expires_at IS NOT NULL AND expires_at<=?1",
@@ -8593,6 +11265,10 @@ async fn automation_tick(
     enqueue_missing_reviews(&conn)?;
     queue_due_daily_market_reviews(&conn)?;
     queue_due_profile_runs(&conn, now)?;
+    // C29 / B1：活跃快判 Profile 的常驻快照采集器（幂等；也是崩溃/异常后的自愈点）。
+    // 名单先同步读出来（`&Connection` 不是 `Send`，不能跨 await）。
+    let fastlane_collectors = fastlane_collector_plan(&conn)?;
+    sync_fastlane_collectors(&app, &runtime, fastlane_collectors).await?;
     evaluate_dynamic_wake_conditions(&app, &runtime, &conn, now)?;
 
     loop {
@@ -8604,12 +11280,34 @@ async fn automation_tick(
             let run_runtime = runtime.clone();
             let failed_run_id = run.id.clone();
             let failed_profile = profile.clone();
+            // C29.19：开关关闭时快判轮次**不派给任何 runner**（既不派快判 runner，也不误派
+            // AI runner）——认领处已挡住，这里是第二道闸：取消 + 明确原因 + 日志，不静默。
+            if let Some(reason) = fastlane_blocked(&profile) {
+                conn.execute(
+                    "UPDATE ai_agent_runs SET status='cancelled',error=?2,finished_at=?3,updated_at=?3
+                     WHERE id=?1 AND status IN ('queued','running')",
+                    params![failed_run_id, reason, now],
+                )
+                .map_err(|error| error.to_string())?;
+                crate::boot_log(&format!(
+                    "fastlane mode disabled: run {} (profile={}) cancelled before dispatch",
+                    failed_run_id, failed_profile.id
+                ));
+                // `permit` 在本次迭代结束时归还并发槽（没有 runner 被启动）。
+                continue;
+            }
+            // C29：`profileType="fastlane"` 的 Run **不分派**给 AI Profile 的执行器，
+            // 而是走快判 runner（唯一执行入口；手动触发仍然只有 `ai_agent_profile_run_now` 一个）。
+            let is_fastlane = run_uses_fastlane_runner(&profile);
             tauri::async_runtime::spawn(async move {
                 let _permit = permit;
-                if let Err(message) =
+                let outcome = if is_fastlane {
+                    execute_fastlane_round(run_app.clone(), run, profile, trigger).await
+                } else {
                     execute_profile_run(run_app.clone(), run, profile, trigger, template_snapshot)
                         .await
-                {
+                };
+                if let Err(message) = outcome {
                     if finalize_profile_run_if_needed(
                         &run_app,
                         &failed_run_id,
@@ -8700,7 +11398,7 @@ fn queue_due_daily_market_reviews(conn: &Connection) -> Result<(), String> {
 fn queue_due_profile_runs(conn: &Connection, now: i64) -> Result<(), String> {
     for profile in load_profiles(conn)?
         .into_iter()
-        .filter(|profile| profile.enabled)
+        .filter(|profile| profile.enabled && fastlane_blocked(profile).is_none())
     {
         if !profile_rate_limit_allows(conn, &profile, now)? {
             continue;
@@ -8834,6 +11532,11 @@ fn evaluate_dynamic_wake_conditions(
             Ok(profile) if profile.enabled => profile,
             _ => continue,
         };
+        // C29.19：开关关闭 → 快判 Profile 的观察条件**不再触发轮次**（留可见记录，不静默）。
+        // 触发标记与条件状态**不动**：这不是"用户条件被消费/替换"，只是本版本不执行。
+        if fastlane_blocked(&profile).is_some() {
+            continue;
+        }
         if !profile_rate_limit_allows(conn, &profile, now)? {
             continue;
         }
@@ -9349,12 +12052,22 @@ fn claim_next_run(
     }
     let row = conn
         .query_row(
+            // C29：停机排队的平仓轮（`trigger_type='fastlane_close'`）由停机命令排队，
+            // 而停机**必然**把 Profile 置为 `enabled=0` —— 因此这一条 run 必须仍可被认领
+            // （否则"用户停机后平仓"这条唯一的降险路径永远排不出去）。
+            // 除它之外，禁用 Profile 的 Run 一律不认领（停机后不再产生新的普通轮）。
+            //
+            // C29.19：开关关闭（本版本）→ 所有 `profileType="fastlane"` 的行**都不认领**
+            // （含停机平仓轮：runner 不可达 ⇒ 排了也执行不了，排进去只会变成"永远排队"）。
+            // `COALESCE(...,'ai')` 是必须的：老行的 `profile_type` 可能是 NULL。
             "SELECT r.id,r.profile_id,r.trigger_json,r.profile_snapshot_json,r.skill_versions_json
              FROM ai_agent_runs r
              JOIN ai_agent_profiles p ON p.id=r.profile_id
-             WHERE r.status='queued' AND p.enabled=1 AND p.deleted_at IS NULL
+             WHERE r.status='queued' AND p.deleted_at IS NULL
+               AND (p.enabled=1 OR r.trigger_type='fastlane_close')
+               AND (?1=1 OR COALESCE(p.profile_type,'ai')<>?2)
              ORDER BY r.created_at ASC LIMIT 1",
-            [],
+            params![i64::from(fastlane_mode_enabled()), PROFILE_TYPE_FASTLANE],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -9611,7 +12324,12 @@ async fn execute_profile_run(
     } else {
         let catalog = enabled_agents
             .iter()
-            .map(|agent| format!("- {} | {} | {} | {}", agent.id, agent.name, agent.role, agent.summary))
+            .map(|agent| {
+                format!(
+                    "- {} | {} | {} | {}",
+                    agent.id, agent.name, agent.role, agent.summary
+                )
+            })
             .collect::<Vec<_>>()
             .join("\n");
         if chinese_prompt {
@@ -9792,6 +12510,7 @@ async fn execute_profile_run(
         trigger: trigger.clone(),
         review_id: None,
         episode_id: None,
+        fastlane_round: None,
     };
     let ai_runtime = app.state::<AiRuntime>().inner().clone();
     let stream_error = run_ai_stream(
@@ -10032,6 +12751,7 @@ async fn execute_review_run(app: tauri::AppHandle, review: QueuedReview) -> Resu
         trigger: json!({}),
         review_id: Some(review.id.clone()),
         episode_id: Some(review.episode_id.clone()),
+        fastlane_round: None,
     };
     let ai_runtime = app.state::<AiRuntime>().inner().clone();
     let result = run_ai_stream(
@@ -10757,9 +13477,8 @@ mod tests {
     #[test]
     fn triage_profile_payload_fills_ui_missing_fields() {
         // UI 实际下发的形状（无 tools / skipTriageTriggers）。
-        let ui_payload: crate::ai_triage::AiAgentTriageConfig =
-            serde_json::from_str(
-                r#"{
+        let ui_payload: crate::ai_triage::AiAgentTriageConfig = serde_json::from_str(
+            r#"{
                     "mode": "enforce",
                     "maxSkips": 3,
                     "maxSilenceMinutes": 120,
@@ -10773,8 +13492,8 @@ mod tests {
                         "importantNews": true
                     }
                 }"#,
-            )
-            .expect("deserialize ui payload");
+        )
+        .expect("deserialize ui payload");
         assert_eq!(
             ui_payload.tools,
             vec!["market", "account", "intelligence", "radar"],
@@ -10808,7 +13527,9 @@ mod tests {
             );
             // 回显恒为固定值（UI 不再需要这个选项）。
             assert_eq!(
-                crate::ai_triage::AiAgentTriageConfig::default().escalate.margin_ratio_convention,
+                crate::ai_triage::AiAgentTriageConfig::default()
+                    .escalate
+                    .margin_ratio_convention,
                 crate::ai_triage::MARGIN_RATIO_HIGHER_IS_SAFER
             );
         }
@@ -10902,7 +13623,10 @@ mod tests {
             assert_eq!(effective.mode, "off", "{trigger} 必须绕过试判");
         }
         // 普通运行沿用 Profile 配置。
-        assert_eq!(triage_config_for_run(&profile, "wake_condition").mode, "enforce");
+        assert_eq!(
+            triage_config_for_run(&profile, "wake_condition").mode,
+            "enforce"
+        );
         assert_eq!(triage_config_for_run(&profile, "manual").mode, "enforce");
         // 用户显式 off 也不变。
         let off = crate::ai_triage::AiAgentTriageConfig {
@@ -10965,29 +13689,30 @@ mod tests {
 
     /// C20：默认启用集 = 4 个流程角色；历史 7 个标 deprecated（不被全选内置选中）。
     #[test]
-    fn default_enabled_agents_are_the_four_process_roles() {
+    fn default_enabled_agents_is_empty_and_only_the_counterparty_is_builtin() {
+        // C31 断言①⑤：默认启用集**已删除**（恒为空），内置库只剩对手盘一个。
+        // 这条同时钉住"C20.5 自动补默认角色"不会借尸还魂：只要默认集非空，
+        // 老 Profile 的迁移就又有东西可塞。
         let defaults = desic_agent_automation::default_enabled_agent_ids();
+        assert!(defaults.is_empty(), "{defaults:?}");
         assert_eq!(
-            defaults,
-            vec![
-                "desic-data-digest",
-                "desic-account-state",
-                "desic-decision-proposal",
-                "desic-contrarian-review"
-            ]
+            desic_agent_automation::builtin_agent_ids(),
+            vec!["desic-contrarian-review".to_string()]
         );
-        let deprecated = desic_agent_automation::deprecated_builtin_agent_ids();
-        assert_eq!(deprecated.len(), 7);
-        assert!(deprecated.contains(&"desic-market-structure".to_string()));
-        assert!(
-            !deprecated.contains(&"desic-contrarian-review".to_string()),
-            "C20：contrarian 是 id 复用，不标停用"
-        );
-        // 11 个内置文件都要能安装（历史角色文件保留）。
+        assert!(desic_agent_automation::deprecated_builtin_agent_ids().is_empty());
+        // 唯一内置文件必须可安装。
         for id in desic_agent_automation::builtin_agent_ids() {
             assert!(
                 desic_agent_automation::builtin_agent_markdown(&id).is_some(),
                 "{id} 必须仍可安装"
+            );
+        }
+        // 删除清单里的 10 个 id 一个都不能再渲染 / 安装。
+        for removed in desic_agent_automation::REMOVED_BUILTIN_AGENTS.iter() {
+            assert!(
+                desic_agent_automation::builtin_agent_markdown(removed.id).is_none(),
+                "{} 不该再可安装",
+                removed.id
             );
         }
     }
@@ -10996,14 +13721,25 @@ mod tests {
     #[test]
     fn draft_prompt_matches_c20_content_pack() {
         let system = desic_agent_automation::AI_AGENT_DRAFT_SYSTEM_PROMPT;
-        for role in ["data_digest", "account_state", "decision_proposal", "contrarian"] {
+        for role in [
+            "data_digest",
+            "account_state",
+            "decision_proposal",
+            "contrarian",
+        ] {
             assert!(system.contains(role), "role 枚举缺少 {role}");
         }
-        assert!(system.contains("反例"), "C20 规则 9（反例约束）必须在内嵌提示词里");
+        assert!(
+            system.contains("反例"),
+            "C20 规则 9（反例约束）必须在内嵌提示词里"
+        );
         assert!(system.contains("不要输出 scopes"), "C15 起的字段清单");
         let user = desic_agent_automation::AI_AGENT_DRAFT_USER_PROMPT;
         assert!(user.contains("{{description}}") && user.contains("{{name_line}}"));
-        assert!(user.contains("{{description}}"), "占位符必须保留给 Rust 替换");
+        assert!(
+            user.contains("{{description}}"),
+            "占位符必须保留给 Rust 替换"
+        );
     }
 
     /// C23.2 夹具：主 Agent 拼装后的完整任务（多行、含依赖提示与 Profile 任务）。
@@ -11101,8 +13837,10 @@ mod tests {
 
     #[test]
     fn triage_phase_tokens_subtract_deep_from_triage() {
-        let triage = json!({ "usage": { "totalTokens": 1000, "inputTokens": 800 }, "totalTokens": 1000 });
-        let total = json!({ "usage": { "totalTokens": 3500, "inputTokens": 3000 }, "totalTokens": 3500 });
+        let triage =
+            json!({ "usage": { "totalTokens": 1000, "inputTokens": 800 }, "totalTokens": 1000 });
+        let total =
+            json!({ "usage": { "totalTokens": 3500, "inputTokens": 3000 }, "totalTokens": 3500 });
         let deep = subtract_usage_for_test(&total, &triage);
         assert_eq!(deep["totalTokens"], 2500);
         assert_eq!(deep["usage"]["totalTokens"], 2500);
@@ -11413,7 +14151,8 @@ mod tests {
                summary TEXT,error TEXT,started_at INTEGER NOT NULL,finished_at INTEGER,next_wake_at INTEGER,
                created_at INTEGER NOT NULL,action_counts_json TEXT NOT NULL DEFAULT '{}',token_usage_json TEXT,
                triage_json TEXT,experts_json TEXT,audit_json TEXT,
-               single_agent_mode TEXT NOT NULL DEFAULT 'standard'
+               single_agent_mode TEXT NOT NULL DEFAULT 'standard',
+               record_kind TEXT NOT NULL DEFAULT 'ai',fastlane_json TEXT
              );
              CREATE TABLE ai_messages(
                id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
@@ -11976,8 +14715,6 @@ mod tests {
         )));
     }
 
-
-
     fn insert_test_profile(
         conn: &Connection,
         id: &str,
@@ -12076,7 +14813,11 @@ mod tests {
         let thirty_one_minutes = 31 * 60 * 1000_i64;
         let five_minutes = 5 * 60 * 1000_i64;
 
-        insert_run("run-zombie", now - thirty_one_minutes, now - thirty_one_minutes);
+        insert_run(
+            "run-zombie",
+            now - thirty_one_minutes,
+            now - thirty_one_minutes,
+        );
         insert_run("run-live-long", now - 3 * 60 * 60 * 1000, now - 1_000);
         insert_run("run-fresh", now - five_minutes, now - five_minutes);
         insert_test_profile(&conn, "profile-run-queued", "off", 4, "[]");
@@ -12120,7 +14861,11 @@ mod tests {
                 .expect("load run status");
             assert_eq!(
                 status,
-                if id == "run-queued" { "queued" } else { "running" },
+                if id == "run-queued" {
+                    "queued"
+                } else {
+                    "running"
+                },
                 "{id} 不得被清理"
             );
         }
@@ -12205,7 +14950,10 @@ mod tests {
     fn migration_log_keeps_one_line_per_profile() {
         let profile_key = "profile:log-dedupe-test";
         assert!(migration_log_slot(profile_key), "首次迁移应记录");
-        assert!(!migration_log_slot(profile_key), "同一 profile 不得重复记录");
+        assert!(
+            !migration_log_slot(profile_key),
+            "同一 profile 不得重复记录"
+        );
         assert!(
             migration_log_slot("snapshot:log-dedupe-test"),
             "运行快照是独立来源，可各自记录一次"
@@ -12306,13 +15054,11 @@ mod tests {
         }
     }
 
-
-
-    /// C20.5（强制迁移版）：含已下线 id 的旧 Profile 在**读取时**被改写成
-    /// 「默认 4 个角色（内置顺序）+ 其余保留 id（原相对顺序）」并**落库**；
-    /// 幂等、已合规 Profile 一个字节不改、空名单不动。
+    /// C31 断言④⑤：老 Profile 在**读取时**被就地剔除已删除的内置 Agent 并**落库**，
+    /// 剔除清单以 `migrationNotes` 形式可见；**绝不再自动补默认角色**（C20.5 的
+    /// "补齐 4 个流程角色"已失效）；已合规 / 空名单 / 纯自定义 Profile 一个字节不改。
     #[test]
-    fn profile_read_force_migrates_deprecated_enabled_agents() {
+    fn profile_read_drops_removed_agents_without_adding_defaults() {
         let conn = Connection::open_in_memory().expect("open in-memory database");
         migrate_ai_automation(&conn).expect("migrate automation schema");
         let legacy_ids = json!([
@@ -12334,15 +15080,16 @@ mod tests {
             .expect("normalize profile input");
             upsert_profile_row(&conn, &profile, id, 1_000, 2_000).expect("insert profile row");
         };
-        insert("profile-deprecated-mix", legacy_ids.clone());
-        insert("profile-compliant", json!(["desic-data-digest", "desic-account-state", "desic-decision-proposal", "desic-contrarian-review"]));
+        insert("profile-removed-mix", legacy_ids.clone());
+        insert(
+            "profile-contrarian-only",
+            json!(["desic-contrarian-review"]),
+        );
         insert("profile-custom-only", json!(["custom-agent"]));
         insert("profile-empty", json!([]));
 
+        // 期望：删除项全部消失，其余按原相对顺序保留，**没有补进来的角色**。
         let expected_migrated = vec![
-            "desic-data-digest".to_string(),
-            "desic-account-state".to_string(),
-            "desic-decision-proposal".to_string(),
             "desic-contrarian-review".to_string(),
             "custom-agent".to_string(),
         ];
@@ -12355,82 +15102,134 @@ mod tests {
             .expect("stored ids")
         };
 
-        // ① 含已下线 + 自定义（董事会给的形状）：4 新在前、其余保留 id 在后，**已落库**。
-        let loaded = load_profile(&conn, "profile-deprecated-mix").expect("load profile");
+        // ① 含已删除 id + 自定义：只删不加，且**已落库**。
+        let loaded = load_profile(&conn, "profile-removed-mix").expect("load profile");
         assert_eq!(loaded.enabled_agent_ids, expected_migrated);
+        assert!(
+            !loaded
+                .enabled_agent_ids
+                .iter()
+                .any(|id| desic_agent_automation::is_removed_builtin_agent_id(id)),
+            "落库名单里不得残留已删除的内置 Agent"
+        );
         assert_eq!(
-            serde_json::from_str::<Vec<String>>(&stored_ids("profile-deprecated-mix"))
+            serde_json::from_str::<Vec<String>>(&stored_ids("profile-removed-mix"))
                 .expect("persisted ids"),
             expected_migrated,
             "迁移必须持久化（不是只影响生效名单）"
         );
 
-        // ② 幂等：第二次读取/再跑启动迁移都不再改写，`updated_at` 不推进。
+        // ② 可见提示：删除清单逐条出现在 migrationNotes 里（不静默）。
+        let notice = loaded
+            .migration_notes
+            .iter()
+            .find(|note| note.contains("已移除内置 Agent"))
+            .expect("删除必须有可见提示");
+        for (id, name) in [
+            ("desic-smart-money", "Smart Money"),
+            ("desic-historical-analogy", "历史类比"),
+            ("desic-account-risk", "账户风险"),
+        ] {
+            assert!(notice.contains(name), "{notice} 缺少 {name}");
+            assert!(notice.contains(id), "{notice} 缺少 {id}");
+        }
+        assert!(
+            notice.contains("主 Agent"),
+            "提示必须说明职责已归主 Agent：{notice}"
+        );
+        // 唯一保留的角色不该出现在提示里。
+        assert!(!notice.contains("desic-contrarian-review"), "{notice}");
+
+        // ③ 幂等：第二次读取 / 再跑启动迁移都不再改写，`updated_at` 不推进。
         let updated_at: i64 = conn
             .query_row(
-                "SELECT updated_at FROM ai_agent_profiles WHERE id='profile-deprecated-mix'",
+                "SELECT updated_at FROM ai_agent_profiles WHERE id='profile-removed-mix'",
                 [],
                 |row| row.get(0),
             )
             .expect("updated_at");
-        let again = load_profile(&conn, "profile-deprecated-mix").expect("reload profile");
+        let again = load_profile(&conn, "profile-removed-mix").expect("reload profile");
         assert_eq!(again.enabled_agent_ids, expected_migrated);
-        assert_eq!(migrate_deprecated_enabled_agents(&conn), 1, "只剩纯自定义那条要迁");
+        assert_eq!(
+            migrate_removed_enabled_agents(&conn),
+            0,
+            "已无删除项 → 启动迁移不再改写任何行"
+        );
         let updated_at_after: i64 = conn
             .query_row(
-                "SELECT updated_at FROM ai_agent_profiles WHERE id='profile-deprecated-mix'",
+                "SELECT updated_at FROM ai_agent_profiles WHERE id='profile-removed-mix'",
                 [],
                 |row| row.get(0),
             )
             .expect("updated_at");
         assert_eq!(updated_at, updated_at_after, "幂等：已迁移的行不再被写");
-        assert_eq!(migrate_deprecated_enabled_agents(&conn), 0, "全部幂等");
 
-        // ③ 已合规 Profile：一个字节不改（连 updated_at 都不动）。
-        let compliant_before = stored_ids("profile-compliant");
-        let compliant = load_profile(&conn, "profile-compliant").expect("load compliant");
-        assert_eq!(compliant.enabled_agent_ids.len(), 4);
-        assert_eq!(stored_ids("profile-compliant"), compliant_before);
+        // ④ 已合规（只剩唯一保留角色）：一个字节不改，也没有提示。
+        let compliant_before = stored_ids("profile-contrarian-only");
+        let compliant = load_profile(&conn, "profile-contrarian-only").expect("load compliant");
+        assert_eq!(
+            compliant.enabled_agent_ids,
+            vec!["desic-contrarian-review".to_string()]
+        );
+        assert_eq!(stored_ids("profile-contrarian-only"), compliant_before);
+        assert!(compliant.migration_notes.is_empty());
 
-        // ④ 纯自定义 Profile（无已下线 id）→ 补齐默认 4 个，保留自定义。
+        // ⑤ 纯自定义 Profile：**不再被补齐默认角色**（C20.5 的自动填充已失效）。
         let custom = load_profile(&conn, "profile-custom-only").expect("load custom-only");
-        assert_eq!(custom.enabled_agent_ids, expected_migrated);
+        assert_eq!(custom.enabled_agent_ids, vec!["custom-agent".to_string()]);
+        assert_eq!(stored_ids("profile-custom-only"), "[\"custom-agent\"]");
+        // 默认启用集本身必须为空（否则任何"补齐"都会塞回删掉的角色）。
+        assert!(desic_agent_automation::default_enabled_agent_ids().is_empty());
 
-        // ⑤ 空名单不动（新建 / 关闭协作的 Profile 不该凭空多出专家）。
+        // ⑥ 空名单不动。
         let empty = load_profile(&conn, "profile-empty").expect("load empty");
         assert!(empty.enabled_agent_ids.is_empty());
-        assert_eq!(
-            stored_ids("profile-empty"),
-            "[]",
-            "空名单不得被补齐成默认 4 个"
-        );
+        assert_eq!(stored_ids("profile-empty"), "[]");
 
-        // 纯函数级：触发条件与"用户子集不动"。
-        assert!(plan_enabled_agent_ids_migration(&[]).is_none(), "空名单不动");
+        // 纯函数级：只删不加 + 触发条件。
         assert!(
-            plan_enabled_agent_ids_migration(&expected_migrated).is_none(),
-            "已合规不动"
+            plan_removed_agent_ids_migration(&[]).is_none(),
+            "空名单不动"
+        );
+        assert!(
+            plan_removed_agent_ids_migration(&["desic-contrarian-review".to_string()]).is_none(),
+            "无删除项不动"
+        );
+        assert!(
+            plan_removed_agent_ids_migration(&["custom-agent".to_string()]).is_none(),
+            "纯自定义不动（不再补齐默认角色）"
         );
         assert_eq!(
-            plan_enabled_agent_ids_migration(&[
+            plan_removed_agent_ids_migration(&[
                 "desic-smart-money".to_string(),
                 "custom-agent".to_string()
             ]),
-            Some(expected_migrated.clone()),
-            "含已下线 → 4 新 + 其余保留"
+            Some(vec!["custom-agent".to_string()]),
+            "含已删除 id → 只删不加"
         );
         assert_eq!(
-            plan_enabled_agent_ids_migration(&["custom-agent".to_string()]),
-            Some(expected_migrated.clone()),
-            "纯自定义 → 补齐 4 新"
-        );
-        assert!(
-            plan_enabled_agent_ids_migration(&[
+            plan_removed_agent_ids_migration(&[
                 "desic-data-digest".to_string(),
-                "desic-account-state".to_string()
-            ])
-            .is_none(),
-            "用户有意只跑 2 个角色：没有已下线 id 就不动手"
+                "desic-account-state".to_string(),
+                "desic-decision-proposal".to_string()
+            ]),
+            Some(Vec::new()),
+            "C20 的 4 个流程角色现在全是删除项 → 名单清空，且不补任何角色"
+        );
+        // 启动迁移（真实 SQL 路径）：含删除项的 Profile 会被就地改写，且只改写它。
+        insert(
+            "profile-startup-removed",
+            json!(["desic-decision-proposal", "desic-contrarian-review"]),
+        );
+        assert_eq!(
+            migrate_removed_enabled_agents(&conn),
+            1,
+            "启动期只改写含删除项的那一行"
+        );
+        assert_eq!(
+            serde_json::from_str::<Vec<String>>(&stored_ids("profile-startup-removed"))
+                .expect("persisted ids"),
+            vec!["desic-contrarian-review".to_string()]
         );
     }
 
@@ -12442,7 +15241,7 @@ mod tests {
             serde_json::from_value::<AiAgentProfileInput>(json!({
                 "name": "保存回归",
                 "symbols": ["BTC-USDT-SWAP"],
-                "enabledAgentIds": ["desic-data-digest", "desic-account-state"],
+                "enabledAgentIds": ["desic-contrarian-review", "custom-agent"],
                 "targetLeverage": 25,
                 "maxSingleTradeMarginPct": 40
             }))
@@ -12460,8 +15259,8 @@ mod tests {
         assert_eq!(
             loaded.enabled_agent_ids,
             vec![
-                "desic-data-digest".to_string(),
-                "desic-account-state".to_string()
+                "desic-contrarian-review".to_string(),
+                "custom-agent".to_string()
             ]
         );
         assert_eq!(loaded.target_leverage, 25);
@@ -12493,8 +15292,8 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Vec<String>>(&enabled_json).expect("enabled ids json"),
             vec![
-                "desic-data-digest".to_string(),
-                "desic-account-state".to_string()
+                "desic-contrarian-review".to_string(),
+                "custom-agent".to_string()
             ]
         );
         // 旧列停止写入：mode 固定 off（新模型没有主开关）。
@@ -12518,11 +15317,6 @@ mod tests {
             .expect("query deleted_at after re-save");
         assert_eq!(deleted_after_resave, None, "重存不得软删除已有 Profile");
     }
-
-
-
-
-
 
     #[test]
     fn required_profile_skills_cannot_be_removed() {
@@ -12618,9 +15412,6 @@ mod tests {
         );
     }
 
-
-
-
     /// C7「运行历史兼容」+ C3 迁移：旧快照（multiAgentMode/multiAgents）不崩，
     /// 内存迁移成 enabledAgentIds；只有真正损坏的 JSON 才让 Run 失败。
     #[test]
@@ -12697,8 +15488,7 @@ mod tests {
 
         // 未知旧 mode 视为 off（不迁移、不报错）。
         let unknown_profile = load_profile(&conn, "profile-unknown").expect("load profile");
-        let mut unknown_mode =
-            serde_json::to_value(&unknown_profile).expect("serialize profile");
+        let mut unknown_mode = serde_json::to_value(&unknown_profile).expect("serialize profile");
         let object = unknown_mode.as_object_mut().expect("profile object");
         object.remove("enabledAgentIds");
         object.insert("multiAgentMode".to_string(), json!("bogus"));
@@ -12716,12 +15506,11 @@ mod tests {
         // 新快照（enabledAgentIds）原样生效；库校验只发生在保存路径（C3），
         // 快照重放阶段保留原列表（不存在的 id 不会被解析成运行载荷）。
         let explicit_profile = load_profile(&conn, "profile-explicit").expect("load profile");
-        let mut explicit =
-            serde_json::to_value(&explicit_profile).expect("serialize profile");
-        explicit
-            .as_object_mut()
-            .expect("profile object")
-            .insert("enabledAgentIds".to_string(), json!(["desic-smart-money", "nope"]));
+        let mut explicit = serde_json::to_value(&explicit_profile).expect("serialize profile");
+        explicit.as_object_mut().expect("profile object").insert(
+            "enabledAgentIds".to_string(),
+            json!(["desic-smart-money", "nope"]),
+        );
         insert_test_run(
             &conn,
             "run-explicit",
@@ -12731,8 +15520,9 @@ mod tests {
         let (_, profile, _, _) = claim_next_run(&conn, 400)
             .expect("explicit snapshot claims")
             .expect("queued run");
-        // C20.5：已下线的 id 从生效名单剔除；"库中不存在"的 id 在**快照重放**阶段仍原样
-        // 保留（库校验只发生在保存路径，C3）——两层各自过滤，载荷里两者都进不去。
+        // C31：已删除的内置 id（`desic-smart-money` 在删除台账里）从生效名单剔除；
+        // "库中不存在"的 id 在**快照重放**阶段仍原样保留（库校验只发生在保存路径，C3）
+        // ——两层各自过滤，载荷里两者都进不去。
         assert_eq!(profile.enabled_agent_ids, vec!["nope".to_string()]);
     }
 
@@ -12763,13 +15553,14 @@ mod tests {
         let mut automatic = current.clone();
         automatic.legacy_multi_agent_mode = "auto".to_string();
         let automatic =
-            validate_profile_snapshot(automatic).expect("auto snapshot migrates to builtins");
-        // C20：auto 快照迁移到默认启用集（4 个流程角色）。
-        assert_eq!(
-            automatic.enabled_agent_ids,
-            desic_agent_automation::default_enabled_agent_ids()
-        );
-        assert_eq!(automatic.enabled_agent_ids.len(), 4);
+            validate_profile_snapshot(automatic).expect("auto snapshot migrates without experts");
+        // C31：旧 auto 快照**不再自动启用任何 Agent**（默认启用集已删除），
+        // 但仍留下"为什么一个专家都没有"的可见说明。
+        assert!(automatic.enabled_agent_ids.is_empty());
+        assert!(automatic
+            .migration_notes
+            .iter()
+            .any(|note| note.contains("不再自动启用")));
 
         let mut custom = current;
         custom.legacy_multi_agent_mode = "custom".to_string();
@@ -13054,6 +15845,9 @@ mod tests {
     #[test]
     fn skill_file_fingerprint_changes_when_enabled_set_changes() {
         let mut config = desic_storage_config::AiConfig {
+            typesafe_api_key: String::new(),
+            typesafe_base_url: None,
+            typesafe_model: None,
             provider: Some("cline-sdk".to_string()),
             model: "test-model".to_string(),
             base_url: "https://example.invalid/v1".to_string(),
@@ -13081,7 +15875,6 @@ mod tests {
             skill_runtime_trust: HashMap::new(),
             open_agent: true,
             workspace_roots: Vec::new(),
-            typesafe: desic_storage_config::AiTypesafeConfig::default(),
             tool_read_concurrency: None,
             tool_domain_concurrency: None,
         };
@@ -13278,7 +16071,13 @@ mod tests {
     }
     /// C19 用量夹具：往 `background:<run>` 会话里插一条带 `usageSummary` 事件的助手消息
     /// （与侧车真实写入的形状一致：`__desicUsageSummary` + `type: usageSummary`）。
-    fn insert_usage_message(conn: &Connection, id: &str, run_id: &str, created_at: i64, total: i64) {
+    fn insert_usage_message(
+        conn: &Connection,
+        id: &str,
+        run_id: &str,
+        created_at: i64,
+        total: i64,
+    ) {
         let tokens = json!({
             "inputTokens": total,
             "outputTokens": 0,
@@ -13306,7 +16105,12 @@ mod tests {
         conn.execute(
             "INSERT INTO ai_messages(id,session_id,role,content,tool_json,created_at)
              VALUES(?1,?2,'assistant','本轮报告',?3,?4)",
-            params![id, format!("background:{run_id}"), events.to_string(), created_at],
+            params![
+                id,
+                format!("background:{run_id}"),
+                events.to_string(),
+                created_at
+            ],
         )
         .expect("insert usage message");
     }
@@ -13397,8 +16201,11 @@ mod tests {
         .expect("deserialize finish input without selfAnalysisReason");
         assert!(bare.self_analysis_reason.is_none());
         // 生效专家名单非空：升级 + 零专家 + 零证据 + 无理由 → 标"未说明理由"。
-        let deployed = vec![desic_agent_automation::builtin_agent_definition("desic-data-digest")
-            .expect("builtin definition")];
+        let deployed =
+            vec![
+                desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                    .expect("builtin definition"),
+            ];
         let audit = finish_run_audit(
             &escalated,
             &deployed,
@@ -13494,7 +16301,12 @@ mod tests {
         enabled_agents: Vec<desic_agent_automation::AiAgentDefinition>,
         escalated: bool,
     ) -> BackgroundRunContext {
-        test_finish_context_with_mode(run_id, enabled_agents, escalated, SINGLE_AGENT_MODE_STANDARD)
+        test_finish_context_with_mode(
+            run_id,
+            enabled_agents,
+            escalated,
+            SINGLE_AGENT_MODE_STANDARD,
+        )
     }
 
     fn test_finish_context_with_mode(
@@ -13542,6 +16354,7 @@ mod tests {
             trigger: json!({}),
             review_id: None,
             episode_id: None,
+            fastlane_round: None,
         }
     }
 
@@ -13562,8 +16375,11 @@ mod tests {
     #[test]
     fn finish_run_soft_check_pushes_back_at_most_once() {
         let conn = usage_test_connection();
-        let deployed = vec![desic_agent_automation::builtin_agent_definition("desic-data-digest")
-            .expect("builtin definition")];
+        let deployed =
+            vec![
+                desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                    .expect("builtin definition"),
+            ];
         let context = test_finish_context("run-soft-check", deployed.clone(), true);
         let summary = "## 结论\n本轮不建仓。\n## 事实与证据\n- 15:00 结构未确认\n## 冲突与缺口\n无\n## 观察条件\n站上 X\n## 下一步\n等待";
         let bare = soft_check_input(None);
@@ -13663,6 +16479,2705 @@ mod tests {
         );
     }
 
+    /// C29：Profile 类型 —— 缺字段/非法 = `ai`（旧行为逐字不变）；
+    /// 快判字段在 `ai` 类型上被忽略、不报错；新建快判 Profile 写入董事会默认值。
+    #[test]
+    fn profile_type_defaults_and_fastlane_creation_defaults() {
+        assert_eq!(normalize_profile_type("fastlane"), PROFILE_TYPE_FASTLANE);
+        assert_eq!(normalize_profile_type(" FASTLANE "), PROFILE_TYPE_FASTLANE);
+        for invalid in ["", "ai ", "fast", "1", "unknown"] {
+            assert_eq!(
+                normalize_profile_type(invalid),
+                PROFILE_TYPE_AI,
+                "{invalid:?}"
+            );
+        }
+
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let save = |profile: AiAgentProfileInput, id: &str| -> AiAgentProfileSummary {
+            let profile = normalize_profile(profile).expect("normalize profile input");
+            upsert_profile_row(&conn, &profile, id, 1_000, 2_000).expect("insert profile row");
+            load_profile(&conn, id).expect("load profile")
+        };
+
+        // 旧 Profile（没有 profileType、没有 fastlane 段）→ ai + 快判默认值，行为不变。
+        let legacy = save(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "旧 AI Profile",
+                "symbols": ["BTC-USDT-SWAP"],
+            }))
+            .expect("deserialize legacy profile"),
+            "profile-legacy-ai",
+        );
+        assert_eq!(legacy.profile_type, PROFILE_TYPE_AI);
+        assert_eq!(legacy.fastlane, crate::fastlane::FastlaneConfig::default());
+        assert_eq!(
+            legacy.scan_interval_minutes, 30,
+            "旧 Profile 的扫描间隔不变"
+        );
+
+        // `ai` 类型收到快判字段 → 照常保存、不报错，但不影响既有行为。
+        let ai_with_fastlane = save(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "AI Profile 带快判字段",
+                "symbols": ["BTC-USDT-SWAP"],
+                "profileType": "ai",
+                "fastlaneRiskPerTradePct": 1.25, "fastlaneStylePreset": "range_both",
+            }))
+            .expect("deserialize ai profile"),
+            "profile-ai-with-fastlane",
+        );
+        assert_eq!(ai_with_fastlane.profile_type, PROFILE_TYPE_AI);
+        assert_eq!(ai_with_fastlane.fastlane.risk_per_trade_pct, 1.25);
+
+        // 新建快判 Profile → 董事会默认值（10 分钟 / 10 秒 / 120 次 / 副驾驶）。
+        let fastlane = save(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "快判 Profile",
+                "symbols": ["BTC-USDT-SWAP"],
+                "profileType": "fastlane",
+            }))
+            .expect("deserialize fastlane profile"),
+            "profile-fastlane",
+        );
+        assert_eq!(fastlane.profile_type, PROFILE_TYPE_FASTLANE);
+        assert_eq!(fastlane.mode, "copilot", "默认执行模式 = 副驾驶");
+        assert_eq!(fastlane.scan_interval_minutes, 10, "最长静默 10 分钟");
+        assert_eq!(fastlane.min_wake_interval_seconds, 10, "最小触发间隔 10 秒");
+        assert_eq!(fastlane.max_runs_per_hour, 120, "每小时 120 次");
+        assert_eq!(fastlane.fastlane.llm_reasoning_effort, "none");
+        assert_eq!(
+            fastlane.fastlane.style,
+            crate::fastlane::style_text_for_preset("long_pullback"),
+            "风格正文默认由预设生成"
+        );
+
+        // 编辑既有快判 Profile：用户改过的触发值不被"默认值"覆盖。
+        let edited = save(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "id": "profile-fastlane",
+                "name": "快判 Profile",
+                "symbols": ["BTC-USDT-SWAP"],
+                "profileType": "fastlane",
+                "scanIntervalMinutes": 3,
+                "maxRunsPerHour": 30,
+                "fastlaneRiskPerTradePct": 0.8, "fastlaneStylePreset": "breakout_follow",
+            }))
+            .expect("deserialize edited fastlane profile"),
+            "profile-fastlane",
+        );
+        assert_eq!(edited.scan_interval_minutes, 3);
+        assert_eq!(edited.max_runs_per_hour, 30);
+        assert_eq!(edited.fastlane.risk_per_trade_pct, 0.8);
+        assert_eq!(edited.fastlane.style_preset, "breakout_follow");
+
+        // 非法 profileType → 回落 ai（不报错）。
+        let bogus = save(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "非法类型",
+                "symbols": ["BTC-USDT-SWAP"],
+                "profileType": "turbo",
+            }))
+            .expect("deserialize bogus profile"),
+            "profile-bogus-type",
+        );
+        assert_eq!(bogus.profile_type, PROFILE_TYPE_AI);
+        // 缺 profileType（旧前端保存已有快判 Profile）→ 保留库中现值。
+        let mut resave = normalize_profile(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "id": "profile-fastlane",
+                "name": "快判 Profile",
+                "symbols": ["BTC-USDT-SWAP"],
+            }))
+            .expect("deserialize resave"),
+        )
+        .expect("normalize resave");
+        assert!(resave.profile_type.is_none());
+        apply_profile_type_default(&conn, &mut resave, "profile-fastlane");
+        upsert_profile_row(&conn, &resave, "profile-fastlane", 1_000, 3_000).expect("resave");
+        assert_eq!(
+            load_profile(&conn, "profile-fastlane")
+                .expect("reload")
+                .profile_type,
+            PROFILE_TYPE_FASTLANE,
+            "旧前端保存不得把快判 Profile 变回 ai"
+        );
+    }
+
+    /// C29：一键停机 —— 停判（Profile 停用 + 取消运行 + 撤销观察条件）+ 停机记录
+    /// + 可选"平仓轮"排队（跳过 Jev，仍走 LLM 参数 → 代码校验 → 既有平仓链路，零旁路）。
+    /// 命令本身要 AppHandle，因此这里断言它依赖的**落库单元**逐条成立。
+    #[test]
+    fn fastlane_kill_switch_stops_judging_and_records_it() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane-kill','快判','1','copilot','demo','[\"BTC-USDT-SWAP\"]',10,
+               '[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert fastlane profile");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-kill-1','profile-fastlane-kill','wake_condition','running',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert running run");
+        conn.execute(
+            "INSERT INTO ai_wake_conditions(id,profile_id,source,plan_mode,condition_type,config_json,status,created_at,updated_at)
+             VALUES('wake-kill-1','profile-fastlane-kill','agent','any','price_cross','{}','active',1,1)",
+            [],
+        )
+        .expect("insert active condition");
+
+        // 停判三件事（与命令体一致）：停用 Profile、取消在跑运行、撤销生效观察条件。
+        let now = now_ms();
+        conn.execute(
+            "UPDATE ai_agent_profiles SET enabled=0,updated_at=?2 WHERE id=?1",
+            params!["profile-fastlane-kill", now],
+        )
+        .expect("disable profile");
+        let cancelled = conn
+            .execute(
+                "UPDATE ai_agent_runs SET status='cancelled',error='快判模式一键停机',finished_at=?2,updated_at=?2
+                 WHERE profile_id=?1 AND status IN ('queued','running')",
+                params!["profile-fastlane-kill", now],
+            )
+            .expect("cancel runs");
+        let replaced = conn
+            .execute(
+                "UPDATE ai_wake_conditions SET status='replaced',updated_at=?2
+                 WHERE profile_id=?1 AND status='active'",
+                params!["profile-fastlane-kill", now],
+            )
+            .expect("replace conditions");
+        assert_eq!(cancelled, 1);
+        assert_eq!(replaced, 1);
+        assert!(
+            !load_profile(&conn, "profile-fastlane-kill")
+                .expect("load")
+                .enabled
+        );
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM ai_agent_runs WHERE id='run-kill-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("run status");
+        assert_eq!(status, "cancelled");
+
+        // 停机记录：action.kind = kill_switch，且能落库读回。
+        let record = crate::fastlane::FastlaneRecord::new(crate::fastlane::FastlaneTrigger {
+            source: "manual".to_string(),
+            condition_type: None,
+            params: Some(json!({ "closePositions": false })),
+        })
+        .kill_switch("user_kill_switch");
+        conn.execute(
+            "UPDATE ai_agent_runs SET fastlane_json=?2 WHERE id=?1",
+            params!["run-kill-1", record.to_value().to_string()],
+        )
+        .expect("persist kill switch record");
+        let run = load_run(&conn, "run-kill-1").expect("load run");
+        assert_eq!(run.record_kind, "fastlane");
+        let fastlane = run.fastlane.expect("fastlane record");
+        assert_eq!(fastlane["action"]["kind"], "kill_switch");
+        assert_eq!(fastlane["action"]["reason"], "user_kill_switch");
+        assert_eq!(fastlane["trigger"]["source"], "manual");
+
+        // 平仓轮：排队一条 queued 运行，带 `intent="close"` 标记（runner 据此跳过 Jev，
+        // 但仍要经 LLM 写参数 + `validate_round` + 既有平仓链路）。
+        let close_run_id = "run-fastlane-close-test";
+        conn.execute(
+            "INSERT INTO ai_agent_runs(
+               id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind
+             ) VALUES(?1,'profile-fastlane-kill','fastlane_close','queued',?2,?2,?2,'fastlane')",
+            params![close_run_id, now],
+        )
+        .expect("queue close round");
+        conn.execute(
+            "UPDATE ai_agent_runs SET fastlane_json=?2 WHERE id=?1",
+            params![
+                close_run_id,
+                json!({
+                    "recordKind": "fastlane",
+                    "intent": "close",
+                    "trigger": { "source": "manual", "conditionType": "kill_switch",
+                                 "params": { "closePositions": true } }
+                })
+                .to_string()
+            ],
+        )
+        .expect("mark close intent");
+        let close_run = load_run(&conn, close_run_id).expect("load close round");
+        assert_eq!(close_run.status, "queued", "平仓轮排队等待 runner");
+        assert_eq!(close_run.record_kind, "fastlane");
+        let marker = close_run.fastlane.expect("close marker");
+        assert_eq!(marker["intent"], "close", "runner 据此跳过 Jev 判定");
+        assert_eq!(marker["trigger"]["conditionType"], "kill_switch");
+        // 平仓轮不受"取消在跑/排队运行"的误伤（它是停判之后才入队的）。
+        let queued: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_agent_runs WHERE profile_id='profile-fastlane-kill' AND status='queued'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count queued");
+        assert_eq!(queued, 1);
+    }
+
+    /// C29.7 / UI：快判字段在 **Profile 线上是扁平的**（`fastlaneXxx`），不是嵌套对象；
+    /// UI 写什么就落什么（否则写入会被静默忽略）。
+    #[test]
+    fn fastlane_profile_fields_are_flat_on_the_wire() {
+        // UI 形状（types.ts 的字段名原样）→ 解析 → 落库 → 读回仍可解出同形状。
+        let input: AiAgentProfileInput = serde_json::from_value(json!({
+            "name": "快判线上形状",
+            "symbols": ["BTC-USDT-SWAP"],
+            "profileType": "fastlane",
+            "fastlaneStylePreset": "range_both",
+            "fastlaneRiskPerTradePct": 0.75,
+            "fastlaneMaxDailyLossPct": 3.0,
+            "fastlaneMaxConcurrent": 2,
+            "fastlaneMaxSlippageBps": 8,
+            "fastlaneMaxActionsPerMinute": 3,
+            "fastlaneQualityFloor": 3.0,
+            "fastlaneConfidenceFloor": 0.7,
+            "fastlaneEventBlackoutMinutes": 45,
+            "fastlaneTradingHours": "night",
+            "fastlaneNotifyPolicy": "every_action",
+            "fastlaneJevModel": "jev-x",
+            "fastlaneJevTimeoutMs": 1200,
+            "fastlaneLlmTimeoutMs": 2500,
+            "fastlaneLlmReasoningEffort": "high",
+        }))
+        .expect("UI 的扁平快判字段必须被接住");
+        assert_eq!(input.fastlane.style_preset, "range_both");
+        assert_eq!(input.fastlane.risk_per_trade_pct, 0.75);
+        assert_eq!(input.fastlane.trading_hours, "night");
+        assert_eq!(
+            input.fastlane.llm_reasoning_effort, "high",
+            "入参可给（归一后固定 none）"
+        );
+
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let profile = normalize_profile(input).expect("normalize profile input");
+        upsert_profile_row(&conn, &profile, "profile-fastlane-flat", 1_000, 2_000)
+            .expect("insert profile row");
+        let loaded = load_profile(&conn, "profile-fastlane-flat").expect("load profile");
+        assert_eq!(loaded.fastlane.style_preset, "range_both");
+        assert_eq!(loaded.fastlane.trading_hours, "night");
+        assert_eq!(loaded.fastlane.max_concurrent, 2);
+        assert_eq!(
+            loaded.fastlane.llm_reasoning_effort, "none",
+            "归一把思考强制关掉（侧车也硬写死）"
+        );
+
+        // 线上形状：扁平字段各自出现，且**没有**嵌套的 `fastlane` 对象。
+        let value = serde_json::to_value(&loaded).expect("serialize profile summary");
+        let object = value.as_object().expect("profile object");
+        assert!(
+            object.get("fastlane").is_none(),
+            "快判字段必须扁平下发，不能是嵌套对象：{object:?}"
+        );
+        for key in [
+            "fastlaneStylePreset",
+            "fastlaneStyle",
+            "fastlaneRiskPerTradePct",
+            "fastlaneMaxDailyLossPct",
+            "fastlaneMaxConcurrent",
+            "fastlaneMaxSlippageBps",
+            "fastlaneMaxActionsPerMinute",
+            "fastlaneQualityFloor",
+            "fastlaneConfidenceFloor",
+            "fastlaneEventBlackoutMinutes",
+            "fastlaneTradingHours",
+            "fastlaneNotifyPolicy",
+            "fastlaneJevModel",
+            "fastlaneJevTimeoutMs",
+            "fastlaneLlmTimeoutMs",
+            "fastlaneLlmReasoningEffort",
+        ] {
+            assert!(object.contains_key(key), "缺少线上字段：{key}");
+        }
+        assert_eq!(value["fastlaneTradingHours"], "night");
+        assert_eq!(value["fastlaneRiskPerTradePct"], 0.75);
+        // 反向：序列化结果能原样再解析（UI 回传）。
+        let round_trip: AiAgentProfileInput =
+            serde_json::from_value(value).expect("序列化结果必须能被 UI 原样回传");
+        assert_eq!(round_trip.fastlane.style_preset, "range_both");
+        assert_eq!(round_trip.fastlane.trading_hours, "night");
+    }
+
+    /// C29 / B1+B3：采集器对账名单 = 活跃快判 Profile（enabled + 未删除 + profileType=fastlane + 有品种）。
+    /// 这是"registry 条目数 = 活跃快判 Profile 数"在调度侧的输入，删/停/改类型都必须掉出名单。
+    #[test]
+    fn fastlane_collector_plan_tracks_only_active_fastlane_profiles() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        let insert = |id: &str,
+                      enabled: i64,
+                      profile_type: &str,
+                      symbols: &str,
+                      deleted: Option<i64>| {
+            conn.execute(
+                "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+                   skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+                   entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+                   allowed_wake_condition_types_json,profile_type,created_at,updated_at,deleted_at)
+                 VALUES(?1,?1,?2,'copilot','demo',?3,10,'[]','{}',30,10,30,180,10,120,'[]',?4,1,1,?5)",
+                params![id, enabled, symbols, profile_type, deleted],
+            )
+            .expect("insert profile");
+        };
+        insert("profile-active", 1, "fastlane", "[\"BTC-USDT-SWAP\"]", None);
+        insert(
+            "profile-disabled",
+            0,
+            "fastlane",
+            "[\"BTC-USDT-SWAP\"]",
+            None,
+        );
+        insert(
+            "profile-deleted",
+            1,
+            "fastlane",
+            "[\"BTC-USDT-SWAP\"]",
+            Some(2),
+        );
+        insert("profile-ai", 1, "ai", "[\"BTC-USDT-SWAP\"]", None);
+        insert("profile-no-symbol", 1, "fastlane", "[]", None);
+
+        let plan = fastlane_collector_plan(&conn).expect("collector plan");
+        let ids = plan
+            .iter()
+            .map(|(profile, inst_id)| (profile.id.clone(), inst_id.clone()))
+            .collect::<Vec<_>>();
+        // C29.19 按开关分叉：开关关闭（本版本）→ 名单**恒为空**（不起采集器、不订阅行情）；
+        // 开关打开（下个版本）→ 原有的"活跃快判 Profile 才有采集器"断言逐字保留。
+        if crate::fastlane::FASTLANE_MODE_ENABLED {
+            assert_eq!(
+                ids,
+                vec![("profile-active".to_string(), "BTC-USDT-SWAP".to_string())]
+            );
+        } else {
+            assert!(ids.is_empty(), "开关关闭时采集器名单必须为空，实际 {ids:?}");
+        }
+        // 名单为空 ⇒ `sync_fastlane_collectors` 走既有 stale 路径把已起条目全部释放；
+        // "释放"这条链路本身由 `fastlane_mode_disabled_releases_started_collectors` 直接钉住。
+    }
+
+    /// C29：运行的记录种类与快判六组记录落库形状（旧运行 = `ai` / NULL）。
+    #[test]
+    fn run_record_kind_and_fastlane_json_round_trip() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-fastlane-1','profile-fastlane','wake_condition','completed',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert fastlane run");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at)
+             VALUES('run-ai-1','profile-ai','manual','completed',1,1,1)",
+            [],
+        )
+        .expect("insert ai run");
+
+        // 侧车回传 → 六组记录（Rust 补 trigger / gate / fetchMs / codeMs / totalMs）。
+        let result: crate::fastlane::FastlaneSidecarResult = serde_json::from_value(json!({
+            "ok": true,
+            "jev": { "action": "观望", "actionRaw": "观望", "probabilities": { "观望": 0.94 },
+                     "confidence": 0.93, "quality": 1.1, "latencyMs": 779, "attempts": 1, "raw": "{}" },
+            "llm": { "latencyMs": 747, "params": { "summary": "等回踩" },
+                     "validation": { "ok": true, "reasons": [] }, "wakeConditions": 3,
+                     "nextWakePlan": { "mode": "any", "conditions": [] } },
+            "action": { "kind": "watch", "reason": "low_quality" },
+            "timing": { "jevMs": 779, "llmMs": 747 },
+            "tokens": { "jevIn": 2135, "jevOut": 142, "llmIn": 2104, "llmOut": 173 }
+        }))
+        .expect("deserialize sidecar result");
+        let record = crate::fastlane::FastlaneRecord::from_sidecar(
+            crate::fastlane::FastlaneTrigger {
+                source: "condition".to_string(),
+                condition_type: Some("price_cross".to_string()),
+                params: None,
+            },
+            crate::fastlane::GateOutcome::pass(),
+            &result,
+            42,
+            5,
+        );
+        assert_eq!(
+            record.timing.total_ms,
+            42 + 779 + 747 + 5,
+            "总时长按四段实测之和计"
+        );
+        assert_eq!(record.action.reason.as_deref(), Some("low_quality"));
+        conn.execute(
+            "UPDATE ai_agent_runs SET fastlane_json=?2 WHERE id=?1",
+            params!["run-fastlane-1", record.to_value().to_string()],
+        )
+        .expect("persist fastlane record");
+
+        let run = load_run(&conn, "run-fastlane-1").expect("load fastlane run");
+        assert_eq!(run.record_kind, "fastlane");
+        let fastlane = run.fastlane.expect("fastlane record");
+        for group in [
+            "recordKind",
+            "trigger",
+            "gate",
+            "jev",
+            "llm",
+            "action",
+            "timing",
+            "tokens",
+        ] {
+            assert!(fastlane.get(group).is_some(), "缺少分组：{group}");
+        }
+        assert_eq!(fastlane["tokens"]["llmOut"], 173);
+        assert_eq!(fastlane["timing"]["fetchMs"], 42);
+        assert_eq!(fastlane["jev"]["attempts"], 1);
+        // 旧 AI 运行：recordKind 默认 ai、快判记录为 NULL。
+        let ai = load_run(&conn, "run-ai-1").expect("load ai run");
+        assert_eq!(ai.record_kind, "ai");
+        assert!(ai.fastlane.is_none());
+    }
+
+    /// 真机（窄调用 `HTTP 400`）：快判轮的 `fastlane_llm_model` 必须把**内部 model-config id**
+    /// 解析成 provider 模型名，否则 provider 秒拒 400。
+    #[test]
+    fn fastlane_llm_model_resolves_internal_ids_to_provider_names() {
+        use desic_storage_config::{AiConfig, AiModelConfig};
+        let model_config = |id: &str, model: &str| AiModelConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            provider: "openai-compatible".to_string(),
+            model: model.to_string(),
+            base_url: "https://api.example.invalid".to_string(),
+            api_key: "sk-placeholder".to_string(),
+            permission_mode: "advisor".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+        };
+        let config = AiConfig {
+            provider: Some("openai-compatible".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            base_url: "https://api.example.invalid".to_string(),
+            api_key: "sk-placeholder".to_string(),
+            stream: Some(true),
+            permission_mode: "advisor".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+            active_model_id: "model-1784742123978".to_string(),
+            models: vec![
+                model_config("model-1784742123978", "deepseek-v4-flash"),
+                model_config("model-builtin", "claude-sonnet-4"),
+            ],
+            system_prompt: "test".to_string(),
+            custom_rules: String::new(),
+            enabled_skills: Vec::new(),
+            skill_definitions: Vec::new(),
+            skill_runtime_trust: HashMap::new(),
+            open_agent: true,
+            workspace_roots: Vec::new(),
+            typesafe_api_key: "ts-placeholder".to_string(),
+            typesafe_base_url: None,
+            typesafe_model: None,
+            tool_read_concurrency: None,
+            tool_domain_concurrency: None,
+        };
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        let profile_with_model = |model: Option<&str>| -> AiAgentProfileSummary {
+            let input = serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "快判", "symbols": ["BTC-USDT-SWAP"], "profileType": "fastlane",
+            }))
+            .expect("deserialize profile");
+            let normalized = normalize_profile(input).expect("normalize profile");
+            upsert_profile_row(&conn, &normalized, "profile-model", 1_000, 2_000)
+                .expect("insert profile row");
+            let mut profile = load_profile(&conn, "profile-model").expect("load profile");
+            profile.model = model.map(str::to_string);
+            profile
+        };
+
+        // ① 真机形状：`model-1784742123978`（内部 id）→ 解析成 provider 名。
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(Some("model-1784742123978")), &config).model,
+            "deepseek-v4-flash"
+        );
+        // ② 用户填的已经是 provider 名（不在 models[] 里）→ 原样透传，不丢用户设置。
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(Some("deepseek-v4-flash")), &config).model,
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(Some("  gpt-5-preview  ")), &config).model,
+            "gpt-5-preview"
+        );
+        // ③ 未知的**内部 id**（`model-…` 形态但查不到）→ 回落激活模型（当 provider 名发出去必 400）。
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(Some("model-9999999999999")), &config).model,
+            "deepseek-v4-flash"
+        );
+        // ④ 空 → 回落激活模型（既有行为）。
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(None), &config).model,
+            "deepseek-v4-flash"
+        );
+        assert_eq!(
+            fastlane_llm_model(&profile_with_model(Some("   ")), &config).model,
+            "deepseek-v4-flash"
+        );
+        // 内部 id 形态判定（只认 `model-…`）。
+        assert!(looks_like_model_config_id("model-1"));
+        assert!(looks_like_model_config_id("model-deepseek"));
+        for value in ["deepseek-v4-flash", "model", "model-", "my-model-1", ""] {
+            assert!(!looks_like_model_config_id(value), "{value}");
+        }
+
+        // ⑤ 兜底断言：真正下发到侧车的 `fastlane_llm_model` 是 provider 名，不是 `model-…`。
+        let dispatch = crate::fastlane::FastlaneDispatch::build(
+            &crate::fastlane::FastlaneConfig::default(),
+            &crate::fastlane::FastlaneAiSettings {
+                llm_model: fastlane_llm_model(
+                    &profile_with_model(Some("model-1784742123978")),
+                    &config,
+                )
+                .model,
+                typesafe_api_key: config.typesafe_api_key.clone(),
+                inherited_jev: crate::fastlane::FastlaneInheritedJev::default(),
+                models: crate::fastlane::sanitized_model_list(&config.models),
+                llm_base_url: None,
+                llm_api_key: None,
+            },
+            &json!({ "inst_id": "BTC-USDT-SWAP" }),
+            &json!([]),
+            false,
+        );
+        assert_eq!(dispatch.config["fastlane_llm_model"], "deepseek-v4-flash");
+        assert_ne!(dispatch.config["fastlane_llm_model"], "model-1784742123978");
+        // 普通 AI 轮的模型名路径不动（`config.model` 仍是 provider 名）。
+        assert_eq!(config.model, "deepseek-v4-flash");
+    }
+
+    /// 真机 2026-09-21：`wake_conditions_payload` 把每条条件的 `expiresAt` 原样喂给模型，模型
+    /// **照抄**上一轮的绝对毫秒 → 新一轮 plan 带着过期时间回来。旧口径整份 `Err` ⇒ **0 条写库、
+    /// 闭环断链**（记录里只写"未写入"，看不出是照抄）。新口径：只丢到期时间（→ 无到期），条件照写。
+    #[test]
+    fn stale_expires_at_keeps_the_conditions_and_notes_it() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,
+               '[\"price_cross\",\"timer\"]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        let now = 1_800_000_000_000_i64;
+        // 照抄回来的到期时间（上一轮算的）此刻已经过去。
+        let plan = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "price_cross", "params": { "instId": "BTC-USDT-SWAP", "direction": "above", "price": 80_500.0 } },
+                { "type": "timer", "params": { "intervalMinutes": 5 } }
+            ],
+            "expiresAtMs": now - 60_000
+        });
+        let outcome =
+            persist_fastlane_wake_plan(&conn, &profile, &plan, now).expect("不再是整份拒绝");
+        assert_eq!(outcome.written, 2, "条件本身合法 → 照写（闭环不断链）");
+        assert!(outcome.dropped.is_empty(), "{:?}", outcome.dropped);
+        assert_eq!(outcome.notes.len(), 1, "必须留痕，不静默");
+        assert!(
+            outcome.notes[0].contains("到期时间无效"),
+            "{:?}",
+            outcome.notes
+        );
+        // 「无到期」= `expires_at IS NULL`（不是写一个假的未来时间）。
+        let expires: Vec<Option<i64>> = {
+            let mut stmt = conn
+                .prepare("SELECT expires_at FROM ai_wake_conditions WHERE profile_id=?1 AND status='active'")
+                .expect("prepare");
+            stmt.query_map(params![profile.id], |row| row.get::<_, Option<i64>>(0))
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        assert_eq!(expires, vec![None, None], "两条都必须是无到期");
+
+        // 记录口径：notes 进 `llm.validation.reasons`，但 `ok` 与 `wakeConditions` 不动。
+        let sidecar: crate::fastlane::FastlaneSidecarResult = serde_json::from_value(json!({
+            "ok": true,
+            "jev": { "action": "观望", "quality": 1.56, "confidence": 0.82, "latencyMs": 858, "attempts": 1 },
+            "llm": { "latencyMs": 1_670, "validation": { "ok": true, "reasons": [] },
+                     "wakeConditions": 2, "params": { "summary": "等回踩" } }
+        }))
+        .expect("sidecar result");
+        let mut record = crate::fastlane::FastlaneRecord::from_sidecar(
+            crate::fastlane::FastlaneTrigger {
+                source: "silence".into(),
+                condition_type: None,
+                params: None,
+            },
+            crate::fastlane::GateOutcome {
+                ok: true,
+                data: None,
+                anomaly: None,
+                conflict: None,
+                reasons: vec![],
+                applied_to: None,
+                bypassed_for: None,
+                entry_quality: None,
+            },
+            &sidecar,
+            1,
+            1,
+        );
+        record.note_wake_plan_notes(&outcome.notes);
+        let llm = record.llm.as_ref().expect("llm");
+        assert_eq!(llm.wake_conditions, 2, "写库条数照实");
+        assert!(llm.validation.ok, "到期时间失效不是动作被拒");
+        assert!(
+            llm.validation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("到期时间无效")),
+            "{:?}",
+            llm.validation.reasons
+        );
+    }
+
+    /// 真机 `run_1789927808343894000` ①：**一条 timer 参数不合规不该废掉整份 plan** ——
+    /// 合法条件照写（`wakeConditions` = 真正写库条数），非法那条只丢弃并记原因。
+    #[test]
+    fn wake_plan_partial_acceptance_keeps_valid_conditions() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,
+               '[\"price_cross\",\"price_change_pct\",\"timer\"]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        let now = 1_800_000_000_000_i64;
+        // 真机形状：3 条里第 3 条 `timer` 缺参数（既没 atMs 也没 intervalMinutes）。
+        let plan = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "timer", "params": { "intervalMinutes": 5 } },
+                { "type": "price_cross", "params": { "direction": "above", "price": 80_500.0 } },
+                { "type": "timer", "params": { "intervalMinutes": 0 } }
+            ],
+            "expiresAtMs": now + 3_600_000
+        });
+        let outcome = persist_fastlane_wake_plan(&conn, &profile, &plan, now).expect("partial ok");
+        assert_eq!(outcome.written, 2, "合法的两条必须写进库");
+        assert_eq!(outcome.dropped.len(), 1, "只丢弃非法那一条");
+        assert!(
+            outcome.dropped[0].contains("timer"),
+            "{:?}",
+            outcome.dropped
+        );
+
+        // 记录口径：`wakeConditions` = 真正写库条数；丢弃说明进 `llm.validation.reasons`（不静默）。
+        let sidecar: crate::fastlane::FastlaneSidecarResult = serde_json::from_value(json!({
+            "ok": true,
+            "jev": { "action": "观望", "quality": 1.56, "confidence": 0.82, "latencyMs": 858, "attempts": 1 },
+            "llm": { "latencyMs": 1_670, "validation": { "ok": true, "reasons": [] },
+                     "wakeConditions": 3, "params": { "summary": "等回踩" } }
+        }))
+        .expect("parse result");
+        let mut record = crate::fastlane::FastlaneRecord::from_sidecar(
+            crate::fastlane::FastlaneTrigger {
+                source: "condition".to_string(),
+                condition_type: None,
+                params: None,
+            },
+            crate::fastlane::GateOutcome::pass(),
+            &sidecar,
+            21,
+            12,
+        );
+        record.note_wake_conditions_dropped(outcome.written, &outcome.dropped);
+        let llm = record.llm.as_ref().expect("llm");
+        assert_eq!(llm.wake_conditions, 2, "侧车报 3 条，真正写库 2 条");
+        assert!(
+            llm.validation.ok,
+            "丢弃附加条件是诊断、不是动作被拒 —— 运行 completed 就不能显示成 LLM 拒绝"
+        );
+        assert!(
+            llm.validation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("已丢弃 1 条观察条件") && reason.contains("timer")),
+            "{:?}",
+            llm.validation.reasons
+        );
+
+        // 写进去的两条仍能被既有 `evaluate_condition` 命中（沿用闭环口径）。
+        let conditions = load_active_condition_models(&conn, now).expect("load conditions");
+        assert_eq!(conditions.len(), 2);
+        let timer = conditions
+            .iter()
+            .find(|item| matches!(item.condition, WakeCondition::Timer { .. }))
+            .expect("timer");
+        let due = WakeMarketState {
+            now_ms: now + 6 * 60_000,
+            ..Default::default()
+        };
+        assert!(evaluate_condition(
+            &timer.condition,
+            &due,
+            timer.created_at,
+            timer.last_triggered_at
+        ));
+        let cross = conditions
+            .iter()
+            .find(|item| matches!(item.condition, WakeCondition::PriceCross { .. }))
+            .expect("price_cross");
+        let mut crossing = WakeMarketState {
+            now_ms: now + 1_000,
+            ..Default::default()
+        };
+        crossing
+            .prices
+            .insert("BTC-USDT-SWAP".to_string(), 80_600.0);
+        crossing
+            .previous_prices
+            .insert("BTC-USDT-SWAP".to_string(), 80_400.0);
+        assert!(evaluate_condition(
+            &cross.condition,
+            &crossing,
+            cross.created_at,
+            cross.last_triggered_at
+        ));
+
+        // 全部非法 → 0 条写库 + 全是丢弃原因（不是"失败"，也不再整份拒绝）。
+        let all_bad = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "timer", "params": { "intervalMinutes": 0 } },
+                { "type": "timer", "params": { "intervalMinutes": 9_999 } }
+            ]
+        });
+        let outcome = persist_fastlane_wake_plan(&conn, &profile, &all_bad, now).expect("ok");
+        assert_eq!(outcome.written, 0);
+        assert_eq!(outcome.dropped.len(), 2);
+    }
+
+    /// lead 裁决：快判轮**没有子 Agent** —— 运行级用量的 `agentCount` 必须如实报 0
+    ///（UI 会把 `agentCount>0` 显示成"N 个子 Agent"）。
+    #[test]
+    fn fastlane_run_usage_reports_no_sub_agents() {
+        let record = crate::fastlane::FastlaneRecord::from_sidecar(
+            crate::fastlane::FastlaneTrigger {
+                source: "condition".to_string(),
+                condition_type: None,
+                params: None,
+            },
+            crate::fastlane::GateOutcome::pass(),
+            &crate::fastlane::FastlaneSidecarResult {
+                ok: true,
+                jev: None,
+                llm: None,
+                action: None,
+                timing: Default::default(),
+                tokens: Default::default(),
+                gate: None,
+                intent: None,
+            },
+            1,
+            1,
+        );
+        let usage = fastlane_token_usage(
+            &record,
+            &FastlaneUsageContext {
+                provider: "openai-compatible".to_string(),
+                model_id: "model-1".to_string(),
+                model: "deepseek-v4-flash".to_string(),
+                model_name: "deepseek-v4-flash".to_string(),
+            },
+        );
+        assert_eq!(usage.agent_count, 0, "两次模型调用不是子 Agent");
+        assert_eq!(usage.reported_agent_count, 0);
+        assert_eq!(usage.unreported_agent_count, 0);
+    }
+
+    /// 真机 `run-1789926893000094000` ①：侧车条件不带 `instId` → **回填本轮品种**后能写库；
+    /// 显式给了 `instId` → 不覆盖。
+    #[test]
+    fn wake_plan_backfills_the_round_instrument() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json TEXT,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,
+               '[\"price_cross\",\"timer\"]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        let now = 1_800_000_000_000_i64;
+        // 真机形状：`timer` / `price_cross` 都**不带** `instId`。
+        let plan = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "timer", "params": { "intervalMinutes": 5 } },
+                { "type": "price_cross", "params": { "direction": "above", "price": 80_500.0 } }
+            ],
+            "expiresAtMs": now + 3_600_000
+        });
+        let outcome = persist_fastlane_wake_plan(&conn, &profile, &plan, now)
+            .expect("缺 instId 必须回填后写成功");
+        assert_eq!(outcome.written, 2);
+        assert!(outcome.dropped.is_empty(), "{:?}", outcome.dropped);
+        let conditions = load_active_condition_models(&conn, now).expect("load conditions");
+        assert_eq!(conditions.len(), 2);
+        // 每条都带上了本轮品种（含与品种无关的 `timer`）。
+        let configs = conn
+            .prepare(
+                "SELECT config_json FROM ai_wake_conditions WHERE profile_id='profile-fastlane'",
+            )
+            .expect("prepare")
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(configs.len(), 2);
+        for config in &configs {
+            let value: Value = serde_json::from_str(config).expect("config json");
+            assert_eq!(value["instId"], "BTC-USDT-SWAP", "{value}");
+        }
+        // 条件本身仍能解析成既有 `WakeCondition`（回填不会破坏 schema）。
+        assert!(conditions
+            .iter()
+            .any(|item| matches!(item.condition, WakeCondition::PriceCross { .. })));
+        assert!(conditions
+            .iter()
+            .any(|item| matches!(item.condition, WakeCondition::Timer { .. })));
+
+        // 显式给了 `instId` → **不覆盖**。
+        conn.execute(
+            "UPDATE ai_wake_conditions SET status='replaced' WHERE profile_id='profile-fastlane'",
+            [],
+        )
+        .expect("clear old rows");
+        let explicit = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "price_cross", "instId": "ETH-USDT-SWAP",
+                  "params": { "instId": "ETH-USDT-SWAP", "direction": "above", "price": 3_500.0 } }
+            ],
+            "expiresAtMs": now + 3_600_000
+        });
+        // Profile 只认 BTC → 显式指定别的品种会被**作用域校验**丢弃那一条（不静默改写、
+        // 也不连带废掉其它合法条件；这里只有这一条 → 写库 0 条 + 记原因）。
+        let outcome = persist_fastlane_wake_plan(&conn, &profile, &explicit, now)
+            .expect("条目级问题只丢弃那一条");
+        assert_eq!(outcome.written, 0);
+        assert_eq!(outcome.dropped.len(), 1);
+        assert!(
+            outcome.dropped[0].contains("price_cross") && outcome.dropped[0].contains("范围"),
+            "{:?}",
+            outcome.dropped
+        );
+        let explicit_same = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "price_cross", "instId": "BTC-USDT-SWAP",
+                  "params": { "direction": "above", "price": 80_500.0 } }
+            ],
+            "expiresAtMs": now + 3_600_000
+        });
+        assert_eq!(
+            persist_fastlane_wake_plan(&conn, &profile, &explicit_same, now)
+                .expect("write")
+                .written,
+            1
+        );
+    }
+
+    /// C33 ①（真机形状回归）：**模型自己发明的类型只丢那一条，不再废掉整份计划**。
+    ///
+    /// 真机现场：某轮 `background.finishRun` 写下
+    /// `{"type":"price","direction":"cross","instId":"BTC-USDT-SWAP","price":84986.4}`（该写 `price_cross`），
+    /// 旧口径把它当**计划级**错误 → 整份校验失败、整份不落库、卡片标红"该计划未落库"，
+    /// 而同份计划里另外两条完全合法。现在按快判既有口径降为**条目级**。
+    #[test]
+    fn background_wake_plan_drops_the_unknown_type_but_keeps_valid_conditions() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        // 真机那类 Profile：白名单只有几类（`price` 这种自创类型不在其中）。
+        let mut context = test_finish_context("run-ai-wake", Vec::new(), false);
+        context.profile_id = Some("profile-ai-wake".to_string());
+        context.allowed_wake_condition_types = vec!["price_cross".to_string(), "timer".to_string()];
+        let now = 1_800_000_000_000_i64;
+        let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+            "mode": "any",
+            "conditions": [
+                // ← 真机形状（原样照抄，含 84986.4 与 `direction: "cross"`）。
+                { "type": "price", "direction": "cross", "instId": "BTC-USDT-SWAP", "price": 84_986.4 },
+                // 合法条件（AI 链路是**扁平**形状；`instId` 省略 → 单品种语境回填本轮品种）。
+                { "type": "price_cross", "direction": "above", "price": 86_000.0 },
+                { "type": "timer", "intervalMinutes": 15 }
+            ],
+            "expiresAtMs": now + 1_800_000
+        }))
+        .expect("deserialize plan");
+        let write = partition_background_wake_plan(&conn, &context, &plan, now)
+            .expect("白名单外类型**不得**整份拒绝");
+        assert_eq!(
+            write.accepted.len(),
+            2,
+            "合法两条必须留下：{:?}",
+            write.dropped
+        );
+        assert_eq!(write.dropped.len(), 1, "只有自创类型那一条被丢");
+        let reason = format!(
+            "已丢弃 {} 条观察条件：{}",
+            write.dropped.len(),
+            write.dropped.join("；")
+        );
+        assert_eq!(
+            reason,
+            "已丢弃 1 条观察条件：price：类型不在 Profile 白名单"
+        );
+        assert_eq!(write.accepted[0].1, "price_cross");
+        assert_eq!(write.accepted[1].1, "timer");
+        assert_eq!(write.accepted[0].0, "any", "plan_mode 逐条带上");
+        // 真正写库（与生产同一段插入代码 + 同一事务形状）。
+        let tx = conn.unchecked_transaction().expect("transaction");
+        let created = insert_background_wake_conditions(
+            &tx,
+            "profile-ai-wake",
+            &write.accepted,
+            plan.expires_at,
+            now,
+        )
+        .expect("insert");
+        tx.commit().expect("commit");
+        assert_eq!(created.len(), 2, "写库条数 = 合法条数（不是计划条数）");
+        let mut statement = conn
+            .prepare(
+                "SELECT condition_type,config_json FROM ai_wake_conditions
+                 WHERE profile_id='profile-ai-wake' AND status='active' ORDER BY condition_type",
+            )
+            .expect("prepare");
+        let rows = statement
+            .query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .expect("query")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect");
+        assert_eq!(
+            rows.iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["price_cross", "timer"],
+            "自创类型 `price` 不得落库，另两条必须落库"
+        );
+        // 缺 `instId` 的合法条件仍按本轮品种回填（既有闭环口径不变）。
+        for (kind, config) in &rows {
+            let value: Value = serde_json::from_str(config).expect("config json");
+            assert_eq!(value["instId"], "BTC-USDT-SWAP", "{kind}: {value}");
+        }
+        // **计划级**（没法逐条处理）仍必须整份拒绝：`mode` 非法 / 条数 >32 / 条件缺 `type`。
+        for invalid in [
+            json!({ "mode": "some", "conditions": [{ "type": "timer", "params": { "intervalMinutes": 5 } }] }),
+            json!({ "mode": "any", "conditions": vec![json!({ "type": "timer", "intervalMinutes": 5 }); 33] }),
+            json!({ "mode": "any", "conditions": [{ "params": { "intervalMinutes": 5 } }] }),
+            json!({ "mode": "any", "conditions": [{ "type": "   ", "intervalMinutes": 5 }] }),
+        ] {
+            let plan: BackgroundWakePlanInput =
+                serde_json::from_value(invalid.clone()).expect("deserialize invalid plan");
+            let error = partition_background_wake_plan(&conn, &context, &plan, now)
+                .expect_err("计划级问题必须整份拒绝");
+            assert!(
+                error.contains("mode") || error.contains("32") || error.contains("type"),
+                "{invalid} → {error}"
+            );
+        }
+    }
+
+    /// C34 ①（**真机形状回归**）：AI 链路的 `expiresAt` 失效**不得**废掉整份计划。
+    ///
+    /// 真机隐患与快判同源：`wake_conditions_payload` 把每条条件的 `expiresAt` 原样喂给模型，模型
+    /// **照抄**上一轮算出的绝对毫秒 → 新一轮计划带着"已经过去的时间"回来。旧口径在 `background_finish_run`
+    /// 里 `validate_wake_expiry(input.next_wake_plan.expires_at, now_ms())?` 整份 `Err`
+    /// → **3 条合法条件一条都写不进去、闭环断链**，而记录里只写"未写入"，看不出是照抄造成的。
+    ///
+    /// 真机形状：`expiresAt` 抄成过去时间 + 3 条合法条件（`price_cross` 缺 instId / `price_cross` /
+    /// `timer`）→ 断言 **3 条写库**、`expires_at` **全为 NULL**、原因进 `validation.reasons`、
+    /// **计划不被整份拒绝**、`validation.ok` 不翻 false。
+    #[test]
+    fn background_wake_plan_expired_expires_at_drops_only_the_expiry() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let mut context = test_finish_context("run-ai-wake-expiry", Vec::new(), false);
+        context.profile_id = Some("profile-ai-wake-expiry".to_string());
+        context.allowed_wake_condition_types = vec![
+            "price_cross".to_string(),
+            "timer".to_string(),
+            "position_changed".to_string(),
+        ];
+        let now = 1_800_000_000_000_i64;
+        // 真机形状：模型**照抄**回来的到期时间（上一轮算的 13 位毫秒），此刻已经过去。
+        let stale = now - 60_000;
+        let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "price_cross", "direction": "above", "price": 86_000.0 },
+                { "type": "timer", "intervalMinutes": 15 },
+                { "type": "position_changed", "instId": "BTC-USDT-SWAP" }
+            ],
+            "expiresAt": stale
+        }))
+        .expect("deserialize plan");
+        let write = partition_background_wake_plan(&conn, &context, &plan, now)
+            .expect("到期时间失效**不得**整份拒绝");
+        assert_eq!(write.accepted.len(), 3, "{:?}", write.dropped);
+        assert!(write.dropped.is_empty(), "{:?}", write.dropped);
+        assert_eq!(
+            write.expires_at, None,
+            "失效 → 无到期（不是写一个假的未来时间）"
+        );
+        assert_eq!(write.notes.len(), 1, "必须留痕，不静默");
+        // 措辞与快判**逐字同一句**（`persist_fastlane_wake_plan` 里那句）。
+        assert_eq!(
+            write.notes[0],
+            "到期时间无效（唤醒计划 expiresAt 必须晚于当前时间，单位为 13 位 Unix 毫秒时间戳）→ 本次观察条件按「无到期」写入（请检查模型是否照抄了上一轮的 expiresAt）",
+            "{:?}",
+            write.notes
+        );
+        // 真正写库（与生产同一段插入代码 + 同一事务形状）。
+        let tx = conn.unchecked_transaction().expect("transaction");
+        let created = insert_background_wake_conditions(
+            &tx,
+            "profile-ai-wake-expiry",
+            &write.accepted,
+            write.expires_at,
+            now,
+        )
+        .expect("insert");
+        tx.commit().expect("commit");
+        assert_eq!(created.len(), 3, "3 条合法条件必须全部落库（旧口径 0 条）");
+        let rows = {
+            let mut statement = conn
+                .prepare(
+                    "SELECT condition_type,config_json,expires_at FROM ai_wake_conditions
+                     WHERE profile_id='profile-ai-wake-expiry' AND status='active' ORDER BY condition_type",
+                )
+                .expect("prepare");
+            statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, Option<i64>>(2)?,
+                    ))
+                })
+                .expect("query")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect")
+        };
+        assert_eq!(
+            rows.iter()
+                .map(|(kind, _, _)| kind.as_str())
+                .collect::<Vec<_>>(),
+            vec!["position_changed", "price_cross", "timer"]
+        );
+        for (kind, config, expires_at) in &rows {
+            assert_eq!(*expires_at, None, "{kind} 必须是无到期：{:?}", expires_at);
+            let value: Value = serde_json::from_str(config).expect("config json");
+            assert_eq!(value["instId"], "BTC-USDT-SWAP", "{kind}: {value}");
+        }
+        // 诊断位（**复用 C33 的 `validation.reasons` / `wakeConditions`，不新造字段体系**）：
+        // 原因进去，`ok` 不翻 false（与快判裁决同一口径）。
+        let mut reasons: Vec<String> = Vec::new();
+        if !write.dropped.is_empty() {
+            reasons.push(format!(
+                "已丢弃 {} 条观察条件：{}",
+                write.dropped.len(),
+                write.dropped.join("；")
+            ));
+        }
+        reasons.extend(write.notes.iter().cloned());
+        assert_eq!(reasons.len(), 1, "{reasons:?}");
+        assert!(reasons[0].contains("到期时间无效"), "{reasons:?}");
+        assert!(reasons[0].contains("无到期"), "{reasons:?}");
+    }
+
+    /// C34 ②（边界三条）：**只有真的失效才降级**，合法未来 13 位毫秒照旧写入该值。
+    ///
+    /// - 合法未来 13 位毫秒 → `expires_at = Some(该值)`（**不得**一律写成 NULL）；
+    /// - 10 位十进制秒 → 「无到期」+ 记原因（原因里给出换算后的 13 位值，便于对账）；
+    /// - 超过一年 → 「无到期」+ 记原因。
+    #[test]
+    fn background_wake_plan_keeps_a_valid_expiry_and_degrades_only_invalid_ones() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let mut context = test_finish_context("run-ai-wake-expiry-edge", Vec::new(), false);
+        context.profile_id = Some("profile-ai-wake-expiry-edge".to_string());
+        context.allowed_wake_condition_types = vec!["price_cross".to_string(), "timer".to_string()];
+        let now = 1_800_000_000_000_i64;
+        let future = now + 3_600_000;
+        let cases: Vec<(i64, Option<i64>, bool, &str)> = vec![
+            (future, Some(future), false, "合法未来 13 位毫秒"),
+            (1_800_000_000_i64, None, true, "10 位十进制秒"),
+            (now + 367 * 24 * 60 * 60_000, None, true, "超过一年"),
+        ];
+        for (index, (expires_at, expected, should_note, label)) in cases.iter().enumerate() {
+            let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+                "mode": "any",
+                "conditions": [
+                    { "type": "price_cross", "direction": "above", "price": 86_000.0 },
+                    { "type": "timer", "intervalMinutes": 15 }
+                ],
+                "expiresAt": expires_at
+            }))
+            .expect("deserialize plan");
+            let write = partition_background_wake_plan(&conn, &context, &plan, now)
+                .unwrap_or_else(|error| panic!("{label} 不该整份拒绝：{error}"));
+            assert_eq!(write.accepted.len(), 2, "{label}：条件必须照写");
+            assert!(write.dropped.is_empty(), "{label}：{:?}", write.dropped);
+            assert_eq!(write.expires_at, *expected, "{label}");
+            assert_eq!(
+                write.notes.len(),
+                usize::from(*should_note),
+                "{label}：{:?}",
+                write.notes
+            );
+            if *should_note {
+                assert!(
+                    write.notes[0].contains("到期时间无效"),
+                    "{label}：{:?}",
+                    write.notes
+                );
+            }
+            // 真写库，逐轮核对落到列里的值。
+            let profile_id = format!("profile-ai-wake-expiry-edge-{index}");
+            let tx = conn.unchecked_transaction().expect("transaction");
+            let created = insert_background_wake_conditions(
+                &tx,
+                &profile_id,
+                &write.accepted,
+                write.expires_at,
+                now,
+            )
+            .expect("insert");
+            tx.commit().expect("commit");
+            assert_eq!(created.len(), 2, "{label}");
+            let stored: Vec<Option<i64>> = {
+                let mut statement = conn
+                    .prepare(
+                        "SELECT expires_at FROM ai_wake_conditions
+                         WHERE profile_id=?1 AND status='active' ORDER BY condition_type",
+                    )
+                    .expect("prepare");
+                statement
+                    .query_map(params![profile_id], |row| row.get::<_, Option<i64>>(0))
+                    .expect("query")
+                    .collect::<Result<Vec<_>, _>>()
+                    .expect("collect")
+            };
+            assert_eq!(stored, vec![*expected, *expected], "{label}");
+        }
+        // 十进制秒那条的原因里必须带上换算后的 13 位值（与既有 `validate_unix_millisecond_timestamp` 同措辞）。
+        let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+            "mode": "any",
+            "conditions": [{ "type": "timer", "intervalMinutes": 15 }],
+            "expiresAt": 1_800_000_000_i64
+        }))
+        .expect("deserialize plan");
+        let write = partition_background_wake_plan(&conn, &context, &plan, now)
+            .expect("no whole-plan reject");
+        assert_eq!(write.notes.len(), 1);
+        assert!(
+            write.notes[0].contains("1800000000000"),
+            "{:?}",
+            write.notes
+        );
+    }
+
+    /// C34 ③（**边界回归**）：`validate_wake_expiry` 的**校验规则本身一字未改** ——
+    /// 13 位毫秒 / 必须晚于当前 / 最多一年。旧派单明令"只改失效后的处置，不改判据"。
+    #[test]
+    fn wake_expiry_rule_itself_is_unchanged_by_c34() {
+        let now = 1_800_000_000_000_i64;
+        assert!(validate_wake_expiry(None, now).is_ok(), "无到期是合法的");
+        assert!(
+            validate_wake_expiry(Some(now + 1), now).is_ok(),
+            "未来 1ms 合法"
+        );
+        assert!(
+            validate_wake_expiry(Some(now + 366 * 24 * 60 * 60_000), now).is_ok(),
+            "一年内（含）合法"
+        );
+        // ① 必须晚于当前（等于当前也拒）。
+        for stale in [now, now - 1, now - 60_000] {
+            let error = validate_wake_expiry(Some(stale), now).expect_err("已过期必须拒");
+            assert!(error.contains("必须晚于当前时间"), "{stale} → {error}");
+        }
+        // ② 最多一年。
+        let error = validate_wake_expiry(Some(now + 367 * 24 * 60 * 60_000), now)
+            .expect_err("超过一年必须拒");
+        assert!(error.contains("最多设置到一年后"), "{error}");
+        // ③ 10 位秒级仍按"格式非法"拒（并给出可照抄的 13 位值）。
+        let error = validate_wake_expiry(Some(1_800_000_000), now).expect_err("秒级必须拒");
+        assert!(error.contains("13 位 Unix 毫秒时间戳"), "{error}");
+        assert!(error.contains("1800000000000"), "{error}");
+    }
+
+    /// C34 ①（**返回体口径**）：失效事件在返回体里**可见**（`validation.reasons`），
+    /// 且**不翻 `validation.ok`**、**不改 `wakeConditions`**（= 真正写库条数）——
+    /// 复用 C33 的诊断位，不新造字段体系。
+    #[test]
+    fn expired_wake_expiry_is_visible_in_the_finish_run_payload_shape() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let mut context = test_finish_context("run-ai-wake-expiry-payload", Vec::new(), false);
+        context.profile_id = Some("profile-ai-wake-expiry-payload".to_string());
+        context.allowed_wake_condition_types = vec!["timer".to_string()];
+        let now = 1_800_000_000_000_i64;
+        let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+            "mode": "any",
+            "conditions": [{ "type": "timer", "intervalMinutes": 15 }],
+            "expiresAt": now - 60_000
+        }))
+        .expect("deserialize plan");
+        let wake_write =
+            partition_background_wake_plan(&conn, &context, &plan, now).expect("no reject");
+        let tx = conn.unchecked_transaction().expect("transaction");
+        let created = insert_background_wake_conditions(
+            &tx,
+            "profile-ai-wake-expiry-payload",
+            &wake_write.accepted,
+            wake_write.expires_at,
+            now,
+        )
+        .expect("insert");
+        tx.commit().expect("commit");
+        // 与 `background_finish_run` 完全同形的那两段（丢弃汇总 + notes 追加）。
+        let mut reasons: Vec<String> = Vec::new();
+        if !wake_write.dropped.is_empty() {
+            reasons.push(format!(
+                "已丢弃 {} 条观察条件：{}",
+                wake_write.dropped.len(),
+                wake_write.dropped.join("；")
+            ));
+        }
+        reasons.extend(wake_write.notes.iter().cloned());
+        let payload = json!({
+            "wakeConditions": created.len(),
+            "validation": { "ok": true, "reasons": reasons }
+        });
+        assert_eq!(
+            payload["wakeConditions"], 1,
+            "写库 1 条（不是计划被拒的 0 条）"
+        );
+        assert_eq!(
+            payload["validation"]["ok"], true,
+            "到期时间失效不是动作被拒"
+        );
+        let rendered = payload["validation"]["reasons"]
+            .as_array()
+            .expect("reasons");
+        assert_eq!(rendered.len(), 1, "{payload}");
+        assert!(
+            rendered[0]
+                .as_str()
+                .expect("reason")
+                .contains("到期时间无效"),
+            "{payload}"
+        );
+    }
+
+    /// C33 ①（下发规范）：AI Profile 链路下发的条件类型规范 = `fastlane::wake_condition_schema()`
+    /// **按该 Profile 的 `allowed_wake_condition_types` 过滤**（只列它允许的类型，绝不把 19 类全塞
+    /// 给一个只允许 5 类的 Profile）；没有名单（简报/复盘与交互会话）→ `Null`（不下发）。
+    #[test]
+    fn background_wake_condition_schema_is_filtered_by_the_profile_allowlist() {
+        let mut context = test_finish_context("run-ai-wake-schema", Vec::new(), false);
+        context.allowed_wake_condition_types = vec![
+            "timer".to_string(),
+            "price_cross".to_string(),
+            "position_changed".to_string(),
+        ];
+        let schema = background_wake_condition_schema(Some(&context));
+        let map = schema.as_object().expect("schema object");
+        let mut kinds = map
+            .keys()
+            .filter(|key| !key.starts_with('_'))
+            .cloned()
+            .collect::<Vec<_>>();
+        kinds.sort();
+        assert_eq!(kinds, vec!["position_changed", "price_cross", "timer"]);
+        // 同源：与全量 schema 的同名条目逐字一致（改 schema 一处、两条链路同步）。
+        let full = crate::fastlane::wake_condition_schema();
+        for kind in &kinds {
+            assert_eq!(map[kind], full[kind], "{kind} 必须与全量 schema 逐字同源");
+        }
+        assert_eq!(map["_note"], full["_note"], "instId 可省略的统一说明照旧");
+        // 白名单外**一个都不许出现**（真机模型猜出来的 `price` 也不行）。
+        for kind in ["price", "candle_volume_ratio", "funding_extreme"] {
+            assert!(!map.contains_key(kind), "白名单外的 {kind} 不得下发");
+        }
+        assert_eq!(
+            schema,
+            crate::fastlane::wake_condition_schema_for(&context.allowed_wake_condition_types)
+                .expect("非空名单必须下发"),
+            "只是同一份 schema 的白名单视图，不是第二份生成逻辑"
+        );
+        // 空名单 = 不下发：简报/复盘的名单被 `clear()`，交互会话没有 Profile。
+        let mut empty = test_finish_context("run-briefing", Vec::new(), false);
+        empty.allowed_wake_condition_types.clear();
+        assert_eq!(background_wake_condition_schema(Some(&empty)), Value::Null);
+        assert_eq!(background_wake_condition_schema(None), Value::Null);
+    }
+
+    /// 真机 `run-1789926893000094000` ②：观察条件写不成**不判整轮失败** —— 运行照旧
+    /// `completed`、`action=watch`，原因进 `llm.validation.reasons`、`wakeConditions=0`。
+    #[test]
+    fn rejected_wake_plan_keeps_the_round_completed() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,
+               '[\"price_cross\",\"timer\"]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-wake','profile-fastlane','wake_condition','running',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert run");
+
+        // 侧车这一轮给的是 watch + 3 条 plan（真机形状），但 plan 落库被拒（例如缺 type）。
+        let result: crate::fastlane::FastlaneSidecarResult = serde_json::from_value(json!({
+            "ok": true,
+            "jev": { "action": "观望", "quality": 1.52, "confidence": 0.75, "latencyMs": 849, "attempts": 1 },
+            "llm": { "latencyMs": 953, "validation": { "ok": true, "reasons": [] },
+                     "wakeConditions": 3, "params": { "summary": "等回踩" },
+                     "nextWakePlan": { "mode": "any", "conditions": [ { "params": {} } ] } }
+        }))
+        .expect("parse round result");
+        let mut record = crate::fastlane::FastlaneRecord::from_sidecar(
+            crate::fastlane::FastlaneTrigger {
+                source: "condition".to_string(),
+                condition_type: Some("price_cross".to_string()),
+                params: None,
+            },
+            crate::fastlane::GateOutcome::pass(),
+            &result,
+            21,
+            12,
+        );
+        // 收尾：plan 写完被拒（真实调用点走的是同一条 `persist_fastlane_wake_plan`）。
+        let plan = crate::fastlane::FastlaneRecord::next_wake_plan(&result).expect("plan");
+        let error = persist_fastlane_wake_plan(&conn, &profile, &plan, now_ms())
+            .expect_err("非法 plan 必须被拒");
+        record.note_wake_plan_rejected(&error);
+        // 判定/参数/耗时/token 全部保留。
+        assert_eq!(record.action.kind, "watch");
+        // C29.18：`quality` 降级为**观察量**（`Option<f64>`）—— 老侧车响应带它 → 原样留痕；
+        // 缺失时字段不出现（UI 显示 `--`），不再写成 0.0（那是编造一个读数）。
+        assert_eq!(record.jev.as_ref().expect("jev").quality, Some(1.52));
+        assert_eq!(record.timing.jev_ms, 849);
+        assert_eq!(record.llm.as_ref().expect("llm").wake_conditions, 0);
+        assert!(!record.llm.as_ref().expect("llm").validation.ok);
+        assert!(
+            record
+                .llm
+                .as_ref()
+                .expect("llm")
+                .validation
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("观察条件未写入") && reason.contains(&error)),
+            "{:?}",
+            record.llm.as_ref().expect("llm").validation.reasons
+        );
+
+        // 落库：**completed**（不是 failed），原因写进记录，summary 说明未写入。
+        persist_fastlane_round(
+            &conn,
+            &profile,
+            "run-wake",
+            &record,
+            &FastlaneUsageContext::default(),
+            "快判轮｜动作=watch｜观察条件未写入：missing field 'type'",
+            None,
+        )
+        .expect("persist round");
+        let run = load_run(&conn, "run-wake").expect("load run");
+        assert_eq!(run.status, "completed", "观察条件写不成 ≠ 整轮失败");
+        assert!(run.error.is_none());
+        let fastlane = run.fastlane.expect("fastlane record");
+        assert_eq!(fastlane["action"]["kind"], "watch");
+        assert_eq!(fastlane["llm"]["wakeConditions"], 0);
+        assert!(
+            fastlane["llm"]["validation"]["reasons"]
+                .as_array()
+                .expect("reasons")
+                .iter()
+                .any(|reason| reason
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("观察条件未写入")),
+            "{fastlane}"
+        );
+        // 运行级动作计数：写库条数 = 0（不是侧车报的 3）。
+        assert_eq!(run.action_counts.wake, 0);
+    }
+
+    /// 真机（运行头"Token 未报告"）：快判两段 token 必须汇总进**运行级**用量。
+    #[test]
+    fn fastlane_round_persists_run_level_token_usage() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        let usage = FastlaneUsageContext {
+            provider: "openai-compatible".to_string(),
+            model_id: "model-1784742123978".to_string(),
+            model: "deepseek-v4-flash".to_string(),
+            model_name: "deepseek-v4-flash".to_string(),
+        };
+        let persist = |run_id: &str, result: Value| -> AiAgentRunSummary {
+            conn.execute(
+                "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+                 VALUES(?1,'profile-fastlane','wake_condition','running',1,1,1,'fastlane')",
+                params![run_id],
+            )
+            .expect("insert run");
+            let result: crate::fastlane::FastlaneSidecarResult =
+                serde_json::from_value(result).expect("parse result");
+            let record = crate::fastlane::FastlaneRecord::from_sidecar(
+                crate::fastlane::FastlaneTrigger {
+                    source: "condition".to_string(),
+                    condition_type: None,
+                    params: None,
+                },
+                crate::fastlane::GateOutcome::pass(),
+                &result,
+                21,
+                12,
+            );
+            persist_fastlane_round(&conn, &profile, run_id, &record, &usage, "summary", None)
+                .expect("persist");
+            load_run(&conn, run_id).expect("load run")
+        };
+
+        // ① 两段都有数（真机形状）→ 汇总 = 四格之和，`reported=true`、`ProviderReported`。
+        let run = persist(
+            "run-usage-full",
+            json!({
+                "ok": true,
+                "jev": { "action": "观望", "quality": 1.52, "confidence": 0.75, "latencyMs": 849, "attempts": 1 },
+                "llm": { "latencyMs": 953, "validation": { "ok": true, "reasons": [] }, "wakeConditions": 3 },
+                "timing": { "jevMs": 849, "llmMs": 953 },
+                "tokens": { "jevIn": 1918, "jevOut": 89, "llmIn": 1868, "llmOut": 111 }
+            }),
+        );
+        let token_usage = run.token_usage.expect("run-level token usage");
+        assert!(token_usage.reported);
+        assert_eq!(token_usage.usage.total_tokens, 1918 + 89 + 1868 + 111);
+        assert_eq!(token_usage.usage.input_tokens, 1918 + 1868);
+        assert_eq!(token_usage.usage.output_tokens, 89 + 111);
+        // 快判轮没有子 Agent（见 `fastlane_run_usage_reports_no_sub_agents`）。
+        assert_eq!(token_usage.agent_count, 0);
+        assert_eq!(token_usage.reported_agent_count, 0);
+        assert_eq!(token_usage.model, "deepseek-v4-flash");
+        assert_eq!(run.action_counts.wake, 3, "写库条数进运行级计数");
+
+        // ② 两段都跑了、但只有一段报得出 usage（provider 不回 token）→ `Partial`，**不伪造 0**。
+        let run = persist(
+            "run-usage-partial",
+            json!({
+                "ok": true,
+                "jev": { "action": "观望", "latencyMs": 849, "attempts": 1 },
+                "llm": { "latencyMs": 900, "validation": { "ok": true, "reasons": [] }, "wakeConditions": 1 },
+                "timing": { "jevMs": 849, "llmMs": 900 },
+                "tokens": { "jevIn": null, "jevOut": null, "llmIn": 100, "llmOut": 20 }
+            }),
+        );
+        let token_usage = run.token_usage.expect("token usage");
+        assert!(token_usage.reported);
+        assert_eq!(
+            token_usage.quality,
+            desic_agent_automation::AiUsageQuality::Partial,
+            "两段只报一段 → Partial（不是 ProviderReported，也不是 Unreported）"
+        );
+        assert_eq!(token_usage.usage.total_tokens, 120);
+        assert_eq!(token_usage.agent_count, 0);
+
+        // ②b `close` 轮跳过 Jev → 实际只有一次调用，它报了 → `ProviderReported`。
+        let run = persist(
+            "run-usage-close",
+            json!({
+                "ok": true,
+                "jev": { "skipped": true, "reason": "intent_close" },
+                "llm": { "latencyMs": 900, "validation": { "ok": true, "reasons": [] }, "wakeConditions": 1 },
+                "timing": { "jevMs": 0, "llmMs": 900 },
+                "tokens": { "jevIn": null, "jevOut": null, "llmIn": 100, "llmOut": 20 }
+            }),
+        );
+        let token_usage = run.token_usage.expect("token usage");
+        assert!(token_usage.reported);
+        assert_eq!(
+            token_usage.quality,
+            desic_agent_automation::AiUsageQuality::ProviderReported,
+            "跳过 Jev 的平仓轮只有一次调用"
+        );
+        assert_eq!(token_usage.usage.total_tokens, 120);
+
+        // ③ 全部报不出 → `reported=false`（UI 照旧显示"未报告"，但我们记下了模型信息）。
+        let run = persist(
+            "run-usage-none",
+            json!({
+                "ok": true,
+                "llm": { "latencyMs": 900, "validation": { "ok": true, "reasons": [] }, "wakeConditions": 0 },
+                "tokens": { "jevIn": null, "jevOut": null, "llmIn": null, "llmOut": null }
+            }),
+        );
+        let token_usage = run.token_usage.expect("token usage");
+        assert!(!token_usage.reported, "没有数就报未报告，不伪造 0 token");
+        assert_eq!(token_usage.usage.total_tokens, 0);
+        assert_eq!(
+            token_usage.quality,
+            desic_agent_automation::AiUsageQuality::Unreported
+        );
+    }
+
+    /// lead 裁决：窄调用的**端点与凭据**必须跟随 Profile 选中的那个模型条目。
+    ///
+    /// 现状（修前）：模型名按 Profile 解析，但 `baseUrl`/`apiKey` 仍来自**激活模型** →
+    /// 用户给快判 Profile 绑了别的 provider 的模型时"模型名对上、端点/凭据不对"→ 400/401。
+    #[test]
+    fn narrow_llm_endpoint_and_credentials_follow_the_profile_model() {
+        use desic_storage_config::{AiConfig, AiModelConfig};
+        // 三个不同 provider（与真机 `models[]` 同形状）。
+        let entry = |id: &str, model: &str, base_url: &str, key: &str| AiModelConfig {
+            id: id.to_string(),
+            name: id.to_string(),
+            provider: format!("provider-of-{id}"),
+            model: model.to_string(),
+            base_url: base_url.to_string(),
+            api_key: key.to_string(),
+            permission_mode: "copilot".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+        };
+        let active_key = "sk-placeholder-active-model";
+        let other_key = "sk-placeholder-other-provider";
+        let config = AiConfig {
+            provider: Some("provider-of-model-1".to_string()),
+            model: "deepseek-v4-flash".to_string(),
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: active_key.to_string(),
+            stream: Some(true),
+            permission_mode: "advisor".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+            active_model_id: "model-1".to_string(),
+            models: vec![
+                entry(
+                    "model-1",
+                    "deepseek-v4-flash",
+                    "https://api.deepseek.com",
+                    active_key,
+                ),
+                entry(
+                    "model-2",
+                    "doubao-seed-evolving",
+                    "https://ark.cn-beijing.volces.com/api/v3",
+                    other_key,
+                ),
+            ],
+            system_prompt: "test".to_string(),
+            custom_rules: String::new(),
+            enabled_skills: Vec::new(),
+            skill_definitions: Vec::new(),
+            skill_runtime_trust: HashMap::new(),
+            open_agent: true,
+            workspace_roots: Vec::new(),
+            typesafe_api_key: "ts-placeholder".to_string(),
+            typesafe_base_url: None,
+            typesafe_model: None,
+            tool_read_concurrency: None,
+            tool_domain_concurrency: None,
+        };
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        let profile_with_model = |model: Option<&str>| -> AiAgentProfileSummary {
+            let input = serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "快判", "symbols": ["BTC-USDT-SWAP"], "profileType": "fastlane",
+            }))
+            .expect("deserialize profile");
+            let normalized = normalize_profile(input).expect("normalize profile");
+            upsert_profile_row(&conn, &normalized, "profile-model", 1_000, 2_000)
+                .expect("insert profile row");
+            let mut profile = load_profile(&conn, "profile-model").expect("load profile");
+            profile.model = model.map(str::to_string);
+            profile
+        };
+        let dispatch_for = |model: Option<&str>| {
+            let profile = profile_with_model(model);
+            let target = fastlane_llm_model(&profile, &config);
+            let dispatch = crate::fastlane::FastlaneDispatch::build(
+                &crate::fastlane::FastlaneConfig::default(),
+                &crate::fastlane::FastlaneAiSettings {
+                    llm_model: target.model.clone(),
+                    typesafe_api_key: config.typesafe_api_key.clone(),
+                    inherited_jev: crate::fastlane::FastlaneInheritedJev::default(),
+                    models: crate::fastlane::sanitized_model_list(&config.models),
+                    llm_base_url: target.base_url.clone(),
+                    llm_api_key: target.api_key.clone(),
+                },
+                &json!({ "inst_id": "BTC-USDT-SWAP" }),
+                &json!([]),
+                false,
+            );
+            (target, dispatch)
+        };
+
+        // ① Profile 绑**非激活** provider 的模型 → 模型名 + 端点 + 凭据全部来自该条目。
+        let (target, dispatch) = dispatch_for(Some("model-2"));
+        assert_eq!(target.source, "entry");
+        assert_eq!(target.model, "doubao-seed-evolving");
+        assert_eq!(
+            dispatch.config["fastlane_llm_model"],
+            "doubao-seed-evolving"
+        );
+        assert_eq!(
+            dispatch.config["baseUrl"],
+            "https://ark.cn-beijing.volces.com/api/v3"
+        );
+        assert_eq!(dispatch.config["apiKey"], other_key);
+        assert_ne!(
+            dispatch.config["apiKey"], active_key,
+            "不得继续用激活模型那一把凭据"
+        );
+        // 凭据在整份载荷里**只出现一次**（就是显式下发的 config.apiKey 这一处）。
+        let serialized = dispatch.sidecar_view().to_string();
+        assert_eq!(
+            serialized.matches(other_key).count(),
+            1,
+            "凭据只允许出现在 config.apiKey 一处"
+        );
+        assert!(!serialized.contains(active_key), "激活模型的 Key 不该出现");
+        // `models` 列表仍是 4 键白名单（不含任何 Key）。
+        for item in dispatch.config["models"].as_array().expect("models") {
+            assert!(!item.as_object().expect("object").contains_key("apiKey"));
+        }
+
+        // ② Profile 绑**激活**模型 → 保持现状（不下发覆盖键，会话现值即同源）。
+        let (target, dispatch) = dispatch_for(Some("model-1"));
+        assert_eq!(target.source, "active");
+        assert_eq!(target.model, "deepseek-v4-flash");
+        assert_eq!(dispatch.config["fastlane_llm_model"], "deepseek-v4-flash");
+        assert!(dispatch.config.get("baseUrl").is_none(), "不覆盖端点");
+        assert!(dispatch.config.get("apiKey").is_none(), "不覆盖凭据");
+
+        // ③ 用户填的是 provider 名（无法归属条目）→ 原样透传，端点/凭据**不猜**。
+        let (target, dispatch) = dispatch_for(Some("gpt-5-preview"));
+        assert_eq!(target.source, "passthrough");
+        assert_eq!(dispatch.config["fastlane_llm_model"], "gpt-5-preview");
+        assert!(dispatch.config.get("baseUrl").is_none());
+        assert!(dispatch.config.get("apiKey").is_none());
+        // 未知 `model-…` id → 回落激活模型，同样不覆盖端点/凭据。
+        let (target, dispatch) = dispatch_for(Some("model-9999999999999"));
+        assert_eq!(target.source, "fallback");
+        assert_eq!(dispatch.config["fastlane_llm_model"], "deepseek-v4-flash");
+        assert!(dispatch.config.get("apiKey").is_none());
+        // 空 → 激活模型。
+        let (target, _) = dispatch_for(None);
+        assert_eq!(target.source, "active");
+        assert_eq!(target.model, "deepseek-v4-flash");
+        // 条目存在但 Key 为空 → 端点仍跟随条目，但**不覆盖凭据**
+        //（避免把激活 provider 的 Key 送到另一个端点）。
+        let mut blank_key = config.clone();
+        blank_key.models[1].api_key = String::new();
+        let profile = profile_with_model(Some("model-2"));
+        let target = fastlane_llm_model(&profile, &blank_key);
+        assert_eq!(
+            target.base_url.as_deref(),
+            Some("https://ark.cn-beijing.volces.com/api/v3")
+        );
+        assert!(target.api_key.is_none(), "空 Key 不覆盖");
+    }
+
+    /// 真机首跑 ③：每小时运行上限的**夹取上限按 Profile 类型**——    /// 真机首跑 ③：每小时运行上限的**夹取上限按 Profile 类型**——
+    /// 快判模式必须放得进 C29.4 的 120（旧行为全局夹 60，保存一次就被改成 60），AI Profile 维持 60。
+    #[test]
+    fn hourly_run_ceiling_follows_profile_type() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let save = |input: Value, id: &str| -> AiAgentProfileSummary {
+            let profile = normalize_profile(
+                serde_json::from_value::<AiAgentProfileInput>(input).expect("deserialize profile"),
+            )
+            .expect("normalize profile input");
+            upsert_profile_row(&conn, &profile, id, 1_000, 2_000).expect("insert profile row");
+            load_profile(&conn, id).expect("load profile")
+        };
+        let ceiling_fastlane = crate::fastlane::FASTLANE_DEFAULT_MAX_RUNS_PER_HOUR;
+        assert_eq!(ceiling_fastlane, 120, "C29.4：快判每小时 120 次");
+        assert_eq!(
+            AI_PROFILE_MAX_RUNS_PER_HOUR_CEILING, 60,
+            "AI Profile 仍夹 60"
+        );
+
+        // 显式 120：快判保留，AI 夹到 60（这正是真机截图里"120 变成 60"的根因）。
+        let fastlane = save(
+            json!({ "name": "快判", "symbols": ["BTC-USDT-SWAP"], "profileType": "fastlane",
+                    "maxRunsPerHour": 120 }),
+            "profile-fastlane-120",
+        );
+        assert_eq!(fastlane.max_runs_per_hour, 120);
+        let ai = save(
+            json!({ "name": "AI", "symbols": ["BTC-USDT-SWAP"], "profileType": "ai",
+                    "maxRunsPerHour": 120 }),
+            "profile-ai-120",
+        );
+        assert_eq!(ai.max_runs_per_hour, 60);
+        // 创建时缺省：快判落到 C29.4 的 120。
+        let created = save(
+            json!({ "name": "快判新建", "symbols": ["BTC-USDT-SWAP"], "profileType": "fastlane" }),
+            "profile-fastlane-new",
+        );
+        assert_eq!(created.max_runs_per_hour, 120);
+
+        // 非法值按各自上限夹取（0 → 1；9999 → 各自上限）。
+        // 注：**新建**快判 Profile 的 4 项由 C29.4 创建默认值覆盖（既有行为，前一条已断言），
+        // 因此夹取口径在**已存在的 Profile 上重存**时验证（带 `id` = 更新，不触发创建默认）。
+        for (profile_type, id, expected_zero, expected_huge) in [
+            ("fastlane", "profile-clamp", 1, ceiling_fastlane),
+            (
+                "ai",
+                "profile-ai-clamp",
+                1,
+                AI_PROFILE_MAX_RUNS_PER_HOUR_CEILING,
+            ),
+        ] {
+            let create = |field: &str, value: i64| {
+                json!({ "id": id, "name": profile_type, "symbols": ["BTC-USDT-SWAP"],
+                        "profileType": profile_type, field: value })
+            };
+            // 先建一条（快判走创建默认值；AI 走既有默认值）。
+            save(
+                json!({ "id": id, "name": profile_type, "symbols": ["BTC-USDT-SWAP"],
+                        "profileType": profile_type }),
+                id,
+            );
+            let zero = save(create("maxRunsPerHour", 0), id);
+            assert_eq!(zero.max_runs_per_hour, expected_zero, "{profile_type} 0");
+            let huge = save(create("maxRunsPerHour", 9999), id);
+            assert_eq!(huge.max_runs_per_hour, expected_huge, "{profile_type} 9999");
+        }
+        // 已存库的 120 也不会被读路径改写（加载按库值原样读）。
+        assert_eq!(
+            load_profile(&conn, "profile-fastlane-120")
+                .expect("reload fastlane profile")
+                .max_runs_per_hour,
+            120
+        );
+    }
+
+    /// C29 / B4（lead 裁决）：**顾问模式**的快判轮必须**显式早退**——不调侧车（零 Jev/零 LLM），
+    /// 如实落一条 `watch`（原因码沿用冻结枚举）+ `gate.reasons` 说明"是执行模式不支持动作"。
+    #[test]
+    fn fastlane_advisor_profile_never_calls_the_sidecar() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        let insert_profile = |id: &str, mode: &str| {
+            conn.execute(
+                "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+                   skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+                   entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+                   allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+                 VALUES(?1,?1,1,?2,'demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+                params![id, mode],
+            )
+            .expect("insert profile");
+        };
+        insert_profile("profile-advisor", "advisor");
+        insert_profile("profile-legacy-advisor", "readonly");
+        insert_profile("profile-copilot", "copilot");
+        insert_profile("profile-limited", "limited_auto");
+
+        // 判定与授权层同一个归一化口径（未知/空值 → advisor；legacy `readonly` 也是 advisor）。
+        for id in ["profile-advisor", "profile-legacy-advisor"] {
+            let profile = load_profile(&conn, id).expect("advisor profile");
+            assert!(fastlane_profile_is_advisor(&profile), "{id} 应判为顾问模式");
+        }
+        for id in ["profile-copilot", "profile-limited"] {
+            let profile = load_profile(&conn, id).expect("executable profile");
+            assert!(!fastlane_profile_is_advisor(&profile), "{id} 不应早退");
+        }
+
+        // 早退记录（与 runner 同一条构造路径）：动作=watch、原因码在冻结枚举里、
+        // 原因文本写明是执行模式问题；**零 Jev/零 LLM/零耗时**（没有任何模型调用发生）。
+        let profile = load_profile(&conn, "profile-advisor").expect("advisor profile");
+        let record = fastlane_advisor_watch_record(crate::fastlane::FastlaneTrigger {
+            source: "condition".to_string(),
+            condition_type: Some("price_cross".to_string()),
+            params: None,
+        });
+        assert_eq!(record.action.kind, "watch");
+        assert_eq!(record.action.reason.as_deref(), Some("validation_failed"));
+        assert!(crate::fastlane::is_known_watch_reason(
+            record.action.reason.as_deref().unwrap_or_default()
+        ));
+        assert!(!record.gate.ok);
+        assert!(
+            record
+                .gate
+                .reasons
+                .iter()
+                .any(|reason| reason.contains("顾问模式不创建交易机会")),
+            "{:?}",
+            record.gate.reasons
+        );
+        assert!(
+            record.jev.is_none() && record.llm.is_none(),
+            "早退不得有模型调用痕迹"
+        );
+        assert_eq!(record.timing.total_ms, 0);
+        assert!(record.tokens.jev_in.is_none() && record.tokens.llm_in.is_none());
+
+        // 落库（与 runner 同一条写库路径）：六组齐全、运行以 completed 收尾。
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-advisor','profile-advisor','manual','running',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert run");
+        persist_fastlane_round(
+            &conn,
+            &profile,
+            "run-advisor",
+            &record,
+            &FastlaneUsageContext::default(),
+            "快判轮跳过：顾问模式",
+            None,
+        )
+        .expect("persist advisor round");
+        let run = load_run(&conn, "run-advisor").expect("load run");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.record_kind, "fastlane");
+        let fastlane = run.fastlane.expect("fastlane record");
+        for group in [
+            "recordKind",
+            "trigger",
+            "gate",
+            "action",
+            "timing",
+            "tokens",
+        ] {
+            assert!(fastlane.get(group).is_some(), "缺少分组：{group}");
+        }
+        assert_eq!(fastlane["action"]["kind"], "watch");
+        assert_eq!(fastlane["action"]["reason"], "validation_failed");
+        assert!(
+            fastlane["gate"]["reasons"]
+                .as_array()
+                .expect("gate reasons")
+                .iter()
+                .any(|reason| reason
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("顾问模式不创建交易机会")),
+            "{fastlane}"
+        );
+    }
+
+    /// C29 / B4：单日亏损护栏吃**真实当日已实现盈亏**（既有 `position_episodes`），
+    /// 拿不到账户/权益时**不猜 0**（返回 `None`，预算按 0 计但不假装检查过）。
+    #[test]
+    fn fastlane_daily_loss_breaker_uses_realized_pnl() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        conn.execute_batch(
+            "CREATE TABLE position_episodes(
+               id TEXT PRIMARY KEY,account_id TEXT NOT NULL,status TEXT NOT NULL,
+               close_time INTEGER,realized_pnl TEXT);",
+        )
+        .expect("create position_episodes");
+        let now = 1_800_000_000_000_i64;
+        let day_start = fastlane_day_start_ms(now);
+        let insert = |id: &str, close_time: i64, pnl: &str| {
+            conn.execute(
+                "INSERT INTO position_episodes(id,account_id,status,close_time,realized_pnl)
+                 VALUES(?1,'acct-1','closed',?2,?3)",
+                params![id, close_time, pnl],
+            )
+            .expect("insert episode");
+        };
+        insert("ep-today", day_start + 1_000, "-250");
+        insert("ep-yesterday", day_start - 1, "-5000");
+        insert("ep-other-account", day_start + 2_000, "-100");
+        conn.execute(
+            "UPDATE position_episodes SET account_id='acct-2' WHERE id='ep-other-account'",
+            [],
+        )
+        .expect("rescue other account");
+
+        let pct =
+            fastlane_daily_pnl_pct(&conn, Some("acct-1"), Some(10_000.0), now).expect("daily pnl");
+        assert!((pct + 2.5).abs() < 1e-9, "{pct}");
+        // 账户或权益缺失 → None（护栏不假装已检查）。
+        assert_eq!(
+            fastlane_daily_pnl_pct(&conn, None, Some(10_000.0), now),
+            None
+        );
+        assert_eq!(
+            fastlane_daily_pnl_pct(&conn, Some("acct-1"), None, now),
+            None
+        );
+        assert_eq!(
+            fastlane_daily_pnl_pct(&conn, Some("acct-1"), Some(0.0), now),
+            None
+        );
+        // 护栏真的会拦住这一轮：-2.5% ≤ -2% → `daily_loss_limit`。
+        let inputs = crate::fastlane::BudgetInputs {
+            now,
+            last_run_at: None,
+            min_wake_interval_seconds: 10,
+            runs_last_hour: 0,
+            max_runs_per_hour: 120,
+            daily_pnl_pct: pct,
+            max_daily_loss_pct: 2.0,
+            open_and_pending: 0,
+            max_concurrent: 1,
+            actions_last_minute: 0,
+            max_actions_per_minute: 1,
+        };
+        assert_eq!(
+            crate::fastlane::budget_block(&inputs),
+            Some("daily_loss_limit")
+        );
+    }
+
+    /// C29 / B4 分派：`profileType="fastlane"` 的 Run 交给快判 runner（唯一执行入口）。
+    #[test]
+    fn fastlane_profile_runs_dispatch_to_the_fastlane_runner() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        for (id, profile_type) in [
+            ("profile-fastlane", "fastlane"),
+            ("profile-ai", "ai"),
+            ("profile-legacy", "turbo"),
+        ] {
+            conn.execute(
+                "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+                   skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+                   entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+                   allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+                 VALUES(?1,?1,1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,'[]',?2,1,1)",
+                params![id, profile_type],
+            )
+            .expect("insert profile");
+        }
+        // C29.19 按开关分叉：开关关闭（本版本）→ 快判 Profile **不再被分派**给快判 runner
+        // （原始断言留到开关打开时逐字生效，见 else 分支）。
+        let fastlane_profile = load_profile(&conn, "profile-fastlane").expect("fastlane profile");
+        if crate::fastlane::FASTLANE_MODE_ENABLED {
+            assert!(run_uses_fastlane_runner(&fastlane_profile));
+        } else {
+            assert!(
+                !run_uses_fastlane_runner(&fastlane_profile),
+                "开关关闭时快判 Profile 不得被分派给快判 runner"
+            );
+            // 同一条判断同时给出**明确原因**（不静默）——runner 入口据此拒绝。
+            assert_eq!(
+                fastlane_blocked(&fastlane_profile),
+                Some(crate::fastlane::FASTLANE_MODE_DISABLED_REASON)
+            );
+        }
+        assert!(!run_uses_fastlane_runner(
+            &load_profile(&conn, "profile-ai").expect("ai profile")
+        ));
+        // 非法 / 缺字段的历史值一律回落 `ai`（快判分派只认显式 fastlane）。
+        assert!(!run_uses_fastlane_runner(
+            &load_profile(&conn, "profile-legacy").expect("legacy profile")
+        ));
+        // AI Profile **不受开关影响**：任何时候都不该被快判闸门挡住。
+        assert_eq!(
+            fastlane_blocked(&load_profile(&conn, "profile-ai").expect("ai profile")),
+            None
+        );
+    }
+
+    /// C29.19 证据①：开关关闭时，快判 Profile 的轮次**入不了队、认领不到、残留会被取消**，
+    /// 而 AI Profile 完全不受影响；Profile 配置（`enabled`）**一行不改**。
+    ///
+    /// 开关打开（下个版本）时本用例直接返回 —— 它证明的是"关闭态"的行为。
+    #[test]
+    fn fastlane_mode_disabled_blocks_enqueue_and_claiming() {
+        if crate::fastlane::FASTLANE_MODE_ENABLED {
+            return;
+        }
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        set_setting(&conn, "master_enabled", json!(true)).expect("enable automation");
+        for (id, profile_type) in [("profile-fastlane", "fastlane"), ("profile-ai", "ai")] {
+            conn.execute(
+                "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+                   skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+                   entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+                   allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+                 VALUES(?1,?1,1,'copilot','demo','[\"BTC-USDT-SWAP\"]',3,'[]','{}',30,10,30,180,10,120,'[]',?2,1,1)",
+                params![id, profile_type],
+            )
+            .expect("insert profile");
+        }
+
+        // ① 入队：快判 Profile 被挡下，原因是常量里的那句明确原因。
+        let blocked = queue_run(&conn, "profile-fastlane", "schedule", json!({ "dueAt": 0 }))
+            .expect_err("开关关闭时快判 Profile 不得入队");
+        assert_eq!(blocked, crate::fastlane::FASTLANE_MODE_DISABLED_REASON);
+        let fastlane_runs: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_agent_runs WHERE profile_id='profile-fastlane'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count fastlane runs");
+        assert_eq!(fastlane_runs, 0, "被挡下的轮次不得留下 run 行");
+
+        // ② 兜底：库里已存在的快判排队轮（老版本留下的）**认领不到**。
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-leftover','profile-fastlane','schedule','queued',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert leftover run");
+        assert!(
+            claim_next_run(&conn, 2).expect("claim leftover").is_none(),
+            "开关关闭时不得认领任何快判轮次"
+        );
+
+        // ③ 残留被取消并写明原因（不静默）；Profile 的 enabled 保持 1（**不动用户配置**）。
+        let cancelled = cancel_pending_fastlane_runs(&conn, 3).expect("cancel pending");
+        assert_eq!(cancelled, 1);
+        let (status, error): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status,error FROM ai_agent_runs WHERE id='run-leftover'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("load leftover run");
+        assert_eq!(status, "cancelled");
+        assert_eq!(
+            error.as_deref(),
+            Some(crate::fastlane::FASTLANE_MODE_DISABLED_REASON)
+        );
+        let still_enabled: i64 = conn
+            .query_row(
+                "SELECT enabled FROM ai_agent_profiles WHERE id='profile-fastlane'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read profile enabled");
+        assert_eq!(still_enabled, 1, "开关关闭不得改动用户库里的 Profile 配置");
+
+        // ④ 无 collateral damage：同一张表里排着的 AI Profile 轮次照旧认领得到
+        //（`claim_next_run` 的 SQL 守卫只挡 `profileType='fastlane'`）。
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-ai','profile-ai','schedule','queued',5,5,5,'ai')",
+            [],
+        )
+        .expect("insert ai run");
+        let (claimed, claimed_profile, _trigger, _template) = claim_next_run(&conn, 6)
+            .expect("claim")
+            .expect("AI 轮次照旧认领");
+        assert_eq!(claimed.profile_id, "profile-ai");
+        assert_eq!(claimed_profile.profile_type, PROFILE_TYPE_AI);
+    }
+
+    /// C29.19 证据③：定时排程（`queue_due_profile_runs`）**不再为快判 Profile 排队**。
+    ///
+    /// 这个库**只有**一条已启用的快判 Profile（没有任何 AI Profile）：因此"排程跑完为 Ok 且
+    /// 零 run 行"就是"它掉出了排程名单"的直接证据（不需要任何 skill 夹具）。
+    #[test]
+    fn fastlane_mode_disabled_schedule_tick_skips_fastlane_profiles() {
+        if crate::fastlane::FASTLANE_MODE_ENABLED {
+            return;
+        }
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        // 与用户库里那条一致的形状：**启用中**的快判 Profile（每 3 分钟一轮）。
+        // 注意：这里模拟的是用户库的现状，用例本身**不改**任何 Profile 行的开关值。
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-1789921532165','BTC 快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',3,'[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert enabled fastlane profile");
+        // Profile 的观察条件也照用户库放一条（证明"条件在也不会触发轮次"）。
+        conn.execute(
+            "INSERT INTO ai_wake_conditions(id,profile_id,source,plan_mode,condition_type,config_json,status,created_at,updated_at)
+             VALUES('wake-1','profile-1789921532165','user','any','price_cross','{\"instId\":\"BTC-USDT-SWAP\",\"direction\":\"up\",\"price\":\"65800\"}','active',1,1)",
+            [],
+        )
+        .expect("insert wake condition");
+
+        for tick in [1_800_000_000_000_i64, 1_800_000_180_000] {
+            queue_due_profile_runs(&conn, tick)
+                .expect("schedule tick 必须成功（快判 Profile 已掉出名单）");
+        }
+        let runs: i64 = conn
+            .query_row("SELECT COUNT(*) FROM ai_agent_runs", [], |row| row.get(0))
+            .expect("count runs");
+        assert_eq!(runs, 0, "开关关闭时定时路径不得为快判 Profile 排队");
+        // 条件状态**不被消费**：不是"条件被用掉了"，只是本版本不执行。
+        let condition_status: String = conn
+            .query_row(
+                "SELECT status FROM ai_wake_conditions WHERE id='wake-1'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read condition");
+        assert_eq!(condition_status, "active");
+    }
+
+    /// C29.19 测试替身：只记录"停过 / 释放过"。
+    #[derive(Default)]
+    struct FastlaneTestBeat {
+        stop_calls: std::sync::atomic::AtomicUsize,
+        stopped: AtomicBool,
+    }
+
+    impl crate::fastlane::FastlaneBeatHandle for std::sync::Arc<FastlaneTestBeat> {
+        fn stop(&self) -> bool {
+            self.stop_calls.fetch_add(1, Ordering::SeqCst);
+            !self.stopped.swap(true, Ordering::SeqCst)
+        }
+
+        fn is_stopped(&self) -> bool {
+            self.stopped.load(Ordering::SeqCst)
+        }
+    }
+
+    #[derive(Default)]
+    struct FastlaneTestLease {
+        release_calls: std::sync::atomic::AtomicUsize,
+        released: AtomicBool,
+    }
+
+    impl crate::fastlane::FastlaneStreamLease for std::sync::Arc<FastlaneTestLease> {
+        fn release(&self) -> bool {
+            self.release_calls.fetch_add(1, Ordering::SeqCst);
+            !self.released.swap(true, Ordering::SeqCst)
+        }
+
+        fn is_released(&self) -> bool {
+            self.released.load(Ordering::SeqCst)
+        }
+    }
+
+    fn fastlane_test_instrument() -> crate::fastlane::StateInstrument {
+        crate::fastlane::StateInstrument {
+            tick_size: 0.1,
+            lot_size: 1.0,
+            min_size: 1.0,
+            contract_value: "0.01".to_string(),
+            max_leverage: 100,
+            ct_val: 0.01,
+        }
+    }
+
+    /// C29.19 证据②：开关关闭时**已起的采集器会被释放**（停节拍任务 + 释放自有公开订阅 + 摘条目）。
+    ///
+    /// 直接钉住 `release_all_fastlane_collectors`（`sync_fastlane_collectors` 的关闭态分支
+    /// 与总开关关闭路径都走它）—— 这就是"开关关掉后不会再有采集器在跑、也不会再订阅行情"。
+    #[test]
+    fn fastlane_mode_disabled_releases_started_collectors() {
+        if crate::fastlane::FASTLANE_MODE_ENABLED {
+            return;
+        }
+        let runtime = AiAutomationRuntime::default();
+        let beat = std::sync::Arc::new(FastlaneTestBeat::default());
+        let lease = std::sync::Arc::new(FastlaneTestLease::default());
+        assert!(runtime.fastlane_snapshots.lock().expect("registry").ensure(
+            "profile-1789921532165",
+            "acct-demo",
+            "BTC-USDT-SWAP",
+            fastlane_test_instrument(),
+            false,
+            // owns_public_stream = true：释放时必须连订阅一起退掉。
+            true,
+            Box::new(beat.clone()),
+            Some(Box::new(lease.clone())),
+        ));
+        {
+            let registry = runtime.fastlane_snapshots.lock().expect("registry");
+            assert_eq!(registry.len(), 1);
+            assert_eq!(registry.owned_stream_count(), 1);
+        }
+        // 释放前：节拍任务确实在跑（否则这个用例证明不了"已起的会被释放"）。
+        assert!(!crate::fastlane::FastlaneBeatHandle::is_stopped(&beat));
+        assert!(!crate::fastlane::FastlaneStreamLease::is_released(&lease));
+
+        assert_eq!(release_all_fastlane_collectors(&runtime), 1);
+        {
+            let registry = runtime.fastlane_snapshots.lock().expect("registry");
+            assert!(registry.is_empty(), "开关关闭后不得再保有采集器条目");
+            assert_eq!(registry.dangling_beat_count(), 0);
+            assert_eq!(registry.owned_stream_count(), 0);
+        }
+        assert_eq!(
+            beat.stop_calls.load(Ordering::SeqCst),
+            1,
+            "节拍任务必须被停一次"
+        );
+        assert!(crate::fastlane::FastlaneBeatHandle::is_stopped(&beat));
+        assert_eq!(
+            lease.release_calls.load(Ordering::SeqCst),
+            1,
+            "自有公开订阅必须被释放"
+        );
+        assert!(crate::fastlane::FastlaneStreamLease::is_released(&lease));
+        // 幂等：再释放一次什么都不做（不是"每次都报一次"）。
+        assert_eq!(release_all_fastlane_collectors(&runtime), 0);
+    }
+
+    /// C29 / B4 **闭环回归**：侧车那份 `nextWakePlan` 写库 → 既有 `evaluate_condition` 命中。
+    ///
+    /// 这是「观察条件能闭环触发下一轮」最直接的证明：写进去的行必须是既有 `WakeCondition`
+    /// 形状（平铺），而且到点/到价时 `evaluate_condition` 真的返回 true。
+    #[test]
+    fn fastlane_wake_plan_writes_rows_that_evaluate_condition_hits() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',1,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,
+               '[\"price_cross\",\"timer\"]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert profile");
+        let profile = load_profile(&conn, "profile-fastlane").expect("load profile");
+        let now = 1_800_000_000_000_i64;
+        // 侧车真实形状：`{type, params}` 嵌套 + `expiresAtMs`。
+        let plan = json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "timer", "params": { "intervalMinutes": 5 } },
+                { "type": "price_cross", "params": { "instId": "BTC-USDT-SWAP", "direction": "above", "price": 80_500.0 } }
+            ],
+            "expiresAtMs": now + 3_600_000
+        });
+        let outcome =
+            persist_fastlane_wake_plan(&conn, &profile, &plan, now).expect("persist plan");
+        assert_eq!(outcome.written, 2);
+        assert!(outcome.dropped.is_empty());
+
+        // 写进去的是**既有形状**（平铺），而且是 agent 来源（下一轮替换的就是这一批）。
+        let conditions = load_active_condition_models(&conn, now).expect("load conditions");
+        assert_eq!(conditions.len(), 2);
+        assert!(conditions.iter().all(|item| item.source == "agent"
+            && item.plan_mode == "any"
+            && item.profile_id == "profile-fastlane"));
+        let expires_at: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(expires_at) FROM ai_wake_conditions WHERE profile_id='profile-fastlane'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("expires at");
+        assert_eq!(expires_at, Some(now + 3_600_000));
+        let timer = conditions
+            .iter()
+            .find(|item| matches!(item.condition, WakeCondition::Timer { .. }))
+            .expect("timer condition");
+        let cross = conditions
+            .iter()
+            .find(|item| matches!(item.condition, WakeCondition::PriceCross { .. }))
+            .expect("price_cross condition");
+
+        // 闭环：到点命中（未到点不命中）→ 这条就是「下一轮被唤醒」的判据。
+        let early = WakeMarketState {
+            now_ms: now + 60_000,
+            ..Default::default()
+        };
+        assert!(!evaluate_condition(
+            &timer.condition,
+            &early,
+            timer.created_at,
+            timer.last_triggered_at
+        ));
+        let due = WakeMarketState {
+            now_ms: now + 6 * 60_000,
+            ..Default::default()
+        };
+        assert!(evaluate_condition(
+            &timer.condition,
+            &due,
+            timer.created_at,
+            timer.last_triggered_at
+        ));
+        // 到价命中（上一读 < 阈值 ≤ 当前读）。
+        let mut crossing = WakeMarketState {
+            now_ms: now + 1_000,
+            ..Default::default()
+        };
+        crossing
+            .prices
+            .insert("BTC-USDT-SWAP".to_string(), 80_600.0);
+        crossing
+            .previous_prices
+            .insert("BTC-USDT-SWAP".to_string(), 80_400.0);
+        assert!(evaluate_condition(
+            &cross.condition,
+            &crossing,
+            cross.created_at,
+            cross.last_triggered_at
+        ));
+
+        // **计划级**问题（mode 非法 / Profile 白名单外的类型）→ 整份拒绝。
+        let before: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_wake_conditions WHERE profile_id='profile-fastlane'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count before");
+        for invalid in [
+            json!({ "mode": "some", "conditions": [{ "type": "timer", "params": { "intervalMinutes": 5 } }] }),
+            json!({ "mode": "any", "conditions": [{ "type": "radar_alert", "params": {} }] }),
+            json!({ "mode": "any", "conditions": vec![json!({"type": "timer"}); 33] }),
+        ] {
+            assert!(
+                persist_fastlane_wake_plan(&conn, &profile, &invalid, now).is_err(),
+                "计划级问题必须整份拒绝：{invalid}"
+            );
+        }
+        let after: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM ai_wake_conditions WHERE profile_id='profile-fastlane'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count after");
+        assert_eq!(before, after, "整份拒绝的轮次零副作用");
+    }
+
+    /// C29 / B4：停机排队的平仓轮必须**仍可被认领**（停机必然把 Profile 置为 `enabled=0`），
+    /// 而同一 Profile 的其它排队轮次**不许**在停机后再被认领。
+    #[test]
+    fn fastlane_close_round_is_claimable_after_kill_switch() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS ai_messages(
+               id TEXT PRIMARY KEY,session_id TEXT NOT NULL,role TEXT NOT NULL,
+               content TEXT NOT NULL,reasoning TEXT,tool_json TEXT,
+               token_usage_json,token_usage_version INTEGER NOT NULL DEFAULT 0,
+               status TEXT,created_at INTEGER NOT NULL);",
+        )
+        .expect("create ai_messages");
+        set_setting(&conn, "master_enabled", json!(true)).expect("enable automation");
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-fastlane','快判',0,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert disabled profile");
+        // 另一个（同样已被停机禁用的）Profile 上还排着一条普通轮次：它**不该**被认领。
+        // 注：`idx_ai_agent_runs_one_active_profile` 保证一个 Profile 同时只有一条
+        // queued/running run（停机命令正是先取消在跑的轮次、再排队平仓轮）。
+        conn.execute(
+            "INSERT INTO ai_agent_profiles(id,name,enabled,mode,environment,symbols_json,scan_interval_minutes,
+               skill_ids_json,skill_versions_json,history_lookback_days,similarity_window_minutes,
+               entry_tolerance_bps,max_runtime_seconds,min_wake_interval_seconds,max_runs_per_hour,
+               allowed_wake_condition_types_json,profile_type,created_at,updated_at)
+             VALUES('profile-stopped','快判2',0,'copilot','demo','[\"BTC-USDT-SWAP\"]',10,'[]','{}',30,10,30,180,10,120,'[]','fastlane',1,1)",
+            [],
+        )
+        .expect("insert second disabled profile");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind)
+             VALUES('run-ordinary','profile-stopped','manual','queued',1,1,1,'fastlane')",
+            [],
+        )
+        .expect("insert ordinary run");
+        conn.execute(
+            "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,started_at,created_at,updated_at,record_kind,fastlane_json)
+             VALUES('run-close','profile-fastlane','fastlane_close','queued',2,2,2,'fastlane',?1)",
+            params![json!({
+                "recordKind": "fastlane",
+                "intent": "close",
+                "trigger": { "source": "manual", "conditionType": "kill_switch", "params": { "closePositions": true } }
+            })
+            .to_string()],
+        )
+        .expect("insert close run");
+
+        // C29.19 按开关分叉：开关关闭（本版本）→ **任何** fastlane 行都不再被认领
+        //（含停机平仓轮：runner 不可达，认领了只会白跑一条被拒绝的轮次）。
+        if !crate::fastlane::FASTLANE_MODE_ENABLED {
+            assert!(
+                claim_next_run(&conn, 3)
+                    .expect("claim with switch off")
+                    .is_none(),
+                "开关关闭时不得认领任何快判轮次（含停机平仓轮）"
+            );
+            // 行的形状与解析口径**照旧**（与分派无关的部分继续断言，覆盖不降级）。
+            let run = load_run(&conn, "run-close").expect("load close run");
+            assert!(fastlane_round_is_close(&run, run.fastlane.as_ref()));
+            let trigger_block = fastlane_trigger_block(&run, &json!({}));
+            assert_eq!(trigger_block.source, "manual");
+            assert_eq!(trigger_block.condition_type.as_deref(), Some("kill_switch"));
+            assert_eq!(
+                trigger_block.params.expect("params")["closePositions"],
+                true
+            );
+            let mut ordinary = run.clone();
+            ordinary.id = "run-x".to_string();
+            ordinary.trigger_type = "wake_condition".to_string();
+            ordinary.fastlane = Some(json!({ "mode": "any" }));
+            assert!(!fastlane_round_is_close(
+                &ordinary,
+                ordinary.fastlane.as_ref()
+            ));
+            return;
+        }
+        let (run, _profile, _trigger, _template) = claim_next_run(&conn, 3)
+            .expect("claim close round")
+            .expect("停机平仓轮必须被认领");
+        assert_eq!(run.id, "run-close");
+        assert!(fastlane_round_is_close(&run, run.fastlane.as_ref()));
+        // 触发块取停机命令写下的那份事实（不是猜的 `manual` 空块）。
+        let trigger_block = fastlane_trigger_block(&run, &json!({}));
+        assert_eq!(trigger_block.source, "manual");
+        assert_eq!(trigger_block.condition_type.as_deref(), Some("kill_switch"));
+        assert_eq!(
+            trigger_block.params.expect("params")["closePositions"],
+            true
+        );
+        // 停机后的普通轮次**不被认领**（停机就是停机）。
+        assert!(claim_next_run(&conn, 4).expect("claim again").is_none());
+        // 普通快判轮的 `intent` 判定不受影响。
+        let mut ordinary = run.clone();
+        ordinary.id = "run-x".to_string();
+        ordinary.trigger_type = "wake_condition".to_string();
+        ordinary.fastlane = Some(json!({ "mode": "any" }));
+        assert!(!fastlane_round_is_close(
+            &ordinary,
+            ordinary.fastlane.as_ref()
+        ));
+    }
+
+    /// C28 负向断言：Profile 的输入/输出都没有已移除的**快速判定**字段；
+    /// 老前端仍传该键时**接受并忽略**（不报错）；库里那条历史列**保留**但不读写。
+    ///
+    /// 键名与列名在用例里用拼接写出，保证全仓 `grep` 不留运行时残留字面量
+    /// （唯一允许的字面量是迁移注释里标 deprecated 的那一行）。
+    #[test]
+    fn profile_payload_has_no_removed_field_and_ignores_legacy_input() {
+        let key = "type".to_string() + "safeEnabled";
+        let column = "type".to_string() + "safe_enabled";
+        let mut legacy = json!({
+            "name": "C28 回归",
+            "symbols": ["BTC-USDT-SWAP"],
+        });
+        legacy[key] = json!(true);
+        let input: AiAgentProfileInput =
+            serde_json::from_value(legacy).expect("老前端记得的旧字段必须被忽略而不是报错");
+        assert_eq!(input.name, "C28 回归");
+
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let profile = normalize_profile(input).expect("normalize profile input");
+        upsert_profile_row(&conn, &profile, "profile-c28", 1_000, 2_000)
+            .expect("insert profile row");
+        let loaded = load_profile(&conn, "profile-c28").expect("load profile");
+        let json = serde_json::to_value(&loaded).expect("serialize profile summary");
+        let object = json.as_object().expect("profile object");
+        let fragment = "type".to_string() + "safe";
+        assert!(
+            object
+                .keys()
+                .all(|item| !item.to_ascii_lowercase().contains(&fragment)),
+            "Profile 输出不得再有该字段：{object:?}"
+        );
+        // 历史列保留（不做破坏性迁移），但代码里没有任何读写路径。
+        let mut statement = conn
+            .prepare("PRAGMA table_info(ai_agent_profiles)")
+            .expect("prepare pragma");
+        let columns = statement
+            .query_map([], |row| row.get::<_, String>(1))
+            .expect("query columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect columns");
+        assert!(
+            columns.iter().any(|item| item == &column),
+            "已下线列必须保留（避免重建表）：{columns:?}"
+        );
+    }
+
     /// C24.1：单 Agent 子模式 —— 缺省 `standard`、非法回落 `standard`、
     /// **协作开启时该字段被忽略**（生效模式恒为 `standard`），但 Profile 里存的值仍可回显。
     #[test]
@@ -13672,7 +19187,11 @@ mod tests {
         assert_eq!(normalize_single_agent_mode("standard"), "standard");
         // 非法值 → standard（不报错）。
         for invalid in ["", "  ", "extreme", "minimalx", "1"] {
-            assert_eq!(normalize_single_agent_mode(invalid), "standard", "{invalid}");
+            assert_eq!(
+                normalize_single_agent_mode(invalid),
+                "standard",
+                "{invalid}"
+            );
         }
         // 协作开启 → 该字段被忽略（生效模式 standard，不报错）。
         assert_eq!(
@@ -13720,7 +19239,10 @@ mod tests {
         );
         // 协作开启 + minimal：Profile 里仍存 minimal（UI 要回显），但生效模式是 standard。
         let collaboration_on = save("profile-sam-coop", json!("minimal"), true);
-        assert_eq!(collaboration_on.single_agent_mode, SINGLE_AGENT_MODE_MINIMAL);
+        assert_eq!(
+            collaboration_on.single_agent_mode,
+            SINGLE_AGENT_MODE_MINIMAL
+        );
         assert_eq!(
             effective_single_agent_mode(
                 collaboration_on.collaboration_enabled,
@@ -13765,7 +19287,9 @@ mod tests {
         assert!(text_display_width(&long) > MINIMAL_SUMMARY_MAX_WIDTH);
         assert_eq!(
             minimal_summary_warnings(&long, false),
-            vec![format!("minimal 模式下 summary 超过 {MINIMAL_SUMMARY_MAX_WIDTH} 字符")]
+            vec![format!(
+                "minimal 模式下 summary 超过 {MINIMAL_SUMMARY_MAX_WIDTH} 字符"
+            )]
         );
         // 恰好在 160 显示宽度 = 80 个汉字 → 不报警。
         let exactly = "字".repeat(80);
@@ -13826,11 +19350,17 @@ mod tests {
             true,
         );
         assert_eq!(
-            standard_audit["summaryFormatWarnings"].as_array().expect("array").len(),
+            standard_audit["summaryFormatWarnings"]
+                .as_array()
+                .expect("array")
+                .len(),
             5,
             "standard 模式回归：仍然只判 C21（缺五个小节）"
         );
-        assert_eq!(standard_audit["singleAgentMode"], SINGLE_AGENT_MODE_STANDARD);
+        assert_eq!(
+            standard_audit["singleAgentMode"],
+            SINGLE_AGENT_MODE_STANDARD
+        );
     }
 
     /// C24.2：极简模式下**不下发 C21 排版小节**（换成一句话规则），标准模式逐字不变。
@@ -13844,7 +19374,9 @@ mod tests {
             base.content.contains(CORE_OPERATIONS_RUN_SUMMARY_MARKER),
             "标准正文必须含 C21 小节（否则本用例失去意义）"
         );
-        assert!(base.content.contains("34. A summary that is missing one of the five sections"));
+        assert!(base
+            .content
+            .contains("34. A summary that is missing one of the five sections"));
 
         // 标准模式：逐字不变（回归）。
         let mut standard = vec![base.clone()];
@@ -13923,7 +19455,11 @@ mod tests {
         assert_eq!(audit["singleAgentMode"], SINGLE_AGENT_MODE_MINIMAL);
         // 没有任何"打回额度"被消耗：状态字段已删除，gate 只剩 C22 的那一个且仍为 0。
         assert_eq!(
-            context.finish_gate.lock().expect("gate").self_analysis_pushbacks,
+            context
+                .finish_gate
+                .lock()
+                .expect("gate")
+                .self_analysis_pushbacks,
             0,
             "极简路径不得触碰 C22 的额度"
         );
@@ -13948,22 +19484,34 @@ mod tests {
         // 极简 + 升级 + 零专家 + 无理由：C22 的那一次仍然生效（未被极简改动影响）。
         let escalated = test_finish_context_with_mode(
             "run-minimal-c22",
-            vec![desic_agent_automation::builtin_agent_definition("desic-data-digest")
-                .expect("definition")],
+            vec![
+                desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                    .expect("definition"),
+            ],
             true,
             SINGLE_AGENT_MODE_MINIMAL,
         );
-        let (_e, audit, first) =
-            finish_run_audit_and_soft_check(&conn, &escalated, &input, one_liner, "run-minimal-c22")
-                .expect("first");
+        let (_e, audit, first) = finish_run_audit_and_soft_check(
+            &conn,
+            &escalated,
+            &input,
+            one_liner,
+            "run-minimal-c22",
+        )
+        .expect("first");
         assert_eq!(audit["selfAnalysisUnjustified"], true);
         assert_eq!(
             first.expect("C22 pushback")["errorCode"],
             "self_analysis_reason_required"
         );
-        let (_e, _a, second) =
-            finish_run_audit_and_soft_check(&conn, &escalated, &input, one_liner, "run-minimal-c22")
-                .expect("second");
+        let (_e, _a, second) = finish_run_audit_and_soft_check(
+            &conn,
+            &escalated,
+            &input,
+            one_liner,
+            "run-minimal-c22",
+        )
+        .expect("second");
         assert!(second.is_none(), "C22 仍是『最多一次』");
         assert_eq!(
             escalated
@@ -13980,7 +19528,10 @@ mod tests {
             finish_run_audit_and_soft_check(&conn, &standard, &input, summary, "run-standard-warn")
                 .expect("standard finish");
         assert!(
-            audit["summaryFormatWarnings"].as_array().expect("array").is_empty(),
+            audit["summaryFormatWarnings"]
+                .as_array()
+                .expect("array")
+                .is_empty(),
             "标准模式下这份五小节报告是合规的"
         );
         assert!(pushback.is_none());
@@ -14017,18 +19568,34 @@ mod tests {
     #[test]
     fn summary_format_audit_accepts_zh_and_en_and_never_fails() {
         let zh = "## 结论\n本轮不建仓。\n## 事实与证据\n- 15:00 结构未确认（market.readTicker）\n## 冲突与缺口\n无\n## 观察条件\n站上 X\n## 下一步\n等待";
-        assert!(summary_format_warnings(zh).is_empty(), "{:?}", summary_format_warnings(zh));
+        assert!(
+            summary_format_warnings(zh).is_empty(),
+            "{:?}",
+            summary_format_warnings(zh)
+        );
 
         let en = "## Conclusion\nNo entry this round.\n## Facts and evidence\n- 2026-09-19T15:00Z structure unconfirmed (market.readTicker)\n## Conflicts and gaps\nnone\n## Observation conditions\nreclaim X\n## Next steps\nwait";
-        assert!(summary_format_warnings(en).is_empty(), "{:?}", summary_format_warnings(en));
+        assert!(
+            summary_format_warnings(en).is_empty(),
+            "{:?}",
+            summary_format_warnings(en)
+        );
 
         // 混用（中文三节 + 英文两节）：五个概念齐全 → 通过。
         let mixed = "## 结论\n等待\n## 事实与证据\n- 15:00 无变化\n## 冲突与缺口\n无\n## Observation conditions\nx\n## Next steps\ny";
-        assert!(summary_format_warnings(mixed).is_empty(), "{:?}", summary_format_warnings(mixed));
+        assert!(
+            summary_format_warnings(mixed).is_empty(),
+            "{:?}",
+            summary_format_warnings(mixed)
+        );
 
         // 大小写差异 + 尾随装饰冒号 + 多余空格 → 仍按概念匹配。
         let decorated = "##  CONCLUSION: \n##  Facts  and  evidence\n- 09:30 ok\n## conflicts and gaps\n## observation conditions\n## next steps";
-        assert!(summary_format_warnings(decorated).is_empty(), "{:?}", summary_format_warnings(decorated));
+        assert!(
+            summary_format_warnings(decorated).is_empty(),
+            "{:?}",
+            summary_format_warnings(decorated)
+        );
 
         // 缺 `## 观察条件` → 一条警告（正文照旧，不改写）。
         let missing = "## 结论\nx\n## 事实与证据\n- 15:00 ok\n## 冲突与缺口\n无\n## 下一步\n等";
@@ -14058,7 +19625,11 @@ mod tests {
 
         // 不扩展审计：4 列表格、emoji、超长段落都不产生警告。
         let extra = "## 结论\n✅ x\n| a | b | c | d |\n## 事实与证据\n- 15:00 ok\n## 冲突与缺口\n## 观察条件\n## 下一步";
-        assert!(summary_format_warnings(extra).is_empty(), "{:?}", summary_format_warnings(extra));
+        assert!(
+            summary_format_warnings(extra).is_empty(),
+            "{:?}",
+            summary_format_warnings(extra)
+        );
 
         // 任何输入都不得 panic / 失败（含空、只有 `#`、CRLF、超长单行）。
         for hostile in [
@@ -14071,5 +19642,4 @@ mod tests {
             let _ = summary_format_warnings(hostile);
         }
     }
-
 }

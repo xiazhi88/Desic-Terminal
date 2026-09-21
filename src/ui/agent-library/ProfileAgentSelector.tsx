@@ -76,6 +76,7 @@ export function ProfileAgentSelector({
     source,
     items: visibleAgents.filter((agent) => agent.source === source)
   })).filter((group) => group.items.length > 0), [visibleAgents]);
+  // C20.1（改写版）：内置组现在**最多 1 条**（可选的对手盘），因此"全选内置"最多再勾一个。
   const builtinIds = useMemo(() => visibleAgents.filter((agent) => agent.source === "builtin").map((agent) => agent.id), [visibleAgents]);
   // 只保留库里仍存在的 id，顺序沿用当前勾选顺序（契约 C4：顺序 = 勾选顺序）。
   const knownIds = useMemo(() => new Set(agents.map((agent) => agent.id)), [agents]);
@@ -197,8 +198,11 @@ export function ProfileAgentSelector({
         <div className="agent-picker__head">
           <div>
             <strong><Users size={13} />{t("profileAgents")}</strong>
-          {/* C20.1：说明新角色按流程分工（取数 / 账户 / 分析候选 / 反方）。 */}
+          {/* C20.1（改写版）：内置只剩一个可选的对手盘；主 Agent 自己取数、判断、出方案并执行
+              （旧的四角色流程分工"取数 / 账户 / 分析候选 / 反方"已下线）。 */}
           <em className="agent-picker__roles-note">{t("agentDefaultRolesHint")}</em>
+          {/* C20.1（改写版）：咨询是**可选**的，且最多一次（对手盘）。 */}
+          <em className="agent-picker__roles-note" data-agent-consult-optional>{t("agentConsultOptionalHint")}</em>
             <span>{t("profileAgentsHint")}</span>
           </div>
           <span className="agent-chip is-quiet agent-picker__count" aria-live="polite">

@@ -1860,12 +1860,6 @@ export type AiConfigSummary = {
   skillRuntimeTrust: Record<string, boolean>;
   openAgent: boolean;
   workspaceRoots: string[];
-  /** TypeSafe / Jev 快速判定（可选）：是否启用、是否已配置、掩码 Key、模型与端点。 */
-  typesafeEnabled: boolean;
-  typesafeConfigured: boolean;
-  typesafeApiKeyMasked: string;
-  typesafeModel: string;
-  typesafeBaseUrl: string;
 };
 
 export type AiReasoningDepth = "none" | "minimal" | "low" | "medium" | "high" | "xhigh";
@@ -1997,11 +1991,6 @@ export type AiConfigUpdate = {
   skillDefinitions?: AiSkillDefinition[];
   openAgent?: boolean;
   workspaceRoots?: string[];
-  /** TypeSafe / Jev：缺省 = 不改动现值；`apiKey` 含 `****` 或为空时不覆盖，空串表示显式清空。 */
-  typesafeEnabled?: boolean;
-  typesafeApiKey?: string;
-  typesafeModel?: string;
-  typesafeBaseUrl?: string;
 };
 
 export type AiAutomationTab =
@@ -2091,6 +2080,44 @@ export type AiAgentProfile = {
   collaborationEnabled: boolean;
   /** C19：试判阶段配置（默认 enforce；`off` 等价今天的行为）。 */
   triage: AiTriageConfig;
+  /** C29：Profile 类型（缺字段 = "ai"）。 */
+  profileType?: AiProfileType;
+  /** C29.7：快判模式字段（仅 `profileType === "fastlane"` 时读写；默认值见 C29.4）。 */
+  fastlaneStylePreset?: FastlaneStylePreset;
+  fastlaneStyle?: string;
+  fastlaneRiskPerTradePct?: number;
+  fastlaneMaxDailyLossPct?: number;
+  fastlaneMaxConcurrent?: number;
+  fastlaneMaxSlippageBps?: number;
+  fastlaneMaxActionsPerMinute?: number;
+  fastlaneQualityFloor?: number;
+  /**
+   * **入场分门槛**（C29 变更 B，2026-09-21）：打分臂的方向判定线
+   * （`max(long_score, short_score) ≥ 本值` 且不并列 → 方向 = argmax；否则观望）。
+   * 默认 **1.5（保守）**；`score` 是 0–4 分布上的**期望值**（实测集中 0.2–1.9），
+   * 所以可配区间是 0.5–3.0（取 2/2.5/3 结构性打不中，实验实测 0% 给方向率）。
+   */
+  fastlaneEntryScoreFloor?: number;
+  /**
+   * **降险分门槛**（C29.17，2026-09-21）：降险臂自己的方向判定线（`reduce_score ≥ 本值` → 判降险，
+   * 且**只作用于既有持仓**）。与 `fastlaneEntryScoreFloor` **各自独立可调**，
+   * 默认同为 **1.5**（= C29.14"复用同一门槛"的行为 → 默认下行为零变化）；
+   * `score` 是 0–4 分布上的期望值 → 可配区间同为 0.5–3.0。
+   * 降险比开仓更适合放宽：它不产生新仓位、不放大暴露（宁多减一点，不少减）。
+   */
+  fastlaneReduceScoreFloor?: number;
+  fastlaneConfidenceFloor?: number;
+  fastlaneEventBlackoutMinutes?: number;
+  /** C29.5「时段与事件」：交易时段（默认 24h）。契约 C29.7 未列该字段，待 B-RUST 确认命名。 */
+  fastlaneTradingHours?: "24h" | "day" | "night";
+  fastlaneNotifyPolicy?: FastlaneNotifyPolicy;
+  fastlaneJevModel?: string;
+  /** C29：Jev 服务地址（私有部署指向自建端点）；留空 = 用官方默认。 */
+  fastlaneJevBaseUrl?: string;
+  fastlaneJevTimeoutMs?: number;
+  fastlaneLlmTimeoutMs?: number;
+  /** 必须为 `"none"`（关思考）：开思考实测 8.1s 且内容为空。UI 只读展示。 */
+  fastlaneLlmReasoningEffort?: string;
   /**
    * C24：单 Agent 极简模式。仅在 `collaborationEnabled === false` 时生效；
    * `minimal` = 只调工具、不输出任何正文，收尾 summary 一句话（≤160 字符）。
@@ -2098,11 +2125,26 @@ export type AiAgentProfile = {
   singleAgentMode: AiSingleAgentMode;
   /** 勾选的 Agent 库 id（顺序即勾选顺序；重复/不存在的 id 由 Rust 侧丢弃）。 */
   enabledAgentIds: string[];
-  /** TypeSafe / Jev：本 Profile 运行时是否启用 Jev 快速判定（判定层，默认关闭）。 */
-  typesafeEnabled: boolean;
+  /**
+   * 旧配置迁移提示（由 Rust 在 Profile 引用了**已下线 Agent** 时填充，空则不返回）。
+   * UI 只读展示、不写回；仅用于一次性说明"你的勾选被改了"。
+   */
+  migrationNotes?: string[];
   createdAt: number;
   updatedAt: number;
 };
+
+/**
+ * C29：Profile 类型。`"ai"` = 原有深入分析 Profile；`"fastlane"` = 快判模式。
+ * 旧 Profile / 缺字段一律视为 `"ai"`，行为完全不变。
+ */
+export type AiProfileType = "ai" | "fastlane";
+
+/** C29.4：快判风格预设。 */
+export type FastlaneStylePreset = "long_pullback" | "range_both" | "breakout_follow" | "custom";
+
+/** C29.4：通知策略（契约默认 `on_open_close`）。 */
+export type FastlaneNotifyPolicy = "every_action" | "on_open_close" | "none";
 
 /** C24：单 Agent 模式（协作关闭时生效）。 */
 export type AiSingleAgentMode = "standard" | "minimal";
@@ -2134,6 +2176,124 @@ export type AiTriageConfig = {
 };
 
 export type AiRunTriageVerdict = "skip" | "escalate";
+
+/** C29.7：快判运行记录六组（字段名与 Rust `fastlane_json` 一致）。 */
+export type AiFastlaneRunRecord = {
+  trigger?: {
+    source?: "condition" | "silence" | "manual" | string;
+    conditionType?: string | null;
+    params?: unknown;
+  } | null;
+  gate?: {
+    ok?: boolean;
+    data?: unknown;
+    anomaly?: unknown;
+    conflict?: unknown;
+    reasons?: string[];
+    /** 这道门作用于哪条路径（`open` = 只作用于开新仓；变更 A 之后质量/置信度门恒为 `open`）。 */
+    appliedTo?: string | null;
+    /** 这道门被谁豁免（`risk_reduction` = Jev 判减仓/平仓，降险不受质量/置信度门约束）。 */
+    bypassedFor?: string | null;
+    /**
+     * **C29.18 入场质量门的读数**（侧车算是唯一实现，Rust 只读透传）：三条代码判据的取数 / 阈值 /
+     * 结论。`applicable: false` = 本门**不适用**（没有开仓方向 / 没给快照）——不是"门过了"。
+     */
+    entryQuality?: {
+      applicable?: boolean;
+      skipReason?: string | null;
+      direction?: string | null;
+      structure_ok?: boolean | null;
+      stop_placeable?: boolean | null;
+      rr_ok?: boolean | null;
+      reasons?: string[];
+      rr?: number | null;
+      rr_floor?: number | null;
+      stop_distance_atr?: number | null;
+      stop_anchor_atr?: number | null;
+      nearest_structure_atr?: number | null;
+      levels_count?: number;
+      stop_side_count?: number;
+      target_side_count?: number;
+      [key: string]: unknown;
+    } | null;
+  } | null;
+  /**
+   * 本轮动作分支的 intent 口径（侧车给）：`round` / `close`（停机平仓轮）/ `reduce`（Jev 判降险）。
+   * 两种降险的动作体 `intent` 都是 `close`（Rust `action_intent` 只认那个）——
+   * 靠这个字段把"用户停机命令"与"Jev 自判减仓"在记录里分开。
+   */
+  intent?: string | null;
+  jev?: {
+    action?: string;
+    probabilities?: Record<string, number> | null;
+    confidence?: number;
+    /**
+     * **观察量（C29.18，2026-09-21）**：`quality` 这一问已从 Jev 问题面删除（换问法实验证明它对
+     * "该不该做"没有可用判别力），入场质量改由代码判据决定（`gate.entryQuality`）。
+     * 记录里**保留**只为复盘：老记录 / 老侧车响应带它 → 照原样显示；**缺失时是 `null`**
+     * （UI 显示 `--`），绝不等同于"质量 0 分"。**它不参与任何判定**，也不是不动手的理由。
+     */
+    quality?: number | null;
+    latencyMs?: number;
+    raw?: unknown;
+    /**
+     * **打分臂（C29 变更 B，2026-09-21）**：两个 0–4 期望分 + 判定门槛 + 判定依据。
+     * `entryScoreDecision`：`direction` / `below_floor` / `tie` / `score_missing` / `legacy_action`，
+     * 或**降险臂接管时的码**（C29.14）：`reduce`（本轮按降险动作，开仓臂不参与这次判定）/
+     * `reduce_without_position`（该降险但无持仓）/ `reduce_position_unknown`（该降险但持仓事实缺失）。
+     * 有这几个字段时 `action` 是**代码**按分数判的（不是模型的标签选择）。
+     */
+    longScore?: number | null;
+    shortScore?: number | null;
+    entryScoreFloor?: number | null;
+    entryScoreDecision?: string | null;
+    /**
+     * **降险臂（C29.14，2026-09-21）**：第三个打分问题 `reduce_score`（0–4，问"现在该减仓/平仓
+     * 有多该做"，针对现存持仓、无持仓给 0）与它的判定。
+     * `reduceScoreFloor` 自 **C29.17** 起是**独立门槛**（配置字段 `fastlaneReduceScoreFloor`）：
+     * **默认与 `entryScoreFloor` 同值 1.5**（默认下行为与解耦前逐字一致），但两者可分别调 ——
+     * 落到记录里的是**生效值**，不再强制相等（复盘据此判断降险用的是哪条线）。
+     * `reduceScoreDecision`：`reduce` / `reduce_without_position` / `reduce_position_unknown` / `below_floor`。
+     * `reducePositionFact`：降险臂看到的持仓事实 `held` / `flat` / `unknown`（`unknown` = 读不到，不猜）。
+     */
+    reduceScore?: number | null;
+    reduceScoreFloor?: number | null;
+    reduceScoreDecision?: string | null;
+    reducePositionFact?: string | null;
+    /** 置信度门的值来源：`action_node`（旧形状）/ `none`（打分臂无 action 节点 → 该门本轮不参与）。 */
+    confidenceSource?: string | null;
+  } | null;
+  llm?: {
+    latencyMs?: number;
+    /** 真实调用的模型名（Rust 已把内部 `model-…` id 解析成 provider 模型名）。 */
+    model?: string | null;
+    /** 尝试次数（>1 = 重试过；UI 只在重试时显示，避免噪声）。 */
+    attempts?: number;
+    params?: unknown;
+    validation?: { ok?: boolean; reasons?: string[] } | null;
+    opportunityId?: string | null;
+    wakeConditions?: number;
+  } | null;
+  action?: {
+    kind?: "watch" | "opportunity" | "trade" | "kill_switch" | string;
+    opportunityId?: string | null;
+    orderId?: string | null;
+    reason?: string | null;
+  } | null;
+  timing?: {
+    fetchMs?: number;
+    jevMs?: number;
+    llmMs?: number;
+    codeMs?: number;
+    totalMs?: number;
+  } | null;
+  tokens?: {
+    jevIn?: number;
+    jevOut?: number;
+    llmIn?: number;
+    llmOut?: number;
+  } | null;
+};
 
 export type AiRunExpert = {
   id?: string;
@@ -2208,6 +2368,10 @@ export type AiAutomationRun = {
     selfAnalysisReason?: string | null;
     selfAnalysisUnjustified?: boolean;
   } | null;
+  /** C29：运行记录类型（`"fastlane"` 时详情显示快判六组，且不显示专家相关旧区块）。 */
+  recordKind?: string | null;
+  /** C29.7：快判运行记录六组（`fastlane_json`）。 */
+  fastlane?: AiFastlaneRunRecord | null;
   /** C24：该次运行的单 Agent 模式（`minimal` 时详情显示「极简模式」徽标）。 */
   singleAgentMode?: AiSingleAgentMode | string | null;
   /**

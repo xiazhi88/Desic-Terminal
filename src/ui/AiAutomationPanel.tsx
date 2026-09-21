@@ -13,6 +13,7 @@ import { useGSAP } from "@gsap/react";
 import { gsap } from "gsap";
 import { useTranslation } from "react-i18next";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import { WakeConditionList, wakeConditionsOf, useViewText } from "./wakeConditionView";
 import {
   Activity,
   AlertTriangle,
@@ -94,6 +95,14 @@ import { AgentCollaborationTrace } from "./AgentCollaborationTrace";
 import { AgentLibraryView } from "./agent-library/AgentLibraryView";
 import { ProfileAgentSelector } from "./agent-library/ProfileAgentSelector";
 import { TriageSettings, createDefaultTriage, normalizeTriage } from "./TriageSettings";
+import { ProfileTypeCards } from "./fastlane/ProfileTypeCards";
+import { FastlaneConfigDialog } from "./fastlane/FastlaneConfigDialog";
+import { FastlaneRunRecord } from "./fastlane/FastlaneRunRecord";
+import { FASTLANE_TRIGGER_DEFAULTS, fastlaneStylePresetText, profileTypeOf } from "./fastlane/fastlaneDefaults";
+// C29.19：快判模式的 UI 总开关（与 Rust `FASTLANE_MODE_ENABLED` 同值）——
+// 本版本不发布快判：所有快判入口 / 卡片都按它隐藏，组件本体保留不删。
+import { FASTLANE_MODE_ENABLED } from "./fastlane/fastlaneMode";
+import { buildProfileSaveInput, checkProfileSaveArgs, describeSerializationIssue, findNonSerializable } from "../lib/profilePayload";
 import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
@@ -544,8 +553,8 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     triage: normalizeTriage(profile.triage),
     // C24：缺字段/非法值一律回落 standard。
     singleAgentMode: profile.singleAgentMode === "minimal" ? "minimal" : "standard",
-    // TypeSafe / Jev：缺字段 / 旧 Profile → 关闭（判定层默认不启用）。
-    typesafeEnabled: Boolean(profile.typesafeEnabled),
+    // C29：旧 Profile / 缺字段 = "ai"，行为完全不变；快判字段仅在 fastlane 下被使用。
+    profileType: profile.profileType === "fastlane" ? "fastlane" : "ai",
     // 迁移（老 multiAgentMode / 老模板）由 Rust 读侧完成；这里只做缺字段兜底。
     // C14：字段缺失时按迁移表推断——`enabled_agent_ids_json` 非空即视为已开启。
     collaborationEnabled: typeof profile.collaborationEnabled === "boolean"
@@ -589,11 +598,11 @@ function createProfile(accounts: AccountSummary[], defaultModelId: string): AiAg
     collaborationEnabled: false,
     // C19：试判默认 enforce（董事会决定）。
     triage: createDefaultTriage(),
+    // C29：新建默认是 AI Profile；快判字段只在选择"快判模式"时写入（见 createFastlaneProfile）。
+    profileType: "ai",
     // C24：单 Agent 模式默认 standard（极简需用户显式选择）。
     singleAgentMode: "standard",
     enabledAgentIds: [],
-    // TypeSafe / Jev：新 Profile 默认关闭判定层（需要显式打开，并在 AI 设置里配置 Key）。
-    typesafeEnabled: false,
     createdAt: now,
     updatedAt: now
   };
@@ -1196,6 +1205,27 @@ function ProfileEditorDialog({
   );
 }
 
+/**
+ * C20.1（改写版）/ C31：旧 Profile 引用的已下线 Agent 由 Rust 迁移丢弃，名单改写结果**可见**
+ * （`migrationNotes` 由 Rust 填充）。只提示、不改草稿，不阻塞保存。
+ *
+ * C31 收尾（本次）：把这段渲染**提成唯一组件**，供 Profile 编辑器与开发预览页夹具共用 ——
+ * 预览页断言的就是产品这条渲染路径本身，而不是一份会漂移的复制品。
+ * 纯展示组件：不持有状态、不发请求、DOM 结构与提取前逐字节一致。
+ */
+function ProfileMigrationNotes({ notes }: Readonly<{ notes?: string[] }>) {
+  const { t } = useTranslation("automation");
+  if (!Array.isArray(notes) || notes.length === 0) return null;
+  return (
+    <div className="automation-form-section" role="note" data-profile-migration-notes>
+      <strong><AlertTriangle size={13} aria-hidden="true" />{t("profileMigrationNotesTitle")}</strong>
+      {notes.map((note, index) => (
+        <span key={`profile-migration-note-${index}`} data-profile-migration-note>{note}</span>
+      ))}
+    </div>
+  );
+}
+
 function ProfileEditor({
   draft,
   accounts,
@@ -1410,17 +1440,6 @@ function ProfileEditor({
             onChange={(value) => onChange({ reasoningDepth: value as AiReasoningDepth })}
           />
         </label>
-        <label className="automation-typesafe-field">
-          <FieldLabel help={t("automation:profileTypesafeHelp")}>{t("automation:profileTypesafeLabel")}</FieldLabel>
-          <span className="automation-toggle-row">
-            <input
-              type="checkbox"
-              checked={Boolean(draft.typesafeEnabled)}
-              onChange={(event) => onChange({ typesafeEnabled: event.target.checked })}
-            />
-            <em>{draft.typesafeEnabled ? t("automation:profileTypesafeOn") : t("automation:profileTypesafeOff")}</em>
-          </span>
-        </label>
         <div className="automation-symbol-field wide">
           <span>
             {t("automation:profileWatchSymbols")}
@@ -1487,6 +1506,9 @@ function ProfileEditor({
         </div>
         </div>
       </div>
+
+      {/* C20.1（改写版）/ C31：迁移提示的**唯一渲染点**（预览夹具共用同一组件，见 ProfileMigrationNotes）。 */}
+      <ProfileMigrationNotes notes={draft.migrationNotes} />
 
       <ProfileAgentSelector
         agents={agents}
@@ -2260,6 +2282,19 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
   const wakeCount = wakeCounts.created;
   const tradeCount = steps.filter((step) => runActionKind(step) === "trade").length;
   const notificationCount = steps.filter((step) => runActionKind(step) === "notification").length;
+  // C29：快判轮没有 toolEvents（机会由侧车创建），关键动作数只能取自运行记录的 actionCounts。
+  const fastlaneCounts = (detail.run.recordKind === "fastlane" || detail.run.fastlane) && steps.length === 0
+    ? {
+        opportunity: Math.max(0, Number(detail.run.actionCounts?.opportunity ?? 0)),
+        wake: Math.max(0, Number(detail.run.actionCounts?.wake ?? 0)),
+        trade: Math.max(0, Number(detail.run.actionCounts?.trade ?? 0)),
+        notification: Math.max(0, Number(detail.run.actionCounts?.notification ?? 0))
+      }
+    : null;
+  const outcomeOpportunity = fastlaneCounts ? fastlaneCounts.opportunity : opportunityCount;
+  const outcomeWake = fastlaneCounts ? fastlaneCounts.wake : wakeCount;
+  const outcomeTrade = fastlaneCounts ? fastlaneCounts.trade : tradeCount;
+  const outcomeNotification = fastlaneCounts ? fastlaneCounts.notification : notificationCount;
   const skills = isRecord(detail.skillVersions) ? Object.entries(detail.skillVersions) : [];
   const templateSnapshot = isRecord(detail.templateSnapshot) ? detail.templateSnapshot : null;
   const cacheHitRate = formatRunCacheHitRate(detail.run.tokenUsage);
@@ -2270,6 +2305,21 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
     () => resolveAiAutomationRunError(detail.run.error, detail.toolEvents),
     [detail.run.error, detail.toolEvents]
   );
+  // C29.19：开关关闭（本版本）→ 历史快判运行**不再渲染任何快判专属卡片**（六组记录 / 快判
+  // 关键动作 / "快判轮无试判阶段"注记都按这个判断走）。判据本身（recordKind / fastlane_json）
+  // 一行未改：下个版本翻开关即回到原来的渲染。
+  const isFastlaneRun = FASTLANE_MODE_ENABLED
+    && (detail.run.recordKind === "fastlane" || Boolean(detail.run.fastlane));
+  // C29.8：快判轮没有 toolEvents，关键动作区过去一律走"没有外部动作"分支 —— 与同屏的
+  // "本轮写下的观察条件 6"直接自相矛盾（真机截图就是这么被指出来的）。这里把侧车写下的
+  // 观察条件（+ 机会/交易）当作**关键动作**列出，位置与旧模式运行详情一致。
+  const fastlaneLlm = isRecord(detail.run.fastlane?.llm) ? detail.run.fastlane.llm : null;
+  const fastlaneLlmParams = isRecord(fastlaneLlm?.params) ? fastlaneLlm.params : null;
+  const fastlaneWakeConditions = wakeConditionsOf(fastlaneLlmParams?.nextWakePlan);
+  const fastlaneWrittenWakes = typeof fastlaneLlm?.wakeConditions === "number" ? fastlaneLlm.wakeConditions : null;
+  const fastlaneActionGroups = (fastlaneCounts?.opportunity ?? 0) + (fastlaneCounts?.trade ?? 0) + (fastlaneWakeConditions.length > 0 ? 1 : 0);
+  const showFastlaneKeyActions = steps.length === 0 && isFastlaneRun && fastlaneActionGroups > 0;
+  const viewText = useViewText();
   const triage = useMemo(() => readRunTriage(detail.run.triage), [detail.run.triage]);
   const deepAnalysis = useMemo(() => resolveDeepAnalysisState(detail.run, triage), [detail.run, triage]);
   const [forceState, setForceState] = useState<"idle" | "busy" | "done" | "unsupported">("idle");
@@ -2294,7 +2344,9 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
             <span>{automationText("runOutcome", "Run outcome", "本轮运行结果")}</span>
             <strong>{runStatusTitle(detail.run.status)}</strong>
             <p data-run-wake-created={wakeCount} data-run-wake-active={wakeCounts.active ?? undefined}>
-              {steps.length > 0 ? automationText("runOutcomeCounts", "Created {{opportunities}} trade opportunities, {{wakes}} new dynamic watch conditions, {{trades}} trade actions, and {{notifications}} Feishu notifications.", "产生 {{opportunities}} 个交易机会、本轮新增 {{wakes}} 条动态观察条件、{{trades}} 个交易动作、{{notifications}} 条飞书通知。", { opportunities: opportunityCount, wakes: wakeCount, trades: tradeCount, notifications: notificationCount }) : automationText("runOutcomeAnalysisOnly", "This run only analyzed and read data; it produced no key actions to execute.", "本轮只进行了分析和数据读取，没有产生需要执行的关键动作。")}
+              {/* C29：快判轮的关键动作由侧车创建（没有 toolEvents），必须按 actionCounts 报数，
+                  否则会出现"记录说已创建机会、总览说没有关键动作"的自相矛盾。 */}
+              {isFastlaneRun && steps.length === 0 && outcomeOpportunity === 0 && outcomeTrade === 0 && outcomeWake === 0 ? automationText("runOutcomeFastlaneIdle", "This fastlane round created no opportunity and wrote no watch conditions.", "本轮快判未创建机会，也未写入观察条件。") : steps.length > 0 || (isFastlaneRun && (outcomeOpportunity > 0 || outcomeTrade > 0 || outcomeNotification > 0 || outcomeWake > 0)) ? automationText("runOutcomeCounts", "Created {{opportunities}} trade opportunities, {{wakes}} new dynamic watch conditions, {{trades}} trade actions, and {{notifications}} Feishu notifications.", "产生 {{opportunities}} 个交易机会、本轮新增 {{wakes}} 条动态观察条件、{{trades}} 个交易动作、{{notifications}} 条飞书通知。", { opportunities: outcomeOpportunity, wakes: outcomeWake, trades: outcomeTrade, notifications: outcomeNotification }) : automationText("runOutcomeAnalysisOnly", "This run only analyzed and read data; it produced no key actions to execute.", "本轮只进行了分析和数据读取，没有产生需要执行的关键动作。")}
             </p>
             {wakeCounts.active !== null ? (
               <span className="automation-run-outcome-active-wakes" data-run-wake-active-note>
@@ -2335,6 +2387,12 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
                   ? automationText("runDeepAnalysisOff", "Triage disabled", "未启用试判")
                   : automationText("runDeepAnalysisNa", "Not applicable", "不适用")}
           </strong>
+          {/* C29：快判轮没有试判阶段 —— 只加注记，四态判定逻辑不变。 */}
+          {isFastlaneRun ? (
+            <em className="automation-run-deep-analysis__note" data-run-deep-analysis-fastlane-note>
+              {automationText("runDeepAnalysisFastlaneNote", "Fastlane rounds have no triage phase", "快判轮无试判阶段")}
+            </em>
+          ) : null}
           {deepAnalysis.state === "deep" && deepAnalysis.forcedBy.length > 0 ? (
             <em className="automation-run-deep-analysis__forced" data-run-deep-analysis-forced>
               {automationText("runDeepAnalysisForced", "Hard escalation: {{reasons}}", "硬升级：{{reasons}}", { reasons: deepAnalysis.forcedBy.join("、") })}
@@ -2443,7 +2501,8 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
         </RunDetailFold>
       ) : null}
 
-      <RunContributions run={detail.run} fallback={detail as unknown as { usedEvidence?: unknown; contrarianResolutions?: unknown }} />
+      {isFastlaneRun ? null : <RunContributions run={detail.run} fallback={detail as unknown as { usedEvidence?: unknown; contrarianResolutions?: unknown }} />}
+      {isFastlaneRun ? <FastlaneRunRecord value={detail.run.fastlane} /> : null}
 
       {/* C27 折叠③：本轮技能列表与运行元信息。
           摘要：「技能与运行元信息 · 5 个技能」+ Token 明细（模型 / 输入 / 输出 / 缓存命中率），
@@ -2493,7 +2552,8 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
         </div>
       </RunDetailFold>
 
-      <AgentCollaborationTrace events={detail.toolEvents} runStatus={detail.run.status} experts={detail.run.experts} />
+      {/* C29.5：快判模式没有专家，专家协作轨迹与贡献度区块一律不显示。 */}
+      {isFastlaneRun ? null : <AgentCollaborationTrace events={detail.toolEvents} runStatus={detail.run.status} experts={detail.run.experts} />}
 
       {detail.run.summary ? (
         <section className="automation-run-section automation-run-summary-section">
@@ -2507,11 +2567,64 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
       ) : runError ? <section className="automation-run-section automation-run-summary-section"><h3><Crosshair size={14} />{automationText("runFailureReason", "Failure reason", "失败原因")}</h3><div className="automation-run-summary-surface error" data-i18n-skip>{runError}</div></section> : null}
 
       <section className="automation-run-section automation-run-actions-section">
-        <h3><ArrowRightLeft size={14} />{automationText("runKeyActions", "Key actions", "关键动作")} <span>{i18n.t("common:itemCount", { count: steps.length })}</span></h3>
-        {steps.length === 0 ? <div className="automation-run-empty-action"><CheckCircle2 size={18} /><div><strong>{automationText("runNoExternalActions", "No external actions", "没有外部动作")}</strong><span>{automationText("runNoExternalActionsDetail", "Market reads, account queries, and indicator analysis are hidden; this run created no opportunities, dynamic watch conditions, or trades.", "行情读取、账户查询和指标分析已隐藏；本轮没有创建机会、动态观察条件或执行交易。")}</span></div></div> : (
+        <h3><ArrowRightLeft size={14} />{automationText("runKeyActions", "Key actions", "关键动作")} <span>{i18n.t("common:itemCount", { count: steps.length > 0 ? steps.length : (isFastlaneRun ? fastlaneActionGroups : steps.length) })}</span></h3>
+        {steps.length > 0 ? (
           <div className="automation-tool-timeline">
             {steps.map((step, index) => <RunToolStepRow step={step} index={index} key={step.id} />)}
           </div>
+        ) : showFastlaneKeyActions ? (
+          <div className="automation-tool-timeline" data-run-fastlane-key-actions>
+            {fastlaneWakeConditions.length > 0 ? (
+              /* C29.8：**沿用旧模式关键动作卡片的整套外壳与样式**（`.automation-tool-step wake`
+                 + 两列瓷砖 `.automation-run-wake-list`），而不是另做一套快判样式 —— 同一个事实
+                 在两处必须长得一样。快判轮没有 toolEvents，因此等价卡片由运行记录手工装配。 */
+              <article className="automation-tool-step wake" data-run-key-action="wake" data-run-key-action-wake-count={fastlaneWakeConditions.length}>
+                <div className="automation-tool-step-index"><RadioTower size={13} /></div>
+                <div className="automation-tool-step-main">
+                  <div>
+                    <span className="automation-tool-kind">{automationText("runWatchCondition", "Watch condition", "观察条件")} {fastlaneActionGroups}</span>
+                    <strong>{automationText("toolFinishRun", "Create the next dynamic watch plan", "创建下一轮动态观察条件")}</strong>
+                    <span className={fastlaneWrittenWakes !== null && fastlaneWrittenWakes !== fastlaneWakeConditions.length ? "failed" : "success"}>
+                      {i18n.t("common:completed")}
+                    </span>
+                  </div>
+                  <p className="automation-tool-step-summary">
+                    {automationText("runSavedWatchPlan", "Saved {{conditions}} dynamic watch conditions; created {{created}} and reused {{reused}} trade opportunities.", "保存 {{conditions}} 条动态观察条件，创建 {{created}} 个、复用 {{reused}} 个交易机会。", {
+                      conditions: fastlaneWrittenWakes ?? fastlaneWakeConditions.length,
+                      created: fastlaneCounts?.opportunity ?? 0,
+                      reused: 0
+                    })}
+                  </p>
+                  <WakeConditionList conditions={fastlaneWakeConditions} text={viewText} hook="key-actions" />
+                  {fastlaneWrittenWakes !== null && fastlaneWrittenWakes !== fastlaneWakeConditions.length ? (
+                    <p className="automation-run-wake-partial" data-run-key-action-wake-partial>
+                      {automationText("runWakePlanPartial", "The plan had {{planned}} conditions but only {{written}} were saved.", "计划 {{planned}} 条观察条件，实际写库 {{written}} 条。", { planned: fastlaneWakeConditions.length, written: fastlaneWrittenWakes })}
+                    </p>
+                  ) : null}
+                  <div className="automation-tool-step-details">
+                    <details data-run-key-action-wake-raw>
+                      <summary>{automationText("runRawArguments", "Raw arguments", "原始参数")}</summary>
+                      <pre>{JSON.stringify(fastlaneLlmParams?.nextWakePlan ?? {}, null, 2)}</pre>
+                    </details>
+                  </div>
+                </div>
+              </article>
+            ) : null}
+            {(fastlaneCounts?.opportunity ?? 0) > 0 || (fastlaneCounts?.trade ?? 0) > 0 ? (
+              <article className="automation-tool-step opportunity" data-run-key-action="trade">
+                <div className="automation-tool-step-index"><ArrowRightLeft size={13} /></div>
+                <div className="automation-tool-step-main">
+                  <div>
+                    <span className="automation-tool-kind">{automationText("runActionOpportunity", "Trade opportunity", "交易机会")} {fastlaneActionGroups}</span>
+                    <strong>{automationText("runOutcomeCounts", "Created {{opportunities}} trade opportunities, {{wakes}} new dynamic watch conditions, {{trades}} trade actions, and {{notifications}} Feishu notifications.", "产生 {{opportunities}} 个交易机会、本轮新增 {{wakes}} 条动态观察条件、{{trades}} 个交易动作、{{notifications}} 条飞书通知。", { opportunities: fastlaneCounts?.opportunity ?? 0, wakes: fastlaneCounts?.wake ?? 0, trades: fastlaneCounts?.trade ?? 0, notifications: fastlaneCounts?.notification ?? 0 })}</strong>
+                    <span className="success">{i18n.t("common:completed")}</span>
+                  </div>
+                </div>
+              </article>
+            ) : null}
+          </div>
+        ) : (
+          <div className="automation-run-empty-action"><CheckCircle2 size={18} /><div><strong>{automationText("runNoExternalActions", "No external actions", "没有外部动作")}</strong><span>{automationText("runNoExternalActionsDetail", "Market reads, account queries, and indicator analysis are hidden; this run created no opportunities, dynamic watch conditions, or trades.", "行情读取、账户查询和指标分析已隐藏；本轮没有创建机会、动态观察条件或执行交易。")}</span></div></div>
         )}
       </section>
 
@@ -2595,14 +2708,25 @@ function RunToolStepRow({ step, index }: { step: RunToolStep; index: number }) {
   const kind = runActionKind(step);
   const meta = runActionMeta(kind);
   const opportunityId = kind === "opportunity" ? opportunityIdFromStep(step) : "";
+  /**
+   * C33：观察条件计划"未写入"是**警示**不是失败。
+   *
+   * 底层语义**一行未改**：工具结果仍是 `ok=false`、记录里如实、原始结果折叠区照旧；
+   * 改的只是呈现 —— 「计划未落库」不等于「这一轮白跑了」（判定与结论仍然有效），
+   * 把它做成红色失败会让用户以为整轮失败（真机反馈）。因此这一类只降级呈现，
+   * 「已阻断」（blocked）照旧按失败处理。
+   */
+  const planWarning = kind === "wake" && step.ok === false && step.blocked !== true;
+  const stepFailed = step.ok === false && !planWarning;
+  const statusKey = planWarning ? "warning" : stepFailed ? "failed" : "success";
   return (
-    <article className={clsx("automation-tool-step", kind, step.ok === false && "failed")}>
+    <article className={clsx("automation-tool-step", kind, planWarning && "warning", stepFailed && "failed")} data-run-tool-step-status={statusKey}>
       <div className="automation-tool-step-index">{meta.icon}</div>
       <div className="automation-tool-step-main">
         <div>
           <span className="automation-tool-kind">{meta.label} {index + 1}</span>
           <strong>{toolDisplayName(step.name)}</strong>
-          <span className={step.ok === false || step.blocked ? "failed" : "success"}>{step.blocked ? automationText("runBlocked", "Blocked", "已阻断") : step.ok === false ? i18n.t("common:failed") : i18n.t("common:completed")}</span>
+          <span className={statusKey}>{step.blocked ? automationText("runBlocked", "Blocked", "已阻断") : planWarning ? automationText("runWakePlanWarning", "Warning", "警示") : step.ok === false ? i18n.t("common:failed") : i18n.t("common:completed")}</span>
         </div>
         <p className="automation-tool-step-summary">{toolStepSummary(step)}</p>
         {opportunityId ? (
@@ -2621,20 +2745,41 @@ function RunToolStepRow({ step, index }: { step: RunToolStep; index: number }) {
 }
 
 function RunActionPayload({ step, kind }: { step: RunToolStep; kind: ExtendedRunActionKind }) {
+  // 条件清单的文案走共享适配器（hooks 必须在组件顶层调用，不能写在分支里）。
+  const conditionText = useViewText();
   const input = isRecord(step.arguments) ? step.arguments : {};
   if (kind === "wake") {
     const conditions = wakeConditionsFromStep(step);
+    // C33：本轮**真正写库**的条数（工具结果里的落库真值）。`validation.reasons` = 诊断位，
+    // 丢弃原因必须看得见 —— 静默写 2 条、少 1 条正是这次真机事故的形态。
+    const writtenWakes = readCountFromResult(isRecord(step.result) ? step.result : {}, ["createdWakeConditionIds", "wakeConditionIds", "wakeConditionCount", "wakeConditions"]);
+    const validationReasons = wakeValidationReasons(step);
     return (
-      <div className="automation-run-wake-list">
-        {/* 收尾被拒（软校验打回）时这份计划**没有落库**，必须说清楚，避免被当成已生效。 */}
+      <>
+        {/* 收尾未落库（计划被拒 / 软校验打回）时这份计划**没有落库**，必须说清楚，避免被当成已生效。
+            C33：降级为**警示** —— 「计划未写入」不等于「这一轮的结论无效」。 */}
         {step.ok === false ? (
           <div className="automation-run-wake-rejected" data-run-wake-plan-rejected>
             <AlertTriangle size={12} aria-hidden="true" />
-            {automationText("runWakePlanRejected", "This plan was not saved: the run finish was rejected.", "该计划未落库：本次收尾被拒绝。")}
+            {automationText("runWakePlanNotWritten", "Plan not saved (this round's conclusion still stands)", "计划未写入（这一轮的结论仍然有效）")}
           </div>
         ) : null}
-        {conditions.map((condition, index) => <div key={`${formatStructured(condition)}-${index}`}><RadioTower size={13} /><span>{formatWakeCondition(condition)}</span></div>)}
-      </div>
+        {/* C33：条目级丢弃**可见**：计划几条、写库几条、哪条为什么被丢（与快判的记录口径同一句话）。 */}
+        {step.ok !== false && writtenWakes !== null && writtenWakes < conditions.length ? (
+          <p className="automation-run-wake-partial" data-run-wake-plan-dropped={writtenWakes}>
+            {automationText("runWakePlanDropped", "The plan had {{planned}} conditions but only {{written}} were saved.", "计划 {{planned}} 条观察条件，实际写库 {{written}} 条。", { planned: conditions.length, written: writtenWakes })}
+          </p>
+        ) : null}
+        {validationReasons.length > 0 ? (
+          <ul className="automation-run-wake-dropped-reasons" data-run-wake-drop-reasons>
+            {validationReasons.map((reason) => <li key={reason} data-i18n-skip>{reason}</li>)}
+          </ul>
+        ) : null}
+        {/* C29.8：与快判轮**同一份实现**（`WakeConditionList` = 旧样式的单一定义），
+            因此两种链路的瓷砖、图标、人话逐字一致；旧模式这里原本会把无阈值类型渲染成
+            `订单状态变化 · {"instId":…}`，现在由共享格式化器统一处理。 */}
+        <WakeConditionList conditions={conditions} text={conditionText} hook="tool-step" />
+      </>
     );
   }
   if (kind === "opportunity") {
@@ -2747,7 +2892,17 @@ function toolStepBaseSummary(step: RunToolStep) {
   const result = isRecord(step.result) ? step.result : {};
   if (step.name === "background.finishRun") {
     const plan = isRecord(input.nextWakePlan) ? input.nextWakePlan : {};
-    const conditions = Array.isArray(plan.conditions) ? plan.conditions.length : 0;
+    const planned = Array.isArray(plan.conditions) ? plan.conditions.length : 0;
+    // C33：条数口径 = **真正写库**的条数（工具结果里的落库真值），拿不到才回落到计划条数 ——
+    // 与快判记录的 `wakeConditions` 同口径。否则"计划 8 条、写库 7 条"时，标题行会写"保存 8 条"
+    // 而下一行写"只写库 7 条"，卡片自相矛盾。
+    const written = readCountFromResult(result, [
+      "wakeConditions",
+      "createdWakeConditionIds",
+      "wakeConditionIds",
+      "wakeConditionCount"
+    ]);
+    const conditions = written ?? planned;
     const created = Array.isArray(result.createdOpportunityIds) ? result.createdOpportunityIds.length : 0;
     const reused = Array.isArray(result.reusedOpportunityIds) ? result.reusedOpportunityIds.length : 0;
     return automationText("runSavedWatchPlan", "Saved {{conditions}} dynamic watch conditions; created {{created}} and reused {{reused}} trade opportunities.", "保存 {{conditions}} 条动态观察条件，创建 {{created}} 个、复用 {{reused}} 个交易机会。", { conditions, created, reused });
@@ -2801,6 +2956,20 @@ function wakeConditionsFromStep(step: RunToolStep) {
   const input = isRecord(step.arguments) ? step.arguments : {};
   const plan = isRecord(input.nextWakePlan) ? input.nextWakePlan : {};
   return Array.isArray(plan.conditions) ? plan.conditions.filter(isRecord) : [];
+}
+
+/**
+ * C33：工具结果里的**诊断位**（`validation.reasons`，与快判 `llm.validation` 同形）。
+ *
+ * 为什么单独取：条目级丢弃（白名单外的类型、参数不合规）不再把整份计划 reject，若原因只留在
+ * 原始结果折叠区里，用户看到的就只是"计划 3 条、写库 2 条"而不知道**为什么** —— 静默丢条件
+ * 是这次真机事故的形态，必须可见。
+ */
+function wakeValidationReasons(step: RunToolStep): string[] {
+  const result = isRecord(step.result) ? step.result : {};
+  const validation = isRecord(result.validation) ? result.validation : {};
+  const reasons = Array.isArray(validation.reasons) ? validation.reasons : [];
+  return reasons.filter((reason): reason is string => typeof reason === "string" && reason.trim().length > 0);
 }
 
 function formatWakeCondition(condition: Record<string, unknown>) {
@@ -4553,6 +4722,13 @@ function AiAutomationPanelComponent({
   const [profileDraft, setProfileDraft] = useState<AiAgentProfile | null>(null);
   // The editor is a dialog now: the grid is the resting state of this tab.
   const [profileEditorOpen, setProfileEditorOpen] = useState(false);
+  // C29：新建 Profile 先选类型（两张卡片）；快判类型走独立配置窗口。
+  const [profileTypePickerOpen, setProfileTypePickerOpen] = useState(false);
+  /**
+   * C29：从快判配置窗口跳去"观察条件"编辑器时，记下待恢复的 Profile id。
+   * 回来时恢复**未保存的草稿**（既不丢配置，也不触发"放弃修改"确认）。
+   */
+  const fastlaneResumeRef = useRef<string | null>(null);
   // Destructive and lossy actions route through an in-app dialog because the
   // Tauri webview rejects window.confirm.
   const [pendingConfirm, setPendingConfirm] = useState<{
@@ -4852,6 +5028,14 @@ function AiAutomationPanelComponent({
       onNotify({ kind: "warning", title: t("common:desktopOnly"), message: t("automation:workbenchCommandDesktopOnly") });
       return false;
     }
+    // P0 兜底：任何命令的 args 在进 IPC 前都做一次可序列化自检（带键路径报错，不把原始异常丢给用户）。
+    const argsIssue = args ? findNonSerializable(args, "args") : null;
+    if (argsIssue) {
+      const detail = describeSerializationIssue(argsIssue);
+      logger.error(`ai automation command args not serializable: ${command}`, argsIssue);
+      onNotify({ kind: "error", title: t("automation:workbenchActionFailed", { action: successTitle }), message: t("automation:profilePayloadNotSerializable", { detail }) });
+      return false;
+    }
     setBusyAction(action);
     setError(null);
     try {
@@ -4892,12 +5076,23 @@ function AiAutomationPanelComponent({
       profile.id
     )
       .then((saved) => {
-        if (saved) onProfileSaved?.(profile);
+        if (!saved) {
+          // 失败：窗口保持打开，原因由 runCommand 的通知（含 P0 守卫的键路径）说明。
+          return;
+        }
+        onProfileSaved?.(profile);
+        // 真机 P0：保存成功即已落库，快判配置窗口自动关闭（不再需要用户手动关，
+        // 也不再触发"未保存修改"确认 —— 成功即无未保存内容）。
+        if (profileTypeOf(profile) === "fastlane") setProfileEditorOpen(false);
       });
   }, [onProfileSaved, runCommand, t]);
 
-  const saveProfile = useCallback((forceSystematicConflict = false) => {
+  const saveProfile = useCallback((forceSystematicConflict?: unknown) => {
     if (!profileDraft) return;
+    // P0 加固：第一个参数只可能是"是否强制忽略系统性冲突"的布尔量。
+    // 任何别的值（例如把 `onClick={onSave}` 传进来的 DOM 事件）都被严格丢弃 —— 否则它会
+    // 顺着 args 进 IPC，在 JSON 序列化处炸掉整次保存（真机 bug：args.forceSystematicConflict.target）。
+    const forced = forceSystematicConflict === true;
     const name = profileDraft.name.trim();
     if (!name) {
       onNotify({ kind: "warning", title: t("automation:profileNotSaved"), message: t("automation:profileValidationNameRequired") });
@@ -4924,32 +5119,28 @@ function AiAutomationPanelComponent({
     // 契约 C7：勾选制没有数量校验（不再有"至少 2 个 / 最多 N 个"）。
     // 库里不存在的 id 由 Rust 保存侧丢弃并提示，前端不阻断。
     const now = Date.now();
-    const profile: AiAgentProfile = {
-      ...profileDraft,
+    // P0：载荷逐字段显式构造（见 src/lib/profilePayload.ts），不再 `...profileDraft` 整对象透传 ——
+    // 否则 draft 上任何一个不可 JSON 序列化的字段都会在 IPC 处炸掉整次保存。
+    const profile: AiAgentProfile = buildProfileSaveInput(profileDraft, {
       name,
-      mode: normalizePermissionMode(profileDraft.mode),
-      targetLeverage: Math.max(1, Math.min(125, Math.round(profileDraft.targetLeverage) || 20)),
-      maxSingleTradeMarginPct: Math.max(1, Math.min(100, Math.round(profileDraft.maxSingleTradeMarginPct) || 30)),
       symbols: normalizedSymbols,
-      skillIds: withRequiredProfileSkills(profileDraft.skillIds),
-      skillVersions: profileDraft.skillVersions ?? {},
-      skillVersionModes: profileDraft.skillVersionModes ?? {},
-      reasoningDepth: profileDraft.reasoningDepth,
-      allowedWakeConditionTypes: Array.from(new Set(profileDraft.allowedWakeConditionTypes)),
-      // C14：开关只写布尔值，绝不因为关闭而清空名单。
-      collaborationEnabled: Boolean(profileDraft.collaborationEnabled),
-      // C19：试判配置（前端只做范围收敛，权威校验在 Rust）。
-      triage: normalizeTriage(profileDraft.triage),
-      // C24：单 Agent 模式原样回传（协作开启时由 Rust 忽略）。
-      singleAgentMode: profileDraft.singleAgentMode === "minimal" ? "minimal" : "standard",
-      // C20.5（改写版）：勾选名单**原样回传**（不补默认 4 个、不过滤已下线）——
-      // 迁移由 Rust 强制完成，UI 再做一次过滤/补齐会与后端打架。
-      enabledAgentIds: [...(profileDraft.enabledAgentIds ?? [])],
-      createdAt: profileDraft.createdAt || now,
-      updatedAt: now
-    };
-    if (!profile.enabled || forceSystematicConflict || !isTauriRuntime()) {
-      persistProfile(profile, forceSystematicConflict);
+      mode: normalizePermissionMode(profileDraft.mode),
+      now
+    });
+    // P0：invoke 之前做一次可诊断自检（循环引用/React 节点/BigInt 会给出**键路径**）。
+    const payloadIssue = checkProfileSaveArgs({ profile, forceSystematicConflict: forced });
+    if (payloadIssue) {
+      const detail = describeSerializationIssue(payloadIssue);
+      logger.error("ai_agent_profile_save payload is not serializable", payloadIssue);
+      onNotify({
+        kind: "error",
+        title: t("automation:profileNotSaved"),
+        message: t("automation:profilePayloadNotSerializable", { detail })
+      });
+      return;
+    }
+    if (!profile.enabled || forced || !isTauriRuntime()) {
+      persistProfile(profile, forced);
       return;
     }
     void invokeDesktop<SystematicProfileConflict[]>("ai_agent_profile_systematic_conflicts", {
@@ -4964,7 +5155,7 @@ function AiAutomationPanelComponent({
           setSystematicProfileConflict({ profile, conflicts });
           return;
         }
-        persistProfile(profile, false);
+        persistProfile(profile, forced);
       })
       .catch((nextError) => {
         const message = nextError instanceof Error ? nextError.message : String(nextError);
@@ -5005,6 +5196,28 @@ function AiAutomationPanelComponent({
   }, [deleteProfileById, profileDraft]);
 
   // C19.4：一键强制深度。命令缺失（B-RUST 未落地）时返回 false → UI 降级为"尚不支持"。
+  /** C29.5：一键停机（可选平仓）。命令缺失时提示，不静默。 */
+  const fastlaneKillSwitch = useCallback(async (closePositions: boolean): Promise<boolean> => {
+    if (!profileDraft) return false;
+    if (!isTauriRuntime()) {
+      onNotify({ kind: "warning", title: t("common:desktopOnly"), message: t("automation:workbenchCommandDesktopOnly") });
+      return false;
+    }
+    setBusyAction("fastlane-kill");
+    try {
+      await invokeDesktop<void>("ai_fastlane_kill_switch", { profileId: profileDraft.id, closePositions });
+      onNotify({ kind: "success", title: t("automation:fastlaneKillSwitch"), message: t("automation:fastlaneKillDone") });
+      return true;
+    } catch (nextError) {
+      const message = nextError instanceof Error ? nextError.message : String(nextError);
+      logger.warn("fastlane kill switch failed", { error: message });
+      onNotify({ kind: "error", title: t("automation:fastlaneKillSwitch"), message });
+      return false;
+    } finally {
+      setBusyAction(null);
+    }
+  }, [onNotify, profileDraft, t]);
+
   const forceDeep = useCallback(async (runId: string): Promise<boolean> => {
     if (!isTauriRuntime()) return false;
     try {
@@ -5148,11 +5361,25 @@ function AiAutomationPanelComponent({
   }, [runCommand]);
 
   const selectProfile = useCallback((profile: AiAgentProfile) => {
+    // C29.19：开关关闭（本版本）→ 快判配置窗口的入口撤下。历史快判 Profile 仍然照常出现在
+    // 列表里（用户可自行停用/删除），只是"编辑"不再打开快判配置窗口 —— 并且**明确说明**
+    // 原因（不静默地什么都不发生）。
+    if (!FASTLANE_MODE_ENABLED && profileTypeOf(profile) === "fastlane") {
+      onNotify({
+        kind: "info",
+        title: t("automation:profileFastlaneUnavailableTitle"),
+        message: t("automation:profileFastlaneUnavailableDetail")
+      });
+      return;
+    }
     setSelectedProfileId(profile.id);
     setScopeProfileId(profile.id);
-    setProfileDraft(normalizeProfile({ ...profile, model: resolveProfileModelId(profile.model, aiConfig) }));
+    // C29：刚从这个 Profile 跳去加观察条件 → 恢复原草稿（含未保存的改动）。
+    const resume = fastlaneResumeRef.current === profile.id && profileDraft?.id === profile.id ? profileDraft : null;
+    fastlaneResumeRef.current = null;
+    setProfileDraft(resume ?? normalizeProfile({ ...profile, model: resolveProfileModelId(profile.model, aiConfig) }));
     setProfileEditorOpen(true);
-  }, [aiConfig?.activeModelId, aiConfig?.models]);
+  }, [aiConfig?.activeModelId, aiConfig?.models, onNotify, profileDraft, t]);
 
   // Unsaved edits are detected by comparing the draft with the stored Profile it
   // came from, normalized the same way, so no separate dirty flag can drift.
@@ -5178,6 +5405,45 @@ function AiAutomationPanelComponent({
       onConfirm: () => setProfileEditorOpen(false)
     });
   }, [profileDraftDirty, t]);
+
+  /** C29：选择卡片 —— ai 走原有编辑器；fastlane 新建快判配置草稿并打开独立配置窗口。 */
+  const openProfileTypePicker = useCallback(() => {
+    setProfileTypePickerOpen(true);
+  }, []);
+
+  const createFastlaneProfile = useCallback(() => {
+    // C29.19：开关关闭（本版本）→ 连"新建快判草稿"都不做（卡片已经不渲染，这是第二道闸：
+    // 任何调用方都造不出一个新的快判 Profile）。
+    if (!FASTLANE_MODE_ENABLED) {
+      onNotify({
+        kind: "info",
+        title: t("automation:profileFastlaneUnavailableTitle"),
+        message: t("automation:profileFastlaneUnavailableDetail")
+      });
+      return;
+    }
+    const profile: AiAgentProfile = {
+      ...createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || ""),
+      profileType: "fastlane",
+      // C29.4：默认执行模式 = 副驾驶。必须**显式**写死：createProfile 的默认是 advisor，
+      // 而快判不支持顾问 —— 否则新建的 Profile 一打开配置窗口就会误报"原为顾问模式"。
+      mode: "copilot",
+      // C29.4：触发默认值（复用既有列，创建时写入）。
+      scanIntervalMinutes: FASTLANE_TRIGGER_DEFAULTS.maxSilenceMinutes,
+      minWakeIntervalSeconds: FASTLANE_TRIGGER_DEFAULTS.minWakeIntervalSeconds,
+      maxRunsPerHour: FASTLANE_TRIGGER_DEFAULTS.maxRunsPerHour,
+      fastlaneStylePreset: "long_pullback",
+      fastlaneStyle: fastlaneStylePresetText("long_pullback", i18n.resolvedLanguage || i18n.language || "zh-CN"),
+      fastlaneNotifyPolicy: "on_open_close",
+      fastlaneLlmReasoningEffort: "none"
+    };
+    const desired = t("automation:profileFastlaneDefaultName");
+    profile.name = uniqueProfileName(desired, summary?.profiles ?? []);
+    setProfileTypePickerOpen(false);
+    setSelectedProfileId(profile.id);
+    setProfileDraft(profile);
+    setProfileEditorOpen(true);
+  }, [accounts, aiConfig?.activeModelId, aiConfig?.models, onNotify, summary?.profiles, t]);
 
   const createNewProfile = useCallback(() => {
     const profile = createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || "");
@@ -5396,10 +5662,10 @@ function AiAutomationPanelComponent({
                 <input value={profileQuery} onChange={(event) => setProfileQuery(event.target.value)} placeholder={t("automation:profileSearchPlaceholder")} />
                 {profileQuery ? <button type="button" onClick={() => setProfileQuery("")} title={t("automation:profileClearSearch")}><X size={12} /></button> : null}
               </label>
-              <button className="automation-create-profile" onClick={createNewProfile} title={t("automation:profileNew")}><Plus size={14} />{t("automation:profileCreate")}</button>
+              <button className="automation-create-profile" onClick={openProfileTypePicker} title={t("automation:profileNew")}><Plus size={14} />{t("automation:profileCreate")}</button>
             </div>
             {profiles.length === 0 ? (
-              <SectionState icon={<Bot size={20} />} title={t("automation:noProfiles")} detail={t("automation:profileEmptyDetail")} action={<button className="automation-empty-action" onClick={createNewProfile}><Plus size={14} />{t("automation:profileNew")}</button>} />
+              <SectionState icon={<Bot size={20} />} title={t("automation:noProfiles")} detail={t("automation:profileEmptyDetail")} action={<button className="automation-empty-action" onClick={openProfileTypePicker}><Plus size={14} />{t("automation:profileNew")}</button>} />
             ) : filteredProfiles.length === 0 ? (
               <SectionState icon={<Search size={20} />} title={t("automation:profileNoMatches")} detail={t("automation:profileNoMatchesDetail")} />
             ) : (
@@ -5422,7 +5688,52 @@ function AiAutomationPanelComponent({
                 ))}
               </div>
             )}
-            {profileEditorOpen && profileDraft ? (
+            {profileTypePickerOpen ? (
+              <div className="modal-backdrop automation-profile-type-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) setProfileTypePickerOpen(false); }}>
+                <section className="modal-shell automation-profile-type-modal" role="dialog" aria-modal="true" aria-label={t("automation:profileNewPickerTitle")}>
+                  <header className="modal-head">
+                    <div><strong>{t("automation:profileNewPickerTitle")}</strong></div>
+                    <button className="window-button" type="button" onClick={() => setProfileTypePickerOpen(false)} title={t("common:close")}><X size={16} /></button>
+                  </header>
+                  <div className="automation-profile-type-modal__body">
+                    <ProfileTypeCards
+                      disabled={Boolean(busyAction)}
+                      // C29.19：开关关闭（本版本）→ 选择器只留原有 AI Profile 卡片。
+                      fastlaneEnabled={FASTLANE_MODE_ENABLED}
+                      onPick={(type) => {
+                        setProfileTypePickerOpen(false);
+                        if (type === "fastlane") createFastlaneProfile();
+                        else createNewProfile();
+                      }}
+                    />
+                  </div>
+                </section>
+              </div>
+            ) : null}
+            {FASTLANE_MODE_ENABLED && profileEditorOpen && profileDraft && profileTypeOf(profileDraft) === "fastlane" ? (
+              // C29.5：快判模式走独立配置窗口（不复用 AI Profile 配置界面）。
+              // C29.19：开关关闭（本版本）→ 这个入口整块撤下（组件本体保留在
+              // `src/ui/fastlane/FastlaneConfigDialog.tsx`，下个版本翻开关即恢复）。
+              <FastlaneConfigDialog
+                draft={profileDraft}
+                accounts={accounts}
+                wakeConditions={summary.wakeConditions}
+                models={aiConfig?.models?.map((model) => `${model.name} · ${model.model}`) ?? []}
+                busy={Boolean(busyAction)}
+                onChange={(patch) => setProfileDraft((current) => current ? { ...current, ...patch } : current)}
+                onAddWakeCondition={() => {
+                  // C29：只切标签页，**不关掉草稿**（不丢未保存配置，也不弹"放弃修改"）。
+                  fastlaneResumeRef.current = profileDraft.id;
+                  setProfileEditorOpen(false);
+                  handleTabClick("wake_conditions");
+                }}
+                onDeleteWakeCondition={(item) => { void deleteUserWakeCondition(item); }}
+                onKillSwitch={(closePositions) => { void fastlaneKillSwitch(closePositions); }}
+                onSave={saveProfile}
+                onClose={closeProfileEditor}
+                onDelete={deleteProfile}
+              />
+            ) : profileEditorOpen && profileDraft ? (
               <ProfileEditorDialog
                 title={profileDraft.name || t("automation:profileUnnamed", { defaultValue: profileDraft.id })}
                 dirty={profileDraftDirty}
@@ -5642,6 +5953,8 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
     // C20.6 补充：升级了但未派专家（给理由 → 可复盘）。
     audit: { selfAnalysisReason: "本轮只有行情快照可读，主 Agent 自行完成取数与判断。", selfAnalysisUnjustified: false },
     // C20.6：审计字段样例（权威落点 = run 记录）。
+    // 注意：这里是**历史运行**的样例数据（C31 之前那批流程角色专家的产出），
+    // 不是当前内置编制 —— C31 后内置库只剩对手盘，保留它们只为让运行详情预览有真实形态。
     usedEvidence: [
       { expertId: "desic-data-digest", expertName: "数据汇总", points: ["最新价 65,088.1，4H 低点下移（market.readTicker · 16:04:20Z）", "主动卖出占比 58%，卖方深度 1.7×（market.readOrderBook · 16:04:22Z）"] },
       { expertId: "desic-account-state", expertName: "账户与持仓", points: ["保证金率 412%，空仓无挂单（account.readSnapshot · 16:04:25Z）"] }
@@ -5785,10 +6098,14 @@ const AUTOMATION_PREVIEW_RUN_DETAIL: AiAutomationRunDetail = {
       { type: "position_changed" },
       { type: "order_state_changed", states: ["filled"] },
       { type: "opportunity_state_changed", states: ["approved"] },
-      { type: "timer", intervalMinutes: 60 }
+      { type: "timer", intervalMinutes: 60 },
+      // C33 真机形状：模型**自己发明**的类型 `price`（该写 `price_cross`）→ 条目级丢弃：
+      // 只丢这一条、记原因，其余 7 条照写。旧口径会整份拒绝、7 条一条都不落库。
+      { type: "price", direction: "cross", price: 84986.4 }
     ], expiresAt: 1_784_814_600_000 } }, allowed: true },
-    // 落库真值（地面真值）：createdWakeConditionIds 7 条；全库 active 也是这 7 条。
-    { type: "toolResult", toolCallId: "preview-finish", name: "background.finishRun", result: { ok: true, createdWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], activeWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], nextWakeAt: 1_784_814_600_000 }, summary: "已保存 7 条动态观察条件", ok: true },
+    // 落库真值（地面真值）：createdWakeConditionIds 7 条（= 计划 8 条里合法的那 7 条）；
+    // 全库 active 也是这 7 条。`validation.reasons` = 诊断位（与快判 `llm.validation` 同形）。
+    { type: "toolResult", toolCallId: "preview-finish", name: "background.finishRun", result: { ok: true, createdWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], activeWakeConditionIds: ["wake-preview-1", "wake-preview-2", "wake-preview-3", "wake-preview-4", "wake-preview-5", "wake-preview-6", "wake-preview-7"], wakeConditions: 7, validation: { ok: true, reasons: ["已丢弃 1 条观察条件：price：类型不在 Profile 白名单"] }, nextWakeAt: 1_784_814_600_000 }, summary: "已保存 7 条动态观察条件（丢弃 1 条类型不在白名单）", ok: true },
     { type: "toolCall", toolCallId: "preview-opportunity", name: "tradeOpportunity.create", arguments: {}, allowed: true },
     {
       type: "toolResult",
@@ -5834,31 +6151,32 @@ const AUTOMATION_PREVIEW_SKIPPED_DETAIL: AiAutomationRunDetail = {
     triggerType: "scheduled",
     status: "skipped",
     summary: "试判判定无边际变化，已跳过深度分析并写入下一轮观察条件。",
-    startedAt: Date.now() - 22 * 60_000,
-    finishedAt: Date.now() - 22 * 60_000 + 24_000,
+    startedAt: previewRunTime(22),
+    finishedAt: previewRunTime(22) + 24_000,
     nextWakeAt: Date.now() + 40 * 60_000,
     actionCounts: { opportunity: 0, wake: 1, trade: 0, notification: 0 },
     triage: AUTOMATION_PREVIEW_SKIPPED_TRIAGE,
     tokenUsage: null
   },
   trigger: { type: "scheduled", source: "automation-preview", wakeConditionId: "wake-preview-triage" },
-  profileSnapshot: { id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-market-structure"] },
+  // C20.1（改写版）：Profile 快照里的点名名单只剩可选的对手盘。
+  profileSnapshot: { id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-contrarian-review"] },
   skillVersions: { "trading-philosophy": 3 },
   assistantText: "本轮无边际变化，已写回下一轮观察条件。",
   reasoning: "试判阶段只读了行情、账户与新闻三类只读证据，未发现达到深度分析门槛的变化。",
   initialMarketSnapshot: null,
   finalDecision: null,
   toolEvents: [
-    { type: "toolCall", toolCallId: "preview-triage-ticker", name: "market.readTicker", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 2_000 },
-    { type: "toolResult", toolCallId: "preview-triage-ticker", name: "market.readTicker", result: { last: "64982.4" }, summary: "试判：读取最新行情", ok: true, endedAt: Date.now() - 22 * 60_000 + 2_400 },
-    { type: "toolCall", toolCallId: "preview-triage-account", name: "account.readSnapshot", arguments: {}, allowed: true, startedAt: Date.now() - 22 * 60_000 + 3_000 },
-    { type: "toolResult", toolCallId: "preview-triage-account", name: "account.readSnapshot", result: { marginRatio: "61" }, summary: "试判：账户无变化", ok: true, endedAt: Date.now() - 22 * 60_000 + 3_500 },
-    { type: "toolCall", toolCallId: "preview-triage-triage", name: "background.reportTriage", arguments: { escalate: false, reasons: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.reasons, evidence: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.evidence, nextWakePlan: { mode: "any", conditions: [{ type: "price_change_pct", thresholdPct: "0.8" }], expiresAt: Date.now() + 6 * 3_600_000 } }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 18_000 },
+    { type: "toolCall", toolCallId: "preview-triage-ticker", name: "market.readTicker", arguments: { instId: "BTC-USDT-SWAP" }, allowed: true, startedAt: previewRunTime(22) + 2_000 },
+    { type: "toolResult", toolCallId: "preview-triage-ticker", name: "market.readTicker", result: { last: "64982.4" }, summary: "试判：读取最新行情", ok: true, endedAt: previewRunTime(22) + 2_400 },
+    { type: "toolCall", toolCallId: "preview-triage-account", name: "account.readSnapshot", arguments: {}, allowed: true, startedAt: previewRunTime(22) + 3_000 },
+    { type: "toolResult", toolCallId: "preview-triage-account", name: "account.readSnapshot", result: { marginRatio: "61" }, summary: "试判：账户无变化", ok: true, endedAt: previewRunTime(22) + 3_500 },
+    { type: "toolCall", toolCallId: "preview-triage-triage", name: "background.reportTriage", arguments: { escalate: false, reasons: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.reasons, evidence: AUTOMATION_PREVIEW_SKIPPED_TRIAGE.evidence, nextWakePlan: { mode: "any", conditions: [{ type: "price_change_pct", thresholdPct: "0.8" }], expiresAt: Date.now() + 6 * 3_600_000 } }, allowed: true, startedAt: previewRunTime(22) + 18_000 },
     // C25③（裁决）：实时轨迹的 reportTriage 结果维持**布尔**形状（escalate + skipped），
     // 与 C19 真模型探针验证过的一致；run 记录里的 `triage.verdict` 才是字符串。
-    { type: "toolResult", toolCallId: "preview-triage-triage", name: "background.reportTriage", result: { ok: true, escalate: false, skipped: true, nextWakeAt: Date.now() + 40 * 60_000 }, summary: "试判：建议跳过，已写入下一轮观察条件", ok: true, endedAt: Date.now() - 22 * 60_000 + 19_000 },
-    { type: "toolCall", toolCallId: "preview-triage-finish", name: "background.finishRun", arguments: { summary: "试判判定无边际变化，跳过深度分析。" }, allowed: true, startedAt: Date.now() - 22 * 60_000 + 20_000 },
-    { type: "toolResult", toolCallId: "preview-triage-finish", name: "background.finishRun", result: { ok: true }, summary: "运行收尾", ok: true, endedAt: Date.now() - 22 * 60_000 + 21_000 }
+    { type: "toolResult", toolCallId: "preview-triage-triage", name: "background.reportTriage", result: { ok: true, escalate: false, skipped: true, nextWakeAt: Date.now() + 40 * 60_000 }, summary: "试判：建议跳过，已写入下一轮观察条件", ok: true, endedAt: previewRunTime(22) + 19_000 },
+    { type: "toolCall", toolCallId: "preview-triage-finish", name: "background.finishRun", arguments: { summary: "试判判定无边际变化，跳过深度分析。" }, allowed: true, startedAt: previewRunTime(22) + 20_000 },
+    { type: "toolResult", toolCallId: "preview-triage-finish", name: "background.finishRun", result: { ok: true }, summary: "运行收尾", ok: true, endedAt: previewRunTime(22) + 21_000 }
   ]
 };
 
@@ -5892,8 +6210,8 @@ const AUTOMATION_PREVIEW_FORCED_DETAIL: AiAutomationRunDetail = {
     usedEvidence: [],
     contrarianResolutions: [],
     summaryFormatWarnings: [],
-    startedAt: Date.now() - 8 * 60_000,
-    finishedAt: Date.now() - 8 * 60_000 + 96_000
+    startedAt: previewRunTime(8),
+    finishedAt: previewRunTime(8) + 96_000
   },
   assistantText: "试判建议跳过，但止损距离与挂单变化触发硬升级，已执行深度分析。"
 };
@@ -5906,7 +6224,7 @@ const AUTOMATION_PREVIEW_TRIAGE_RUNS: AiAutomationRun[] = [
     triggerType: "manual",
     status: "running",
     summary: "试判升级，已进入深度分析。",
-    startedAt: Date.now() - 18 * 60_000,
+    startedAt: previewRunTime(18),
     finishedAt: null,
     nextWakeAt: null,
     actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
@@ -5942,7 +6260,7 @@ const AUTOMATION_PREVIEW_TRIAGE_RUNS: AiAutomationRun[] = [
 ];
 
 const AUTOMATION_PREVIEW_TRIAGE_PROFILES: Map<string, AiAgentProfile> = new Map([
-  ["profile-preview-multi-agent", { ...createProfile([], "preview-model"), id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-data-digest"] }]
+  ["profile-preview-multi-agent", { ...createProfile([], "preview-model"), id: "profile-preview-multi-agent", name: "BTC 永续决策台", collaborationEnabled: true, enabledAgentIds: ["desic-contrarian-review"] }]
 ]);
 
 const AUTOMATION_PREVIEW_TRIAGE_DETAILS: Record<string, AiAutomationRunDetail> = {
@@ -5973,6 +6291,294 @@ const AUTOMATION_PREVIEW_MINIMAL_DEEP_TRIAGE: AiRunTriage = {
 };
 
 /** C24 夹具：协作关闭 + 极简模式 —— 不输出正文，summary 一句话，且带"超过 160 字符"警告样例。 */
+/**
+ * P0 回归探针：用**同一条构造路径**（`buildProfileSaveInput`）生成 payload 并尝试序列化。
+ * - `ok`：payload 可 JSON.stringify（这条就是"以后这类回归会在闸门里被抓到"的那条断言）；
+ * - `cycle:<键路径>`：注入了循环引用时，守卫必须能报出**键路径**（证明诊断可用）。
+ */
+/**
+ * P0 回归：真机现场是 `args.forceSystematicConflict.target`（DOM 节点）——
+ * 即"React 点击事件被当成第一个参数传进保存函数"。这里把两个坑都钉住：
+ * 1. 事件对象进 args 时，守卫必须报出**同一个键路径**（诊断可用）；
+ * 2. 预览里点击保存时，回调**必须收到 0 个参数**（防止再次出现 `onClick={onSave}`）。
+ */
+function computeEventArgumentProbe() {
+  const bogus = { profile: { id: "probe" }, forceSystematicConflict: { target: typeof document === "undefined" ? null : document.body, type: "click" } };
+  const issue = checkProfileSaveArgs(bogus as unknown as Record<string, unknown>);
+  return issue ? `${issue.reason}:${issue.path}` : "not-detected";
+}
+
+function computeProfilePayloadProbe(draft: AiAgentProfile) {
+  const args = () => ({
+    profile: buildProfileSaveInput(draft, { name: draft.name || "probe", symbols: draft.symbols ?? [], mode: draft.mode, now: Date.now() }),
+    forceSystematicConflict: false
+  });
+  const payload = args();
+  try {
+    JSON.stringify(payload);
+  } catch (error) {
+    return { status: `stringify-failed:${error instanceof Error ? error.message : String(error)}`, path: "" };
+  }
+  const issue = checkProfileSaveArgs(payload);
+  // 敌对注入：把 draft 自己挂到自己身上，验证守卫报出的键路径。
+  const hostile = payload as unknown as { profile: Record<string, unknown> };
+  hostile.profile.__hostileCycle = hostile.profile;
+  const hostileIssue = checkProfileSaveArgs(hostile as unknown as Record<string, unknown>);
+  return {
+    status: issue ? `issue:${issue.reason}` : "ok",
+    path: hostileIssue ? hostileIssue.path : ""
+  };
+}
+
+/**
+ * 预览夹具的运行时间：**始终落在"今天"（Asia/Shanghai）之内**。
+ *
+ * 运行列表默认按「今天」过滤（`runTimeRange("today")`），而夹具用的是"现在 - N 分钟"的相对时间；
+ * 在 00:00–00:30 之间跑 smoke 时，这些相对时间会落到**昨天**，列表变空 → 断言随机失败。
+ * 这里把基准时间夹到当天 00:01 之后，既保留"刚刚发生"的语义，又不会跨日。
+ */
+function previewRunTime(minutesAgo: number, now = Date.now()) {
+  const dayStart = shanghaiDayStart(now);
+  return Math.max(now - minutesAgo * 60_000, dayStart + 60_000);
+}
+
+/** C29 预览夹具：快判 Profile（配置窗口用）+ 两条快判运行（观望 / 创建机会）。 */
+const AUTOMATION_PREVIEW_FASTLANE_PROFILE: AiAgentProfile = {
+  ...createProfile([], "preview-model"),
+  id: "profile-preview-fastlane",
+  name: "BTC 快判",
+  profileType: "fastlane",
+  mode: "copilot",
+  scanIntervalMinutes: FASTLANE_TRIGGER_DEFAULTS.maxSilenceMinutes,
+  minWakeIntervalSeconds: FASTLANE_TRIGGER_DEFAULTS.minWakeIntervalSeconds,
+  maxRunsPerHour: FASTLANE_TRIGGER_DEFAULTS.maxRunsPerHour,
+  fastlaneStylePreset: "long_pullback",
+  fastlaneStyle: fastlaneStylePresetText("long_pullback", "zh-CN"),
+  fastlaneNotifyPolicy: "on_open_close",
+  fastlaneJevBaseUrl: "https://api.typesafe.ai",
+  fastlaneLlmReasoningEffort: "none"
+};
+
+const AUTOMATION_PREVIEW_FASTLANE_CONDITIONS: AiWakeCondition[] = [
+  { id: "wake-fastlane-1", profileId: AUTOMATION_PREVIEW_FASTLANE_PROFILE.id, source: "user", planMode: "any", conditionType: "price_cross", config: { instId: "BTC-USDT-SWAP", direction: "up", price: "65800" }, status: "active", expiresAt: null, lastTriggeredAt: null, createdAt: Date.now() - 3_600_000 },
+  { id: "wake-fastlane-2", profileId: AUTOMATION_PREVIEW_FASTLANE_PROFILE.id, source: "user", planMode: "any", conditionType: "candle_volume_ratio", config: { instId: "BTC-USDT-SWAP", ratio: "2.0" }, status: "active", expiresAt: null, lastTriggeredAt: null, createdAt: Date.now() - 1_800_000 }
+];
+
+const AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL: AiAutomationRunDetail = {
+  run: {
+    id: "run-preview-fastlane-opportunity",
+    profileId: AUTOMATION_PREVIEW_FASTLANE_PROFILE.id,
+    triggerType: "wake_condition",
+    status: "completed",
+    recordKind: "fastlane",
+    summary: "快判一轮：Jev 判定开多，参数通过校验并创建交易机会。",
+    startedAt: Date.now() - 3 * 60_000,
+    finishedAt: Date.now() - 3 * 60_000 + 2_780,
+    nextWakeAt: Date.now() + 4 * 60_000,
+    actionCounts: { opportunity: 1, wake: 1, trade: 0, notification: 1 },
+    tokenUsage: null,
+    fastlane: {
+      trigger: { source: "condition", conditionType: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "up", price: "65800" } },
+      gate: { ok: true, data: { freshnessMs: 412, bars: { "1m": 240, "1h": 168 } }, anomaly: null, conflict: null, reasons: [] },
+      jev: { action: "open_long", probabilities: { open_long: 0.62, watch: 0.31, open_short: 0.07 }, confidence: 0.68, quality: 3.4, latencyMs: 742 },
+      llm: {
+        latencyMs: 1_180,
+        model: "deepseek-v4-flash",
+        attempts: 1,
+        params: {
+          side: "long",
+          entry: "65842.1",
+          stop: "65410.0",
+          takeProfit: "66760.0",
+          sizeContracts: "0.02",
+          leverage: "10",
+          summary: "1h 结构转多、量能配合，回踩不破 65410 即持有多头，跌破结构位则重估。",
+          reason: "setup_valid",
+          nextWakePlan: {
+            mode: "any",
+            conditions: [
+              { type: "position_changed", params: { instId: "BTC-USDT-SWAP" } },
+              { type: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "below", price: 65410 } },
+              { type: "timer", params: { intervalMinutes: 15 } }
+            ],
+            expiresAtMs: Date.now() + 60 * 60_000
+          }
+        },
+        validation: { ok: true, reasons: [] },
+        opportunityId: "opp-preview-fastlane-1",
+        wakeConditions: 3
+      },
+      action: { kind: "opportunity", opportunityId: "opp-preview-fastlane-1", reason: null },
+      timing: { fetchMs: 48, jevMs: 742, llmMs: 1_180, codeMs: 12, totalMs: 1_982 },
+      tokens: { jevIn: 0, jevOut: 0, llmIn: 1_240, llmOut: 186 }
+    }
+  },
+  trigger: { type: "wake_condition", source: "automation-preview" },
+  profileSnapshot: { id: AUTOMATION_PREVIEW_FASTLANE_PROFILE.id, name: "BTC 快判", profileType: "fastlane" },
+  skillVersions: {},
+  assistantText: "",
+  reasoning: "",
+  initialMarketSnapshot: null,
+  finalDecision: null,
+  toolEvents: []
+};
+
+/**
+ * C29 夹具：空动作的快判轮（既没创建机会，也没写入观察条件）。
+ * 走的是**代码校验拒绝**路径（C29.3：任一不过 → 当轮不创建机会并记为观望 `validation_failed`），
+ * 因此同时钉住：`[data-fastlane-llm-validation="rejected"]`、观望原因文案、以及不误报"本轮只做了分析"。
+ */
+const AUTOMATION_PREVIEW_FASTLANE_IDLE_DETAIL: AiAutomationRunDetail = {
+  ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL,
+  run: {
+    ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL.run,
+    id: "run-preview-fastlane-idle",
+    startedAt: Date.now() - 14 * 60_000,
+    finishedAt: Date.now() - 14 * 60_000 + 1_975,
+    actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
+    summary: "快判一轮：参数未通过代码校验，本轮未创建机会，也未写入观察条件。",
+    fastlane: {
+      trigger: { source: "manual" },
+      gate: { ok: true, data: { freshnessMs: 421 }, anomaly: null, conflict: null, reasons: [] },
+      jev: { action: "open_long", probabilities: { open_long: 0.58, watch: 0.36, open_short: 0.06 }, confidence: 0.66, quality: 3, latencyMs: 720 },
+      llm: {
+        latencyMs: 1_200,
+        model: "deepseek-v4-flash",
+        attempts: 2,
+        params: {
+          side: "long",
+          entry: "65980.0",
+          stop: "65890.0",
+          sizeContracts: "0.03",
+          leverage: "10",
+          summary: "结构位过近，止损无法给到可实现距离，本轮不建仓。",
+          reason: "no_setup",
+          nextWakePlan: {
+            mode: "any",
+            conditions: [
+              { type: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "up", price: 66760 } },
+              { type: "candle_volume_ratio", params: { instId: "BTC-USDT-SWAP", bar: "5m", lookback: 20, ratio: 2 } }
+            ],
+            expiresAtMs: Date.now() + 45 * 60_000
+          }
+        },
+        validation: { ok: false, reasons: ["止损位置不满足可实现口径", "单笔风险 0.82% 超过预算 0.5%"] },
+        opportunityId: null,
+        wakeConditions: 0
+      },
+      action: { kind: "watch", reason: "validation_failed" },
+      timing: { fetchMs: 44, jevMs: 720, llmMs: 1_200, codeMs: 11, totalMs: 1_975 },
+      tokens: { jevIn: 0, jevOut: 0, llmIn: 1_310, llmOut: 204 }
+    }
+  }
+};
+
+/**
+ * C29 夹具：交易时段外（`fastlaneTradingHours` 生效）→ 代码门挡下，当轮观望 `session_closed`。
+ * 判定与参数调用都没有执行，因此 jev/llm 的耗时为 0、不产生观察条件。
+ */
+const AUTOMATION_PREVIEW_FASTLANE_SESSION_DETAIL: AiAutomationRunDetail = {
+  ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL,
+  run: {
+    ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL.run,
+    id: "run-preview-fastlane-session-closed",
+    startedAt: previewRunTime(22),
+    finishedAt: previewRunTime(22) + 126,
+    actionCounts: { opportunity: 0, wake: 0, trade: 0, notification: 0 },
+    summary: "快判一轮：当前不在交易时段，本轮观望并等待时段开启。",
+    fastlane: {
+      trigger: { source: "condition", conditionType: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "down", price: "64200" } },
+      gate: { ok: false, data: { freshnessMs: 402 }, anomaly: null, conflict: null, reasons: ["当前不在交易时段（日盘）"] },
+      jev: { action: "watch", probabilities: { watch: 1 }, confidence: 0, quality: 0, latencyMs: 0 },
+      llm: { latencyMs: 0, params: null, validation: null, opportunityId: null, wakeConditions: 0 },
+      action: { kind: "watch", reason: "session_closed" },
+      timing: { fetchMs: 38, jevMs: 0, llmMs: 0, codeMs: 9, totalMs: 47 },
+      tokens: { jevIn: 0, jevOut: 0, llmIn: 0, llmOut: 0 }
+    }
+  }
+};
+
+/**
+ * C29 + 变更 A（2026-09-21）夹具：**门未过但按降险放行**。
+ *
+ * Jev 判「减仓」（confidence 0.32 < 0.6 门限）→ 质量/置信度门没过，但降险不受这两道门约束
+ * （`gate.appliedTo = open` / `bypassedFor = risk_reduction`），当轮仍然给出减仓参数并创建机会。
+ * 记录里 `intent = "reduce"` 与停机平仓轮的 `"close"` 区分开（两者的动作体 intent 都是 close）。
+ * 这是"不许把 ok 改成 true"的可见性证据：`gate.ok` 保持 false，另用 chip 说明豁免。
+ */
+const AUTOMATION_PREVIEW_FASTLANE_RISK_REDUCTION_DETAIL: AiAutomationRunDetail = {
+  ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL,
+  run: {
+    ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL.run,
+    id: "run-preview-fastlane-risk-reduction",
+    startedAt: Date.now() - 6 * 60_000,
+    finishedAt: Date.now() - 6 * 60_000 + 1_930,
+    actionCounts: { opportunity: 1, wake: 0, trade: 0, notification: 1 },
+    summary: "快判一轮：Jev 判定减仓，门未过但按降险放行，已给出减仓参数。",
+    fastlane: {
+      intent: "reduce",
+      trigger: { source: "condition", conditionType: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "below", price: "64200" } },
+      gate: { ok: false, data: { freshnessMs: 401 }, anomaly: null, conflict: null, reasons: ["low_confidence"], appliedTo: "open", bypassedFor: "risk_reduction" },
+      jev: { action: "reduce", probabilities: { reduce: 0.42, watch: 0.51, close: 0.07 }, confidence: 0.32, quality: 1.24, latencyMs: 870 },
+      llm: {
+        latencyMs: 1_040,
+        model: "deepseek-v4-flash",
+        attempts: 1,
+        params: {
+          order: { intent: "close", direction: "long", order_type: "market", entry_px: null, size: { contracts: 0.04 }, exit_kind: "strategy_exit", confidence: 0.32 },
+          summary: "结构转弱、持仓浮亏仍在扩大，按 Jev 判定先减一半敞口。"
+        },
+        validation: { ok: true, reasons: ["risk_reduction_gate_bypass: 质量/置信度门未过（low_confidence），本轮是降险动作 → 放行；开新仓仍受该门约束"] },
+        opportunityId: "opp-preview-fastlane-reduce",
+        wakeConditions: 0
+      },
+      action: { kind: "opportunity", opportunityId: "opp-preview-fastlane-reduce", reason: null },
+      timing: { fetchMs: 41, jevMs: 870, llmMs: 1_040, codeMs: 10, totalMs: 1_961 },
+      tokens: { jevIn: 4_120, jevOut: 80, llmIn: 1_180, llmOut: 150 }
+    }
+  }
+};
+
+const AUTOMATION_PREVIEW_FASTLANE_WATCH_DETAIL: AiAutomationRunDetail = {
+  ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL,
+  run: {
+    ...AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL.run,
+    id: "run-preview-fastlane-watch",
+    startedAt: Date.now() - 9 * 60_000,
+    finishedAt: Date.now() - 9 * 60_000 + 1_640,
+    actionCounts: { opportunity: 0, wake: 1, trade: 0, notification: 0 },
+    summary: "快判一轮：质量低于下限，本轮观望并写下下一轮观察条件。",
+    fastlane: {
+      trigger: { source: "silence" },
+      gate: { ok: true, data: { freshnessMs: 388 }, anomaly: null, conflict: { timeframeDisagreement: true }, reasons: ["15m 与 1h 方向不一致"] },
+      jev: { action: "watch", probabilities: { watch: 0.88, open_long: 0.09, open_short: 0.03 }, confidence: 0.91, quality: 2.1, latencyMs: 690 },
+      llm: {
+        latencyMs: 940,
+        model: "deepseek-v4-flash",
+        attempts: 1,
+        params: {
+          summary: "BTC 在 1h 区间内震荡、微观盘口缺失，等待突破区间边界或量能异动再评估。",
+          reason: "low_quality",
+          nextWakePlan: {
+            mode: "any",
+            conditions: [
+              { type: "timer", params: { intervalMinutes: 5 } },
+              { type: "price_cross", params: { instId: "BTC-USDT-SWAP", direction: "up", price: 81485.9 } },
+              { type: "price_change_pct", params: { instId: "BTC-USDT-SWAP", direction: "absolute", windowMinutes: 5, thresholdPct: 0.5 } }
+            ],
+            expiresAtMs: Date.now() + 60 * 60_000
+          }
+        },
+        validation: { ok: true, reasons: [] },
+        wakeConditions: 3
+      },
+      action: { kind: "watch", reason: "low_quality" },
+      timing: { fetchMs: 41, jevMs: 690, llmMs: 940, codeMs: 9, totalMs: 1_680 },
+      tokens: { jevIn: 0, jevOut: 0, llmIn: 980, llmOut: 142 }
+    }
+  }
+};
+
 const AUTOMATION_PREVIEW_MINIMAL_DETAIL: AiAutomationRunDetail = {
   run: {
     id: "run-preview-single-agent-minimal",
@@ -6195,14 +6801,30 @@ const AUTOMATION_PREVIEW_POSITION_REVIEW: AiAutomationReview = {
 };
 
 const AUTOMATION_PREVIEW_AGENTS: AiAgentSummary[] = [
-  // C20.1：新默认 4 个流程角色（取数 / 账户 / 分析候选 / 反方）。
-  { id: "desic-data-digest", name: "数据汇总", role: "data_digest", envelope: "standard", skills: ["okx-market-intelligence", "market-radar-research"], requiresAccount: false, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: ["market-radar-research"], missingAccount: false, modified: false, deprecated: false },
-  { id: "desic-account-state", name: "账户与持仓", role: "account_state", envelope: "risk", skills: [], requiresAccount: true, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
-  { id: "desic-decision-proposal", name: "分析/决策候选", role: "decision_proposal", envelope: "standard", skills: [], requiresAccount: false, source: "builtin", version: 1, updatedAt: Date.now() - 86_400_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
-  { id: "desic-contrarian-review", name: "反方审查", role: "contrarian", envelope: "standard", skills: ["okx-market-intelligence"], requiresAccount: false, source: "builtin", version: 2, updatedAt: Date.now() - 43_200_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
+  // C20.1（改写版）：内置库只剩**一个** Agent —— 对手盘视角（counterparty）。主 Agent 自己取数、
+  // 判断、出方案、执行并在成交后持续监控；咨询是可选的，且最多一次（对手盘）。
+  { id: "desic-contrarian-review", name: "对手盘", role: "contrarian", envelope: "standard", skills: ["okx-market-intelligence"], requiresAccount: false, source: "builtin", version: 2, updatedAt: Date.now() - 43_200_000, enabledByProfiles: ["profile-preview-multi-agent"], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
   { id: "custom-mean-reversion-desk", name: "均值回归台", role: "custom", envelope: "standard", skills: [], requiresAccount: false, source: "custom", version: 2, updatedAt: Date.now() - 3_600_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: true, deprecated: false },
   { id: "ai-volatility-regime", name: "波动率制度识别", role: "custom", envelope: "standard", skills: [], requiresAccount: false, source: "ai", version: 1, updatedAt: Date.now() - 600_000, enabledByProfiles: [], missingSkills: [], missingAccount: false, modified: false, deprecated: false },
   // C20.5（改写版）：下线的历史专家不再出现在夹具里（Rust 侧也不返回）——彻底隐藏、文件保留。
+];
+
+/**
+ * C31 收尾：`migrationNotes` 的预览夹具（**逐字取产品真实文案**，不许在这里"改写得更顺"）。
+ *
+ * 文案真源（两条都会真实出现 —— 保存路径把它们**合并去重**，见 `ai_automation.rs` 的
+ * `migration_notes` 合并块）：
+ * - 读取路径：`src-tauri/crates/agent-automation/src/agents.rs` 的 `removed_builtin_agent_notice`
+ *   →「本轮已移除内置 Agent {中文名（id）}：它的职责（取数与事实核对）已归主 Agent 自己完成，咨询改为可选。」
+ * - 保存路径：`src-tauri/src/ai_automation.rs` →「以下 Agent 不在 Agent 库中，已从勾选名单移除：{id、id}」
+ *
+ * id 用**真实已删 id**（C31 删除台账前两条）：`desic-data-digest`（数据汇总）、
+ * `desic-decision-proposal`（分析/决策候选）。夹具只喂给 `ProfileMigrationNotes`，
+ * 不参与任何迁移判定、不写回、不影响产品行为。
+ */
+const AUTOMATION_PREVIEW_PROFILE_MIGRATION_NOTES: string[] = [
+  "本轮已移除内置 Agent 数据汇总（desic-data-digest）、分析/决策候选（desic-decision-proposal）：它的职责（取数与事实核对）已归主 Agent 自己完成，咨询改为可选。",
+  "以下 Agent 不在 Agent 库中，已从勾选名单移除：desic-data-digest、desic-decision-proposal"
 ];
 
 /** C16 预览夹具：创建对话框的 Skill 多选（含一个未激活项）与 AI 对话框的模型选择。 */
@@ -6242,31 +6864,34 @@ const AUTOMATION_PREVIEW_MODELS: AiModelConfigSummary[] = [
 ];
 
 const AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES: Record<string, string> = {
-  "desic-data-digest": "一次读齐行情、衍生品、聪明钱、新闻与历史数据，产出可引用的结构化摘要，不做方向判断。",
-  "desic-account-state": "读取持仓、普通与算法挂单、止损止盈状态、保证金率与可用余量，输出纯客观的状态清单与风险标记。",
-  "desic-decision-proposal": "基于摘要与账户状态产出候选决策：方向、入场、仓位、失效条件与风险回报。",
-  "desic-contrarian-review": "尝试推翻候选决策：逐条反驳并给可检验依据，或明确无法推翻、需补什么证据。",
-  "desic-market-structure": "检查多周期价格结构、趋势、波动、成交、盘口和关键失效位，明确事实与推断。",
-  "desic-order-flow-liquidity": "核对主动成交、挂单深度与流动性变化，判断短周期方向是否被真实成交支持。",
-  "desic-derivatives-positioning": "读取资金费率、持仓量、基差与拥挤度，判断杠杆资金的位置与反转风险。",
-  "desic-account-risk": "检查仓位、保证金、挂单与交易预检，给出可执行的约束条件。",
-  "desic-intelligence-flow": "核对新闻、宏观事件、情绪与资金流，区分事实、推断与时效。",
+  // C20.1（改写版）：内置只剩对手盘；其余条目只服务于仍存在的预览夹具。
+  "desic-contrarian-review": "以对手盘视角尝试推翻当前判断：逐条反驳并给可检验依据，或明确无法推翻、需补什么证据。",
   "custom-mean-reversion-desk": "在震荡区间内评估均值回归机会，明确区间失效条件。",
   "ai-volatility-regime": "识别波动率制度切换，给出制度内外的证据边界。"
 };
 
 export function AutomationPreview() {
   const requestedView = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
-  const initialView = requestedView === "run" || requestedView === "single-run" || requestedView === "refresh" || requestedView === "model-error" || requestedView === "optimization" || requestedView === "reviews" || requestedView === "agents" || requestedView === "triage" || requestedView === "minimal" ? requestedView : "config";
-  const [view, setView] = useState<"config" | "agents" | "run" | "single-run" | "refresh" | "model-error" | "optimization" | "reviews" | "triage" | "minimal">(initialView);
+  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run"];
+  const initialView = requestedView && previewViews.includes(requestedView) ? requestedView : "config";
+  const [view, setView] = useState<string>(initialView);
+  // P0：点击保存时实际传给回调的参数个数（0 = 正确；>=1 说明事件被当参数传进去了）。
+  const [fastlaneSaveArgCount, setFastlaneSaveArgCount] = useState<number | null>(null);
+  // 真机 P0 预览复现：配置窗口开关状态 + 保存后的 toast（复用真实 .notification-stack 样式与层级）。
+  const [previewFastlaneOpen, setPreviewFastlaneOpen] = useState(true);
+  const [previewToast, setPreviewToast] = useState<{ kind: "success" | "error"; title: string; message: string } | null>(null);
+  const eventArgumentProbe = useMemo(() => computeEventArgumentProbe(), []);
+  // P0：保存载荷自检结果（供 smoke/人工断言，不进 UI 视觉）。
+  const payloadProbe = useMemo(
+    () => computeProfilePayloadProbe(AUTOMATION_PREVIEW_FASTLANE_PROFILE),
+    []
+  );
   const singleAgentPreview = view === "single-run";
   const [previewSuggestions, setPreviewSuggestions] = useState<AiOptimizationSuggestion[]>([AUTOMATION_PREVIEW_OPTIMIZATION_SUGGESTION]);
   // 预览态的勾选器：直接用假数据渲染真实组件（勾选制，无方案模板）。
-  // C20.5（改写版）：夹具反映"迁移后的形态" —— 默认 4 个新角色 + 1 个自定义（保留用户自定义专家）。
-  const [previewAgentIds, setPreviewAgentIds] = useState<string[]>(() => [
-    ...AUTOMATION_PREVIEW_AGENTS.slice(0, 4).map((agent) => agent.id),
-    "custom-mean-reversion-desk"
-  ]);
+  // C20.1（改写版）：夹具反映"迁移后的形态" —— 内置只有一个可选的对手盘（默认已勾选 = 允许咨询），
+  // 外加 2 个非内置专家（保留用户自定义 / AI 创建）。
+  const [previewAgentIds, setPreviewAgentIds] = useState<string[]>(() => ["desic-contrarian-review"]);
   // 预览夹具默认开启协作：勾选/清空/全选断言依赖可交互。
   const [previewCollaboration, setPreviewCollaboration] = useState(true);
   // C19：试判设置夹具（默认 enforce + 契约默认参数）。
@@ -6274,6 +6899,14 @@ export function AutomationPreview() {
   // C24：两个独立夹具状态 —— config 视图默认「标准」（契约默认值），minimal 视图固定演示「极简」。
   const [previewSingleAgentMode, setPreviewSingleAgentMode] = useState<AiSingleAgentMode>("standard");
   const [previewMinimalAgentMode, setPreviewMinimalAgentMode] = useState<AiSingleAgentMode>("minimal");
+  // C29：卡片选择页与快判配置窗口的夹具状态。
+  // `?view=fastlane-config&legacy=1` → 以历史 `advisor` 快判 Profile 起步，覆盖老数据兜底路径。
+  const [previewFastlaneDraft, setPreviewFastlaneDraft] = useState<AiAgentProfile>(() => (
+    typeof window !== "undefined" && new URLSearchParams(window.location.search).get("legacy") === "1"
+      ? { ...AUTOMATION_PREVIEW_FASTLANE_PROFILE, mode: "advisor" }
+      : AUTOMATION_PREVIEW_FASTLANE_PROFILE
+  ));
+  const [previewFastlaneConditions, setPreviewFastlaneConditions] = useState<AiWakeCondition[]>(AUTOMATION_PREVIEW_FASTLANE_CONDITIONS);
   // 全局慢放系数（`?slow=N`）：只放大夹具定时器，默认 1 与现状完全一致。
   const previewSlow = useMemo(() => readPreviewSlowFactor(), []);
   const updatePreviewSuggestion = async (id: string, status: string) => {
@@ -6282,7 +6915,17 @@ export function AutomationPreview() {
   };
 
   return (
-    <main className="automation-preview-page" data-preview-view={view} data-preview-slow={previewSlow}>
+    <main
+      className="automation-preview-page"
+      data-preview-view={view}
+      data-preview-slow={previewSlow}
+      data-profile-payload-serializable={payloadProbe.status}
+      data-profile-payload-cycle-path={payloadProbe.path}
+      data-profile-payload-event-argument={eventArgumentProbe}
+      data-profile-payload-save-arg-count={fastlaneSaveArgCount ?? undefined}
+      // C29.19：预览页根节点暴露**真实的**开关值（smoke 断言按它分叉，而不是让脚本去猜）。
+      data-fastlane-mode-enabled={FASTLANE_MODE_ENABLED ? "true" : "false"}
+    >
       <div className="ai-automation-panel automation-preview-panel">
         <header className="automation-preview-head">
           <div><Workflow size={17} /><span><strong>{view === "agents" ? automationText("agents", "Agent library", "Agent 库") : singleAgentPreview ? automationText("singleAgentProfile", "Single-Agent Profile", "单 Agent Profile") : automationText("profileConfigurationPreview", "Profile configuration", "Profile 配置")}</strong><small>{automationText("visualRegressionPreview", "Visual regression preview", "视觉回归预览")}</small></span></div>
@@ -6292,12 +6935,60 @@ export function AutomationPreview() {
             <button type="button" role="tab" aria-selected={view === "agents"} className={view === "agents" ? "active" : ""} onClick={() => setView("agents")}>{automationText("agents", "Agent library", "Agent 库")}</button>
             <button type="button" role="tab" aria-selected={view === "triage"} className={view === "triage" ? "active" : ""} onClick={() => setView("triage")}>{automationText("triageTitle", "Triage", "试判")}</button>
             <button type="button" role="tab" aria-selected={view === "minimal"} className={view === "minimal" ? "active" : ""} onClick={() => setView("minimal")}>{automationText("singleAgentMode", "Single-Agent mode", "单 Agent 模式")}</button>
+            <button type="button" role="tab" aria-selected={view === "new-profile"} className={view === "new-profile" ? "active" : ""} onClick={() => setView("new-profile")}>{automationText("profileNewPickerTitle", "New Profile", "新建 Profile")}</button>
+            <button type="button" role="tab" aria-selected={view === "fastlane-config"} className={view === "fastlane-config" ? "active" : ""} onClick={() => setView("fastlane-config")}>{automationText("fastlaneConfigTitle", "Fastlane configuration", "快判配置")}</button>
+            <button type="button" role="tab" aria-selected={view === "fastlane-run"} className={view === "fastlane-run" ? "active" : ""} onClick={() => setView("fastlane-run")}>{automationText("fastlaneRunTitle", "Fastlane round", "快判记录")}</button>
             <button type="button" role="tab" aria-selected={view === "reviews"} className={view === "reviews" ? "active" : ""} onClick={() => setView("reviews")}>{automationText("reviews", "Reviews", "复盘")}</button>
             <button type="button" role="tab" aria-selected={view === "optimization"} className={view === "optimization" ? "active" : ""} onClick={() => setView("optimization")}>{automationText("suggestions", "Optimization suggestions", "优化建议")}</button>
           </nav>
         </header>
         <section className="automation-preview-content">
-          {view === "minimal" ? (
+          {view === "new-profile" ? (
+            <div className="automation-preview-fastlane">
+              <ProfileTypeCards onPick={() => undefined} />
+            </div>
+          ) : view === "fastlane-config" ? (
+            <div className="automation-preview-fastlane">
+              {previewFastlaneOpen ? <FastlaneConfigDialog
+                draft={previewFastlaneDraft}
+                accounts={[]}
+                wakeConditions={previewFastlaneConditions}
+                models={["Preview Reasoner · preview-reasoner"]}
+                busy={false}
+                onChange={(patch) => setPreviewFastlaneDraft((current) => ({ ...current, ...patch }))}
+                onAddWakeCondition={() => undefined}
+                onDeleteWakeCondition={(item) => setPreviewFastlaneConditions((current) => current.filter((condition) => condition.id !== item.id))}
+                onKillSwitch={() => {
+                  // 不关窗口就能弹通知 —— 用来钉住"配置窗口打开期间 toast 仍完整可见"（真机 P0 ①）。
+                  setPreviewToast({ kind: "success", title: automationText("fastlaneKillSwitch", "Stop now", "立即停机"), message: previewFastlaneDraft.name || "fastlane" });
+                }}
+                onSave={(...args: unknown[]) => {
+                  setFastlaneSaveArgCount(args.length);
+                  // 与真实路径一致：保存成功 → 自动关闭窗口 + 弹一条成功通知。
+                  setPreviewFastlaneOpen(false);
+                  setPreviewToast({ kind: "success", title: automationText("profileSaved", "Profile saved", "Profile 已保存"), message: previewFastlaneDraft.name || "fastlane" });
+                }}
+                onClose={() => setPreviewFastlaneOpen(false)}
+                onDelete={() => setPreviewFastlaneOpen(false)}
+              /> : <p className="fastlane-empty" data-fastlane-config-closed>{automationText("profileSaved", "Profile saved", "Profile 已保存")}</p>}
+              {previewToast ? (
+                <div className="notification-stack" aria-live="polite" data-toast-layer="above-modal" data-preview-toast={previewToast.kind}>
+                  <article className={clsx("notification-card", previewToast.kind)}>
+                    <div className="notification-icon"><CheckCircle2 size={16} /></div>
+                    <div><strong>{previewToast.title}</strong><span>{previewToast.message}</span></div>
+                  </article>
+                </div>
+              ) : null}
+            </div>
+          ) : view === "fastlane-run" ? (
+            <div className="automation-preview-fastlane">
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_FASTLANE_OPPORTUNITY_DETAIL} /></div>
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_FASTLANE_RISK_REDUCTION_DETAIL} /></div>
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_FASTLANE_WATCH_DETAIL} /></div>
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_FASTLANE_IDLE_DETAIL} /></div>
+              <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_FASTLANE_SESSION_DETAIL} /></div>
+            </div>
+          ) : view === "minimal" ? (
             <div className="automation-preview-minimal">
               {/* C24：协作关闭 + 极简模式的 Profile 设置夹具。 */}
               <ProfileAgentSelector
@@ -6452,10 +7143,14 @@ export function AutomationPreview() {
                 <div className="automation-editor-head">
                   <div className="automation-editor-title">
                     <span className="automation-editor-mark"><Bot size={16} /></span>
-                    <div data-i18n-skip><strong>BTC 永续决策台</strong><span>自定义团队 · 三路取证 · 一路反方审查</span></div>
+                    <div data-i18n-skip><strong>BTC 永续决策台</strong><span>主 Agent 独立决策 · 需要时咨询对手盘</span></div>
                   </div>
                   <span className="automation-preview-readonly"><ShieldCheck size={12} />{automationText("subagentsReadOnly", "Subagents are read-only", "子 Agent 只读")}</span>
                 </div>
+                {/* C31 收尾：迁移提示演示夹具 —— 位置与产品一致（在"参与 Agent"之前）。
+                    渲染走产品同一条路径（`ProfileMigrationNotes`），预览页因此能回归
+                    「剔除已删 id → migrationNotes → 可见提示」这条链路，而不是只靠真机数据。 */}
+                <ProfileMigrationNotes notes={AUTOMATION_PREVIEW_PROFILE_MIGRATION_NOTES} />
                 <ProfileAgentSelector
                   agents={AUTOMATION_PREVIEW_AGENTS}
                   responsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}

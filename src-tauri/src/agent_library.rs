@@ -10,14 +10,14 @@
 
 use super::*;
 use desic_agent_automation::{
-    agent_draft_from_role_json, agent_draft_few_shot_messages, agent_draft_system_prompt,
+    agent_draft_few_shot_messages, agent_draft_from_role_json, agent_draft_system_prompt,
     build_agent_draft_user_prompt, is_builtin_agent_id, normalize_enabled_agent_ids,
     parse_agent_markdown, plan_legacy_agent_migration, render_agent_markdown,
     render_agent_skeleton, resolve_agent_envelope, unique_custom_agent_id,
-    validate_agent_definition, validate_agent_file, validate_agent_source_for_save, AiAgentDefinition,
-    AiAgentDetail, AiAgentDraftOutcome, AiAgentSummary, LegacyAgentMigrationPlan,
-    AGENT_MAX_FILE_BYTES, AGENT_NAME_MAX_CHARS, AGENT_SOURCE_AI, AGENT_SOURCE_BUILTIN,
-    AGENT_SOURCE_CUSTOM,
+    validate_agent_definition, validate_agent_file, validate_agent_source_for_save,
+    AiAgentDefinition, AiAgentDetail, AiAgentDraftOutcome, AiAgentSummary,
+    LegacyAgentMigrationPlan, AGENT_MAX_FILE_BYTES, AGENT_NAME_MAX_CHARS, AGENT_SOURCE_AI,
+    AGENT_SOURCE_BUILTIN, AGENT_SOURCE_CUSTOM,
 };
 use std::collections::HashSet;
 use std::path::PathBuf;
@@ -117,10 +117,12 @@ pub(crate) fn agent_library_definitions() -> Vec<AiAgentDefinition> {
 /// 内置 Agent 文件是否被本地改动（C8 出口条件 4）。
 /// 判据：文件内容与内置渲染不一致（忽略行尾换行差异）。
 fn agent_is_modified(entry: &AgentLibraryEntry) -> bool {
-    if entry.definition.source != AGENT_SOURCE_BUILTIN && !is_builtin_agent_id(&entry.definition.id) {
+    if entry.definition.source != AGENT_SOURCE_BUILTIN && !is_builtin_agent_id(&entry.definition.id)
+    {
         return false;
     }
-    let Some(expected) = desic_agent_automation::builtin_agent_markdown(&entry.definition.id) else {
+    let Some(expected) = desic_agent_automation::builtin_agent_markdown(&entry.definition.id)
+    else {
         return false;
     };
     entry.content.trim_end() != expected.trim_end()
@@ -193,8 +195,8 @@ fn sort_summaries(summaries: &mut [AiAgentSummary]) {
     });
 }
 
-/// C20.5：库列表**默认不返回已下线（`deprecated`）条目**。`include_deprecated` 只给
-/// 将来可能出现的"显示已下线"视图用（默认关闭，当前没有 UI 入口）。
+/// C31：库列表**默认只含仍在内置表里的条目**（当前 = 对手盘一个）+ 用户自建 / AI 创建。
+/// `include_deprecated` 只给将来可能出现的"显示已下线"视图用（默认关闭，当前没有 UI 入口）。
 pub(crate) fn agent_library_summaries(
     app: &tauri::AppHandle,
 ) -> Result<Vec<AiAgentSummary>, String> {
@@ -397,10 +399,11 @@ pub(crate) fn agent_runtime_payload(definition: &AiAgentDefinition) -> Value {
     })
 }
 
-/// 载荷 + 被忽略的已下线 id（C20.5：运行绝不派发，但要如实回报，不静默）。
+/// 载荷 + 被忽略的已下线 id（C31：运行绝不派发，但要如实回报，不静默）。
 ///
 /// 返回 `(agents, ignored_deprecated)`；`ignored_deprecated` 只包含"库中存在但已下线"
-/// 的勾选项，未知 id 由 Profile 读取/保存路径负责提示（C3）。
+/// 的勾选项（内置表当前没有停用条目，故恒为空）。C31 删除的内置 id 连定义都不存在，
+/// 因此走"未知 id"路径，由 Profile 读取 / 保存路径提示（`migrationNotes` / 丢弃清单）。
 pub(crate) fn collaboration_payload_agents_with_ignored(
     collaboration_enabled: bool,
     enabled_ids: &[String],
@@ -409,7 +412,8 @@ pub(crate) fn collaboration_payload_agents_with_ignored(
         return (Vec::new(), Vec::new());
     }
     let definitions = agent_library_definitions();
-    let selection = desic_agent_automation::resolve_enabled_agent_selection(enabled_ids, &definitions);
+    let selection =
+        desic_agent_automation::resolve_enabled_agent_selection(enabled_ids, &definitions);
     // 顺序 = 用户勾选顺序（C4：不做数量截断、不排序、不打分）。
     let agents = selection
         .enabled
@@ -418,7 +422,6 @@ pub(crate) fn collaboration_payload_agents_with_ignored(
         .collect::<Vec<_>>();
     (agents, selection.ignored_deprecated)
 }
-
 
 /// 勾选名单里的 id 是否都存在于库中（保存时用于提示丢弃项）。
 pub(crate) fn split_known_enabled_agent_ids(ids: &[String]) -> (Vec<String>, Vec<String>) {
@@ -446,11 +449,12 @@ pub(crate) fn split_known_enabled_agent_ids(ids: &[String]) -> (Vec<String>, Vec
 
 // ===== 命令（契约 C3）=====
 
-/// C20.5：库列表默认**不返回已下线（`deprecated`）条目** —— 旧 7 个历史角色彻底隐藏，
-/// 文件仍保留在 `agents/<id>/AGENTS.md`（把内置表的 `deprecated` 去掉即可恢复）。
+/// C31：库列表默认**只返回仍在内置表里的条目**（当前 = 对手盘一个）+
+/// 用户自建 / AI 创建的条目。历史上那 10 个内置 Agent 的定义与落盘资产都已删除
+/// （台账见 `desic_agent_automation::REMOVED_BUILTIN_AGENTS`），既不在列表里，也不会被派发。
 ///
 /// `includeDeprecated` 是显式开关、**默认关闭**；当前没有 UI 入口，只为将来可能的
-/// "显示已下线"视图预留（调用方必须自己opt-in，不会误开）。
+/// "显示已下线"视图预留（调用方必须自己 opt-in，不会误开）。
 #[tauri::command]
 pub(crate) fn ai_agents_list(
     app: tauri::AppHandle,
@@ -460,10 +464,7 @@ pub(crate) fn ai_agents_list(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_read(
-    app: tauri::AppHandle,
-    id: String,
-) -> Result<AiAgentDetail, String> {
+pub(crate) fn ai_agent_read(app: tauri::AppHandle, id: String) -> Result<AiAgentDetail, String> {
     let summary = summary_for_id(&app, &id)?;
     let entry = load_agent_library_entry(&id)?;
     Ok(AiAgentDetail {
@@ -510,8 +511,7 @@ pub(crate) fn ai_agent_duplicate(
     definition.source = AGENT_SOURCE_CUSTOM.to_string();
     definition.version = 1;
     definition.created_at = now_ms();
-    definition.summary =
-        desic_agent_automation::summarize_agent_body(&definition.body);
+    definition.summary = desic_agent_automation::summarize_agent_body(&definition.body);
     validate_agent_definition(&definition)?;
     let markdown = render_agent_markdown(&definition, &definition.body);
     crate::storage_config::write_agent_bundle(&new_id, &markdown, true)?;
@@ -526,8 +526,7 @@ pub(crate) fn ai_agent_duplicate(
 #[tauri::command]
 pub(crate) fn ai_agent_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let entry = load_agent_library_entry(&id)?;
-    if is_builtin_agent_id(&entry.definition.id)
-        || entry.definition.source == AGENT_SOURCE_BUILTIN
+    if is_builtin_agent_id(&entry.definition.id) || entry.definition.source == AGENT_SOURCE_BUILTIN
     {
         return Err(format!("内置 Agent 不可删除：{}", entry.definition.id));
     }
@@ -616,10 +615,7 @@ pub(crate) fn resolve_agent_draft_model(
                 if available.is_empty() {
                     format!("未找到模型 {selector}：尚未配置任何 AI 模型")
                 } else {
-                    format!(
-                        "未找到模型 {selector}；可用模型：{}",
-                        available.join("、")
-                    )
+                    format!("未找到模型 {selector}；可用模型：{}", available.join("、"))
                 }
             })?,
     };
@@ -721,7 +717,9 @@ pub(crate) async fn ai_agent_generate_cancel(
         )
         .await
         {
-            crate::boot_log(&format!("cancelAgentDraft 通知侧车失败（本地已取消）: {error}"));
+            crate::boot_log(&format!(
+                "cancelAgentDraft 通知侧车失败（本地已取消）: {error}"
+            ));
         }
     }
     if cancelled {
@@ -763,7 +761,11 @@ pub(crate) async fn request_agent_draft_from_sidecar(
 ) -> Result<String, String> {
     let request_id = resolve_agent_draft_request_id(
         requested_request_id,
-        format!("agent-draft-{}-{}", now_ms(), crate::ai_automation::unique_suffix()),
+        format!(
+            "agent-draft-{}-{}",
+            now_ms(),
+            crate::ai_automation::unique_suffix()
+        ),
     );
     let (result_tx, result_rx) = oneshot::channel();
     runtime
@@ -788,8 +790,9 @@ pub(crate) async fn request_agent_draft_from_sidecar(
 
 // ===== 工具宿主（契约 C6）=====
 
-/// `agent.list` 工具（C20.5：与 `ai_agents_list` 同口径 —— **不含已下线条目**）。
-/// 主 Agent 因此看不到旧角色，也就不会去点名它们。
+/// `agent.list` 工具（C31：与 `ai_agents_list` 同口径 —— 默认只含仍在内置表里的条目）。
+/// 主 Agent 因此看不到已删除的角色，也就不会去点名它们；`ignoredDeprecatedAgents`
+/// 字段保留（当前恒为空），给将来恢复"停用角色"机制留出口。
 pub(crate) fn tool_agent_list(app: &tauri::AppHandle) -> Result<Value, String> {
     Ok(json!({
         "agents": agent_library_summaries(app)?,
@@ -850,7 +853,10 @@ pub(crate) fn normalize_agent_create_input(input: &Value) -> Result<AgentCreateI
         return Err("agent.create 需要 responsibility".to_string());
     }
     let role = desic_agent_automation::normalize_agent_create_role(
-        input.get("role").and_then(Value::as_str).unwrap_or("custom"),
+        input
+            .get("role")
+            .and_then(Value::as_str)
+            .unwrap_or("custom"),
     );
 
     let skills = input
@@ -899,11 +905,7 @@ pub(crate) fn normalize_agent_create_input(input: &Value) -> Result<AgentCreateI
             let normalized = if path.contains('/') {
                 path
             } else {
-                format!(
-                    "{}/{}",
-                    desic_agent_automation::AGENT_REFERENCES_DIR,
-                    path
-                )
+                format!("{}/{}", desic_agent_automation::AGENT_REFERENCES_DIR, path)
             };
             let content = reference
                 .get("content")
@@ -1013,7 +1015,13 @@ mod tests {
     use desic_agent_automation::AiProfileSubAgent;
 
     /// 旧 Profile / 旧模板成员（C15：其中的 `scopes` 会被丢弃，不写入新文件）。
-    fn legacy_agent(id: &str, name: &str, role: &str, responsibility: &str, scopes: &[&str]) -> AiProfileSubAgent {
+    fn legacy_agent(
+        id: &str,
+        name: &str,
+        role: &str,
+        responsibility: &str,
+        scopes: &[&str],
+    ) -> AiProfileSubAgent {
         AiProfileSubAgent {
             id: id.to_string(),
             name: name.to_string(),
@@ -1040,8 +1048,9 @@ mod tests {
 
     #[test]
     fn agent_library_payload_shape_matches_contract_c4() {
-        let definition = desic_agent_automation::builtin_agent_definition("desic-market-structure")
-            .expect("builtin");
+        let definition =
+            desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                .expect("builtin");
         let payload = agent_runtime_payload(&definition);
         let object = payload.as_object().expect("object");
         let mut keys = object.keys().cloned().collect::<Vec<_>>();
@@ -1062,17 +1071,21 @@ mod tests {
             ],
             "C15：载荷不再有 scopes"
         );
-        assert!(payload["body"].as_str().unwrap_or_default().contains("## 职责"));
+        assert!(payload["body"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("## 职责"));
         assert_eq!(
             payload["summary"].as_str().unwrap_or_default(),
-            "检查多周期价格结构、趋势、波动、成交、盘口和关键失效位，明确事实与推断。"
+            "从对手盘视角挑战本轮方案，逐条给出可检验的反证，或明确说明无法推翻、还需要补哪些证据。"
         );
     }
 
     #[test]
     fn agent_library_summary_serialization_uses_camel_case() {
-        let definition = desic_agent_automation::builtin_agent_definition("desic-account-risk")
-            .expect("builtin");
+        let definition =
+            desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                .expect("builtin");
         let summary = definition.to_summary(1_700_000_000_000);
         let value = serde_json::to_value(&summary).expect("serialize");
         assert!(value.get("requiresAccount").is_some());
@@ -1083,14 +1096,17 @@ mod tests {
         assert!(value.get("updatedAt").is_some());
         // C15：列表契约不再有 `scopes`，改为一次性 `scopesDeprecated` 提示。
         assert!(value.get("scopes").is_none(), "C15 起不再序列化 scopes");
-        assert_eq!(value.get("scopesDeprecated"), Some(&serde_json::json!(false)));
+        assert_eq!(
+            value.get("scopesDeprecated"),
+            Some(&serde_json::json!(false))
+        );
         let detail = AiAgentDetail {
             summary,
             content: "content".to_string(),
         };
         let detail_value = serde_json::to_value(&detail).expect("serialize detail");
         assert_eq!(detail_value["content"], "content");
-        assert_eq!(detail_value["id"], "desic-account-risk");
+        assert_eq!(detail_value["id"], "desic-contrarian-review");
     }
 
     /// C8 出口条件 6：老 profile（off/auto/custom）+ 老模板条目迁移后勾选名单与
@@ -1105,19 +1121,19 @@ mod tests {
         assert!(off.enabled_agent_ids.is_empty());
         assert!(off.library_agents.is_empty());
 
-        // auto：8 个内置 id，不需要库文件。
-        let auto = plan_agent_migration_from_legacy(Some("auto"), Vec::new(), Vec::new(), None, now);
-        // C20：auto（旧全池）迁移到**新默认启用集**（4 个流程角色）；
-        // 历史 7 个角色文件保留、可手动勾选，但不再默认启用。
+        // auto：C31 起**不再自动启用任何 Agent**（默认启用集已删除），也不建文件。
+        let auto =
+            plan_agent_migration_from_legacy(Some("auto"), Vec::new(), Vec::new(), None, now);
         assert_eq!(
             auto.enabled_agent_ids,
             desic_agent_automation::default_enabled_agent_ids()
         );
-        assert_eq!(auto.enabled_agent_ids.len(), 4);
-        assert!(auto.enabled_agent_ids.iter().all(|id| id.starts_with("desic-")));
+        assert!(auto.enabled_agent_ids.is_empty(), "不再塞回默认角色");
         assert!(auto.library_agents.is_empty());
+        assert!(auto.notes.iter().any(|note| note.contains("不再自动启用")));
 
-        // custom + 旧模板条目：旧 auto-* id 走 alias；自定义条目落库文件。
+        // custom + 旧模板条目：C31 删除清单里的旧 `auto-*` id **不迁移、不落盘**
+        // （否则会以自定义 Agent 的身份静默复活），自定义条目照常落库文件。
         let custom = plan_agent_migration_from_legacy(
             Some("custom"),
             vec![
@@ -1146,36 +1162,44 @@ mod tests {
             Some("旧模板指令"),
             now,
         );
-        assert!(custom
-            .enabled_agent_ids
-            .contains(&"desic-market-structure".to_string()));
+        assert!(
+            !custom
+                .enabled_agent_ids
+                .contains(&"desic-market-structure".to_string()),
+            "已删除的内置 id 不得回到勾选名单：{:?}",
+            custom.enabled_agent_ids
+        );
         assert!(custom
             .enabled_agent_ids
             .contains(&MIGRATION_TEST_IDS[0].to_string()));
         assert!(custom
             .enabled_agent_ids
             .contains(&MIGRATION_TEST_IDS[1].to_string()));
-        assert_eq!(custom.library_agents.len(), 2);
+        assert_eq!(custom.library_agents.len(), 2, "只迁移两个自定义条目");
         assert!(custom
             .notes
             .iter()
             .any(|note| note.contains("instructions")));
+        assert!(custom
+            .notes
+            .iter()
+            .any(|note| note.contains("desic-market-structure") && note.contains("已删除")));
 
         let (first_written, _) = persist_migrated_agent_bundles(&custom);
         assert_eq!(first_written, 2, "首次迁移应写入 2 个库文件");
         let (second_written, second_notes) = persist_migrated_agent_bundles(&custom);
         assert_eq!(second_written, 0, "二次迁移必须幂等（不重复建文件）");
-        assert!(second_notes
-            .iter()
-            .all(|note| !note.contains("失败")));
+        assert!(second_notes.iter().all(|note| !note.contains("失败")));
 
-        // 勾选名单在库中可解析（自定义条目与内置条目都能被 normalize 保留）。
+        // 勾选名单在库中可解析（自定义条目与唯一保留的内置条目都能被 normalize 保留）。
         let definitions = agent_library_definitions();
-        let normalized =
-            desic_agent_automation::normalize_enabled_agent_ids(&custom.enabled_agent_ids, &definitions);
+        let normalized = desic_agent_automation::normalize_enabled_agent_ids(
+            &custom.enabled_agent_ids,
+            &definitions,
+        );
         assert!(normalized.contains(&MIGRATION_TEST_IDS[0].to_string()));
         assert!(normalized.contains(&MIGRATION_TEST_IDS[1].to_string()));
-        assert!(normalized.contains(&"desic-market-structure".to_string()));
+        assert!(!normalized.contains(&"desic-market-structure".to_string()));
 
         // 落盘文件可解析、source=custom、正文取自迁移骨架。
         let migrated = load_agent_library_entry(MIGRATION_TEST_IDS[0]).expect("migrated entry");
@@ -1190,10 +1214,10 @@ mod tests {
     fn agent_library_save_rules_reject_builtin_and_id_mismatch() {
         // 内置 id 一律拒绝（C8 出口条件 7）。
         let builtin_markdown =
-            desic_agent_automation::builtin_agent_markdown("desic-market-structure")
+            desic_agent_automation::builtin_agent_markdown("desic-contrarian-review")
                 .expect("builtin markdown");
         assert!(save_agent_markdown(None, &builtin_markdown).is_err());
-        assert!(save_agent_markdown(Some("desic-market-structure"), &builtin_markdown).is_err());
+        assert!(save_agent_markdown(Some("desic-contrarian-review"), &builtin_markdown).is_err());
 
         // id 与入参不一致 → 报错（C8 出口条件 7）。
         let custom = "---\nid: agent-library-save-test\nname: 保存测试\nrole: custom\nscopes: [market]\n---\n## 职责\n保存测试职责。\n";
@@ -1234,8 +1258,9 @@ mod tests {
         assert!(error.contains("envelope"), "{error}");
 
         // C15：scopes 入参被忽略（含白名单外的值也不报错），不再进入库定义。
-        let normalized = normalize_agent_create_input(&base(json!({ "scopes": ["shell", "market"] })))
-            .expect("scopes input is ignored");
+        let normalized =
+            normalize_agent_create_input(&base(json!({ "scopes": ["shell", "market"] })))
+                .expect("scopes input is ignored");
         assert!(normalized.warnings.is_empty());
         assert!(normalized.skills.is_empty());
 
@@ -1325,7 +1350,9 @@ mod tests {
             .expect("profile enabled ids");
         assert_eq!(enabled, "[]", "模板入库不得改动任何 Profile 的勾选名单");
         let scheme_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM ai_agent_schemes", [], |row| row.get(0))
+            .query_row("SELECT COUNT(*) FROM ai_agent_schemes", [], |row| {
+                row.get(0)
+            })
             .expect("scheme rows");
         assert_eq!(scheme_rows, 1, "旧模板行必须保留（回滚需要）");
 
@@ -1356,27 +1383,31 @@ mod tests {
     fn agent_library_collaboration_toggle_gates_payload_without_clearing_selection() {
         use rusqlite::Connection;
 
-        // C20.5：默认启用集（4 个流程角色）里的前 3 个 —— 已下线的历史角色不再派发。
-        let payload_ids = vec![
-            "desic-data-digest".to_string(),
-            "desic-account-state".to_string(),
-            "desic-decision-proposal".to_string(),
-        ];
+        // C31：库里的候选只剩对手盘（可选咨询），其余靠用户自建。
+        let payload_ids = vec!["desic-contrarian-review".to_string()];
 
         // ① 关闭：载荷为空（闸门），勾选列表原样保留。
-        assert!(collaboration_payload_agents_with_ignored(false, &payload_ids).0.is_empty());
-        // ② 开启：载荷含 3 个（库中存在且未下线的内置条目）。
+        assert!(
+            collaboration_payload_agents_with_ignored(false, &payload_ids)
+                .0
+                .is_empty()
+        );
+        // ② 开启：载荷含 1 个（库中存在且未下线的内置条目）。
         let payload = collaboration_payload_agents_with_ignored(true, &payload_ids).0;
-        assert_eq!(payload.len(), 3, "开启后必须按勾选名单注入");
-        assert_eq!(payload[0].id, "desic-data-digest");
-        assert_eq!(payload[2].id, "desic-decision-proposal");
+        assert_eq!(payload.len(), 1, "开启后必须按勾选名单注入");
+        assert_eq!(payload[0].id, "desic-contrarian-review");
         assert!(payload.iter().all(|agent| !agent.body.is_empty()));
         // 开启但名单为空 → 仍是空载荷（"已开启但未勾选"，行为等价独立工作）。
-        assert!(collaboration_payload_agents_with_ignored(true, &[]).0.is_empty());
+        assert!(collaboration_payload_agents_with_ignored(true, &[])
+            .0
+            .is_empty());
         // 未勾选/重复 id 仍在闸门内去重。
         let deduped = collaboration_payload_agents_with_ignored(
             true,
-            &["desic-data-digest".to_string(), "desic-data-digest".to_string()],
+            &[
+                "desic-contrarian-review".to_string(),
+                "desic-contrarian-review".to_string(),
+            ],
         )
         .0;
         assert_eq!(deduped.len(), 1);
@@ -1404,8 +1435,9 @@ mod tests {
             2_000,
         )
         .expect("insert profile row");
-        let loaded = crate::ai_automation::load_profile_for_test(&conn, "profile-collaboration-test")
-            .expect("load profile");
+        let loaded =
+            crate::ai_automation::load_profile_for_test(&conn, "profile-collaboration-test")
+                .expect("load profile");
         assert!(!loaded.collaboration_enabled, "关闭状态必须被持久化");
         assert_eq!(loaded.enabled_agent_ids, payload_ids, "关开关不得清空勾选");
         assert!(collaboration_payload_agents_with_ignored(
@@ -1445,7 +1477,7 @@ mod tests {
             collaboration_payload_agents_with_ignored(true, &reloaded.enabled_agent_ids)
                 .0
                 .len(),
-            3
+            1
         );
 
         // C14 兼容：旧前端不带 `collaborationEnabled` 字段时保留库中现值（不得静默关闭）。
@@ -1485,12 +1517,11 @@ mod tests {
         assert_eq!(after_legacy_save.enabled_agent_ids, payload_ids);
     }
 
-    /// C20.5：库列表**默认不含已下线（deprecated）条目**；`includeDeprecated` 是显式开关
-    /// （默认关闭、当前无 UI 入口）；把内置表的 `deprecated` 去掉即恢复可见。
+    /// C31 断言①：**库列表只剩一个内置 Agent**（对手盘），没有停用分组、没有隐藏条目，
+    /// `includeDeprecated` 开关也永远是同一份列表（内置表里已无 `deprecated` 条目）。
     #[test]
-    fn agent_library_hides_deprecated_builtins_by_default() {
+    fn agent_library_lists_only_the_counterparty_builtin() {
         let mut all = Vec::new();
-        let mut deprecated_definition = None;
         for id in desic_agent_automation::builtin_agent_ids() {
             // 文件里没有 `deprecated` 字段（正文是唯一真相）：解析结果是 false，
             // 由内置表标注后才与 builtin_agent_definition 一致。
@@ -1501,77 +1532,104 @@ mod tests {
             desic_agent_automation::apply_builtin_deprecation(&mut parsed);
             let spec = desic_agent_automation::builtin_agent_definition(&id).expect("definition");
             assert_eq!(parsed.deprecated, spec.deprecated, "{id}");
-            if parsed.deprecated {
-                deprecated_definition = Some(parsed.clone());
-            }
+            assert!(!parsed.deprecated, "{id}: C31 后内置表里没有停用条目");
             all.push(parsed.to_summary(0));
         }
-        assert_eq!(all.len(), 11, "内置文件全部保留（含历史角色）");
-        // 默认视图：只剩当前 4 个流程角色。
-        let default_view = visible_summaries(all.clone(), false);
-        assert_eq!(default_view.len(), 4, "默认只显示当前角色");
-        assert!(default_view.iter().all(|summary| !summary.deprecated));
-        assert!(default_view.iter().all(|summary| summary.id != "desic-smart-money"));
-        assert!(default_view
-            .iter()
-            .any(|summary| summary.id == "desic-contrarian-review"));
-        // 显式开关（默认关闭）：将来做"显示已下线"视图时用得上。
-        assert_eq!(visible_summaries(all, true).len(), 11);
+        assert_eq!(all.len(), 1, "内置库只剩对手盘一个");
+        assert_eq!(all[0].id, "desic-contrarian-review");
+        assert_eq!(all[0].name, "对手盘");
 
-        // 恢复路径：`deprecated` 置回 false → 立刻回到默认可见集。
-        let mut restored = deprecated_definition.expect("deprecated builtin");
-        assert!(desic_agent_automation::is_deprecated_agent_id(&restored.id));
-        restored.deprecated = false;
-        let restored_id = restored.id.clone();
-        let view = visible_summaries(vec![restored.to_summary(0)], false);
-        assert_eq!(view.len(), 1);
-        assert_eq!(view[0].id, restored_id);
+        let default_view = visible_summaries(all.clone(), false);
+        assert_eq!(default_view.len(), 1);
+        assert_eq!(
+            visible_summaries(all, true).len(),
+            1,
+            "显式开关也看不到停用条目"
+        );
+
+        // 删除清单里的 id 一个都不在库里（既不显示、也读不到正文）。
+        for removed in desic_agent_automation::REMOVED_BUILTIN_AGENTS.iter() {
+            assert!(desic_agent_automation::builtin_agent_markdown(removed.id).is_none());
+            assert!(!default_view.iter().any(|summary| summary.id == removed.id));
+        }
+
+        // 恢复链路仍在：往库里加一条 `deprecated` 定义 → 默认视图立刻隐藏它。
+        let mut legacy =
+            desic_agent_automation::builtin_agent_definition("desic-contrarian-review")
+                .expect("definition");
+        legacy.id = "custom-legacy-role".to_string();
+        legacy.deprecated = true;
+        assert_eq!(
+            visible_summaries(vec![legacy.to_summary(0)], false).len(),
+            0
+        );
+        legacy.deprecated = false;
+        assert_eq!(
+            visible_summaries(vec![legacy.to_summary(0)], false).len(),
+            1
+        );
     }
 
-    /// C20.5：已下线的勾选**绝不进载荷**，但出现在丢弃清单里（不静默）；未知 id 不算
-    /// "已下线"（它走 C3 的"不存在"路径，由 Profile 读取/保存提示）。
+    /// C31：删除清单里的勾选**绝不进载荷**，且必须出现在丢弃清单（不静默）——
+    /// 库里没有这些定义，所以走 `dropped_unknown`，并由 Profile 读取路径写成
+    /// `migrationNotes` 给用户看。
     #[test]
-    fn collaboration_payload_drops_deprecated_agents_and_reports_them() {
+    fn collaboration_payload_drops_removed_agents_and_reports_them() {
         let ids = vec![
             "desic-data-digest".to_string(),
-            "desic-smart-money".to_string(),
+            "desic-contrarian-review".to_string(),
             "desic-historical-analogy".to_string(),
             "not-in-library".to_string(),
         ];
         let (agents, ignored) = collaboration_payload_agents_with_ignored(true, &ids);
         assert_eq!(agents.len(), 1, "{agents:?}");
-        assert_eq!(agents[0].id, "desic-data-digest");
-        assert_eq!(
-            ignored,
-            vec![
-                "desic-smart-money".to_string(),
-                "desic-historical-analogy".to_string()
-            ]
+        assert_eq!(agents[0].id, "desic-contrarian-review");
+        assert!(
+            ignored.is_empty(),
+            "C31 后没有 deprecated 条目：{ignored:?}"
         );
         // 关闭闸门 → 空载荷（且不报"已忽略"，因为压根没构建）。
         let (off_agents, off_ignored) = collaboration_payload_agents_with_ignored(false, &ids);
         assert!(off_agents.is_empty());
         assert!(off_ignored.is_empty());
-        // 纯函数级恢复路径：同一条定义把 deprecated 置回 false → 立刻可派。
+
+        // 纯函数级：删除项进 dropped_unknown（可见），与"库中不存在"同一路径。
         let definitions = agent_library_definitions();
-        let mut restored = definitions.clone();
-        for agent in restored.iter_mut() {
-            if agent.id == "desic-smart-money" {
-                agent.deprecated = false;
-            }
-        }
-        let selection = desic_agent_automation::resolve_enabled_agent_selection(&ids, &restored);
-        assert!(selection.enabled.contains(&"desic-smart-money".to_string()));
-        assert!(selection
-            .ignored_deprecated
-            .contains(&"desic-historical-analogy".to_string()));
-        assert_eq!(selection.dropped_unknown, vec!["not-in-library".to_string()]);
-        // 未恢复时：已下线进 ignored_deprecated，而不是 enabled。
         let selection = desic_agent_automation::resolve_enabled_agent_selection(&ids, &definitions);
-        assert!(!selection.enabled.contains(&"desic-smart-money".to_string()));
-        assert!(selection
-            .ignored_deprecated
-            .contains(&"desic-smart-money".to_string()));
+        assert_eq!(
+            selection.enabled,
+            vec!["desic-contrarian-review".to_string()]
+        );
+        assert!(selection.ignored_deprecated.is_empty());
+        assert_eq!(
+            selection.dropped_unknown,
+            vec![
+                "desic-data-digest".to_string(),
+                "desic-historical-analogy".to_string(),
+                "not-in-library".to_string()
+            ]
+        );
+        // 只删不加的迁移（`drop_removed_agent_ids`）与删除台账口径一致。
+        let (kept, dropped) = desic_agent_automation::drop_removed_agent_ids(&ids);
+        assert_eq!(
+            kept,
+            vec![
+                "desic-contrarian-review".to_string(),
+                "not-in-library".to_string()
+            ],
+            "未知 id 保留（清理是保存路径的事）"
+        );
+        assert_eq!(
+            dropped,
+            vec![
+                "desic-data-digest".to_string(),
+                "desic-historical-analogy".to_string()
+            ]
+        );
+        let notice =
+            desic_agent_automation::removed_builtin_agent_notice(&dropped).expect("visible notice");
+        assert!(notice.contains("数据汇总"), "{notice}");
+        assert!(notice.contains("历史类比"), "{notice}");
     }
 
     /// C14 ③ 迁移三态：旧 off（无 scheme）→ false；auto → true + 8 内置；custom/scheme → true。
@@ -1600,24 +1658,24 @@ mod tests {
 
         insert("profile-c14-off", "off", None, "[]");
         insert("profile-c14-auto", "auto", None, "[]");
-        insert("profile-c14-custom", "custom", None, &serde_json::json!([
-            {
-                "id": "agent-library-c14-custom-test",
-                "name": "自定义成员",
-                "role": "custom",
-                "responsibility": "自定义职责。",
-                "scopes": ["market"],
-                "required": false,
-                "enabled": true
-            }
-        ])
-        .to_string());
         insert(
-            "profile-c14-scheme",
-            "off",
-            Some("scheme-c14-test"),
-            "[]",
+            "profile-c14-custom",
+            "custom",
+            None,
+            &serde_json::json!([
+                {
+                    "id": "agent-library-c14-custom-test",
+                    "name": "自定义成员",
+                    "role": "custom",
+                    "responsibility": "自定义职责。",
+                    "scopes": ["market"],
+                    "required": false,
+                    "enabled": true
+                }
+            ])
+            .to_string(),
         );
+        insert("profile-c14-scheme", "off", Some("scheme-c14-test"), "[]");
         conn.execute(
             "INSERT INTO ai_agent_schemes(id,name,description,agents_json,created_at,updated_at)
              VALUES('scheme-c14-test','模板','',?1,1,1)",
@@ -1641,33 +1699,34 @@ mod tests {
         assert!(!off.collaboration_enabled, "旧 off（无 scheme）→ false");
         assert!(off.enabled_agent_ids.is_empty());
 
+        // C31：旧 auto（全池）**不再自动启用任何 Agent**（默认启用集已删除），
+        // 但旧行为确实是"开了协作" → 开关仍迁移为 true，名单为空。
         let auto = crate::ai_automation::load_profile_for_test(&conn, "profile-c14-auto")
             .expect("load auto profile");
         assert!(auto.collaboration_enabled, "旧 auto → true");
-        assert_eq!(
-            auto.enabled_agent_ids,
-            desic_agent_automation::default_enabled_agent_ids(),
-            "C20：auto 迁移到默认启用集（4 个流程角色）"
+        assert!(
+            auto.enabled_agent_ids.is_empty(),
+            "C31：不再塞回任何默认角色，实际 {:?}",
+            auto.enabled_agent_ids
         );
-        assert_eq!(auto.enabled_agent_ids.len(), 4);
-        assert!(auto.enabled_agent_ids.iter().all(|id| id.starts_with("desic-")));
 
         let custom = crate::ai_automation::load_profile_for_test(&conn, "profile-c14-custom")
             .expect("load custom profile");
         assert!(custom.collaboration_enabled, "旧 custom → true");
-        // C20.5（强制迁移版）：旧 custom Profile 里一个默认角色都没有 → 补齐新 4 个，
-        // 自定义成员原样保留（顺序：默认 4 在前、其余保留原相对顺序）。
-        let mut expected = desic_agent_automation::default_enabled_agent_ids();
-        expected.push("agent-library-c14-custom-test".to_string());
-        assert_eq!(custom.enabled_agent_ids, expected);
+        // C31：自定义成员原样保留，**不再补齐默认角色**。
+        assert_eq!(
+            custom.enabled_agent_ids,
+            vec!["agent-library-c14-custom-test".to_string()]
+        );
 
         let scheme = crate::ai_automation::load_profile_for_test(&conn, "profile-c14-scheme")
             .expect("load scheme profile");
         assert!(scheme.collaboration_enabled, "引用 scheme → true");
-        // 同上：旧 scheme 成员 + 补齐的新 4 个角色。
-        let mut expected = desic_agent_automation::default_enabled_agent_ids();
-        expected.push("agent-library-c14-scheme-test".to_string());
-        assert_eq!(scheme.enabled_agent_ids, expected);
+        // 同上：只有旧 scheme 成员，没有补进来的角色。
+        assert_eq!(
+            scheme.enabled_agent_ids,
+            vec!["agent-library-c14-scheme-test".to_string()]
+        );
 
         // 已有勾选的旧行（列刚加入时的一次性回填）也视为开启：
         // 用"列尚不存在"的旧库跑一次真实 migrate，验证回填语句本身生效。
@@ -1713,17 +1772,24 @@ mod tests {
     /// 与当前内置渲染一致 → false。安装层"不覆盖 + 清单可升级"由下一条用例覆盖。
     #[test]
     fn agent_library_reports_locally_modified_builtin() {
-        let id = "desic-market-structure";
-        let expected = desic_agent_automation::builtin_agent_markdown(id).expect("builtin markdown");
+        let id = "desic-contrarian-review";
+        let expected =
+            desic_agent_automation::builtin_agent_markdown(id).expect("builtin markdown");
         let entry = |content: String| AgentLibraryEntry {
             definition: desic_agent_automation::parse_agent_markdown(&content).expect("parse"),
             content,
             path: std::path::PathBuf::new(),
             updated_at: 0,
         };
-        assert!(!agent_is_modified(&entry(expected.clone())), "未被改动的内置文件不是 modified");
+        assert!(
+            !agent_is_modified(&entry(expected.clone())),
+            "未被改动的内置文件不是 modified"
+        );
         let mutated = format!("{expected}\n<!-- local edit -->\n");
-        assert!(agent_is_modified(&entry(mutated)), "被改动的内置文件必须是 modified");
+        assert!(
+            agent_is_modified(&entry(mutated)),
+            "被改动的内置文件必须是 modified"
+        );
 
         // 非内置来源永不参与该判定。
         let custom_markdown =
@@ -1748,7 +1814,7 @@ mod tests {
             std::process::id(),
             crate::ai_automation::unique_suffix()
         ));
-        let id = "desic-smart-money";
+        let id = "desic-contrarian-review";
         let current = desic_agent_automation::builtin_agent_markdown(id).expect("builtin markdown");
         let read = |id: &str| {
             std::fs::read_to_string(root.join(id).join(desic_agent_automation::AGENT_FILE_NAME))
@@ -1765,7 +1831,7 @@ mod tests {
         };
         cleanup();
 
-        // ① 全新目录 + 空清单 → 8 个文件全部新建，清单写入 8 条指纹。
+        // ① 全新目录 + 空清单 → 全部内置文件新建（C31 起只有 1 个），清单写入对应指纹。
         let first = crate::storage_config::install_builtin_agent_bundles_with_manifest(
             &root,
             Some(&HashMap::new()),
@@ -1778,7 +1844,10 @@ mod tests {
         );
         assert_eq!((first.upgraded, first.kept), (0, 0));
         let manifest = first.manifest.clone().expect("manifest produced");
-        assert_eq!(manifest.len(), desic_agent_automation::builtin_agent_ids().len());
+        assert_eq!(
+            manifest.len(),
+            desic_agent_automation::builtin_agent_ids().len()
+        );
         assert_eq!(read(id), current);
         crate::ai_automation::save_builtin_agent_fingerprint_manifest_for_test(&conn, &manifest)
             .expect("persist manifest");
@@ -1812,7 +1881,8 @@ mod tests {
         }));
 
         // ③ 清单证明"我们上次装过这份"→ 盘上换成旧版内容后安装 → 升级为新版。
-        let stale = "---\nid: desic-smart-money\nname: Smart Money\nrole: smart_money\n---\n更旧正文。\n";
+        let stale =
+            "---\nid: desic-contrarian-review\nname: 对手盘\nrole: contrarian\n---\n更旧正文。\n";
         write(id, stale);
         let mut downgraded = stored.clone();
         downgraded.insert(
@@ -1836,22 +1906,81 @@ mod tests {
                 .map(String::as_str),
             Some(crate::storage_config::sha256_bytes(current.as_bytes()).as_str())
         );
-        // 未改动的其它内置文件保持原样。
-        assert_eq!(
-            read("desic-market-structure"),
-            desic_agent_automation::builtin_agent_markdown("desic-market-structure")
-                .expect("markdown")
-        );
+        // 删除清单里的落盘目录会被清理（同一次安装里完成），不再残留。
+        assert!(!root.join("desic-data-digest").exists());
 
         // ④ 清单缺失 + 已存在但内容不同 → 不覆盖 + 标记"清单缺失"；无清单不回写清单。
         write(id, stale);
         let missing =
             crate::storage_config::install_builtin_agent_bundles_with_manifest(&root, None)
                 .expect("install without manifest");
-        assert!(missing.manifest_missing, "清单缺失必须被标记（调用方据此记一行日志）");
+        assert!(
+            missing.manifest_missing,
+            "清单缺失必须被标记（调用方据此记一行日志）"
+        );
         assert_eq!(missing.kept, 1);
         assert_eq!(read(id), stale, "清单缺失时不得猜测覆盖");
         assert!(missing.manifest.is_none(), "无清单路径不回写清单");
+        assert_eq!(missing.kept_ids, vec![id.to_string()], "保留必须逐 id 留痕");
+
+        // ⑤ C31 静默 bug 的回归现场：落盘正文比基线旧（= 真机上的 `3ebcbd70…`）、
+        // 清单里**没有**这个 id —— 旧实现既不升级也不记日志。现在必须：
+        // 认出它是我们出厂过的旧版 → 升级 → 把 id 写进 upgraded_ids（调用方据此打日志）。
+        // 真机上那份"永不升级"的旧正文（现场证据：
+        // artifacts/agent-role-alignment/evidence-20260921194211/disk-desic-contrarian-review.AGENTS.md，
+        // sha256 = 3ebcbd70…），逐字节内联在测试里。
+        let stale_baseline = r#"---
+id: desic-contrarian-review
+name: 反方审查
+role: contrarian
+envelope: standard
+skills: []
+requiresAccount: false
+source: builtin
+version: 1
+createdAt: 1760000000000
+---
+## 身份
+只读「反方审查」专家，仅读证据、不决策、不下单。职责是找反证，不是复核或复述正向结论。
+
+## 职责
+主动寻找反证、过期数据、缺失证据、拥挤交易和相反市场路径，不重复正向结论。范围是与当前结论相反的价格结构、相反的流动与资金证据、已被新快照或新事件推翻的旧证据，以及过热或拥挤的反向解读。
+
+## 方法与证据要求
+先确认被审查的结论及其证据时间，再逐条找反证：是否用了过期数据、是否只取单一时点、是否存在相反周期或相反方向的证据、是否有更简单的替代解释。每条反证附工具记录 ID 与观测时间，并说明它削弱的是哪条结论、削弱到什么程度；盘口证据记录快照标识。事实、推断、冲突、缺口分开写；证据足够即返回报告，不遍历全部工具；确无有效反证时明确写「未找到反证」，不把同意的话重写一遍。
+
+## 输出偏好
+Markdown 或散文自由撰写：先列反证与对应结论，再列未找到反证的部分与剩余缺口。可附结构化摘要 JSON，但不是必须。不写要求主 Agent 执行动作的语句。
+
+## 数据缺口处理
+缺少被审查结论的原文或时间范围时先说明审查范围，只对可核对的证据做反证。证据不足时写「无法形成反证」，不编造反例。无账户数据时不做仓位与保证金反证，仅从市场与情报侧审查。
+"#;
+        assert_eq!(
+            crate::storage_config::sha256_bytes(stale_baseline.as_bytes()),
+            "3ebcbd709b852472b30762789ce6792174f66ac6f8c13530c9b1e4c1334f0733",
+            "夹具必须逐字节等于真机上那份永不升级的旧正文"
+        );
+        write(id, stale_baseline);
+        let empty_manifest = HashMap::new();
+        let healer = crate::storage_config::install_builtin_agent_bundles_with_manifest(
+            &root,
+            Some(&empty_manifest),
+        )
+        .expect("install heals stale baseline");
+        assert_eq!(healer.upgraded, 1, "出厂过的旧正文必须被升级");
+        assert_eq!(healer.upgraded_ids, vec![id.to_string()]);
+        assert_eq!(healer.kept_ids, Vec::<String>::new());
+        assert_eq!(read(id), current, "升级后必须等于当前基线");
+        assert_eq!(
+            healer
+                .manifest
+                .expect("manifest")
+                .get(id)
+                .cloned()
+                .expect("fingerprint recorded"),
+            crate::storage_config::sha256_bytes(current.as_bytes()),
+            "指纹清单必须与实际资产一致"
+        );
 
         cleanup();
     }
@@ -1911,8 +2040,12 @@ mod tests {
         assert_eq!(payload["type"], "generateAgentDraft");
         assert_eq!(payload["description"], "看 BTC 盘口");
         assert_eq!(payload["name"], "盘口");
-        assert!(payload["prompts"]["system"].as_str().is_some_and(|v| !v.is_empty()));
-        assert!(payload["prompts"]["messages"].as_array().is_some_and(|v| v.len() == 4));
+        assert!(payload["prompts"]["system"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()));
+        assert!(payload["prompts"]["messages"]
+            .as_array()
+            .is_some_and(|v| v.len() == 4));
 
         // ② 传合法 model → 该模型（含 provider/baseUrl/apiKey）。
         let resolved = resolve_agent_draft_model(&config, Some("model-b")).expect("selected model");
@@ -1923,7 +2056,10 @@ mod tests {
         assert_eq!(payload["config"]["baseUrl"], "https://api.example.invalid");
         assert_eq!(payload["config"]["apiKey"], "sk-local-b");
         assert_eq!(payload["model"], "model-b-model");
-        assert!(payload["name"].is_null(), "未指定名称时下发 null，由侧车/提示词自行命名");
+        assert!(
+            payload["name"].is_null(),
+            "未指定名称时下发 null，由侧车/提示词自行命名"
+        );
 
         // ③ 传非法 id → Err 并列出可用模型（不静默回落）。
         let error = resolve_agent_draft_model(&config, Some("model-missing"))
@@ -1947,7 +2083,10 @@ mod tests {
         ] {
             assert!(config_object.contains_key(key), "config 缺少 {key}");
         }
-        assert!(!payload["config"]["apiKey"].as_str().unwrap_or_default().is_empty());
+        assert!(!payload["config"]["apiKey"]
+            .as_str()
+            .unwrap_or_default()
+            .is_empty());
 
         // 没有任何模型 → 明确 Err。
         let empty: AiConfig = serde_json::from_value(serde_json::json!({
@@ -1995,14 +2134,16 @@ mod tests {
         }
         // 瞬时：不进检查点（与 C11 的 AgentProgressNotice 同款）。
         assert!(!ai_event_triggers_checkpoint(&event));
-        assert!(!ai_event_triggers_checkpoint(&AiEvent::AgentProgressNotice {
-            session_id: "s".to_string(),
-            agent_id: "a".to_string(),
-            agent_name: "A".to_string(),
-            elapsed_ms: 1,
-            silent_ms: 1,
-            phase: "consult".to_string(),
-        }));
+        assert!(!ai_event_triggers_checkpoint(
+            &AiEvent::AgentProgressNotice {
+                session_id: "s".to_string(),
+                agent_id: "a".to_string(),
+                agent_name: "A".to_string(),
+                elapsed_ms: 1,
+                silent_ms: 1,
+                phase: "consult".to_string(),
+            }
+        ));
         // 对照组：真正会落盘的事件仍为 true。
         assert!(ai_event_triggers_checkpoint(&AiEvent::Delta {
             session_id: "s".to_string(),
@@ -2117,8 +2258,7 @@ mod tests {
 
         // 合法：原样使用，并进入请求载荷（等待方与侧车回包都用同一 id）。
         assert!(is_valid_agent_draft_request_id(ui_id));
-        let resolved =
-            resolve_agent_draft_request_id(Some(ui_id), generated.clone());
+        let resolved = resolve_agent_draft_request_id(Some(ui_id), generated.clone());
         assert_eq!(resolved, ui_id);
         let config: desic_storage_config::AiConfig = serde_json::from_value(serde_json::json!({
             "provider": "openai-compatible",
@@ -2147,7 +2287,7 @@ mod tests {
             Some(""),
             Some("   "),
             Some("a"),
-            Some("短id短"),                  // 非 ASCII
+            Some("短id短"), // 非 ASCII
             Some("has/slash-123456"),
             Some("有中文的requestid1234"),
             Some("space in id 12345"),
@@ -2158,7 +2298,11 @@ mod tests {
             assert_eq!(resolved, generated, "非法 id {invalid:?} 必须被忽略");
         }
         assert!(is_valid_agent_draft_request_id("A-Za-z0-9_-"));
-        assert_eq!(is_valid_agent_draft_request_id("1234567"), false, "长度下限 8");
+        assert_eq!(
+            is_valid_agent_draft_request_id("1234567"),
+            false,
+            "长度下限 8"
+        );
         assert_eq!(
             is_valid_agent_draft_request_id(&"a".repeat(64)),
             true,
@@ -2169,19 +2313,23 @@ mod tests {
 
     #[test]
     fn agent_library_split_reports_dropped_ids() {
+        // C31：删除清单里的 id 与 `auto-*` 旧形态都不再是库里已知 id → 全部计为丢弃项
+        // （保存路径据此提示用户），唯一保留的内置 id 照常通过。
         let (known, dropped) = split_known_enabled_agent_ids(&[
+            "desic-contrarian-review".to_string(),
             "desic-market-structure".to_string(),
             "auto-smart-money".to_string(),
             "not-in-library".to_string(),
-            "desic-market-structure".to_string(),
+            "desic-contrarian-review".to_string(),
         ]);
+        assert_eq!(known, vec!["desic-contrarian-review".to_string()]);
         assert_eq!(
-            known,
+            dropped,
             vec![
                 "desic-market-structure".to_string(),
-                "desic-smart-money".to_string()
+                "auto-smart-money".to_string(),
+                "not-in-library".to_string()
             ]
         );
-        assert_eq!(dropped, vec!["not-in-library".to_string()]);
     }
 }

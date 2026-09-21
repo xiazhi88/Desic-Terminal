@@ -555,9 +555,21 @@ const REQUIRED_AI_SKILL_ID_SET = new Set<string>(REQUIRED_AI_SKILL_IDS);
 const REQUIRED_ENABLED_AI_SKILL_IDS: string[] = REQUIRED_AI_SKILL_IDS.filter(
   (id) => id !== "desic-core-operations"
 );
+/**
+ * C31：**内置固定规范**（不可编辑）—— 只放"不这样写就跑不起来"的东西：系统工具的名称与
+ * 用途、动作参数的必要字段与单位、报告必须回给系统的必要信息、权限与失败处理。
+ * 越少越好；凡是"建议 / 偏好 / 理念"一律不进来。
+ *
+ * 其余 Skill（含 `trading-philosophy` 这个默认的理念载体）都是**可编辑**的：
+ * 用户能改能扩，改过之后系统升级不覆盖（"未改动的旧副本才升级"的指纹判定在 Rust
+ * `merge_ai_skill_definitions`）。Rust 侧同一份清单 = `NON_EDITABLE_SKILL_IDS`。
+ */
+const NON_EDITABLE_SKILL_IDS = ["desic-core-operations"] as const;
+const NON_EDITABLE_SKILL_ID_SET = new Set<string>(NON_EDITABLE_SKILL_IDS);
+const FIXED_POLICY_SKILL_ID = NON_EDITABLE_SKILL_IDS[0];
 
 function aiSkillConstraintLabel(skillId: string, t?: UiTranslation): string {
-  if (skillId === "desic-core-operations") return t ? t("settings:fixedPolicy") : "固定规范";
+  if (NON_EDITABLE_SKILL_ID_SET.has(skillId)) return t ? t("settings:fixedPolicy") : "固定规范";
   if (skillId === "trading-philosophy") return t ? t("settings:requiredCustomizable") : "必需 · 可定制";
   if (REQUIRED_AI_SKILL_ID_SET.has(skillId)) return t ? t("settings:required") : "必需";
   return "";
@@ -6163,8 +6175,9 @@ function NotificationStack({
   const { t } = useTranslation("common");
   if (notifications.length === 0) return null;
   const localizedNotifications = notifications.map((notification) => localizeAppNotification(notification, t));
+  // P0：层级契约 —— toast 永远在所有 modal 之上（CSS `.notification-stack` z-index 460）。
   return (
-    <div className="notification-stack" aria-live="polite">
+    <div className="notification-stack" aria-live="polite" data-toast-layer="above-modal">
       {localizedNotifications.map((notification) => (
         <article
           className={clsx("notification-card", notification.kind, notification.action && "clickable")}
@@ -6557,11 +6570,6 @@ function AiSettingsPane({
   const [busy, setBusy] = useState(false);
   const [initialized, setInitialized] = useState(false);
   const [setupOpen, setSetupOpen] = useState(false);
-  // TypeSafe / Jev 快速判定（判定层，可选）。Key 明文只落本机敏感配置，这里只回掩码。
-  const [typesafeEnabled, setTypesafeEnabled] = useState(false);
-  const [typesafeApiKey, setTypesafeApiKey] = useState("");
-  const [typesafeModel, setTypesafeModel] = useState("jev-1.13.0");
-  const [typesafeBaseUrl, setTypesafeBaseUrl] = useState("https://api.typesafe.ai");
 
   const applySummary = useCallback((config: AiConfigSummary) => {
     const configuredModels = config.models.map((item) => ({
@@ -6580,10 +6588,6 @@ function AiSettingsPane({
     setActiveModelId(config.activeModelId || nextModels[0]?.id || "");
     setSelectedModelId((current) => nextModels.some((item) => item.id === current) ? current : config.activeModelId || nextModels[0]?.id || "");
     setStatus(config.configured ? t("settings:currentModel", { model: config.model }) : t("settings:aiNotConfigured"));
-    setTypesafeEnabled(Boolean(config.typesafeEnabled));
-    setTypesafeModel(config.typesafeModel || "jev-1.13.0");
-    setTypesafeBaseUrl(config.typesafeBaseUrl || "https://api.typesafe.ai");
-    setTypesafeApiKey("");
     setInitialized(true);
   }, []);
 
@@ -6685,11 +6689,7 @@ function AiSettingsPane({
         systemPrompt: summary?.systemPrompt,
         customRules: summary?.customRules,
         enabledSkills: withRequiredAiSkills(summary?.enabledSkills),
-        skillDefinitions: summary?.skillDefinitions,
-        typesafeEnabled,
-        typesafeApiKey: typesafeApiKey.trim() || undefined,
-        typesafeModel: typesafeModel.trim() || undefined,
-        typesafeBaseUrl: typesafeBaseUrl.trim() || undefined
+        skillDefinitions: summary?.skillDefinitions
       });
       if (!next) {
         setStatus(t("settings:aiSaveDesktopOnly"));
@@ -6706,7 +6706,7 @@ function AiSettingsPane({
     } finally {
       setBusy(false);
     }
-  }, [activeModelId, applySummary, models, onNotify, summary, t, typesafeEnabled, typesafeApiKey, typesafeModel, typesafeBaseUrl]);
+  }, [activeModelId, applySummary, models, onNotify, summary, t]);
 
   const test = useCallback(async () => {
     if (!selectedModel) return;
@@ -6832,28 +6832,6 @@ function AiSettingsPane({
           </section>
         ) : null}
       </div>
-
-      <section className="ai-model-config-editor ai-typesafe-editor" aria-label={t("settings:typesafeTitle")}>
-        <div className="ai-model-editor-head">
-          <div>
-            <strong>{t("settings:typesafeTitle")}</strong>
-            <span>{t("settings:typesafeDescription")}</span>
-          </div>
-          <label className="ai-typesafe-switch" title={t("settings:typesafeEnable")}>
-            <input type="checkbox" checked={typesafeEnabled} onChange={(event) => setTypesafeEnabled(event.target.checked)} />
-          </label>
-        </div>
-        <div className="settings-form-grid">
-          <label className="wide"><span>API Key</span><input type="password" autoComplete="off" value={typesafeApiKey} placeholder={summary?.typesafeConfigured ? summary.typesafeApiKeyMasked : t("settings:enterNewApiKey")} onChange={(event) => setTypesafeApiKey(event.target.value)} /></label>
-          <label><span>Model</span><input value={typesafeModel} onChange={(event) => setTypesafeModel(event.target.value)} /></label>
-          <label><span>Base URL</span><input value={typesafeBaseUrl} onChange={(event) => setTypesafeBaseUrl(event.target.value)} /></label>
-        </div>
-        <p className="automation-field-note">
-          {typesafeEnabled
-            ? (summary?.typesafeConfigured ? t("settings:typesafeConfigured") : t("settings:typesafePendingKey"))
-            : t("settings:typesafeDisabledNote")}
-        </p>
-      </section>
 
       {models.length > 0 && <div className="modal-actions">
         <button onClick={test} disabled={busy || !canTestSelectedModel}>{busy ? t("common:processing") : t("settings:testSelectedModel")}</button>
@@ -7380,9 +7358,11 @@ function SkillsSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNot
               </label>
             ) : null}
             <label><span>{t("common:name")}</span><input value={displayedSkill.id} disabled={readOnly || fixedSkillIds.has(editingSkill.id)} onChange={(event) => renameSkill(editingSkill.id, event.target.value)} /></label>
-            <label><span>{t("common:description")}</span><input value={displayedSkill.description} disabled={readOnly || editingSkill.id === "desic-core-operations"} onChange={(event) => updateSkill(editingSkill.id, { description: event.target.value })} /></label>
-            <label><span>{t("settings:rules")}</span><textarea value={displayedSkill.rules} disabled={readOnly || editingSkill.id === "desic-core-operations"} onChange={(event) => updateSkill(editingSkill.id, { rules: event.target.value })} /></label>
-            <label><span>{t("settings:content")}</span><textarea value={displayedSkill.content ?? ""} disabled={readOnly || editingSkill.id === "desic-core-operations"} onChange={(event) => updateSkill(editingSkill.id, { content: event.target.value })} /></label>
+            {/* C31：只有内置固定规范（NON_EDITABLE_SKILL_IDS）禁止编辑；其余 Skill（含
+                `trading-philosophy` 这类理念载体）一律可改可扩。 */}
+            <label><span>{t("common:description")}</span><input value={displayedSkill.description} disabled={readOnly || NON_EDITABLE_SKILL_ID_SET.has(editingSkill.id)} onChange={(event) => updateSkill(editingSkill.id, { description: event.target.value })} /></label>
+            <label><span>{t("settings:rules")}</span><textarea value={displayedSkill.rules} disabled={readOnly || NON_EDITABLE_SKILL_ID_SET.has(editingSkill.id)} onChange={(event) => updateSkill(editingSkill.id, { rules: event.target.value })} /></label>
+            <label><span>{t("settings:content")}</span><textarea value={displayedSkill.content ?? ""} disabled={readOnly || NON_EDITABLE_SKILL_ID_SET.has(editingSkill.id)} onChange={(event) => updateSkill(editingSkill.id, { content: event.target.value })} /></label>
             {viewedVersion?.status === "draft" ? <div className="skill-draft-actions"><button type="button" onClick={() => void publishVersion(viewedVersion)}>{t("settings:publishSkillVersion", { version: viewedVersion.version })}</button><button type="button" onClick={() => void discardVersion(viewedVersion)}>{t("settings:discardDraft")}</button></div> : null}
             {readOnly ? <button type="button" onClick={() => setViewedVersionId("current")}>{t("settings:returnToCurrentContent")}</button> : null}
             {!readOnly && editingSkill.id === "trading-philosophy" ? <button type="button" onClick={resetTradingPhilosophy}>{t("settings:restoreBuiltinTradingPhilosophy")}</button> : null}

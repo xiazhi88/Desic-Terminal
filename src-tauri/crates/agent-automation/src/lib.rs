@@ -19,7 +19,9 @@ pub use agents::{
     current_time_ms as agent_current_time_ms, custom_agent_from_legacy, is_builtin_agent_id,
     is_recommended_agent_role, is_valid_agent_id, is_valid_agent_role, legacy_agent_id_alias,
     normalize_agent_envelope, normalize_agent_source, normalize_enabled_agent_ids,
-    default_enabled_agent_ids, deprecated_builtin_agent_ids,
+    default_enabled_agent_ids, deprecated_builtin_agent_ids, drop_removed_agent_ids,
+    is_removed_builtin_agent_id, removed_builtin_agent, removed_builtin_agent_ids,
+    removed_builtin_agent_labels, removed_builtin_agent_notice,
     parse_agent_draft_markdown, parse_agent_envelope, parse_agent_markdown,
     plan_legacy_agent_migration,
     remove_enabled_agent_id, render_agent_skeleton, resolve_agent_envelope,
@@ -38,6 +40,7 @@ pub use agents::{
     AGENT_SCOPES, AGENT_SCOPE_ACCOUNT, AGENT_SCOPE_DERIVATIVES, AGENT_SCOPE_HISTORY,
     AGENT_SCOPE_INTELLIGENCE, AGENT_SCOPE_MARKET, AGENT_SOURCES, AGENT_SOURCE_AI,
     AGENT_SOURCE_BUILTIN, AGENT_SOURCE_CUSTOM, AGENT_SUMMARY_MAX_CHARS, BUILTIN_AGENT_SPECS,
+    REMOVED_BUILTIN_AGENTS, RemovedBuiltinAgent,
 };
 pub use usage::{
     build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,

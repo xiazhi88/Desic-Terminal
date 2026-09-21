@@ -749,7 +749,9 @@ function AgentCreateDialog({
   const { t } = useTranslation(["automation", "common"]);
   const dialogDrag = useDraggableSurface<HTMLElement>();
   const [name, setName] = useState("");
-  const [role, setRole] = useState<string>(AGENT_ROLE_SUGGESTIONS[8]);
+  // C31：新建自定义 Agent 的默认 role = 只读咨询角色（对手盘视角的通用形态）。
+  // 具体咨询对象由用户在 Profile 里勾选；这里只是建议起手值。
+  const [role, setRole] = useState<string>(AGENT_ROLE_SUGGESTIONS[0]);
   const [responsibility, setResponsibility] = useState("");
   const [envelope, setEnvelope] = useState<AiAgentDraftFields["envelope"]>("standard");
   const [skillIds, setSkillIds] = useState<string[]>([]);

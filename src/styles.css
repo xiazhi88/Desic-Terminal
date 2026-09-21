@@ -5925,11 +5925,13 @@ button {
   background: #000;
 }
 
+/* 真机 P0：toast 必须在**所有** modal 之上（.modal-backdrop 190 / .compact 195 / 帮助中心 220 /
+  市场选择器 320 / AI 上下文浮层 420）。原来这里是 45 —— 配置悬浮窗一开，保存通知就被压在下面看不见。 */
 .notification-stack {
   position: fixed;
   top: 66px;
   right: 18px;
-  z-index: 45;
+  z-index: 460;
   width: min(360px, calc(100vw - 36px));
   display: grid;
   gap: 10px;
@@ -16517,6 +16519,12 @@ button {
   color: #9380bd;
 }
 
+/* ===== C29 新建 Profile 类型选择弹窗 ===== */
+.automation-preview-fastlane { min-height: 0; height: 100%; overflow: auto; display: grid; align-content: start; gap: 14px; padding: 4px; }
+
+.automation-profile-type-modal { width: min(880px, calc(100vw - 56px)); grid-template-rows: 56px minmax(0, 1fr); }
+.automation-profile-type-modal__body { min-height: 0; overflow: auto; padding: 16px 18px; }
+
 /* ===== C25⑤ 是否进入深度分析 ===== */
 .automation-run-deep-analysis {
   display: inline-flex;
@@ -16674,6 +16682,16 @@ button {
   padding: 5px 8px;
   color: var(--warn);
   font-size: 10px;
+}
+
+/* C33：条目级丢弃的原因（"已丢弃 1 条观察条件：price：类型不在 Profile 白名单"）——
+   写库条数少于计划条数时必须能看出**为什么**，静默丢条件是这次真机事故的形态。 */
+.automation-run-wake-dropped-reasons {
+  margin: 4px 0 0;
+  padding-left: 16px;
+  color: var(--warn);
+  font-size: 10px;
+  line-height: 1.6;
 }
 
 .automation-run-outcome-active-wakes { display: block; margin-top: 4px; color: var(--weak); font-size: 10.5px; }
@@ -19700,6 +19718,11 @@ button {
   color: #fca5a5;
 }
 
+/* C33：观察条件计划"未写入"= 警示（琥珀），不是失败（红）—— 这一轮的结论仍然有效。 */
+.automation-tool-step-main > div:first-child > span.warning {
+  color: var(--warn);
+}
+
 .automation-tool-step-main > p,
 .automation-run-empty {
   margin: 5px 0 0;
@@ -20274,6 +20297,12 @@ button {
 .automation-tool-step.failed {
   border-color: #552d32;
   background: #160d0f;
+}
+
+/* C33：同上 —— 未写入的观察条件计划是**警示**卡片，不是失败卡片。 */
+.automation-tool-step.warning {
+  border-color: #5a4a1f;
+  background: #141009;
 }
 
 .automation-tool-step-index {
@@ -27725,3 +27754,10 @@ button {
     margin-inline: 10px;
   }
 }
+
+/* ===== C29.8：快判轮「关键动作」里的观察条件（旧模式运行详情同一位置） ===== */
+.automation-run-action-card[data-run-key-action="wake"],
+.automation-run-action-card[data-run-key-action="trade"] { display: grid; gap: 6px; }
+.automation-run-action-kind { display: inline-flex; align-items: center; gap: 5px; color: var(--weak); font-size: 10.5px; }
+.automation-run-wake-partial { margin: 0; color: var(--warning, #f5a524); font-size: 10.5px; }
+.fastlane-run__wake-hint { color: var(--muted); }

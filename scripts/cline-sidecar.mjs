@@ -17,6 +17,7 @@ import {
   registerDesicClaudeCliHandler
 } from "./claude-cli-adapter.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
+import { buildWakeConditionSchemaSpec, normalizeFastlaneConfig, runFastlaneRound } from "./cline-fastlane.mjs";
 import { installWindowsHiddenChildProcessPolicy } from "./windows-child-process.mjs";
 import {
   collectProfileAgentReport,
@@ -115,7 +116,19 @@ function sanitizeDiagnosticText(value) {
     .replace(/([?&](?:api[_-]?key|access[_-]?token|token|secret)=)[^&\s]+/gi, "$1[redacted]");
 }
 
-function emit(event) {
+/**
+ * 投递段归因插桩（纯增量字段，默认开启）。
+ * - `emitAt`：sidecar 发出 `toolExecuteRequest` 的时刻（写进请求体）；
+ * - `writeAt`：`process.stdout.write` 刷新回调的时刻（管道出口）。
+ * 一键关闭：环境变量 `DESIC_TOOL_DELIVERY_TRACE=0`（Rust 侧同名开关，侧车继承父进程环境）。
+ * 关闭时既不写 `emitAt`、也不注册写回调 —— 事件内容与关闭前逐字一致。
+ */
+const TOOL_DELIVERY_TRACE = !["0", "false", "off", "no"]
+  .includes(String(process.env.DESIC_TOOL_DELIVERY_TRACE ?? "1").trim().toLowerCase());
+/** executionId -> { emitAt, writeAt }：`writeAt` 只能在本进程的写回调里取到，故本地留存。 */
+const toolDeliveryTimings = new Map();
+
+function emit(event, onWritten) {
   const safeEvent = event && typeof event === "object"
     && ["error", "pendingPromptError", "pendingPromptCommandResult", "status"].includes(event.type)
     && typeof event.message === "string"
@@ -124,7 +137,12 @@ function emit(event) {
   const payload = JSON.stringify(safeEvent, (_key, value) =>
     typeof value === "string" ? redactKnownDiagnosticSecrets(value) : value
   );
-  process.stdout.write(`${payload}\n`);
+  const line = `${payload}\n`;
+  if (typeof onWritten === "function") {
+    process.stdout.write(line, onWritten);
+    return;
+  }
+  process.stdout.write(line);
 }
 
 function isExpectedAgentAbort(error) {
@@ -1449,97 +1467,36 @@ const FEISHU_NOTIFICATION_SCHEMA = {
   }
 };
 
+/// AI Profile 链路 `nextWakePlan.conditions[]` 的**宽松**入参 schema（`background.finishRun` 用）。
+///
+/// 纪律（2026-09-21 裁决）：**工具入参 schema 不得成为 Rust 校验之外的第二道真相** ——
+/// Rust 是唯一权威（`ai_automation::default_wake_condition_types()` 的 19 类 +
+/// `ValidateWakeCondition`/`WakeCondition` 逐条参数校验 + `validate_wake_condition_limits`），
+/// 侧车这一层只保证一件事：**别把 Rust 支持的东西挡在外面**。
+///   - `type` 只约束为"非空字符串"，**不枚举类型**（避免与 Rust 的清单漂移）；
+///   - 字段不做逐类强约束、允许后端定义的类型附加任意字段（`additionalProperties: true`）；
+///   - 常见字段（instId / atMs / intervalMinutes / price / …）只作**描述性提示**，不做硬校验；
+///   - 引导由 **Rust 下发**（快判链路已在用 `wakeConditionSchema`；AI 链路后续同机制下发），
+///     侧车**不维护第二份类型清单**。
+///
+/// 历史（真事故）：旧版是 10 分支 `oneOf` + 每分支 `additionalProperties: false`，
+/// 把 Rust 已支持的 9 类（open_interest_anomaly / taker_flow_imbalance / crowding_divergence /
+/// funding_extreme / liquidation_cluster / important_news_event / sentiment_reversal /
+/// smart_money_change / macro_event_window）挡在侧车入参校验上 —— 这些类型事实上"永远用不到"。
 const WAKE_CONDITION_SCHEMA = {
-  oneOf: [
-    {
-      type: "object", additionalProperties: false, required: ["type"],
-      properties: {
-        type: { const: "timer" },
-        atMs: {
-          type: ["integer", "null"],
-          description: "Future Unix epoch time in milliseconds (13 digits, Date.now() units)."
-        },
-        intervalMinutes: { type: ["integer", "null"], minimum: 1, maximum: 1440 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false, required: ["type", "instId", "direction", "price"],
-      properties: {
-        type: { const: "price_cross" }, instId: { type: "string", minLength: 1 },
-        direction: { type: "string", enum: ["up", "above", "down", "below"] },
-        price: { type: "number", exclusiveMinimum: 0 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false,
-      required: ["type", "instId", "windowMinutes", "direction", "thresholdPct"],
-      properties: {
-        type: { const: "price_change_pct" }, instId: { type: "string", minLength: 1 },
-        windowMinutes: { type: "integer", minimum: 1, maximum: 1440 },
-        direction: { type: "string", enum: ["up", "above", "down", "below", "absolute"] },
-        thresholdPct: { type: "number", exclusiveMinimum: 0, maximum: 1000 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false,
-      required: ["type", "instId", "bar", "lookback", "ratio"],
-      properties: {
-        type: { const: "candle_volume_ratio" }, instId: { type: "string", minLength: 1 },
-        bar: { type: "string", enum: ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D"] },
-        lookback: { type: "integer", minimum: 1, maximum: 500 },
-        ratio: { type: "number", exclusiveMinimum: 0, maximum: 100 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false,
-      required: ["type", "instId", "direction", "rate"],
-      properties: {
-        type: { const: "funding_rate_threshold" }, instId: { type: "string", minLength: 1 },
-        direction: { type: "string", enum: ["up", "above", "down", "below", "absolute"] },
-        rate: { type: "number", minimum: -1, maximum: 1 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false,
-      required: ["type", "instId", "depth", "direction", "ratio"],
-      properties: {
-        type: { const: "orderbook_imbalance" }, instId: { type: "string", minLength: 1 },
-        depth: { type: "integer", minimum: 1, maximum: 50 },
-        direction: { type: "string", enum: ["buy", "bid", "up", "sell", "ask", "down"] },
-        ratio: { type: "number", exclusiveMinimum: 0, maximum: 1 }
-      }
-    },
-    {
-      type: "object", additionalProperties: false, required: ["type"],
-      properties: {
-        type: { const: "order_state_changed" }, accountId: { type: ["string", "null"] },
-        instId: { type: ["string", "null"] },
-        states: { type: "array", maxItems: 32, items: { type: "string", maxLength: 64 } }
-      }
-    },
-    {
-      type: "object", additionalProperties: false, required: ["type"],
-      properties: {
-        type: { const: "position_changed" }, accountId: { type: ["string", "null"] },
-        instId: { type: ["string", "null"] }
-      }
-    },
-    {
-      type: "object", additionalProperties: false, required: ["type", "opportunityId"],
-      properties: {
-        type: { const: "opportunity_state_changed" }, opportunityId: { type: "string", minLength: 1 },
-        states: { type: "array", maxItems: 32, items: { type: "string", maxLength: 64 } }
-      }
-    },
-    {
-      type: "object", additionalProperties: false, required: ["type"],
-      properties: {
-        type: { const: "episode_closed" }, accountId: { type: ["string", "null"] },
-        instId: { type: ["string", "null"] }
-      }
+  type: "object",
+  additionalProperties: true,
+  required: ["type"],
+  properties: {
+    type: {
+      type: "string",
+      minLength: 1,
+      description: "条件类型：取值由后端定义并逐条校验（侧车不枚举、不维护第二份清单）。"
     }
-  ]
+  },
+  description: "下一轮唤醒条件。与品种相关的条件请带上 instId（省略时由后端回填本轮品种）；绝对时间字段（atMs / expiresAt）用 13 位 Unix 毫秒（Date.now() 单位），不是 10 位秒；定时类条件可用 intervalMinutes（分钟）；price / direction / states 等字段按后端定义的类型给。允许后端定义的类型附加任意字段：侧车不做逐类强校验，非法条件由后端逐条校验并丢弃。"
 };
+
 
 const BACKGROUND_FINISH_RUN_SCHEMA = {
   type: "object",
@@ -1574,19 +1531,28 @@ const BACKGROUND_FINISH_RUN_SCHEMA = {
       }
     },
     nextWakePlan: {
+      // 与 Rust `BackgroundWakePlanInput`（`ai_automation.rs:904-911`：三字段全部 `#[serde(default)]`，
+      // `mode` 走 `default_wake_mode` 归一）对齐：**侧车不得比 Rust 更严** —— 放行少字段、未知字段
+      // （如快判链路的 `expiresAtMs`）与大小写不敏感的 mode；真正取值校验在 Rust。
+      // `required` 已**整条去掉**（2026-09-21 裁决）：Rust 三字段皆 `#[serde(default)]`，留 `conditions`
+      // 就是"第二道真相"。原本想保留的引导（"没有条件的唤醒计划等于不再醒来"）改为写进
+      // `conditions.description` —— **可见性而非硬门**：陈述后果，但挡住 LLM 的是零。
       type: "object",
-      additionalProperties: false,
-      required: ["mode", "conditions"],
+      additionalProperties: true,
       properties: {
-        mode: { type: "string", enum: ["any", "all"] },
+        mode: {
+          type: "string",
+          description: "唤醒模式，通常为 any / all；后端会归一大小写，未给时按后端默认处理。"
+        },
         expiresAt: {
           type: ["integer", "null"],
-          description: "Optional wake-plan expiry as Unix epoch milliseconds (13 digits, Date.now() units). Omit or use null for no expiry."
+          description: "Optional wake-plan expiry as Unix epoch milliseconds (13 digits, Date.now() units). Omit or use null for no expiry. 快判链路的同义字段名是 expiresAtMs，后端按同一语义归一。"
         },
         conditions: {
           type: "array",
           maxItems: 32,
-          items: WAKE_CONDITION_SCHEMA
+          items: WAKE_CONDITION_SCHEMA,
+          description: "建议至少给出 1 条：空数组（或不给）等于这一轮之后不再有下一轮唤醒。省略 `conditions` 键后端不报错，只是本次不排下一轮。"
         }
       }
     }
@@ -2341,12 +2307,15 @@ const REPORT_TRIAGE_SCHEMA = {
       }
     },
     nextWakePlan: {
+      // 同一原则（侧车不得比 Rust 更严）：Rust 收 `BackgroundWakePlanInput`（`conditions: Vec<Value>`，
+      // 字符串/对象都接，mode 归一大小写）→ 这里**不限定 items 形状**、mode 不做枚举，
+      // 只在 description 里给引导；escalate=false 时"必须有计划"由 Rust `validate_triage_report_input` 判。
       type: "object",
       additionalProperties: true,
-      description: "escalate=false 时必填：否则视为未完成。mode 为 any/all，conditions 为下次唤醒条件，expiresAt 为 13 位毫秒时间戳。",
+      description: "escalate=false 时必填：否则视为未完成。mode 通常为 any/all（后端归一大小写）；conditions 为下次唤醒条件，**字符串或对象皆可，后端按类型归一**；expiresAt 为 13 位毫秒时间戳。",
       properties: {
-        mode: { type: "string", enum: ["any", "all"] },
-        conditions: { type: "array", items: { type: "string" } },
+        mode: { type: "string" },
+        conditions: { type: "array", items: {} },
         expiresAt: { type: "number" }
       }
     }
@@ -2437,6 +2406,11 @@ function executeDesicTool(sessionId, name, input, options = {}, context = {}) {
   const parentAgentId = agentRole === "main"
     ? null
     : String(options.parentAgentId || context.metadata?.parentAgentId || sessionId);
+  const emitAt = TOOL_DELIVERY_TRACE ? Date.now() : undefined;
+  if (TOOL_DELIVERY_TRACE) {
+    // 先登记再 emit：写回调是异步触发的，登记必须早于写。
+    toolDeliveryTimings.set(executionId, { emitAt, writeAt: undefined });
+  }
   emit({
     type: "toolExecuteRequest",
     sessionId,
@@ -2455,8 +2429,12 @@ function executeDesicTool(sessionId, name, input, options = {}, context = {}) {
     agentProfileId: options.agentProfileId || null,
     reviewId: options.reviewId || null,
     episodeId: options.episodeId || null,
-    requestedAt
-  });
+    requestedAt,
+    ...(TOOL_DELIVERY_TRACE ? { emitAt } : {})
+  }, TOOL_DELIVERY_TRACE ? () => {
+    const record = toolDeliveryTimings.get(executionId);
+    if (record) record.writeAt = Date.now();
+  } : undefined);
   return new Promise((resolve, reject) => {
     const requestedBacktestWaitSeconds = Number(scopedInput?.waitSeconds);
     const toolTimeoutMs = name === "strategy.getBacktestResult"
@@ -2464,6 +2442,7 @@ function executeDesicTool(sessionId, name, input, options = {}, context = {}) {
       : 120_000;
     const timeout = setTimeout(() => {
       pendingToolExecutions.delete(executionId);
+      toolDeliveryTimings.delete(executionId);
       reject(new Error("工具执行超时"));
     }, toolTimeoutMs);
     pendingToolExecutions.set(executionId, {
@@ -2471,14 +2450,16 @@ function executeDesicTool(sessionId, name, input, options = {}, context = {}) {
         clearTimeout(timeout);
         pendingToolExecutions.delete(executionId);
         if (result.ok === false) {
+          toolDeliveryTimings.delete(executionId);
           reject(new Error(result.error || "工具执行失败"));
           return;
         }
         const output = result.result ?? {};
         if (result.timing && output && typeof output === "object" && !Array.isArray(output)) {
-          resolve({ ...output, _toolTiming: result.timing });
+          resolve({ ...output, _toolTiming: mergeToolDeliveryTiming(executionId, result.timing) });
           return;
         }
+        toolDeliveryTimings.delete(executionId);
         resolve(output);
       }
     });
@@ -2581,6 +2562,15 @@ function createDesicTools(sessionId, options = {}) {
   const radarEnabled = isSkillToolEnabled("radar.readRanking", activeSkillIds);
   const profileLeverageEnabled = boolConfig(options.backgroundRun, false)
     && ["copilot", "limited_auto"].includes(normalizePermissionMode(options.permissionMode));
+  // C33：AI Profile 链路的**观察条件类型规范**（"类型 → 必填字段/单位"）—— Rust 用
+  // `fastlane::wake_condition_schema()` 生成、按本 Profile 的 `allowed_wake_condition_types`
+  // **过滤后**随 `config.wakeConditionSchema` 下发；这里**原样注入** `background.finishRun` 的
+  // **工具描述**。侧车不维护第二份类型清单、不硬编码任何类型名（与快判同一条纪律）。
+  //
+  // 为什么进描述而不是 `nextWakePlan.conditions.items` 的 JSON schema：后者会成为比 Rust 校验
+  // 更严的第二道门（2026-09-21 裁决明令禁止），且实测把 Rust 支持的类型挡在侧车之外。
+  // 未下发（老 Rust / 交互会话 / 简报与复盘）→ 空串 → 工具描述**逐字**回到基础文案。
+  const wakeConditionSchemaSpec = buildWakeConditionSchemaSpec(options.wakeConditionSchema);
 
   const tools = [
     tool("market.readTicker", "Read the latest OKX ticker for an instrument.", READ_TICKER_SCHEMA),
@@ -2653,7 +2643,10 @@ function createDesicTools(sessionId, options = {}) {
     tool("notification.feishu.send", "Send a Feishu notification through the configured Desic Terminal notification channel.", FEISHU_NOTIFICATION_SCHEMA),
     tool(
       "background.finishRun",
-      "Finish a background agent run with a durable summary, semantic outcome/reason/reasonCodes and next wake plan; must be the final successful tool call. On validation rejection, correct the reported fields and call again. Never submit opportunity ids, accountAssessment or decision context ids — the backend derives them from this Run's persisted tool results and prechecks. The summary must not infer narrow account tolerance from balance, minSz or gross notional exposure; use effectiveExposureMultiple, stop/ATR risk, margin buffer and authoritative blockers. Absolute times such as nextWakePlan.expiresAt and timer.atMs are 13-digit Unix epoch milliseconds (Date.now() units), never 10-digit seconds. The summary must follow the “Analysis-result formatting” section of desic-core-operations: lead with the conclusion, then exactly the five fixed sections (Conclusion / Facts and evidence / Conflicts and gaps / Observation conditions / Next steps, or 结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步 for Chinese runs), every evidence item carrying its observation time plus a record id or tool name, and never paste raw JSON or whole tool outputs. 摘要必须按 desic-core-operations 的 “Analysis-result formatting” 小节排版：首屏先结论，随后五个固定小节（结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步；英文运行用对应英文标题），证据条目带观测时间与记录 ID 或工具名，不要粘贴原始 JSON 或整段工具输出。 If this run is in minimal mode (singleAgentMode=minimal): the summary may only be one sentence of at most 160 display width (no sections, no multiple lines, no markdown), this run must not output any prose either, do not write any acknowledgement or filler sentence either (such as “Done”, “Received”, “the run has ended”): when you are finished, call the finish tool directly, and in minimal mode this instruction wins over the formatting rules above. 若本轮是**极简模式**（singleAgentMode=minimal）：summary 只允许**一句话、不超过 160 显示宽度**（不要小节、不要多行、不要 markdown）；本轮也不要输出任何正文；也不要说任何确认语/过渡语（如“已完成”“收到”“本轮已结束”），要收尾就直接调用工具；极简模式下本条优先于上面的排版要求。",
+      "Finish a background agent run with a durable summary, semantic outcome/reason/reasonCodes and next wake plan; must be the final successful tool call. On validation rejection, correct the reported fields and call again. Never submit opportunity ids, accountAssessment or decision context ids — the backend derives them from this Run's persisted tool results and prechecks. The summary must not infer narrow account tolerance from balance, minSz or gross notional exposure; use effectiveExposureMultiple, stop/ATR risk, margin buffer and authoritative blockers. Absolute times such as nextWakePlan.expiresAt and timer.atMs are 13-digit Unix epoch milliseconds (Date.now() units), never 10-digit seconds. The summary must follow the “Analysis-result formatting” section of desic-core-operations: lead with the conclusion, then exactly the five fixed sections (Conclusion / Facts and evidence / Conflicts and gaps / Observation conditions / Next steps, or 结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步 for Chinese runs), every evidence item carrying its observation time plus a record id or tool name, and never paste raw JSON or whole tool outputs. 摘要必须按 desic-core-operations 的 “Analysis-result formatting” 小节排版：首屏先结论，随后五个固定小节（结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步；英文运行用对应英文标题），证据条目带观测时间与记录 ID 或工具名，不要粘贴原始 JSON 或整段工具输出。 If this run is in minimal mode (singleAgentMode=minimal): the summary may only be one sentence of at most 160 display width (no sections, no multiple lines, no markdown), this run must not output any prose either, do not write any acknowledgement or filler sentence either (such as “Done”, “Received”, “the run has ended”): when you are finished, call the finish tool directly, and in minimal mode this instruction wins over the formatting rules above. 若本轮是**极简模式**（singleAgentMode=minimal）：summary 只允许**一句话、不超过 160 显示宽度**（不要小节、不要多行、不要 markdown）；本轮也不要输出任何正文；也不要说任何确认语/过渡语（如“已完成”“收到”“本轮已结束”），要收尾就直接调用工具；极简模式下本条优先于上面的排版要求。"
+        // C33：把 Rust 下发的条件类型规范（已按 Profile 白名单过滤）追加到工具描述末尾。
+        // 未下发 → 空串 → 描述**逐字**回到基础文案（老 Rust / 交互会话 / 简报与复盘）。
+        + (wakeConditionSchemaSpec ? `\n\n${wakeConditionSchemaSpec}` : ""),
       BACKGROUND_FINISH_RUN_SCHEMA
     ),
     tool(
@@ -2837,6 +2830,17 @@ function mapToolCall(sessionId, toolCall, extra = {}) {
   };
 }
 
+/**
+ * 投递段归因：把本进程的 `writeAt`（stdout 刷新完成）并进 Rust 回传的 `timing`。
+ * Rust 侧插桩关闭时 `timing` 里没有 `readAt`/`pickedAt`，这里只补齐本地那一段，不动其它键。
+ */
+function mergeToolDeliveryTiming(executionId, timing) {
+  const local = toolDeliveryTimings.get(executionId);
+  toolDeliveryTimings.delete(executionId);
+  if (!local || local.writeAt === undefined) return timing;
+  return { ...timing, writeAt: local.writeAt };
+}
+
 function mapToolResult(sessionId, toolCall, result, extra = {}) {
   const output = result ?? toolCall?.output ?? toolCall?.result ?? toolCall?.error ?? {};
   const timing = output && typeof output === "object" && !Array.isArray(output)
@@ -2864,6 +2868,13 @@ function mapToolResult(sessionId, toolCall, result, extra = {}) {
     // queueMs = requestedAt → executionStartedAt。回填它们才能把"投递延迟"与"许可/锁排队"分开。
     receivedAt: Number(timing?.receivedAt) || undefined,
     queueMs: Number.isFinite(Number(timing?.queueMs)) ? Number(timing.queueMs) : undefined,
+    // 投递段归因（纯增量字段）：receivedAt - requestedAt
+    // = (writeAt - emitAt)【Node 侧】+ (readAt - writeAt)【管道/调度】+ (pickedAt - readAt)【事件循环积压】
+    //   + (receivedAt - pickedAt)【spawn 调度】。缺字段 = 插桩关闭或该轮未走网关路径。
+    emitAt: Number(timing?.emitAt) || undefined,
+    writeAt: Number(timing?.writeAt) || undefined,
+    readAt: Number(timing?.readAt) || undefined,
+    pickedAt: Number(timing?.pickedAt) || undefined,
     ...extra
   };
 }
@@ -5317,6 +5328,56 @@ async function generateAgentDraft(cline, input, options = {}) {
 }
 
 
+/// C29 快判轮（侧车侧入口）：载荷 `profileType === "fastlane"` 时**不复用** Profile 的 LLM
+/// 探索循环——一轮只有两次模型调用（Jev + 窄调用 LLM），侧车自己不取数（快照由 Rust 备好），
+/// 唯一的动作出口是既有「创建机会」工具（经 `executeDesicTool` 转发给宿主）。
+async function runFastlaneCommand(cline, input) {
+  const command = normalizeCommand(input);
+  const sessionId = command.sessionId;
+  // 安全：把 Typesafe key 登记进诊断脱敏表，任何回显/日志都会被替换（key 本身只进请求头）。
+  rememberDiagnosticSecret(input?.config?.typesafeApiKey);
+  const snapshot = input?.fastlaneSnapshot && typeof input.fastlaneSnapshot === "object" ? input.fastlaneSnapshot : {};
+  if (!snapshot || Object.keys(snapshot).length === 0) {
+    emit({ type: "fastlaneResult", sessionId, ok: false, error: "缺少 fastlaneSnapshot", action: { kind: "watch", reason: "data" } });
+    return null;
+  }
+  const policyConfig = {
+    ...command.config,
+    permissionMode: normalizePermissionMode(command.config.permissionMode),
+    agentRole: "main",
+    backgroundRun: true,
+    reviewRun: false
+  };
+  const createOpportunity = async (params, meta = {}) => {
+    const payload = {
+      ...params,
+      ...(meta?.snapshot?.inst_id ? { instId: String(meta.snapshot.inst_id) } : {}),
+      ...(meta?.config?.environment ? { environment: String(meta.config.environment) } : {}),
+      ...(meta?.config?.agentProfileTargetLeverage ? { lever: String(meta.config.agentProfileTargetLeverage) } : {})
+    };
+    emit({ type: "status", sessionId, status: "running", message: "快判动作：创建交易机会" });
+    return await executeDesicTool(sessionId, "tradeOpportunity.create", bindProfileAccountInput("tradeOpportunity.create", payload, policyConfig), policyConfig, {});
+  };
+  const result = await runFastlaneRound({
+    sessionId,
+    snapshot,
+    config: command.config,
+    // 停机平仓轮（`fastlaneIntent: "close"`）跳过 Jev：用户已显式决定平仓（C29.7）。
+    intent: String(input?.fastlaneIntent || input?.config?.fastlaneIntent || "round"),
+    typesafeApiKey: String(input?.config?.typesafeApiKey || ""),
+    wakeConditions: Array.isArray(input?.wakeConditions) ? input.wakeConditions : (Array.isArray(command.config.wakeConditions) ? command.config.wakeConditions : []),
+    // 观察条件 schema（"类型 → 必填字段/单位"）：Rust 下发即**原样注入** prompt；
+    // 未下发（老 Rust）→ 侧车退化为基础文案，不报错、不阻塞（侧车不硬编码类型清单）。
+    wakeConditionSchema: input?.wakeConditionSchema ?? command.config?.wakeConditionSchema ?? null,
+    createOpportunity,
+    // 失败原文（HTTP 状态码 / 网络原因）进事件前过同一张脱敏表：key 永不出现在文案里。
+    redact: sanitizeDiagnosticText,
+    emit
+  });
+  emit({ type: "done", sessionId, finishReason: "completed" });
+  return result;
+}
+
 async function sendMessage(cline, input) {
   const command = normalizeCommand(input);
   const requestTimeout = aiRequestIdleTimeoutMs(command.config);
@@ -5839,6 +5900,17 @@ async function main() {
             requestId: input.requestId || "",
             ok: false,
             message: error?.message || String(error)
+          });
+        }));
+      } else if (input?.config?.profileType === "fastlane") {
+        // C29：快判轮走独立流程（两次模型调用），不进 Profile 的 LLM 探索循环。
+        trackTask(runFastlaneCommand(cline, input).catch((error) => {
+          emit({
+            type: "fastlaneResult",
+            sessionId: input.sessionId || activeSessionId,
+            ok: false,
+            error: error?.message || String(error),
+            action: { kind: "watch", reason: "anomaly" }
           });
         }));
       } else if (type === "cancelAgentDraft") {

@@ -57,13 +57,18 @@ pub const AGENT_SOURCES: [&str; 3] = [
 ];
 
 /// 推荐 role 枚举（C2）。校验只强制正则，`custom` 是合法兜底值。
-pub const AGENT_ROLE_ENUM: [&str; 12] = [
-    // C20 流程角色（默认启用集）
+///
+/// C31：内置库只剩一个可选咨询角色（`contrarian`），所以建议列表把 `contrarian` /
+/// `custom` 放在最前。其余值保留 —— 用户自建的 Agent 与历史文件仍可能用它们，
+/// role 本来就是自由 slug（正则不拦），删除内置 Agent 不等于禁用这些标识。
+pub const AGENT_ROLE_ENUM: [&str; 13] = [
+    // C31：推荐起手值（可选咨询角色 + 通用自定义）
+    "contrarian",
+    "custom",
+    // 兼容：历史流程 / 专家角色的 role 标识（内置 Agent 已删除，标识本身仍可解析）
     "data_digest",
     "account_state",
     "decision_proposal",
-    "contrarian",
-    // C20 起的历史角色（文件保留、可手动勾选）
     "market_structure",
     "order_flow_liquidity",
     "derivatives_positioning",
@@ -929,7 +934,10 @@ pub struct BuiltinAgentSpec {
     pub envelope: &'static str,
     pub skills: &'static [&'static str],
     pub requires_account: bool,
-    /// C20：历史角色标记（文件保留、可手动勾选，**默认不启用**、UI 标灰）。
+    /// C20 引入、C31 后**恒为 false**：历史上标记"文件保留、可手动勾选、默认不启用"的
+    /// 降级角色。C31 已把 7 个历史角色从内置表里删除（见 [`REMOVED_BUILTIN_AGENTS`]），
+    /// 字段保留是为了让解析 / 列表 / 载荷的"停用过滤"链路继续可用（恢复方式 =
+    /// 往内置表里加回一条并置 `true`）。
     pub deprecated: bool,
     /// C20 §6.1「建议点名 scopes」：**只是给主 Agent 的收窄建议**（C15 起文件里没有
     /// scopes 字段），用于目录注入与 UI 提示，不参与任何授权判定。
@@ -941,155 +949,162 @@ pub struct BuiltinAgentSpec {
     pub body: &'static str,
 }
 
-/// 契约 C1 的内置表。旧 id 只用于 alias 迁移，新 id 是唯一落盘 id。
-pub const BUILTIN_AGENT_SPECS: [BuiltinAgentSpec; 11] = [
-    BuiltinAgentSpec {
-        id: "desic-market-structure",
-        legacy_id: "auto-market-structure",
-        name: "市场结构",
-        role: "market_structure",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &[],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["market", "derivatives"],
-        responsibility: "检查多周期价格结构、趋势、波动、成交、盘口和关键失效位，明确事实与推断。",
-        body: builtin_bodies::BODY_MARKET_STRUCTURE,
-    },
-    BuiltinAgentSpec {
-        id: "desic-order-flow-liquidity",
-        legacy_id: "auto-order-flow-liquidity",
-        name: "订单流与流动性",
-        role: "order_flow_liquidity",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &[],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["market"],
-        responsibility: "检查盘口深度、买卖价差、逐笔成交、主动买卖和流动性缺口，识别短时冲击与滑点风险。",
-        body: builtin_bodies::BODY_ORDER_FLOW_LIQUIDITY,
-    },
-    BuiltinAgentSpec {
-        id: "desic-derivatives-positioning",
-        legacy_id: "auto-derivatives-positioning",
-        name: "衍生品仓位",
-        role: "derivatives_positioning",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &[],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["derivatives", "market"],
-        responsibility: "检查资金费率、基差、持仓拥挤、爆仓样本和仓位变化，判断杠杆方向及挤压风险。",
-        body: builtin_bodies::BODY_DERIVATIVES_POSITIONING,
-    },
-    BuiltinAgentSpec {
-        id: "desic-account-risk",
-        legacy_id: "auto-account-risk",
-        name: "账户风险",
-        role: "account_risk",
-        envelope: AGENT_ENVELOPE_RISK,
-        skills: &[],
-        requires_account: true,
-        deprecated: true,
-        preferred_scopes: &["account", "history", "market"],
-        responsibility: "检查仓位、余额、保证金、挂单、集中度与历史相似交易；风险结论只能收紧或否决。",
-        body: builtin_bodies::BODY_ACCOUNT_RISK,
-    },
-    BuiltinAgentSpec {
-        id: "desic-intelligence-flow",
-        legacy_id: "auto-intelligence-flow",
-        name: "新闻与宏观",
-        role: "intelligence_flow",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &["okx-market-intelligence"],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["intelligence"],
-        responsibility: "检查新闻、宏观日历、事件、情绪与市场反应，标注发布时间、来源、重要性和证据冲突。",
-        body: builtin_bodies::BODY_INTELLIGENCE_FLOW,
-    },
-    BuiltinAgentSpec {
-        id: "desic-smart-money",
-        legacy_id: "auto-smart-money",
-        name: "Smart Money",
-        role: "smart_money",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &["okx-market-intelligence"],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["intelligence", "derivatives"],
-        responsibility: "检查精英交易员仓位、绩效、订单历史、共识分歧和资金流趋势，区分领先信号与拥挤跟随。",
-        body: builtin_bodies::BODY_SMART_MONEY,
-    },
-    BuiltinAgentSpec {
-        id: "desic-historical-analogy",
-        legacy_id: "auto-historical-analogy",
-        name: "历史类比",
-        role: "historical_analogy",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &[],
-        requires_account: false,
-        deprecated: true,
-        preferred_scopes: &["history", "market"],
-        responsibility: "检索历史订单、成交、持仓阶段和既有交易机会，比较相似情境、结果分布与失效条件。",
-        body: builtin_bodies::BODY_HISTORICAL_ANALOGY,
-    },
-    BuiltinAgentSpec {
-        id: "desic-data-digest",
-        legacy_id: "desic-data-digest",
-        name: "数据汇总",
-        role: "data_digest",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &["okx-market-intelligence", "market-radar-research"],
-        requires_account: false,
-        deprecated: false,
-        preferred_scopes: &["market", "derivatives", "intelligence"],
-        responsibility: "一次读齐行情、衍生品、聪明钱、新闻与历史数据，产出可引用的结构化摘要，不做方向判断。",
-        body: builtin_bodies::BODY_DATA_DIGEST,
-    },
-    BuiltinAgentSpec {
-        id: "desic-account-state",
-        legacy_id: "desic-account-state",
-        name: "账户与持仓",
-        role: "account_state",
-        // C20 裁决：role 保持 `account_state`，用**显式声明 risk** 让 C15.1 取严规则生效。
-        envelope: AGENT_ENVELOPE_RISK,
-        skills: &[],
-        requires_account: true,
-        deprecated: false,
-        preferred_scopes: &["account", "market"],
-        responsibility: "读取持仓、普通与算法挂单、止损止盈状态、保证金率与可用余量，输出纯客观的状态清单与风险标记。",
-        body: builtin_bodies::BODY_ACCOUNT_STATE,
-    },
-    BuiltinAgentSpec {
-        id: "desic-decision-proposal",
-        legacy_id: "desic-decision-proposal",
-        name: "分析/决策候选",
-        role: "decision_proposal",
-        envelope: AGENT_ENVELOPE_STANDARD,
-        skills: &[],
-        requires_account: false,
-        deprecated: false,
-        preferred_scopes: &["market", "history"],
-        responsibility: "基于数据摘要与账户状态给出候选决策（方向、入场、仓位、失效条件、风险回报），并声明这是候选而不是最终决策。",
-        body: builtin_bodies::BODY_DECISION_PROPOSAL,
-    },
+/// 契约 C1 / C31 的内置表：**只剩 1 个可选咨询角色（对手盘）**。
+///
+/// C31 之前这里是 C20 的 11 条（4 个流程角色 + 7 个历史角色）。公司决定"把内置的 agent
+/// 都删掉，换成对手盘"：主 Agent 自己取数 → 判断 → 出具体方案 → 执行 → 成交后继续盯，
+/// 流程角色专家（数据汇总 / 账户与持仓 / 分析候选）做的事就是主 Agent 自己的步骤。
+/// 删除台账与最后一版出厂指纹见 [`REMOVED_BUILTIN_AGENTS`]。
+///
+/// 唯一保留的条目复用原 id `desic-contrarian-review`（不破坏引用），定位改成
+/// **对手盘视角**、输出改成**自然语言**（见 `builtin_bodies::BODY_CONTRARIAN_REVIEW`）。
+pub const BUILTIN_AGENT_SPECS: [BuiltinAgentSpec; 1] = [
     BuiltinAgentSpec {
         id: "desic-contrarian-review",
         legacy_id: "auto-contrarian-review",
-        name: "反方审查",
+        name: "对手盘",
         role: "contrarian",
         envelope: AGENT_ENVELOPE_STANDARD,
         skills: &["okx-market-intelligence"],
         requires_account: false,
         deprecated: false,
-        preferred_scopes: &["intelligence", "history"],
-        responsibility: "尝试推翻候选决策，逐条给出可检验的反驳依据，或明确说明无法推翻、还需要补哪些证据。",
+        preferred_scopes: &["intelligence", "history", "market"],
+        responsibility: "从对手盘视角挑战本轮方案，逐条给出可检验的反证，或明确说明无法推翻、还需要补哪些证据。",
         body: builtin_bodies::BODY_CONTRARIAN_REVIEW,
     },
 ];
 
-/// 全部内置 id（含 C20 起降级的历史角色）——安装、内置保护、UI 列表都用它。
+/// C31 已删除的内置 Agent 台账（**删除清单，不是内置清单**）。
+///
+/// 用途只有两个，都不参与启用 / 派发判定：
+/// 1. **用户可见提示**：老 Profile 里被删的 id 走"未知 id 丢弃"机制时，用中文名给出
+///    一句可读说明（[`removed_builtin_agent_notice`]），不许静默；
+/// 2. **落盘资产安全清理**：`baselines` 是这些角色最后一版出厂正文的 sha256 ——
+///    只有"证明这份 `AGENTS.md` 是我们写的"才能删；用户改过的文件一律不动。
+pub struct RemovedBuiltinAgent {
+    pub id: &'static str,
+    /// C1 之前的旧 id（`auto-*`）。它们不再参与 alias 迁移，只用于把提示写清楚。
+    pub legacy_id: &'static str,
+    pub name: &'static str,
+    /// 最后一版出厂正文（`render_agent_markdown` 结果）的 sha256；同一角色换过多版时全部列出。
+    pub baselines: &'static [&'static str],
+}
+
+/// C31 删除台账。**任何一条都不再是内置 Agent**：库、勾选器、载荷、指纹清单里都不该出现它们。
+pub const REMOVED_BUILTIN_AGENTS: [RemovedBuiltinAgent; 10] = [
+    RemovedBuiltinAgent {
+        id: "desic-data-digest",
+        legacy_id: "desic-data-digest",
+        name: "数据汇总",
+        baselines: &["3e95aefd035dcf23e945e969126ff70feaf8a7c84f3594c306cb51fb376dec4b"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-account-state",
+        legacy_id: "desic-account-state",
+        name: "账户与持仓",
+        // 两版都登记：`ade9…` 是"没被清单覆盖所以永不升级"的那一版落盘正文（C31 顺手修掉的静默 bug）。
+        baselines: &[
+            "ade9264d95cf2789d7d17e00822dcdffcfe38e0e968c9a12181279dfd0513197",
+            "22685b9877c0692faa129dbe84d895718dbd84123a57a2a221e18d5f8ac47fc4",
+        ],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-decision-proposal",
+        legacy_id: "desic-decision-proposal",
+        name: "分析/决策候选",
+        baselines: &["a469fac3a627e55c83284a5d65d97a49ee75f345f74a344afc59b39cafbc10c4"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-market-structure",
+        legacy_id: "auto-market-structure",
+        name: "市场结构",
+        baselines: &["abe575d48c74f2678fc296984335a03481cba2f2a860c944104e23cf69e8bef7"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-order-flow-liquidity",
+        legacy_id: "auto-order-flow-liquidity",
+        name: "订单流与流动性",
+        baselines: &["6c53ccb6ba718fa0987adb53bd07f44c034a1bb6ff490ab474993c741793c982"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-derivatives-positioning",
+        legacy_id: "auto-derivatives-positioning",
+        name: "衍生品仓位",
+        baselines: &["3e2cb9d202958f9c759b8e453a0f5dfc1d391309a972859a87ffc2a2bfc2b6e7"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-account-risk",
+        legacy_id: "auto-account-risk",
+        name: "账户风险",
+        baselines: &["b68bda4919ee64cc34a2d0ceb2d0623220fa6c158888cd702376de7d81490fa3"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-intelligence-flow",
+        legacy_id: "auto-intelligence-flow",
+        name: "新闻与宏观",
+        baselines: &["7d4abff4dab56ee6ea17b82e3839dc6651589d2f97dad5ce1fff05e888e90a05"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-smart-money",
+        legacy_id: "auto-smart-money",
+        name: "Smart Money",
+        baselines: &["c13c49042b94dc1d7c58efae5dfc9528de39151ed39569df4afd31784e397df2"],
+    },
+    RemovedBuiltinAgent {
+        id: "desic-historical-analogy",
+        legacy_id: "auto-historical-analogy",
+        name: "历史类比",
+        baselines: &["caa725f427f3514c08da7a37f0ec040215b7931ea8a12f582105570b31524156"],
+    },
+];
+
+/// 按 id 或旧 id 查删除台账。
+pub fn removed_builtin_agent(id: &str) -> Option<&'static RemovedBuiltinAgent> {
+    let id = id.trim();
+    REMOVED_BUILTIN_AGENTS
+        .iter()
+        .find(|agent| agent.id == id || agent.legacy_id == id)
+}
+
+pub fn removed_builtin_agent_ids() -> Vec<String> {
+    REMOVED_BUILTIN_AGENTS
+        .iter()
+        .map(|agent| agent.id.to_string())
+        .collect()
+}
+
+/// 该 id（或旧 id）是不是 C31 删掉的内置 Agent。
+///
+/// 与 [`is_builtin_agent_id`] 互斥：删除后它们**不在**内置表里，所以普通校验会把它当
+/// "自定义 id"；迁移与落盘清理必须先用本函数拦一道，否则会把删掉的角色当用户自建 Agent
+/// 重新落盘 / 重新列出来（静默复活）。
+pub fn is_removed_builtin_agent_id(id: &str) -> bool {
+    removed_builtin_agent(id).is_some()
+}
+
+/// 删除清单的可读标签：「数据汇总（desic-data-digest）」。未知 id 原样返回。
+pub fn removed_builtin_agent_labels(ids: &[String]) -> Vec<String> {
+    ids.iter()
+        .map(|id| match removed_builtin_agent(id) {
+            Some(agent) => format!("{}（{}）", agent.name, agent.id),
+            None => id.clone(),
+        })
+        .collect()
+}
+
+/// 老 Profile 迁移 / 保存路径共用的**可见提示**（返回 None = 没有需要告知的删除项）。
+pub fn removed_builtin_agent_notice(dropped: &[String]) -> Option<String> {
+    let labels = removed_builtin_agent_labels(dropped);
+    if labels.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "本轮已移除内置 Agent {}：它的职责（取数与事实核对）已归主 Agent 自己完成，咨询改为可选。",
+        labels.join("、")
+    ))
+}
+
+/// 全部内置 id —— 安装、内置保护、UI 列表都用它。C31 起只有 1 个。
 pub fn builtin_agent_ids() -> Vec<String> {
     BUILTIN_AGENT_SPECS
         .iter()
@@ -1097,17 +1112,17 @@ pub fn builtin_agent_ids() -> Vec<String> {
         .collect()
 }
 
-/// C20 默认启用集（新 4 个流程角色）：新 Profile 与迁移后默认勾选这些；
-/// 历史角色（`deprecated: true`）文件保留、可手动勾选，但**不默认启用**。
+/// C31：**默认启用集已删除**（内置库只剩一个可选咨询角色，主 Agent 独立完成全部步骤）。
+/// 新 Profile 的 `enabledAgentIds` 为空；迁移**绝不**再替用户塞回任何角色。
+/// 需要默认勾选时的恢复方式 = 在 Profile 新建路径里显式写入，而不是恢复本函数。
 pub fn default_enabled_agent_ids() -> Vec<String> {
-    BUILTIN_AGENT_SPECS
-        .iter()
-        .filter(|spec| !spec.deprecated)
-        .map(|spec| spec.id.to_string())
-        .collect()
+    Vec::new()
 }
 
-/// C20：内置历史角色 id（UI 标灰、全选内置时跳过）。
+/// C20 引入、C31 后**恒为空**：内置表里已经没有 `deprecated: true` 的条目。
+///
+/// 保留函数是为了让载荷 / UI 的"被忽略的已下线 id"字段继续有唯一来源
+/// （`ignoredDeprecatedAgents`），恢复方式 = 往内置表里加回一条并置 `deprecated: true`。
 pub fn deprecated_builtin_agent_ids() -> Vec<String> {
     BUILTIN_AGENT_SPECS
         .iter()
@@ -1188,9 +1203,11 @@ pub fn resolve_agent_id_alias(id: &str) -> String {
 
 /// 去重（按勾选顺序）、丢弃库中不存在的 id；不排序、不截断、不打分。
 ///
-/// **注意**：本函数只判"存在"。C20.5 起"已下线（`deprecated`）的内置角色"必须走
+/// **注意**：本函数只判"存在"。已下线的内置角色（若将来恢复 `deprecated` 条目）必须走
 /// [`resolve_enabled_agent_selection`] / [`resolve_enabled_agents`] 才会被剔除——
 /// 它们的定义仍在库里，所以这里**能**通过（这正是旧勾选曾被继续派发的原因）。
+/// C31 删除的内置 id 不在库里，这里天然丢弃；但"丢弃"必须配可见提示，见
+/// [`removed_builtin_agent_notice`] 与 [`drop_removed_agent_ids`]。
 pub fn normalize_enabled_agent_ids(ids: &[String], known: &[AiAgentDefinition]) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     let mut result = Vec::new();
@@ -1271,6 +1288,34 @@ pub fn resolve_enabled_agents(
         .collect()
 }
 
+/// C31：从勾选名单里**只删不加**地剔除"已删除的内置 Agent"。
+///
+/// 语义（与 C20.5 的"默认填充版"相反，这是本版唯一的名单迁移）：
+/// - 名单为空 → 原样返回（空名单 = 新建 / 没勾，不凭空塞任何角色）；
+/// - 名单里含删除清单里的 id（或它们的旧 `auto-*` 形态）→ 剔除并计入 `dropped`；
+/// - **绝不注入**任何默认角色：默认启用集已删除（[`default_enabled_agent_ids`] 为空），
+///   老用户下次启动不会再被塞回已经删掉的 id；
+/// - 未知 id **保留**（那可能只是库文件暂时读不到；清理是保存路径的事）。
+///
+/// 返回 `(生效名单, 被剔除的 id)`，两者都按原相对顺序、已去重。
+pub fn drop_removed_agent_ids(ids: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut kept = Vec::new();
+    let mut dropped = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for raw in ids {
+        let id = raw.trim();
+        if id.is_empty() || !seen.insert(id.to_string()) {
+            continue;
+        }
+        if is_removed_builtin_agent_id(id) {
+            dropped.push(id.to_string());
+        } else {
+            kept.push(id.to_string());
+        }
+    }
+    (kept, dropped)
+}
+
 // ===== 旧配置迁移计划（C3 迁移表 / C8 出口条件 6）=====
 
 #[derive(Debug, Clone, Default)]
@@ -1292,6 +1337,12 @@ pub struct LegacyAgentMigrationPlan {
     pub library_agents: Vec<AiAgentDefinition>,
     /// 用户可见的迁移提示（前端提示字段 / 启动日志共用）。
     pub notes: Vec<String>,
+    /// C31：旧模式的"协作开关"意图。
+    ///
+    /// `None` = 不动开关；`Some(true)` = 旧行为确实是"开了协作"（auto / custom / scheme），
+    /// **即使生效名单为空**也要把开关留在开启状态 —— 默认启用集已删除，名单为空是正常的
+    /// （咨询可选），但把用户的团队开关静默关掉是错的。
+    pub collaboration_enabled: Option<bool>,
 }
 
 pub fn plan_legacy_agent_migration(
@@ -1307,17 +1358,25 @@ pub fn plan_legacy_agent_migration(
         .unwrap_or_default();
     match mode.as_str() {
         "auto" => {
-            // C20：auto（旧"全池"）迁移到**新默认启用集**（4 个流程角色）；
-            // 历史角色不再默认启用，但仍可在 Profile 里手动勾选。
-            plan.enabled_agent_ids = default_enabled_agent_ids();
-            plan.notes.push(format!(
-                "多 Agent 模式 auto 已迁移为默认启用集（{} 个流程角色）",
-                plan.enabled_agent_ids.len()
-            ));
+            // C31：旧 auto（= 旧"全池"）**不再自动启用任何 Agent**。默认启用集已删除 ——
+            // 塞任何 id 回来都会在老用户下次启动时"复活"一个已经删掉的角色
+            // （C20.5 那版默认填充正是这样把 4 个流程角色塞回去的，本版已失效）。
+            // 主 Agent 自己取数、判断、出方案并执行，咨询是可选的。
+            plan.enabled_agent_ids.clear();
+            plan.notes.push(
+                "多 Agent 模式 auto 不再自动启用任何 Agent（C31：主 Agent 独立完成，咨询可选）"
+                    .to_string(),
+            );
+            // 旧 auto = 团队开着：名单空了，但开关保持开启。
+            plan.collaboration_enabled = Some(true);
         }
         "custom" => {
             let migrated = migrate_legacy_agent_list(&input.legacy_agents, &mut plan, now_ms);
             plan.enabled_agent_ids = migrated;
+            if !input.legacy_agents.is_empty() {
+                // 旧 custom = 团队开着（哪怕成员都被删除/弃用，开关也不能被静默关掉）。
+                plan.collaboration_enabled = Some(true);
+            }
             if !plan.enabled_agent_ids.is_empty() {
                 plan.notes.push(format!(
                     "已把 {} 个自定义 Agent 迁移到 Agent 库",
@@ -1342,6 +1401,7 @@ pub fn plan_legacy_agent_migration(
             }
         }
         plan.enabled_agent_ids = union;
+        plan.collaboration_enabled = Some(true);
         plan.notes
             .push("旧 Agent 模板条目已迁移到 Agent 库".to_string());
     }
@@ -1368,6 +1428,15 @@ fn migrate_legacy_agent_list(
             continue;
         }
         let resolved_id = resolve_agent_id_alias(&agent.id);
+        // C31：删除清单里的 id（含旧 `auto-*`）**不得**在迁移里重新落盘成自定义 Agent ——
+        // 否则"删掉的专家"会以 `source: custom` 的身份静默复活，还能被勾选与派发。
+        if let Some(removed) = removed_builtin_agent(&agent.id).or_else(|| removed_builtin_agent(&resolved_id)) {
+            plan.notes.push(format!(
+                "旧 Agent {}（{}）已删除，未迁移",
+                removed.id, removed.name
+            ));
+            continue;
+        }
         if is_builtin_agent_id(&resolved_id) {
             // 旧 `auto-*` 名单直接落到新内置 id，不需要额外库文件。
             if !enabled.contains(&resolved_id) {
@@ -1560,77 +1629,105 @@ mod tests {
         builtin_agent_definitions()
     }
 
-    /// C20：内置表 = 4 个新流程角色（默认启用）+ 7 个历史角色（deprecated）；
-    /// `desic-contrarian-review` 是 id 复用（新正文、不标停用）。
+    /// C31 断言①：**内置 Agent 库只剩 1 个** —— 对手盘 `desic-contrarian-review`
+    /// （id 复用、正文改写为对手盘视角）。流程角色（数据汇总 / 账户与持仓 / 分析候选）
+    /// 与 7 个历史角色一起删除：它们做的事就是主 Agent 自己的步骤。
     #[test]
-    fn builtin_table_matches_c20_roles_and_deprecations() {
-        let defs = builtin_definitions();
-        assert_eq!(defs.len(), 11, "4 新 + 7 历史");
-        assert_eq!(
-            default_enabled_agent_ids(),
-            vec![
-                "desic-data-digest",
-                "desic-account-state",
-                "desic-decision-proposal",
-                "desic-contrarian-review"
-            ]
-        );
-        assert_eq!(deprecated_builtin_agent_ids().len(), 7);
-        assert!(!deprecated_builtin_agent_ids().contains(&"desic-contrarian-review".to_string()));
+    fn builtin_agent_library_keeps_only_the_counterparty_agent() {
+        let ids = builtin_agent_ids();
+        assert_eq!(ids, vec!["desic-contrarian-review".to_string()], "内置库只剩 1 个");
+        assert_eq!(builtin_agent_definitions().len(), 1);
+        assert_eq!(BUILTIN_AGENT_SPECS.len(), 1);
+        // 默认启用集已删除：新 Profile 不勾任何 Agent（咨询是可选的）。
+        assert!(default_enabled_agent_ids().is_empty());
+        // 没有 deprecated 条目 → UI 的"被忽略的已下线 id"恒为空。
+        assert!(deprecated_builtin_agent_ids().is_empty());
 
-        let digest = defs
-            .iter()
-            .find(|def| def.id == "desic-data-digest")
-            .expect("data digest");
-        assert_eq!(digest.name, "数据汇总");
-        assert_eq!(digest.role, "data_digest");
-        assert_eq!(digest.envelope, AGENT_ENVELOPE_STANDARD);
-        assert_eq!(
-            digest.skills,
-            vec!["okx-market-intelligence", "market-radar-research"]
-        );
-        assert!(!digest.deprecated);
-        assert_eq!(
-            digest.summary,
-            "一次读齐行情、衍生品、聪明钱、新闻与历史数据，产出可引用的结构化摘要，不做方向判断。"
-        );
-
-        // C20 裁决：role=account_state + 显式 envelope=risk（不是把 role 改成 account_risk）。
-        let account = defs
-            .iter()
-            .find(|def| def.id == "desic-account-state")
-            .expect("account state");
-        assert_eq!(account.role, "account_state");
-        assert_eq!(account.envelope, AGENT_ENVELOPE_RISK, "显式声明 risk");
-        assert!(account.requires_account);
-
-        let proposal = defs
-            .iter()
-            .find(|def| def.id == "desic-decision-proposal")
-            .expect("decision proposal");
-        assert_eq!(proposal.role, "decision_proposal");
-        assert!(!proposal.requires_account);
-
-        let contrarian = defs
-            .iter()
-            .find(|def| def.id == "desic-contrarian-review")
-            .expect("contrarian");
+        let contrarian = builtin_agent_definition("desic-contrarian-review").expect("contrarian");
+        assert_eq!(contrarian.name, "对手盘");
         assert_eq!(contrarian.role, "contrarian");
-        assert!(!contrarian.deprecated, "id 复用，不标停用");
-        assert!(contrarian.body.contains("尝试推翻候选决策"));
+        assert_eq!(contrarian.source, AGENT_SOURCE_BUILTIN);
+        assert!(!contrarian.deprecated);
+        assert!(contrarian.body.contains("对手盘"));
         assert_eq!(
             contrarian.summary,
-            "尝试推翻候选决策，逐条给出可检验的反驳依据，或明确说明无法推翻、还需要补哪些证据。"
+            "从对手盘视角挑战本轮方案，逐条给出可检验的反证，或明确说明无法推翻、还需要补哪些证据。"
         );
 
-        // 历史角色：文件仍在、可解析，只是标停用。
-        for id in deprecated_builtin_agent_ids() {
-            let def = defs.iter().find(|def| def.id == id).expect("legacy builtin");
-            assert!(def.deprecated, "{id} 必须标 deprecated");
-            assert!(def.source == AGENT_SOURCE_BUILTIN);
-            assert!(builtin_agent_markdown(&id).is_some(), "{id} 仍要能安装");
+        // 删除清单：10 个 id 全部不再内置，全部可查、有中文名、有出厂指纹。
+        assert_eq!(REMOVED_BUILTIN_AGENTS.len(), 10);
+        for removed in REMOVED_BUILTIN_AGENTS.iter() {
+            assert!(!is_builtin_agent_id(removed.id), "{} 不该再是内置", removed.id);
+            assert!(is_removed_builtin_agent_id(removed.id));
+            assert!(is_removed_builtin_agent_id(removed.legacy_id));
+            assert!(builtin_agent_definition(removed.id).is_none());
+            assert!(builtin_agent_markdown(removed.id).is_none());
+            assert!(!removed.name.trim().is_empty());
+            assert!(!removed.baselines.is_empty(), "{} 缺出厂指纹", removed.id);
+            for baseline in removed.baselines {
+                assert_eq!(baseline.len(), 64, "{} 的指纹必须是 sha256 hex", removed.id);
+            }
         }
-        assert!(defs.iter().all(|def| !def.id.starts_with("auto-")));
+        // 旧 `auto-*` 别名不再指向任何内置 id（删除清单只用于提示，不参与别名迁移）。
+        for legacy in [
+            "auto-market-structure",
+            "auto-smart-money",
+            "auto-account-risk",
+            "auto-historical-analogy",
+        ] {
+            assert!(legacy_agent_id_alias(legacy).is_none(), "{legacy} 不该再有别名");
+            assert!(is_removed_builtin_agent_id(legacy), "{legacy} 必须能认出是删除项");
+        }
+        // 保留角色的旧 id 仍然可解析。
+        assert_eq!(
+            legacy_agent_id_alias("auto-contrarian-review"),
+            Some("desic-contrarian-review")
+        );
+        assert!(builtin_agent_ids().iter().all(|id| !id.starts_with("auto-")));
+    }
+
+    /// C31 断言⑤（纯函数级）：迁移**只删不加** —— 删除清单里的 id 被剔除并回报，
+    /// 空名单不凭空塞角色，绝不再出现"自动补默认角色"。
+    #[test]
+    fn removed_agent_ids_are_dropped_without_adding_defaults() {
+        assert!(default_enabled_agent_ids().is_empty(), "默认启用集必须为空");
+
+        let stored = vec![
+            "desic-data-digest".to_string(),
+            "desic-contrarian-review".to_string(),
+            "auto-account-risk".to_string(),
+            "my-custom".to_string(),
+            "desic-data-digest".to_string(),
+        ];
+        let (kept, dropped) = drop_removed_agent_ids(&stored);
+        assert_eq!(
+            kept,
+            vec!["desic-contrarian-review".to_string(), "my-custom".to_string()],
+            "顺序沿用原勾选顺序、去重、未知 id 保留"
+        );
+        assert_eq!(
+            dropped,
+            vec!["desic-data-digest".to_string(), "auto-account-risk".to_string()]
+        );
+        // 空名单不动（不凭空塞角色）。
+        assert_eq!(
+            drop_removed_agent_ids(&[]),
+            (Vec::<String>::new(), Vec::<String>::new())
+        );
+        // 名单里没有删除项 → 一个字节都不变（幂等）。
+        let clean = vec!["desic-contrarian-review".to_string(), "my-custom".to_string()];
+        assert_eq!(drop_removed_agent_ids(&clean), (clean.clone(), Vec::new()));
+
+        // 可见提示：中文名 + 一句话解释，不许静默。
+        let notice = removed_builtin_agent_notice(&dropped).expect("notice");
+        assert!(notice.contains("数据汇总"), "{notice}");
+        assert!(notice.contains("账户风险"), "{notice}");
+        assert!(notice.contains("主 Agent"), "{notice}");
+        assert_eq!(
+            removed_builtin_agent_labels(&["desic-smart-money".to_string()]),
+            vec!["Smart Money（desic-smart-money）".to_string()]
+        );
+        assert!(removed_builtin_agent_notice(&[]).is_none());
     }
 
     /// C23.1：反方审查的范围约束 —— 默认输入是**本轮已产出的报告**、只做**少量定点核对**、
@@ -1658,53 +1755,73 @@ mod tests {
                 .expect("spec")
                 .responsibility
         );
-        // 未动过的三位专家正文不得被"顺手对齐"（内容包 §6.6 的既定分工）。
-        for (id, marker) in [
-            ("desic-data-digest", "一次读齐"),
-            ("desic-account-state", "只读「账户与持仓」专家"),
-            ("desic-decision-proposal", "逐条引用证据 ID、时间戳与来源工具"),
+        // C31：定位改成"对手盘视角"，输出改成自然语言（没有固定字段 / 固定 JSON / 模板），
+        // 同时**保留** C23.1 的范围约束（不重新做全量取证）。
+        for expected in [
+            "只读「对手盘」角色",
+            "把本轮方案当作对手的仓位来攻击",
+            "用自然语言写",
+            "没有固定字段、没有固定 JSON、没有必须填的模板",
+            "只有真的要提交参数时才走工具的结构化入参",
+            "可推翻、无法推翻（附适用范围）、需补证",
         ] {
-            let definition = builtin_agent_definition(id).expect("definition");
             assert!(
-                definition.body.contains(marker),
-                "{id} 正文不应对齐反方范围约束（内容包 §6.6）"
+                contrarian.body.contains(expected),
+                "C31 对手盘正文缺少要素：{expected}"
             );
+        }
+        // 删除的 10 个内置 Agent 一个都不许留在库里。
+        for removed in REMOVED_BUILTIN_AGENTS.iter() {
             assert!(
-                !definition.body.contains("**禁止重新做全量取证**"),
-                "{id} 不是反方角色，不该带反方的禁止全量取证约束"
+                builtin_agent_definition(removed.id).is_none(),
+                "{} 必须已删除",
+                removed.id
             );
         }
     }
 
-    /// C20.5：勾选名单三分（生效 / 已下线忽略 / 不存在）+ 恢复路径（纯函数级）。
+    /// C20.5 机制的**恢复路径**（纯函数级）：内置表里现在一条 `deprecated` 都没有，
+    /// 但"已下线 → 被忽略；把 `deprecated` 置回 false → 立刻可派"这条链路必须还在，
+    /// 否则将来要下线/恢复某个角色时会静默派发。
     #[test]
     fn deprecated_agents_are_ignored_until_restored() {
+        for id in builtin_agent_ids() {
+            assert!(!is_deprecated_agent_id(&id), "{id} 不该是已下线状态");
+        }
+        assert!(deprecated_builtin_agent_ids().is_empty());
+
+        // 构造"库里仍有该定义但已下线"的场景（等价于历史上 7 个历史角色的状态）。
         let mut known = builtin_agent_definitions();
+        let mut legacy = known[0].clone();
+        legacy.id = "custom-legacy-role".to_string();
+        legacy.deprecated = true;
+        known.push(legacy);
+
         let ids = vec![
-            "desic-smart-money".to_string(),
+            "custom-legacy-role".to_string(),
             "desic-contrarian-review".to_string(),
             "not-in-library".to_string(),
         ];
-        for id in deprecated_builtin_agent_ids() {
-            assert!(is_deprecated_agent_id(&id), "{id}");
-        }
-        assert!(!is_deprecated_agent_id("desic-contrarian-review"), "id 复用，未下线");
+        assert!(!is_deprecated_agent_id("desic-contrarian-review"));
         assert!(!is_deprecated_agent_id("not-in-library"));
 
         let selection = resolve_enabled_agent_selection(&ids, &known);
         assert_eq!(selection.enabled, vec!["desic-contrarian-review".to_string()]);
-        assert_eq!(selection.ignored_deprecated, vec!["desic-smart-money".to_string()]);
+        assert_eq!(
+            selection.ignored_deprecated,
+            vec!["custom-legacy-role".to_string()]
+        );
         assert_eq!(selection.dropped_unknown, vec!["not-in-library".to_string()]);
         // 载荷侧：已下线的定义被当无效 id 过滤掉（运行绝不派发）。
         assert!(resolve_enabled_agents(&ids, &known)
             .iter()
-            .all(|agent| agent.id != "desic-smart-money"));
-        // 旧兼容层只判"存在"——已下线的定义仍在库里，所以它能通过（这正是旧行为误派的原因）。
-        assert!(normalize_enabled_agent_ids(&ids, &known).contains(&"desic-smart-money".to_string()));
+            .all(|agent| agent.id != "custom-legacy-role"));
+        // 旧兼容层只判"存在"——定义仍在库里，所以它能通过（这正是旧行为误派的原因）。
+        assert!(normalize_enabled_agent_ids(&ids, &known).contains(&"custom-legacy-role".to_string()));
 
         // 恢复路径：把 `deprecated` 去掉 → 立刻回到生效名单。
         for agent in known.iter_mut() {
-            if agent.id == "desic-smart-money" {
+            if agent.id == "custom-legacy-role" {
                 agent.deprecated = false;
             }
         }
@@ -1712,21 +1829,21 @@ mod tests {
         assert_eq!(
             restored.enabled,
             vec![
-                "desic-smart-money".to_string(),
+                "custom-legacy-role".to_string(),
                 "desic-contrarian-review".to_string()
             ]
         );
         assert!(restored.ignored_deprecated.is_empty());
 
-        // 文件里没有 `deprecated` 字段：靠内置表标注（非内置条目原样不动）。
+        // 文件里没有 `deprecated` 字段：内置表是唯一真相（非内置条目原样不动）。
         let mut parsed = parse_agent_markdown(
-            &builtin_agent_markdown("desic-smart-money").expect("builtin markdown"),
+            &builtin_agent_markdown("desic-contrarian-review").expect("builtin markdown"),
         )
         .expect("parse builtin");
         assert!(!parsed.deprecated);
         apply_builtin_deprecation(&mut parsed);
-        assert!(parsed.deprecated);
-        let mut custom = builtin_agent_definition("desic-data-digest").expect("definition");
+        assert!(!parsed.deprecated);
+        let mut custom = known[0].clone();
         custom.id = "custom-agent".to_string();
         custom.deprecated = true;
         apply_builtin_deprecation(&mut custom);
@@ -1735,11 +1852,11 @@ mod tests {
 
     #[test]
     fn builtin_render_is_stable_and_round_trips() {
-        let first = builtin_agent_markdown("desic-smart-money").expect("builtin markdown");
-        let second = builtin_agent_markdown("desic-smart-money").expect("builtin markdown");
+        let first = builtin_agent_markdown("desic-contrarian-review").expect("builtin markdown");
+        let second = builtin_agent_markdown("desic-contrarian-review").expect("builtin markdown");
         assert_eq!(first, second, "内置指纹必须稳定");
         let parsed = parse_agent_markdown(&first).expect("parse builtin");
-        assert_eq!(parsed.id, "desic-smart-money");
+        assert_eq!(parsed.id, "desic-contrarian-review");
         assert_eq!(parsed.created_at, AGENT_BUILTIN_CREATED_AT_MS);
         let rendered = render_agent_markdown(&parsed, &parsed.body);
         assert_eq!(rendered, first, "渲染必须字节级幂等");
@@ -1880,26 +1997,26 @@ mod tests {
     #[test]
     fn enabled_ids_are_ordered_deduped_and_filtered() {
         let defs = builtin_documents();
+        // C31：删除清单里的 id 在库里根本不存在 → 兼容层直接丢弃。
         let raw = vec![
             "desic-smart-money".to_string(),
             "auto-market-structure".to_string(),
             "desic-smart-money".to_string(),
             "does-not-exist".to_string(),
             "".to_string(),
-            "desic-smart-money".to_string(),
+            "desic-contrarian-review".to_string(),
         ];
-        // 兼容层（只判"存在"，签名不变）：两个 id 都在库里。
         assert_eq!(
             normalize_enabled_agent_ids(&raw, &defs),
-            vec!["desic-smart-money".to_string(), "desic-market-structure".to_string()]
+            vec!["desic-contrarian-review".to_string()]
         );
-        // C20.5：这两个都是已下线的历史角色 → 载荷里一个都不派发。
-        assert!(resolve_enabled_agents(&raw, &defs).is_empty());
-        // 换成仍启用的角色：按勾选顺序、去重、带正文、丢弃不存在的 id。
+        assert!(resolve_enabled_agents(&raw, &defs)
+            .iter()
+            .all(|def| def.id == "desic-contrarian-review"));
+        // 唯一保留的角色：按勾选顺序、去重、带正文、丢弃不存在的 id。
         let live = vec![
-            "desic-decision-proposal".to_string(),
-            "desic-data-digest".to_string(),
-            "desic-data-digest".to_string(),
+            "desic-contrarian-review".to_string(),
+            "desic-contrarian-review".to_string(),
             "does-not-exist".to_string(),
         ];
         let resolved = resolve_enabled_agents(&live, &defs);
@@ -1908,7 +2025,7 @@ mod tests {
                 .iter()
                 .map(|def| def.id.as_str())
                 .collect::<Vec<_>>(),
-            vec!["desic-decision-proposal", "desic-data-digest"]
+            vec!["desic-contrarian-review"]
         );
         assert!(resolved.iter().all(|def| !def.body.is_empty()));
     }
@@ -1925,6 +2042,8 @@ mod tests {
         assert!(off.enabled_agent_ids.is_empty());
         assert!(off.library_agents.is_empty());
 
+        // C31 断言⑤：旧 auto（全池）**不再自动启用任何 Agent**（默认启用集已删除，
+        // 不再把那 4 个流程角色塞回老 Profile），但必须给出可见说明。
         let auto = plan_legacy_agent_migration(
             &LegacyAgentMigrationInput {
                 multi_agent_mode: Some("AUTO".to_string()),
@@ -1932,8 +2051,9 @@ mod tests {
             },
             1_000,
         );
-        assert_eq!(auto.enabled_agent_ids, default_enabled_agent_ids());
-        assert_eq!(auto.enabled_agent_ids.len(), 4, "C20 默认启用集是新 4 个流程角色");
+        assert!(auto.enabled_agent_ids.is_empty(), "不再塞回任何默认角色");
+        assert!(auto.library_agents.is_empty());
+        assert!(auto.notes.iter().any(|note| note.contains("不再自动启用")));
 
         let custom = plan_legacy_agent_migration(
             &LegacyAgentMigrationInput {
@@ -1962,11 +2082,14 @@ mod tests {
             },
             1_000,
         );
-        assert_eq!(
-            custom.enabled_agent_ids,
-            vec!["desic-market-structure".to_string(), "my-custom".to_string()]
-        );
+        // C31：旧 `auto-market-structure` 属于删除清单 → **不迁移、不落盘**（否则会以
+        // 自定义 Agent 的身份静默复活），但要在 notes 里说明。
+        assert_eq!(custom.enabled_agent_ids, vec!["my-custom".to_string()]);
         assert_eq!(custom.library_agents.len(), 1);
+        assert!(custom
+            .notes
+            .iter()
+            .any(|note| note.contains("desic-market-structure") && note.contains("已删除")));
         let migrated = &custom.library_agents[0];
         assert_eq!(migrated.id, "my-custom");
         assert_eq!(migrated.source, AGENT_SOURCE_CUSTOM);
@@ -2056,8 +2179,8 @@ mod tests {
 
     #[test]
     fn directory_id_must_match_frontmatter() {
-        let def = builtin_agent_definition("desic-market-structure").expect("builtin");
-        assert!(validate_agent_directory_id("desic-market-structure", &def).is_ok());
+        let def = builtin_agent_definition("desic-contrarian-review").expect("builtin");
+        assert!(validate_agent_directory_id("desic-contrarian-review", &def).is_ok());
         assert!(validate_agent_directory_id("other-dir", &def).is_err());
     }
 

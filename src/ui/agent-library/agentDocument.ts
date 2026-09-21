@@ -8,20 +8,30 @@ import type { AiAgentEnvelope, AiAgentSource } from "../../types";
  * 真正的校验与拒绝由 Rust 单一实现负责。
  */
 
+/**
+ * 新建自定义 Agent 时可选的 role 标识（C31）。
+ *
+ * 内置库只剩一个可选咨询角色（对手盘 `contrarian`），其余流程角色（取数 / 账户 /
+ * 分析候选）已随 C31 删除 —— 它们做的事就是主 Agent 自己的步骤。用户自建 Agent 时
+ * 建议从 `contrarian`（挑战本轮方案）或 `custom`（通用分析）起步；
+ * Rust 侧 `AGENT_ROLE_ENUM` 仍接受历史 role 值（role 本身是自由 slug，正则不拦），
+ * 因此这里只是建议列表，不是白名单。
+ */
 export const AGENT_ROLE_SUGGESTIONS = [
-  // C20.1：按流程划分的新默认角色（取数 / 账户 / 分析候选）
+  // C31：默认建议 —— 可选咨询角色 + 通用自定义。
+  "contrarian",
+  "custom",
+  // 兼容：用户自建 Agent 仍可沿用这些 role（库里没有对应内置 Agent）。
   "data_digest",
   "account_state",
   "decision_proposal",
-  "contrarian",
   "market_structure",
   "order_flow_liquidity",
   "derivatives_positioning",
   "account_risk",
   "intelligence_flow",
   "smart_money",
-  "historical_analogy",
-  "custom"
+  "historical_analogy"
 ] as const;
 
 /** C20.4：角色 → 输出契约（目录/勾选器上的「这个专家返回什么形态」）。 */

@@ -123,43 +123,6 @@ fn default_ui_language_preference() -> String {
     "system".to_string()
 }
 
-fn default_typesafe_model() -> String {
-    "jev-1.13.0".to_string()
-}
-
-fn default_typesafe_base_url() -> String {
-    "https://api.typesafe.ai".to_string()
-}
-
-/// TypeSafe / Jev 快速判定接入配置（可选，默认关闭）。
-///
-/// Jev 是"判定层"而不是生成层：它返回类型化答案与校准概率，不产出正文。
-/// 这里的开关只决定"是否在 AI 运行中使用 Jev 判定"，不改变既有生成链路、
-/// 也不改变任何交易或权限边界。API Key 明文只落本机敏感配置，对外只回掩码。
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct AiTypesafeConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default)]
-    pub api_key: String,
-    #[serde(default = "default_typesafe_model")]
-    pub model: String,
-    #[serde(default = "default_typesafe_base_url")]
-    pub base_url: String,
-}
-
-impl Default for AiTypesafeConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            api_key: String::new(),
-            model: default_typesafe_model(),
-            base_url: default_typesafe_base_url(),
-        }
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct AiConfig {
@@ -193,9 +156,22 @@ pub struct AiConfig {
     pub open_agent: bool,
     #[serde(default)]
     pub workspace_roots: Vec<String>,
-    /// TypeSafe / Jev 快速判定（可选）。缺字段的旧配置按「关闭 + 默认模型」迁移。
+    /// C29：快判模式使用的 TypeSafe（Jev）API Key。**只进不出** ——
+    /// 落库在敏感配置文件里，任何读接口只回掩码（`AiConfigSummary.typesafe_api_key_masked`），
+    /// 明文只在下发侧车快判载荷时使用（`typesafeApiKey`）。
     #[serde(default)]
-    pub typesafe: AiTypesafeConfig,
+    pub typesafe_api_key: String,
+    /// C28→C29 迁移的**一次性收养**留下的旧全局 Jev 端点（`typesafe.baseUrl`）。
+    ///
+    /// C28 把旧的 `typesafe{enabled,apiKey,model,baseUrl}` 段从结构里删掉，C29 新增了
+    /// `typesafeApiKey` —— 但磁盘上的旧值从来没有被搬过来（真机表现：侧车拿空 Key → HTTP 403）。
+    /// 加载时收养旧值、写回新格式；`baseUrl`/`model` 落在这里，作为快判 Profile **未显式设置**
+    /// 时的回落（Profile 显式设置优先，见 `fastlane::resolve_inherited_jev_setting`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typesafe_base_url: Option<String>,
+    /// 同上：旧 `typesafe.model`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub typesafe_model: Option<String>,
     /// 只读 AI 工具并发上限（可选）。缺省 12，按机器/回退可调，见 `ai_tool_gate`。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_read_concurrency: Option<u32>,
@@ -260,12 +236,8 @@ pub struct AiConfigSummary {
     pub skill_runtime_trust: HashMap<String, bool>,
     pub open_agent: bool,
     pub workspace_roots: Vec<String>,
-    /// TypeSafe / Jev 快速判定：是否启用、是否已具备可用 Key、掩码后的 Key、模型与端点。
-    pub typesafe_enabled: bool,
-    pub typesafe_configured: bool,
+    /// C29：TypeSafe（Jev）Key 的**掩码**；明文永远不出现在读接口里。
     pub typesafe_api_key_masked: String,
-    pub typesafe_model: String,
-    pub typesafe_base_url: String,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -322,11 +294,9 @@ pub struct AiConfigUpdate {
     pub skill_definitions: Option<Vec<AiSkillDefinition>>,
     pub open_agent: Option<bool>,
     pub workspace_roots: Option<Vec<String>>,
-    /// TypeSafe / Jev：`None` = 不改动（沿用现值）；`Some("")` 表示清空 Key（`api_key` 含 `****` 时同样忽略）。
-    pub typesafe_enabled: Option<bool>,
+    /// C29：TypeSafe（Jev）Key。`None` = 不改动；含 `****` 的掩码值忽略；空串 = 显式清空。
+    #[serde(default)]
     pub typesafe_api_key: Option<String>,
-    pub typesafe_model: Option<String>,
-    pub typesafe_base_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -610,6 +580,52 @@ mod tests {
         hash
     }
 
+    /// C28 负向断言：旧配置里残留的**已移除判定层**字段段（含 API Key）必须仍可读入，
+    /// 但**再保存时被完全丢弃** —— 不能把一个用不到的密钥继续留在磁盘上。
+    ///
+    /// 注意：键名在本用例里用拼接写出，保证全仓 `grep` 不留运行时残留字面量
+    /// （唯一允许的字面量是迁移处标注 deprecated 历史列的注释）。
+    #[test]
+    fn legacy_removed_section_loads_and_is_dropped_on_resave() {
+        let section = "type".to_string() + "safe";
+        let secret = "sk-placeholder-not-a-real-key";
+        let legacy = format!(
+            r#"{{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid",
+                 "{section}": {{ "enabled": true, "apiKey": "{secret}",
+                                 "model": "removed-judge-model", "baseUrl": "https://example.invalid" }} }}"#
+        );
+        let config: AiConfig = serde_json::from_str(&legacy).expect("旧配置必须仍能读入");
+        assert_eq!(config.model, "m");
+        let resaved = serde_json::to_string(&config).expect("serialize config");
+        // 旧的**整段**配置必须消失；C29 只保留一个"只进不出"的 Key 字段（默认空）。
+        assert!(
+            !resaved.contains(&format!("\"{section}\":{{")),
+            "再保存不得写出旧的整段配置：{resaved}"
+        );
+        assert!(!resaved.contains(secret), "旧 Key 必须被丢弃：{resaved}");
+        assert_eq!(
+            resaved.to_ascii_lowercase().matches(&section).count(),
+            1,
+            "只应保留 C29 的 Key 字段：{resaved}"
+        );
+    }
+
+    /// C28 负向断言：老前端仍带已移除字段的更新入参**接受并忽略**（不得报错）。
+    #[test]
+    fn legacy_removed_field_update_is_accepted_and_ignored() {
+        let prefix = "type".to_string() + "safe";
+        let payload = format!(
+            r#"{{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid",
+                  "apiKey": "sk-placeholder-not-a-real-key",
+                  "{prefix}Enabled": true, "{prefix}ApiKey": "sk-placeholder-not-a-real-key",
+                  "{prefix}Model": "removed-judge-model", "{prefix}BaseUrl": "https://example.invalid" }}"#
+        );
+        let update: AiConfigUpdate =
+            serde_json::from_str(&payload).expect("旧更新入参必须仍能反序列化（忽略未知字段）");
+        assert_eq!(update.provider.as_deref(), Some("openai-compatible"));
+        assert_eq!(update.model, "m");
+    }
+
     #[test]
     fn local_account_uid_fields_are_backward_compatible_and_use_camel_case() {
         let legacy = serde_json::json!({
@@ -770,7 +786,12 @@ mod tests {
             // "Analysis-result formatting (run summary)"（条目 28–34），既有 1–27 一字未改。
             // 这是**有意的版本提升**（promotion），指纹随正文变化。
             ("desic-core-operations", 0x74d6_0dbf_7630_a498_u64),
-            ("trading-philosophy", 0xebdb_a0a9_c0fd_658d_u64),
+            // C31（2026-09-21）：`trading-philosophy` 追加第 VII 小节
+            // "Think against yourself"（条目 21–23：攻击自己的方案、把"市场已定价什么"
+            // 与"我不同意的部分"分开、结论必须可被证伪），既有 1–20 一字未改。
+            // 这是**有意的版本提升**（promotion）：C31 删掉了 3 个内置流程角色，它们正文里
+            // 的"理念 / 方法论"类句子搬进了这个可编辑 Skill。指纹随正文变化。
+            ("trading-philosophy", 0x0984_ee66_87ee_31ae_u64),
             ("okx-market-intelligence", 0xe56e_8dff_915f_7377_u64),
             ("market-radar-research", 0x8fca_9f53_9f40_54ae_u64),
         ];

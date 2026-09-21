@@ -7,9 +7,9 @@ use desic_storage_config::{
     AiConfig, AiConfigSummary, AiConfigUpdate, AiConnectionTestResult, AiLocalAuthStatus,
     AiLocalCliStatus, AiModelConfig, AiModelConfigSummary, AiModelConfigUpdate, AiSkillDefinition,
     DiagnosticExportResult, FrontendLogEntry, KlineDataRange, ProxyConfig, ProxyConfigSummary,
-    ProxyConfigUpdate, ProxyTestResult, REQUIRED_AI_SKILL_IDS, SensitiveConfigMigrationResult,
-    StorageMaintenanceResult, StorageStatusResult, UiPreferencesConfig, UiPreferencesQuery,
-    UiPreferencesSummary, UiPreferencesUpdate, WatchlistConfig,
+    ProxyConfigUpdate, ProxyTestResult, SensitiveConfigMigrationResult, StorageMaintenanceResult,
+    StorageStatusResult, UiPreferencesConfig, UiPreferencesQuery, UiPreferencesSummary,
+    UiPreferencesUpdate, WatchlistConfig, REQUIRED_AI_SKILL_IDS,
 };
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
 use zip::{read::ZipArchive, write::SimpleFileOptions, CompressionMethod, ZipWriter};
@@ -213,7 +213,9 @@ pub(crate) fn initialize_runtime_paths_with_root(
     if !cfg!(debug_assertions) && !using_custom_root {
         // 旧工作区配置迁移同样是尽力而为：失败只记录（历史上这里的裸 io 错误曾让首次启动直接退出）
         if let Err(error) = migrate_legacy_workspace_config(&paths.config_dir) {
-            crate::boot_log(&format!("legacy workspace config migration skipped: {error}"));
+            crate::boot_log(&format!(
+                "legacy workspace config migration skipped: {error}"
+            ));
         }
     }
 
@@ -565,40 +567,28 @@ pub(crate) fn ai_save_config(
                 })
                 .unwrap_or_default(),
         ),
-        // TypeSafe / Jev（可选判定层）：`None` 字段沿用现值，避免旧前端保存时静默关掉它。
-        typesafe: {
-            let mut typesafe = existing
+        // C29：TypeSafe（Jev）Key —— **只进不出**。掩码回显（含 `****`）不覆盖真实 Key；
+        // 空串表示显式清空；`None` 沿用现值。明文只在下发侧车快判载荷时读取。
+        typesafe_api_key: {
+            let mut key = existing
                 .as_ref()
-                .map(|config| config.typesafe.clone())
+                .map(|config| config.typesafe_api_key.clone())
                 .unwrap_or_default();
-            if let Some(enabled) = update.typesafe_enabled {
-                typesafe.enabled = enabled;
-            }
-            if let Some(model) = update
-                .typesafe_model
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                typesafe.model = model.to_string();
-            }
-            if let Some(base_url) = update
-                .typesafe_base_url
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                typesafe.base_url = base_url.to_string();
-            }
-            if let Some(api_key) = update.typesafe_api_key.as_deref() {
-                let trimmed = api_key.trim();
-                // 掩码回显（含 `****`）不覆盖真实 Key；空串表示显式清空。
+            if let Some(value) = update.typesafe_api_key.as_deref() {
+                let trimmed = value.trim();
                 if !trimmed.contains("****") {
-                    typesafe.api_key = trimmed.to_string();
+                    key = trimmed.to_string();
                 }
             }
-            typesafe
+            key
         },
+        // C28→C29 收养的旧全局 Jev 端点：界面上没有对应控件，保存时**原样沿用**。
+        typesafe_base_url: existing
+            .as_ref()
+            .and_then(|config| config.typesafe_base_url.clone()),
+        typesafe_model: existing
+            .as_ref()
+            .and_then(|config| config.typesafe_model.clone()),
         // 只读工具并发闸门（可选）：界面上没有对应控件，保存时**原样沿用现值**，
         // 否则用户改任意其它设置都会把并发上限重置回缺省。
         tool_read_concurrency: existing
@@ -1374,25 +1364,29 @@ fn persist_imported_bundle_files(
     let parent = target
         .parent()
         .ok_or_else(|| "Skill bundle 存储目录无效".to_string())?;
-    fs::create_dir_all(parent).map_err(|err| {
-        format!(
-            "创建 Skill bundle 父目录 {} 失败: {err}",
-            parent.display()
-        )
-    })?;
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("创建 Skill bundle 父目录 {} 失败: {err}", parent.display()))?;
     let staging = parent.join(format!(".{}-{}.staging", summary.bundle_hash, now_ms()));
     if staging.exists() {
         fs::remove_dir_all(&staging).map_err(|err| err.to_string())?;
     }
-    fs::create_dir_all(&staging)
-        .map_err(|err| format!("创建 Skill bundle 暂存目录 {} 失败: {err}", staging.display()))?;
+    fs::create_dir_all(&staging).map_err(|err| {
+        format!(
+            "创建 Skill bundle 暂存目录 {} 失败: {err}",
+            staging.display()
+        )
+    })?;
     let result = (|| {
         for file in &bundle.files {
             let path = desic_skill_runtime::validate_bundle_relative_path(&file.path)?;
             let destination = staging.join(path);
             if let Some(parent) = destination.parent() {
-                fs::create_dir_all(parent)
-                    .map_err(|err| format!("创建 Skill bundle 文件目录 {} 失败: {err}", parent.display()))?;
+                fs::create_dir_all(parent).map_err(|err| {
+                    format!(
+                        "创建 Skill bundle 文件目录 {} 失败: {err}",
+                        parent.display()
+                    )
+                })?;
             }
             write_file_atomically(&destination, &file.bytes)?;
         }
@@ -1518,7 +1512,10 @@ fn agent_bundle_dir_in(root: &Path, id: &str) -> Result<PathBuf, String> {
 
 /// `AGENTS.md` 的绝对路径（不要求文件存在）。
 pub(crate) fn agent_bundle_markdown_path(id: &str) -> Result<PathBuf, String> {
-    Ok(agent_bundle_dir_in(&agent_library_dir(), id)?.join(desic_agent_automation::AGENT_FILE_NAME))
+    Ok(
+        agent_bundle_dir_in(&agent_library_dir(), id)?
+            .join(desic_agent_automation::AGENT_FILE_NAME),
+    )
 }
 
 /// 读取 Agent 文本；不存在返回 `Ok(None)`。
@@ -1606,7 +1603,12 @@ pub(crate) fn list_agent_reference_paths(id: &str) -> Result<Vec<String>, String
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(error) => return Err(format!("读取 Agent 引用目录 {} 失败: {error}", dir.display())),
+        Err(error) => {
+            return Err(format!(
+                "读取 Agent 引用目录 {} 失败: {error}",
+                dir.display()
+            ))
+        }
     };
     let mut paths = Vec::new();
     for entry in entries {
@@ -1621,21 +1623,30 @@ pub(crate) fn list_agent_reference_paths(id: &str) -> Result<Vec<String>, String
         if !name.to_ascii_lowercase().ends_with(".md") {
             continue;
         }
-        paths.push(format!("{}/{name}", desic_agent_automation::AGENT_REFERENCES_DIR));
+        paths.push(format!(
+            "{}/{name}",
+            desic_agent_automation::AGENT_REFERENCES_DIR
+        ));
     }
     paths.sort();
     Ok(paths)
 }
 
 /// 读取 `references/<relative_path>`；不存在返回 `Ok(None)`。
-pub(crate) fn read_agent_reference(id: &str, relative_path: &str) -> Result<Option<String>, String> {
+pub(crate) fn read_agent_reference(
+    id: &str,
+    relative_path: &str,
+) -> Result<Option<String>, String> {
     let dir = agent_bundle_dir_in(&agent_library_dir(), id)?;
     let relative = desic_agent_automation::validate_agent_reference_path(relative_path)?;
     let path = dir.join(relative);
     match fs::read_to_string(&path) {
         Ok(content) => Ok(Some(content)),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(format!("读取 Agent 引用文件 {} 失败: {error}", path.display())),
+        Err(error) => Err(format!(
+            "读取 Agent 引用文件 {} 失败: {error}",
+            path.display()
+        )),
     }
 }
 
@@ -1679,27 +1690,113 @@ pub(crate) fn delete_agent_bundle(id: &str) -> Result<(), String> {
     }
 }
 
-/// 内置 Agent 安装结果（带指纹清单的三态判定）。
+/// C31：内置 Agent 正文的**历史基线指纹**（sha256 hex，逐字节等于
+/// `render_agent_markdown` 的输出）。
+///
+/// 背景（C31 顺手修掉的静默 bug）：落盘正文比内置基线旧、又不在安装清单里时，旧实现
+/// 既不升级也不写日志 —— 用户机上的 `desic-contrarian-review` 就停在了 C23.1 之前的
+/// 旧正文上（`3ebcbd70…`，实测值），永远升不上来。把"我们确实出厂过"的正文登记在这里，
+/// 安装时就能按"**未改动的旧副本**"安全升级；用户改过的正文指纹既不在这里也不在清单里，
+/// 依旧不覆盖。
+pub(crate) const LEGACY_BUILTIN_AGENT_FINGERPRINTS: [(&str, &str); 1] = [
+    // C23.1 之前出厂的反方正文（已被 C31 的对手盘版取代）。它与"永不升级"的旧落盘
+    // 正文逐字节相同，是这条修复的真实现场样本。
+    (
+        "desic-contrarian-review",
+        "3ebcbd709b852472b30762789ce6792174f66ac6f8c13530c9b1e4c1334f0733",
+    ),
+];
+
+/// 内置 Agent 安装结果（带指纹清单的四态判定 + C31 的删除态）。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct BuiltinAgentInstall {
     /// 本次新建的文件数。
     pub written: usize,
-    /// 本次升级为新版的文件数（清单指纹证明"是上次我们装的那份、用户没动过"）。
+    /// 本次升级为新版的文件数（清单 / 历史基线指纹证明"是上次我们装的那份、用户没动过"）。
     pub upgraded: usize,
-    /// 保持不覆盖的文件数（用户改动，或清单缺失时无法判定）。
+    /// 保持不覆盖的文件数（用户改动，或无法证明是我们写的）。
     pub kept: usize,
-    /// 清单缺失且遇到"已存在但内容不等于当前版本"的文件（调用方按此记一行日志）。
+    /// C31：本次清理掉的**已删除内置 Agent**目录数（只有证明是我们写的才会删）。
+    pub removed: usize,
+    /// 新建 / 升级 / 保留 / 清理的 id（**逐 id 留痕**，调用方按此记日志，绝不静默）。
+    pub written_ids: Vec<String>,
+    pub upgraded_ids: Vec<String>,
+    pub kept_ids: Vec<String>,
+    pub removed_ids: Vec<String>,
+    /// 清单缺失且遇到"已存在但内容不是我们写的"的文件（调用方按此记一行日志）。
     pub manifest_missing: bool,
     /// 安装后的指纹清单；`manifest` 传入 None 时为 None（不猜测、不回写）。
     pub manifest: Option<std::collections::HashMap<String, String>>,
 }
 
-/// 内置 Agent 包安装（三态，C1 + lead 裁决「安装清单指纹」）：
+/// 该正文是不是"我们出厂过的某一版"（清单 + 历史基线指纹）。
+fn builtin_agent_content_is_ours(
+    id: &str,
+    hash: &str,
+    manifest: Option<&std::collections::HashMap<String, String>>,
+) -> bool {
+    if manifest
+        .and_then(|entries| entries.get(id))
+        .is_some_and(|previous| previous == hash)
+    {
+        return true;
+    }
+    LEGACY_BUILTIN_AGENT_FINGERPRINTS
+        .iter()
+        .any(|(baseline_id, baseline)| *baseline_id == id && *baseline == hash)
+}
+
+/// C31 的"删除清单"卸载：把**已删除内置 Agent** 的落盘目录清掉。
+///
+/// 只删能证明是我们写的（最后一版出厂指纹命中删除台账里的 `baselines`），或清单里
+/// 记着我们写过的那一份；用户改过的文件一律保留（"用户改过就不覆盖"的同一原则），
+/// 但会出现在 `kept_ids` 里被记日志，所以不会静默。
+fn prune_removed_builtin_agent_bundles(
+    root: &std::path::Path,
+    manifest: Option<&std::collections::HashMap<String, String>>,
+    result: &mut BuiltinAgentInstall,
+) -> Result<(), String> {
+    for removed in desic_agent_automation::REMOVED_BUILTIN_AGENTS.iter() {
+        let dir = agent_bundle_dir_in(root, removed.id)?;
+        let path = dir.join(desic_agent_automation::AGENT_FILE_NAME);
+        if !path.exists() {
+            continue;
+        }
+        let existing = fs::read(&path)
+            .map_err(|error| format!("读取已删除 Agent 文件 {} 失败: {error}", path.display()))?;
+        let existing_hash = sha256_bytes(&existing);
+        let ours = removed
+            .baselines
+            .iter()
+            .any(|baseline| *baseline == existing_hash)
+            || manifest
+                .and_then(|entries| entries.get(removed.id))
+                .is_some_and(|previous| *previous == existing_hash);
+        if !ours {
+            result.kept_ids.push(removed.id.to_string());
+            if manifest.is_none() {
+                result.manifest_missing = true;
+            }
+            continue;
+        }
+        fs::remove_dir_all(&dir)
+            .map_err(|error| format!("清理已删除的 Agent 目录 {} 失败: {error}", dir.display()))?;
+        result.removed += 1;
+        result.removed_ids.push(removed.id.to_string());
+        if let Some(entries) = result.manifest.as_mut() {
+            entries.remove(removed.id);
+        }
+    }
+    Ok(())
+}
+
+/// 内置 Agent 包安装（四态 + C31 删除态，C1 + lead 裁决「安装清单指纹」）：
 ///
 /// 1. 文件不存在 → 写入当前版本；
 /// 2. 文件内容 == 当前内置渲染 → 跳过；
-/// 3. 文件内容 == 清单里记录的指纹（上次我们装的那份、用户没动过）→ **覆盖为新版**；
-/// 4. 其它（用户改过，或清单缺失且内容不等于当前内置）→ 保持不覆盖。
+/// 3. 文件内容命中**清单指纹或历史基线指纹**（上次我们装的那份、用户没动过）→ **覆盖为新版**；
+/// 4. 其它（用户改过，或无法证明是我们写的）→ 保持不覆盖，并**逐个 id 记进 `kept_ids`**；
+/// 5. C31：`REMOVED_BUILTIN_AGENTS` 的落盘目录，能证明是我们写的就清理（`removed_ids`）。
 ///
 /// 清单来自既有 `ai_automation_settings`（键 `builtin_agent_files_fingerprint`），
 /// 由调用方读取/回写；本函数只做文件层判定，保持可测。
@@ -1725,6 +1822,7 @@ pub(crate) fn install_builtin_agent_bundles_with_manifest(
             fs::write(&path, markdown.as_bytes())
                 .map_err(|error| format!("写入内置 Agent 文件 {} 失败: {error}", path.display()))?;
             result.written += 1;
+            result.written_ids.push(id.clone());
             next_fingerprint = Some(expected.clone());
         } else {
             let existing = fs::read(&path)
@@ -1733,52 +1831,78 @@ pub(crate) fn install_builtin_agent_bundles_with_manifest(
             if existing_hash == expected {
                 // 已是当前版本：这份内容就是我们的当前版本，可以记录。
                 next_fingerprint = Some(expected.clone());
-            } else if let Some(previous) =
-                manifest.and_then(|entries| entries.get(&id)).filter(|previous| **previous == existing_hash)
-            {
-                // `previous` 只用于确认"这就是我们上次装的那份"，覆盖即安全升级。
-                let _ = previous;
+            } else if builtin_agent_content_is_ours(&id, &existing_hash, manifest) {
+                // 命中清单或历史基线指纹 = "这就是我们上次装的那份" → 覆盖即安全升级。
                 fs::write(&path, markdown.as_bytes()).map_err(|error| {
                     format!("升级内置 Agent 文件 {} 失败: {error}", path.display())
                 })?;
                 result.upgraded += 1;
+                result.upgraded_ids.push(id.clone());
                 next_fingerprint = Some(expected.clone());
             } else {
+                // 用户改过，或无法证明是我们写的：不覆盖，但要**逐个 id 留痕**。
                 result.kept += 1;
+                result.kept_ids.push(id.clone());
                 if manifest.is_none() {
                     result.manifest_missing = true;
                 }
                 // 保留该 id 上次记录的指纹（若曾有）：用户把它改回我们装过的版本时
                 // 仍可安全升级；没有记录就不写，避免把"用户可能改过"的内容当成我们的。
-                next_fingerprint = manifest
-                    .and_then(|entries| entries.get(&id))
-                    .cloned();
+                next_fingerprint = manifest.and_then(|entries| entries.get(&id)).cloned();
             }
         }
         if let (Some(next), Some(fingerprint)) = (result.manifest.as_mut(), next_fingerprint) {
             next.insert(id, fingerprint);
         }
     }
+    prune_removed_builtin_agent_bundles(root, manifest, &mut result)?;
     Ok(result)
 }
 
-/// 内置 Agent 包安装（无清单路径，签名与语义保持不变）：只补缺失文件、已存在一律不覆盖。
-/// 返回本次新建的文件数。
+/// 内置 Agent 包安装（无清单路径，语义与有清单版一致）：补缺失文件、已存在不覆盖、
+/// 顺手清理已删除的内置 Agent。返回本次新建的文件数。
 pub(crate) fn install_builtin_agent_bundles_in(root: &std::path::Path) -> Result<usize, String> {
     let result = install_builtin_agent_bundles_with_manifest(root, None)?;
-    if result.manifest_missing {
-        crate::boot_log("builtin agent fingerprint manifest missing");
-    }
+    log_builtin_agent_install(&result);
     Ok(result.written)
+}
+
+/// C31：内置资产升级**必须有日志**（旧实现只在"新建+升级"有量时打一行，
+/// 静默保留的旧正文既无升级也无日志，正是那个 bug 的可见性缺口）。
+pub(crate) fn log_builtin_agent_install(result: &BuiltinAgentInstall) {
+    if result.manifest_missing {
+        crate::boot_log("builtin agent fingerprint manifest missing; unmanaged files kept as-is");
+    }
+    if !result.removed_ids.is_empty() {
+        crate::boot_log(&format!(
+            "agents: removed obsolete builtin bundles={:?}",
+            result.removed_ids
+        ));
+    }
+    if !result.upgraded_ids.is_empty() {
+        crate::boot_log(&format!(
+            "agents: builtin bundles upgraded={:?}",
+            result.upgraded_ids
+        ));
+    }
+    if !result.written_ids.is_empty() {
+        crate::boot_log(&format!(
+            "agents: builtin bundles written={:?}",
+            result.written_ids
+        ));
+    }
+    if !result.kept_ids.is_empty() {
+        crate::boot_log(&format!(
+            "agents: builtin bundles kept (user-modified or unverifiable)={:?}",
+            result.kept_ids
+        ));
+    }
 }
 
 /// 内置 Agent 包安装（失败只记录不阻断启动，与内置 Skill 同策略）
 pub(crate) fn ensure_builtin_agent_bundles() -> Result<(), String> {
-    let written = install_builtin_agent_bundles_in(&agent_library_dir())?;
-    if written > 0 {
-        crate::boot_log(&format!("agents: builtin bundles installed: {written}"));
-    }
-    Ok(())
+    // 无清单路径：只补缺失、已存在（无法证明是我们写的）不覆盖，日志由 `_in` 统一打。
+    install_builtin_agent_bundles_in(&agent_library_dir()).map(|_| ())
 }
 
 /// 与 `ensure_builtin_skill_bundles_best_effort` 同款：任何错误只 `boot_log`，绝不冒泡阻断启动
@@ -2846,8 +2970,7 @@ fn resolve_ai_connection_test_model(
     {
         return Err("请补全选中模型的名称、Provider、Model ID 和 Base URL".to_string());
     }
-    let stored_model = stored
-        .and_then(|config| config.models.iter().find(|item| item.id == id));
+    let stored_model = stored.and_then(|config| config.models.iter().find(|item| item.id == id));
     let stored_key = stored_model
         .map(|item| item.api_key.trim())
         .filter(|value| !value.is_empty());
@@ -2872,7 +2995,9 @@ fn resolve_ai_connection_test_model(
         permission_mode: normalize_ai_permission_mode(update.permission_mode.as_deref()),
         reasoning_depth: normalize_ai_reasoning_depth(update.reasoning_depth.as_deref()),
         context_window: normalize_context_window(
-            update.context_window.or_else(|| stored_model.and_then(|item| item.context_window)),
+            update
+                .context_window
+                .or_else(|| stored_model.and_then(|item| item.context_window)),
         )?,
     })
 }
@@ -3825,8 +3950,7 @@ fn replace_file_atomically(
         MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
         MOVEFILE_REPLACE_EXISTING,
     ] {
-        let moved =
-            unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
+        let moved = unsafe { MoveFileExW(source_wide.as_ptr(), destination_wide.as_ptr(), flags) };
         if moved != 0 {
             return Ok(());
         }
@@ -3917,7 +4041,6 @@ pub(crate) fn harden_sensitive_file_permissions(_path: &PathBuf) -> Result<(), S
 }
 
 fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
-    let typesafe = config.typesafe.clone();
     let provider = config
         .provider
         .clone()
@@ -3958,16 +4081,15 @@ fn ai_config_summary_from(config: AiConfig) -> AiConfigSummary {
         skill_runtime_trust: config.skill_runtime_trust,
         open_agent: config.open_agent,
         workspace_roots: config.workspace_roots,
-        typesafe_enabled: typesafe.enabled,
-        typesafe_configured: typesafe.enabled && !typesafe.api_key.trim().is_empty(),
-        typesafe_api_key_masked: mask_key(&typesafe.api_key),
-        typesafe_model: typesafe.model.clone(),
-        typesafe_base_url: typesafe.base_url.clone(),
+        // C29：只回掩码（明文绝不出现在读接口/事件/日志/记录里）。
+        typesafe_api_key_masked: mask_key(&config.typesafe_api_key),
     }
 }
 
 fn unconfigured_ai_config_summary() -> AiConfigSummary {
     ai_config_summary_from(AiConfig {
+        typesafe_base_url: None,
+        typesafe_model: None,
         provider: Some("openai-compatible".to_string()),
         model: String::new(),
         base_url: String::new(),
@@ -3985,14 +4107,14 @@ fn unconfigured_ai_config_summary() -> AiConfigSummary {
         skill_runtime_trust: HashMap::new(),
         open_agent: true,
         workspace_roots: Vec::new(),
-        typesafe: desic_storage_config::AiTypesafeConfig::default(),
+        typesafe_api_key: String::new(),
         tool_read_concurrency: None,
         tool_domain_concurrency: None,
     })
 }
 
 const LEGACY_TRADING_PHILOSOPHY_FINGERPRINT: u64 = 0xfbf7_6df2_d6c8_da68;
-const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 21] = [
+const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 23] = [
     ("trading-philosophy", 0x28b8_35c6_2b63_9623),
     ("okx-news-intelligence", 0x5f37_0325_71e9_8b62),
     ("okx-smart-money-analysis", 0x7cbe_60eb_bc64_0880),
@@ -4089,7 +4211,39 @@ const LEGACY_DEFAULT_SKILL_FINGERPRINTS: [(&str, u64); 21] = [
     // keeps producing unstructured "analysis results"; only an untouched default is upgraded,
     // a user edit changes the fingerprint and stays authoritative.
     ("desic-core-operations", 0x5387_2f01_0cc0_ad05),
+    // Untouched orchestration baseline (19 items) shipped before C31 collapsed the built-in
+    // agent roster to one optional counterparty agent and removed the "you are the only data
+    // gatherer / experts judge instead of re-gathering" dispatch economics. An unedited copy
+    // would keep describing process roles that no longer exist, so it must upgrade; a user edit
+    // changes the fingerprint and stays authoritative.
+    ("desic-agent-orchestration", 0x18ed_c20d_36ac_0536),
+    // Untouched philosophy baseline shipped before C31 moved the deleted agents' reasoning
+    // habits into this editable Skill (section VII: attack your own plan, separate what is
+    // priced from what you disagree with, write a falsifiable conclusion). An unedited copy
+    // carries no user intent, so the newer default wins; any user edit keeps its own
+    // fingerprint and stays authoritative.
+    ("trading-philosophy", 0xa9b8_f433_f3d0_9714),
 ];
+
+/// C31：**内置固定规范**（唯一一个不可编辑的 Skill）。
+///
+/// 产品分两类 Skill（契约 C31）：
+/// 1. **内置固定规范 / 不可编辑**：只放"不这样写就跑不起来"的东西 —— 系统工具的名称与用途、
+///    动作参数的必要字段与单位、报告必须回给系统的必要信息、权限与失败处理。越少越好；
+///    凡是"建议 / 偏好 / 理念"一律不进来。
+/// 2. **可编辑 Skill / 用户可改可扩**：交易理念等主观内容（`trading-philosophy` 是默认载体，
+///    用户还能自建更多）。用户改过之后，系统升级**不覆盖**（下面 `merge_ai_skill_definitions`
+///    里"未改动的旧副本才升级"的指纹判定）。
+///
+/// 这里放的是第 1 类的 id 列表；它在 UI 上同时决定"哪些字段禁止编辑"
+/// （`src/ui/App.tsx` 的 `NON_EDITABLE_SKILL_IDS` 是同一份清单的 TS 副本，
+/// `scripts/test-ai-skills-sync.mjs` 之外的 Rust 测试会钉住本常量的成员）。
+pub(crate) const NON_EDITABLE_SKILL_IDS: [&str; 1] = ["desic-core-operations"];
+
+/// C31：`trading-philosophy` 是**可编辑**的理念载体（默认内容非空、可改可扩，
+/// 用户改过之后升级不覆盖）。名称与"哪些 Skill 是理念层"在这里只出现一次，
+/// 供测试与将来新增理念类 Skill 时复用。
+pub(crate) const EDITABLE_PHILOSOPHY_SKILL_ID: &str = "trading-philosophy";
 
 fn merge_ai_skill_definitions(
     items: Vec<desic_storage_config::AiSkillDefinition>,
@@ -4101,10 +4255,11 @@ fn merge_ai_skill_definitions(
         if item.id.is_empty() {
             continue;
         }
-        if item.id == "desic-core-operations" {
+        // C31：固定规范**不可编辑** —— 磁盘上出现的任何版本一律丢弃，永远用出厂正文。
+        if NON_EDITABLE_SKILL_IDS.contains(&item.id.as_str()) {
             continue;
         }
-        if item.id == "trading-philosophy"
+        if item.id == EDITABLE_PHILOSOPHY_SKILL_ID
             && skill_text_fingerprint(&item) == LEGACY_TRADING_PHILOSOPHY_FINGERPRINT
         {
             // Upgrade only the untouched legacy default. Any user-edited text gets a different
@@ -4230,7 +4385,8 @@ fn build_updated_ai_models(
                             .or_else(|| existing_model.map(|model| model.reasoning_depth.as_str())),
                     ),
                     context_window: normalize_context_window(
-                        item.context_window.or_else(|| existing_model.and_then(|model| model.context_window)),
+                        item.context_window
+                            .or_else(|| existing_model.and_then(|model| model.context_window)),
                     )?,
                 })
             })
@@ -4571,11 +4727,69 @@ pub(crate) fn load_ai_config(app: &tauri::AppHandle) -> Result<AiConfig, String>
 }
 
 /// Caller must hold `lock_ai_config_writes` for the full read/migrate operation.
+/// C28→C29 **迁移缺口**的一次性收养（真机 01:26:37 的 HTTP 403 就是它）。
+///
+/// 历史：C28 把旧的 `typesafe{enabled,apiKey,model,baseUrl}` 段从结构里删掉，C29 新增
+/// `typesafeApiKey`；但**磁盘上的旧值从来没有被搬过来**，于是侧车发的是空 Bearer →
+/// `Jev HTTP 403`。这里在**加载时收养**旧段（新字段优先），随后由加载路径触发一次既有保存，
+/// 把值写回新格式并真正移除旧段（保留旧段 = 明文 Key 永远躺在旧形状里）。
+///
+/// 规则：`typesafeApiKey` 为空 → 收养旧 `apiKey`；`typesafeBaseUrl`/`typesafeModel` 为 `None`
+/// → 收养旧 `baseUrl`/`model`。**明文只在内存/磁盘之间走一次，绝不进日志**。
+/// 返回被收养的字段名（供 boot log 记元信息；不含任何值）。
+fn adopt_legacy_typesafe_config(raw: &str, config: &mut AiConfig) -> Option<Vec<&'static str>> {
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let legacy = value.get("typesafe")?;
+    if !legacy.is_object() {
+        return None;
+    }
+    let text = |key: &str| {
+        legacy
+            .get(key)
+            .and_then(|item| item.as_str())
+            .map(str::trim)
+            .filter(|item| !item.is_empty())
+            .map(str::to_string)
+    };
+    let mut adopted: Vec<&'static str> = Vec::new();
+    if config.typesafe_api_key.trim().is_empty() {
+        if let Some(key) = text("apiKey") {
+            config.typesafe_api_key = key;
+            adopted.push("apiKey");
+        }
+    }
+    if config.typesafe_base_url.is_none() {
+        if let Some(base_url) = text("baseUrl") {
+            config.typesafe_base_url = Some(base_url);
+            adopted.push("baseUrl");
+        }
+    }
+    if config.typesafe_model.is_none() {
+        if let Some(model) = text("model") {
+            config.typesafe_model = Some(model);
+            adopted.push("model");
+        }
+    }
+    (!adopted.is_empty()).then_some(adopted)
+}
+
 pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, String> {
     let path = workspace_ai_config_path();
     let content =
         fs::read_to_string(&path).map_err(|err| format!("AI config not found: {}", err))?;
     let mut config: AiConfig = serde_json::from_str(&content).map_err(|err| err.to_string())?;
+    // C28→C29：先把旧 `typesafe` 段收养进新字段（新字段优先），再走既有的归一化与保存。
+    let adopted_typesafe = adopt_legacy_typesafe_config(&content, &mut config);
+    if let Some(fields) = adopted_typesafe.as_ref() {
+        // 只记**元信息**（字段名 / 是否已配置 / 长度）：Key 的任何字符都不进日志，
+        // 连掩码都不打（掩码也含 4+4 个真实字符）。
+        crate::boot_log(&format!(
+            "ai config: adopted legacy typesafe section (fields={}, keyConfigured={}, keyLen={})",
+            fields.join(","),
+            !config.typesafe_api_key.trim().is_empty(),
+            config.typesafe_api_key.len(),
+        ));
+    }
     let original_permission_mode = config.permission_mode.clone();
     let original_reasoning_depth = config.reasoning_depth.clone();
     let original_system_prompt = config.system_prompt.clone();
@@ -4609,7 +4823,8 @@ pub(crate) fn load_ai_config_locked(app: &tauri::AppHandle) -> Result<AiConfig, 
         || config.system_prompt != original_system_prompt
         || config.active_model_id != original_active_model_id
         || ai_model_metadata_fingerprint(&config.models) != original_models;
-    if model_config_changed || skill_config_changed {
+    if model_config_changed || skill_config_changed || adopted_typesafe.is_some() {
+        // 收养过旧段 → 立刻写回新格式（旧 `typesafe` 段随之消失，明文 Key 只留在新字段里）。
         save_ai_config(app, &config)?;
         sync_cline_skill_files_from_config(&config)?;
     }
@@ -5104,7 +5319,7 @@ mod tests {
     /// （用户会一直看到"已本地改动"）。
     #[test]
     fn orchestration_default_fingerprint_is_pinned_for_legacy_upgrades() {
-        const DESIC_AGENT_ORCHESTRATION_CURRENT_FINGERPRINT: u64 = 0x18ed_c20d_36ac_0536;
+        const DESIC_AGENT_ORCHESTRATION_CURRENT_FINGERPRINT: u64 = 0x0462_197b_d8ad_fab9;
         let current = desic_storage_config::default_ai_skill_definitions()
             .into_iter()
             .find(|skill| skill.id == "desic-agent-orchestration")
@@ -5124,7 +5339,9 @@ mod tests {
         );
         // 依赖/顺序语义（C20 起由"无固定管线 + 本轮自行决定顺序"表达）。
         assert!(
-            current.content.contains("keeping the array order meaningful"),
+            current
+                .content
+                .contains("keeping the array order meaningful"),
             "并发批次与串行屏障的顺序语义必须在正文里"
         );
         assert!(
@@ -5140,10 +5357,14 @@ mod tests {
             "Narrow an expert's read-only surface whenever the work allows it",
             "Degrade explicitly when a role is missing",
             "In the triage stage the consult tools are unavailable",
+            // C31 断言②：新编制语义必须在位。
+            "Consulting is optional",
+            "The round is yours end to end",
+            "no required JSON shape and no required field list",
         ] {
             assert!(
                 current.content.contains(expected),
-                "C20 编排正文缺少规则：{expected}"
+                "C20/C31 编排正文缺少规则：{expected}"
             );
         }
         assert!(
@@ -5153,30 +5374,33 @@ mod tests {
         // C22（2026-09-19 董事会）：升级即须委派 + 例外须写 selfAnalysisReason +
         // 禁止"为完成任务而空派" + 审计标记只标记不阻断（含误报修正的前置条件）。
         for expected in [
-            "at least one expert",
             "selfAnalysisReason",
             "never dispatch an expert to look busy",
             "selfAnalysisUnjustified",
             // C23.1：审查/反方类专家**必须**传收窄 scopes（这类专家单点最贵）。
             "always pass narrowed scopes",
-            // C20.4 降级路径：缺"分析/决策候选"角色时主 Agent 自己分析，但仍必须走反方。
-            "degradation path",
-            "self-produced candidate",
-            "does not relax the escalation rule",
+            // C31：升级不再等于"必须委派"——咨询恒为可选，空做仍要写理由。
+            "it never makes consultation mandatory",
         ] {
             assert!(
                 current.content.contains(expected),
-                "C22 委派规则缺少关键词：{expected}"
+                "C22/C31 委派规则缺少关键词：{expected}"
             );
         }
         assert_eq!(
             current.content.lines().count(),
-            19,
-            "C22/C23 正文 = 14 条 + C27 的'点名时要写清什么' + 编排提速的 4 条 = 19 条"
+            18,
+            "C31 正文 = 18 条（已删除 3 个流程角色的相关条目）"
         );
         assert!(
-            current.description.contains("how missing roles are absorbed"),
+            current
+                .description
+                .contains("how missing roles are absorbed"),
             "description 必须声明缺角色如何吸收"
+        );
+        assert!(
+            current.description.contains("consulting is optional"),
+            "description 必须声明咨询是可选的（C31）"
         );
         assert!(
             current
@@ -5193,10 +5417,10 @@ mod tests {
                 >= 2,
             "历史基线必须保留"
         );
-        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
-            |(id, fingerprint)| *id == "desic-agent-orchestration"
-                && *fingerprint == 0x05b9_9a0d_3f3f_987a
-        ));
+        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS
+            .iter()
+            .any(|(id, fingerprint)| *id == "desic-agent-orchestration"
+                && *fingerprint == 0x05b9_9a0d_3f3f_987a));
         // C27（2026-09-19 董事会 C 方案）：点名任务不再注入整篇 Profile 长文，改为
         // "该问什么"由主 Agent 自己写 + 系统注入的 5 行事实块。正文必须写明这三点，
         // 否则主 Agent 会把"专家没写清"归因到工具而不是自己的 task。
@@ -5214,18 +5438,19 @@ mod tests {
         }
         // 上一版（C20 的 14 条）必须已登记，否则未改动的用户副本升不上来。
         assert!(
-            LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
-                |(id, fingerprint)| *id == "desic-agent-orchestration"
-                    && *fingerprint == 0xe3a4_f31b_633d_7fd3
-            ),
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .any(|(id, fingerprint)| *id == "desic-agent-orchestration"
+                    && *fingerprint == 0xe3a4_f31b_633d_7fd3),
             "C27 必须把 C20 版的指纹登记进历史基线"
         );
-        // 编排提速（2026-09-20 董事会）：取数归主 Agent + 输出规范由主 Agent 当场定义。
-        // 这四条是**行为指导**，不是权限或代码强制：不设 token 上限、不做每角色 schema。
+        // C31（取代 2026-09-20 的"取数归主 Agent / 专家只判断"一版）：
+        // 主 Agent 负责取数 → 判断 → 出具体方案 → 执行 → 成交后继续盯，咨询可选；
+        // 报告用自然语言。仍是**行为指导**，不是权限或代码强制：不设 token 上限、不做每角色 schema。
         for expected in [
-            "Dispatch economics: you gather, experts judge",
-            "You are the only data gatherer in this round",
-            "must not re-gather what you already collected",
+            "The round is yours end to end",
+            "gather the facts, judge them, produce a concrete plan, execute it, and keep monitoring",
+            "Consult to be challenged, not to be served",
             "targeted verification",
             "Define each expert's output spec in the task",
             "no fixed report format and no per-role schema",
@@ -5260,6 +5485,142 @@ mod tests {
                 }),
             "编排提速必须把 C27 版的指纹登记进历史基线"
         );
+        assert!(
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .any(|(id, fingerprint)| {
+                    // C31 的前一版（19 条、含已删除角色语义）必须登记，否则旧副本升不上来。
+                    *id == "desic-agent-orchestration" && *fingerprint == 0x18ed_c20d_36ac_0536
+                }),
+            "C31 必须把上一版编排正文登记进历史基线"
+        );
+        // C31 断言②：已删除语义一条都不许留下（"唯一取数者 / 专家只判断 / 不许重取" 与
+        // 那三个流程角色的名字）。
+        for forbidden in [
+            "you are the only data gatherer",
+            "You are the only data gatherer",
+            "experts judge",
+            "must not re-gather",
+            "data digest",
+            "account state expert",
+            "decision proposal",
+            "decision-proposal",
+            "at least one expert",
+        ] {
+            assert!(
+                !current.content.contains(forbidden) && !current.rules.contains(forbidden),
+                "C31 后编排正文不得再出现已删除语义：{forbidden}"
+            );
+        }
+    }
+
+    /// C31 断言③：`trading-philosophy` 是一个**存在的、默认内容非空的、可编辑的** Skill，
+    /// 而且**用户改过之后系统升级不覆盖**。
+    ///
+    /// 反例（变异校验会把它打红）：把 `merge_ai_skill_definitions` 里"用户改动优先"
+    /// 换成"默认总是优先"，或把 `trading-philosophy` 塞进 `NON_EDITABLE_SKILL_IDS`，
+    /// 这条都会失败。
+    #[test]
+    fn trading_philosophy_is_editable_and_survives_user_edits() {
+        let defaults = desic_storage_config::default_ai_skill_definitions();
+        let baseline = defaults
+            .iter()
+            .find(|skill| skill.id == EDITABLE_PHILOSOPHY_SKILL_ID)
+            .expect("shared default ships the editable trading-philosophy Skill");
+        assert!(!baseline.content.trim().is_empty(), "默认内容必须非空");
+        assert!(
+            !NON_EDITABLE_SKILL_IDS.contains(&EDITABLE_PHILOSOPHY_SKILL_ID),
+            "理念 Skill 必须在可编辑那一类：固定规范只留给跑不起来的硬约束"
+        );
+        // C31 新增小节：删除的 agent 正文里"理念 / 方法论"类句子搬到这里（保原意、去冗余）。
+        assert!(baseline.content.contains("VII. Think against yourself"));
+        assert!(
+            baseline
+                .content
+                .contains("Separate what the market has already priced"),
+            "分歧口径（市场定价了什么 vs 我的不同看法）必须在理念里"
+        );
+        assert!(
+            baseline
+                .content
+                .contains("treat your own plan as the position an opponent is holding"),
+            "对手盘视角必须写进理念（C31 把 deleted agent 的反证习惯搬到这里）"
+        );
+        assert!(
+            !baseline.content.contains("## 身份"),
+            "理念 Skill 不含 agent 五段骨架"
+        );
+
+        // ① 固定规范：磁盘上的任何版本都被丢弃，永远用出厂正文。
+        let tampered = AiSkillDefinition {
+            id: NON_EDITABLE_SKILL_IDS[0].to_string(),
+            name: NON_EDITABLE_SKILL_IDS[0].to_string(),
+            description: "用户手改的固定规范".to_string(),
+            rules: "被改过的规则".to_string(),
+            content: "被改过的正文".to_string(),
+            builtin: true,
+            bundle: None,
+        };
+        let merged = merge_ai_skill_definitions(vec![tampered]);
+        let fixed = merged
+            .iter()
+            .find(|skill| skill.id == NON_EDITABLE_SKILL_IDS[0])
+            .expect("fixed skill still present");
+        assert_eq!(
+            fixed.content,
+            defaults
+                .iter()
+                .find(|skill| skill.id == NON_EDITABLE_SKILL_IDS[0])
+                .expect("fixed default")
+                .content,
+            "固定规范不可编辑：手改内容不得生效"
+        );
+
+        // ② 可编辑理念：用户改过的正文必须原样保留（升级不覆盖）。
+        let user_text = "我的交易理念：只在日线结构确认后动手，回撤超过 1.5×ATR 就不进场。";
+        let edited = AiSkillDefinition {
+            id: EDITABLE_PHILOSOPHY_SKILL_ID.to_string(),
+            name: EDITABLE_PHILOSOPHY_SKILL_ID.to_string(),
+            description: "用户自己的理念".to_string(),
+            rules: "用户自己的规则".to_string(),
+            content: user_text.to_string(),
+            builtin: true,
+            bundle: None,
+        };
+        let merged = merge_ai_skill_definitions(vec![edited.clone()]);
+        let kept = merged
+            .iter()
+            .find(|skill| skill.id == EDITABLE_PHILOSOPHY_SKILL_ID)
+            .expect("editable skill present");
+        assert_eq!(kept.content, user_text, "用户改动不得被默认正文覆盖");
+        assert_eq!(kept.rules, edited.rules);
+        assert_eq!(kept.description, edited.description);
+        assert_ne!(
+            kept.content, baseline.content,
+            "如果这条相等，说明默认正文把用户改动盖掉了"
+        );
+        // 用户新增的其它可编辑 Skill 同样保留（自由拓展空间）。
+        let extra = AiSkillDefinition {
+            id: "my-own-philosophy".to_string(),
+            name: "my-own-philosophy".to_string(),
+            description: "自建理念".to_string(),
+            rules: "自建规则".to_string(),
+            content: "自建正文".to_string(),
+            builtin: false,
+            bundle: None,
+        };
+        let merged = merge_ai_skill_definitions(vec![extra]);
+        assert!(merged.iter().any(|skill| skill.id == "my-own-philosophy"));
+
+        // ③ 未改动的旧默认副本：登记进历史基线后必须升级到当前默认（否则用户永远停在旧理念）。
+        assert!(
+            LEGACY_DEFAULT_SKILL_FINGERPRINTS
+                .iter()
+                .any(|(id, fingerprint)| {
+                    *id == EDITABLE_PHILOSOPHY_SKILL_ID && *fingerprint == 0xa9b8_f433_f3d0_9714
+                }),
+            "C31 必须把上一版理念指纹登记进历史基线"
+        );
     }
 
     /// C21（契约 §C21.4 / 内容包 §8）：`desic-core-operations` 是**恒注入**的 Skill，
@@ -5278,7 +5639,9 @@ mod tests {
             "shared/default-ai-config.json 的 desic-core-operations 正文变了：请把上一版指纹登记进 LEGACY_DEFAULT_SKILL_FINGERPRINTS 并更新本常量"
         );
         // 新小节与编号连续（既有 1–27 一个字都没动）。
-        assert!(current.content.contains("V. Analysis-result formatting (run summary)"));
+        assert!(current
+            .content
+            .contains("V. Analysis-result formatting (run summary)"));
         for number in 28..=34 {
             assert!(
                 current.content.contains(&format!("\n{number}. ")),
@@ -5316,13 +5679,11 @@ mod tests {
             "C21 排版规范不得放进 desic-agent-orchestration（它只在有专家名单时注入）"
         );
         // 至少登记一版历史基线，否则未改动的旧副本升不上来。
-        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS.iter().any(
-            |(id, fingerprint)| *id == "desic-core-operations"
-                && *fingerprint == 0x5387_2f01_0cc0_ad05
-        ));
+        assert!(LEGACY_DEFAULT_SKILL_FINGERPRINTS
+            .iter()
+            .any(|(id, fingerprint)| *id == "desic-core-operations"
+                && *fingerprint == 0x5387_2f01_0cc0_ad05));
     }
-
-
 
     /// The active Skill set is the authorization boundary: a loaded Skill may
     /// expose its own documents, an unloaded one may not, and path containment
@@ -5493,15 +5854,220 @@ wire_api = "responses"
             skill_runtime_trust: HashMap::new(),
             open_agent: true,
             workspace_roots: Vec::new(),
-            typesafe: desic_storage_config::AiTypesafeConfig::default(),
+            typesafe_api_key: String::new(),
+            typesafe_base_url: None,
+            typesafe_model: None,
             tool_read_concurrency: None,
             tool_domain_concurrency: None,
         }
     }
 
-    /// 调度 Skill 是主 Agent 在名单非空时**原样注入**的正文（`scripts/cline-sidecar.mjs`），
-    /// 因此它必须只描述 v3 的自由调度：不得再教模型使用已删除的后端预算错误、
-    /// "backend-orchestrated mode" 预挂载报告、以及交易机会前的账户风险硬闸门。
+    /// C28 + C29 负向断言：AI 配置回显里**不再有**"快速判定"那套字段
+    /// （`typesafeEnabled` / `typesafeConfigured` / `typesafeModel` / `typesafeBaseUrl`
+    /// 与任何明文 Key）；C29 只允许保留**掩码**字段 `typesafeApiKeyMasked`。
+    #[test]
+    fn ai_config_summary_exposes_no_removed_judgement_fields() {
+        let fragment = "type".to_string() + "safe";
+        let summary = unconfigured_ai_config_summary();
+        let json = serde_json::to_value(&summary).expect("serialize summary");
+        let object = json.as_object().expect("summary object");
+        let allowed = format!("{}ApiKeyMasked", fragment);
+        for key in object.keys() {
+            if !key.to_ascii_lowercase().contains(&fragment) {
+                continue;
+            }
+            assert_eq!(
+                key.as_str(),
+                allowed.as_str(),
+                "C29 只允许保留掩码字段，其余判定层键必须消失：{object:?}"
+            );
+        }
+        for removed in [
+            format!("{}Enabled", fragment),
+            format!("{}Configured", fragment),
+            format!("{}Model", fragment),
+            format!("{}BaseUrl", fragment),
+        ] {
+            assert!(
+                !object.contains_key(&removed),
+                "已移除的字段不得回来：{removed}"
+            );
+        }
+        // 没有 Key 时只回掩码占位（`mask_key` 对短值/空值统一回 `****`），绝无明文形态。
+        assert_eq!(summary.typesafe_api_key_masked, "****");
+    }
+
+    /// C29：TypeSafe（Jev）Key —— **只进不出**：读接口只回掩码，明文只留在敏感配置里；
+    /// 掩码值回传不覆盖真实 Key，空串显式清空。
+    /// C28→C29 迁移缺口（真机 `Jev HTTP 403`）：旧 `typesafe` 段的值必须被**一次性收养**。
+    ///
+    /// 隐患链条：C28 删掉了旧段 → 加载时被静默忽略；C29 新增 `typesafeApiKey` 但从未迁移 →
+    /// 侧车拿到空 Key（`Authorization: Bearer `）→ 403。这里覆盖收养规则与"写回新格式"。
+    #[test]
+    fn legacy_typesafe_section_is_adopted_once_into_the_new_fields() {
+        let legacy_key = "ts-placeholder-not-a-real-key-wxyz";
+        let legacy_section = format!(
+            r#"{{ "provider": "openai-compatible", "model": "m",
+                   "baseUrl": "https://example.invalid", "stream": true,
+                   "typesafe": {{ "enabled": true, "apiKey": "{legacy_key}",
+                   "model": "jev-1.13.0", "baseUrl": "https://jev.internal.example" }} }}"#
+        );
+
+        // ① 新字段空 + 旧段有值 → 全部收养（apiKey / model / baseUrl）。
+        let mut config: AiConfig = serde_json::from_str(&legacy_section).expect("parse legacy");
+        assert!(
+            config.typesafe_api_key.is_empty(),
+            "旧段不进新字段（这正是缺口）"
+        );
+        let adopted = adopt_legacy_typesafe_config(&legacy_section, &mut config)
+            .expect("legacy section must be adopted");
+        assert_eq!(adopted, vec!["apiKey", "baseUrl", "model"]);
+        assert_eq!(config.typesafe_api_key, legacy_key);
+        assert_eq!(
+            config.typesafe_base_url.as_deref(),
+            Some("https://jev.internal.example")
+        );
+        assert_eq!(config.typesafe_model.as_deref(), Some("jev-1.13.0"));
+        // 读接口仍只回掩码（断言掩码与长度，不打印明文）。
+        let summary = ai_config_summary_from(config.clone());
+        assert!(summary.typesafe_api_key_masked.contains('*'));
+        assert!(summary.typesafe_api_key_masked.ends_with("wxyz"));
+        assert_eq!(summary.typesafe_api_key_masked.len(), 12, "4 + **** + 4");
+        assert!(
+            !serde_json::to_string(&summary)
+                .expect("summary json")
+                .contains(legacy_key),
+            "读接口绝不能回明文"
+        );
+
+        // ② 保存路径（`serde_json::to_string_pretty(config)`）：旧段消失、新字段落盘。
+        let persisted = serde_json::to_string_pretty(&config).expect("serialize new format");
+        assert!(persisted.contains("typesafeApiKey"), "{persisted}");
+        assert!(persisted.contains("typesafeBaseUrl") && persisted.contains("typesafeModel"));
+        assert!(
+            !persisted.contains("\"typesafe\""),
+            "旧段必须真正移除：{persisted}"
+        );
+        assert!(persisted.contains(legacy_key), "敏感配置本身要能落库");
+        // 幂等：写回新格式之后再加载，不再有旧段可收养。
+        let reloaded: AiConfig = serde_json::from_str(&persisted).expect("parse new format");
+        let mut reloaded = reloaded;
+        assert!(adopt_legacy_typesafe_config(&persisted, &mut reloaded).is_none());
+
+        // ③ 两者都有 → **新字段胜出**（旧段不改任何值）。
+        let both = format!(
+            r#"{{ "provider": "openai-compatible", "model": "m",
+                   "baseUrl": "https://example.invalid",
+                   "typesafeApiKey": "new-key-placeholder",
+                   "typesafeBaseUrl": "https://new.example", "typesafeModel": "jev-new",
+                   "typesafe": {{ "apiKey": "{legacy_key}", "model": "jev-1.13.0",
+                                  "baseUrl": "https://old.example" }} }}"#
+        );
+        let mut config: AiConfig = serde_json::from_str(&both).expect("parse both");
+        assert!(
+            adopt_legacy_typesafe_config(&both, &mut config).is_none(),
+            "新字段已存在 → 不收养"
+        );
+        assert_eq!(config.typesafe_api_key, "new-key-placeholder");
+        assert_eq!(
+            config.typesafe_base_url.as_deref(),
+            Some("https://new.example")
+        );
+        assert_eq!(config.typesafe_model.as_deref(), Some("jev-new"));
+
+        // ④ 两者都空 / 旧段为空值 → 不报错、不收养。
+        let empty = r#"{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid",
+                         "typesafe": { "enabled": false, "apiKey": "" } }"#;
+        let mut config: AiConfig = serde_json::from_str(empty).expect("parse empty legacy");
+        assert!(adopt_legacy_typesafe_config(empty, &mut config).is_none());
+        assert!(config.typesafe_api_key.is_empty());
+        assert!(config.typesafe_base_url.is_none() && config.typesafe_model.is_none());
+        // 没有旧段的配置：原样，不报错。
+        let none = r#"{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid" }"#;
+        let mut config: AiConfig = serde_json::from_str(none).expect("parse without legacy");
+        assert!(adopt_legacy_typesafe_config(none, &mut config).is_none());
+        // 非对象旧段（坏数据）→ 忽略而不是崩。
+        let broken = r#"{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid", "typesafe": 5 }"#;
+        let mut config: AiConfig = serde_json::from_str(broken).expect("parse broken legacy");
+        assert!(adopt_legacy_typesafe_config(broken, &mut config).is_none());
+    }
+
+    /// C29：TypeSafe（Jev）Key —— **只进不出**：读接口只回掩码，明文只留在敏感配置里；
+    /// 掩码值回传不覆盖真实 Key，空串显式清空。
+    #[test]
+    fn typesafe_api_key_is_write_only_and_masked_on_read() {
+        let secret = "sk-placeholder-not-a-real-key-abcd";
+        let mut config = AiConfig {
+            typesafe_api_key: secret.to_string(),
+            ..ai_config_fixture()
+        };
+        let summary = ai_config_summary_from(config.clone());
+        let json = serde_json::to_value(&summary).expect("serialize summary");
+        let serialized = serde_json::to_string(&json).expect("stringify summary");
+        assert!(
+            !serialized.contains(secret),
+            "明文 Key 绝不能出现在读接口里：{serialized}"
+        );
+        assert!(
+            summary.typesafe_api_key_masked.ends_with("abcd"),
+            "掩码应保留尾部：{}",
+            summary.typesafe_api_key_masked
+        );
+        assert!(summary.typesafe_api_key_masked.contains('*'));
+
+        // 掩码回传不覆盖真实 Key（与既有 Key 同一语义）。
+        let masked_update: AiConfigUpdate = serde_json::from_str(&format!(
+            r#"{{ "provider": "openai-compatible", "model": "m",
+                      "baseUrl": "https://example.invalid", "apiKey": "x",
+                      "typesafeApiKey": "{}" }}"#,
+            summary.typesafe_api_key_masked
+        ))
+        .expect("deserialize masked update");
+        assert_eq!(
+            masked_update.typesafe_api_key.as_deref(),
+            Some(summary.typesafe_api_key_masked.as_str())
+        );
+        // 空串 = 显式清空（保存路径据此清掉 Key）。
+        let clear_update: AiConfigUpdate = serde_json::from_str(
+            r#"{ "provider": "openai-compatible", "model": "m", "baseUrl": "https://example.invalid",
+                  "apiKey": "x", "typesafeApiKey": "" }"#,
+        )
+        .expect("deserialize clear update");
+        assert_eq!(clear_update.typesafe_api_key.as_deref(), Some(""));
+        // 落盘序列化（敏感配置文件）保留 Key —— 只有读接口不给明文。
+        config.typesafe_api_key = secret.to_string();
+        let persisted = serde_json::to_string(&config).expect("serialize config");
+        assert!(persisted.contains(secret), "敏感配置本身必须能落库");
+    }
+
+    /// 测试夹具：一份最小的合法 AiConfig（除 Key 外都用缺省值）。
+    fn ai_config_fixture() -> AiConfig {
+        AiConfig {
+            provider: Some("openai-compatible".to_string()),
+            model: "m".to_string(),
+            base_url: "https://example.invalid".to_string(),
+            api_key: "sk-placeholder".to_string(),
+            stream: Some(true),
+            permission_mode: "advisor".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+            active_model_id: "m".to_string(),
+            models: Vec::new(),
+            system_prompt: "test".to_string(),
+            custom_rules: String::new(),
+            enabled_skills: Vec::new(),
+            skill_definitions: Vec::new(),
+            skill_runtime_trust: std::collections::HashMap::new(),
+            open_agent: true,
+            workspace_roots: Vec::new(),
+            typesafe_api_key: String::new(),
+            typesafe_base_url: None,
+            typesafe_model: None,
+            tool_read_concurrency: None,
+            tool_domain_concurrency: None,
+        }
+    }
+
     #[test]
     fn default_orchestration_skill_describes_free_dispatch_only() {
         let defaults = desic_storage_config::default_ai_skill_definitions();
@@ -5568,28 +6134,33 @@ wire_api = "responses"
             );
         }
         // frontmatter 的 id 与目录名不一致时拒绝写入（防串档）。
-        let root = std::env::temp_dir().join(format!("desic-agent-id-mismatch-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("desic-agent-id-mismatch-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let markdown = desic_agent_automation::builtin_agent_markdown("desic-market-structure")
+        let markdown = desic_agent_automation::builtin_agent_markdown("desic-contrarian-review")
             .expect("内置正文");
-        let error = write_agent_bundle_in(&root, "desic-account-risk", &markdown, true)
+        let error = write_agent_bundle_in(&root, "desic-other-bundle", &markdown, true)
             .expect_err("id 不一致应报错");
-        assert!(error.contains("目录名"), "错误信息应说明 id 不一致: {error}");
+        assert!(
+            error.contains("目录名"),
+            "错误信息应说明 id 不一致: {error}"
+        );
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn agent_bundle_write_is_additive_and_never_overwrites_by_default() {
-        let root = std::env::temp_dir().join(format!("desic-agent-additive-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("desic-agent-additive-{}", std::process::id()));
         let _ = fs::remove_dir_all(&root);
-        let markdown = desic_agent_automation::builtin_agent_markdown("desic-market-structure")
+        let markdown = desic_agent_automation::builtin_agent_markdown("desic-contrarian-review")
             .expect("内置正文");
 
-        let first = write_agent_bundle_in(&root, "desic-market-structure", &markdown, false)
+        let first = write_agent_bundle_in(&root, "desic-contrarian-review", &markdown, false)
             .expect("首次写入");
         assert!(first.wrote);
         assert_eq!(
-            read_agent_bundle_in(&root, "desic-market-structure")
+            read_agent_bundle_in(&root, "desic-contrarian-review")
                 .expect("读回")
                 .as_deref(),
             Some(markdown.as_str())
@@ -5598,23 +6169,21 @@ wire_api = "responses"
         // 用户改动后，`overwrite=false`（迁移/内置安装路径）不得覆盖。
         let edited = format!("{markdown}\n<!-- 本地改动 -->\n");
         fs::write(
-            root.join("desic-market-structure")
+            root.join("desic-contrarian-review")
                 .join(desic_agent_automation::AGENT_FILE_NAME),
             edited.as_bytes(),
         )
         .expect("模拟用户改动");
-        let second = write_agent_bundle_in(&root, "desic-market-structure", &markdown, false)
+        let second = write_agent_bundle_in(&root, "desic-contrarian-review", &markdown, false)
             .expect("重复写入");
         assert!(!second.wrote, "已存在且不覆盖时应跳过");
-        assert!(
-            read_agent_bundle_in(&root, "desic-market-structure")
-                .expect("读回")
-                .expect("存在")
-                .contains("本地改动")
-        );
+        assert!(read_agent_bundle_in(&root, "desic-contrarian-review")
+            .expect("读回")
+            .expect("存在")
+            .contains("本地改动"));
 
         // 显式覆盖（ai_agent_save 路径）才写回。
-        let third = write_agent_bundle_in(&root, "desic-market-structure", &markdown, true)
+        let third = write_agent_bundle_in(&root, "desic-contrarian-review", &markdown, true)
             .expect("覆盖写入");
         assert!(third.wrote);
         let _ = fs::remove_dir_all(&root);
@@ -5635,7 +6204,10 @@ wire_api = "responses"
         });
 
         // 二次安装：文件已存在（含用户改动）一律跳过，幂等。
-        assert_eq!(install_builtin_agent_bundles_in(&root).expect("二次安装"), 0);
+        assert_eq!(
+            install_builtin_agent_bundles_in(&root).expect("二次安装"),
+            0
+        );
 
         // 删除单个文件后再安装：只补回缺失的那个，内容回到内置正文。
         let victim = &ids[0];
@@ -5646,7 +6218,9 @@ wire_api = "responses"
         .expect("删除文件");
         assert_eq!(install_builtin_agent_bundles_in(&root).expect("补装"), 1);
         assert_eq!(
-            read_agent_bundle_in(&root, victim).expect("读回").as_deref(),
+            read_agent_bundle_in(&root, victim)
+                .expect("读回")
+                .as_deref(),
             desic_agent_automation::builtin_agent_markdown(victim).as_deref()
         );
 

@@ -4,8 +4,8 @@ use base64::{engine::general_purpose, Engine as _};
 use chrono::{Datelike, SecondsFormat, TimeZone, Utc};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
-use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use regex::Regex;
+use reqwest::header::{HeaderMap, HeaderValue, CONTENT_TYPE};
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -30,9 +30,7 @@ use tokio::{
     io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
     net::TcpStream,
     process::Command,
-    sync::{
-        mpsc, oneshot, Mutex as AsyncMutex, Notify, Semaphore, SemaphorePermit,
-    },
+    sync::{mpsc, oneshot, Mutex as AsyncMutex, Notify, Semaphore, SemaphorePermit},
     time::{sleep, timeout, Duration},
 };
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
@@ -47,6 +45,7 @@ mod chart_consumers;
 mod data_root_migration;
 mod equity_directory;
 mod equity_localization;
+mod fastlane;
 mod instrument_operations;
 mod intelligence;
 mod market_radar;
@@ -66,19 +65,18 @@ use crate::agent_library::{
 use crate::ai_automation::{
     ai_agent_profile_delete, ai_agent_profile_run_daily_review, ai_agent_profile_run_now,
     ai_agent_profile_save, ai_agent_profile_systematic_conflicts, ai_automation_force_deep_run,
-    ai_automation_overview, ai_automation_run_detail,
-    ai_automation_run_statuses, ai_automation_save_master_enabled, ai_automation_section,
-    ai_automation_summary, ai_optimization_suggestion_update, ai_skill_version_discard,
+    ai_automation_overview, ai_automation_run_detail, ai_automation_run_statuses,
+    ai_automation_save_master_enabled, ai_automation_section, ai_automation_summary,
+    ai_fastlane_kill_switch, ai_optimization_suggestion_update, ai_skill_version_discard,
     ai_skill_version_publish, ai_token_usage_summary, ai_user_wake_condition_delete,
     ai_user_wake_condition_save, append_ai_usage_summary_event, background_finish_run,
-    background_report_triage, BackgroundReportTriageInput,
-    ensure_ai_message_usage_for_session, notification_feishu_config_save, notification_feishu_send,
-    notification_feishu_test, notification_settings_summary,
+    background_report_triage, ensure_ai_message_usage_for_session, notification_feishu_config_save,
+    notification_feishu_send, notification_feishu_test, notification_settings_summary,
     notify_automation_run_record_persisted, optimization_suggestion_create,
     persist_ai_message_usage_summary, review_complete, review_read_skill_version,
     start_ai_automation_worker, AiAutomationRuntime, AiUsageSummary, BackgroundFinishRunInput,
-    BackgroundRunContext, FeishuSendInput, OptimizationSuggestionInput, ReviewCompleteInput,
-    ReviewSkillVersionInput,
+    BackgroundReportTriageInput, BackgroundRunContext, FeishuSendInput,
+    OptimizationSuggestionInput, ReviewCompleteInput, ReviewSkillVersionInput,
 };
 use crate::app_updater::{
     app_update_apply_source, app_update_check, app_update_install, app_update_prepare,
@@ -130,8 +128,8 @@ use crate::storage_config::{
     ai_agent_template_preview_codex, ai_config_summary, ai_local_auth_status, ai_save_config,
     ai_sidecar_proxy_url, ai_skill_import, ai_skill_install_git, ai_skill_pick_source,
     ai_skill_set_runtime_trust, ai_test_connection, export_diagnostics, frontend_log,
-    load_accounts_config, load_ai_config, load_notification_webhook,
-    load_proxy_config, load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
+    load_accounts_config, load_ai_config, load_notification_webhook, load_proxy_config,
+    load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
     proxy_config_summary, reqwest_client, runtime_cache_root, runtime_work_dir,
     save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
     save_watchlist_config, storage_maintenance, storage_status, test_proxy_config,
@@ -1031,10 +1029,12 @@ struct AiRuntime {
     session_sinks: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AiEvent>>>>,
     session_cancelled: Arc<Mutex<HashMap<String, bool>>>,
     sessions_completing: Arc<Mutex<HashSet<String>>>,
-    pending_prompt_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<Option<Vec<Value>>, String>>>>>,
+    pending_prompt_commands:
+        Arc<Mutex<HashMap<String, oneshot::Sender<Result<Option<Vec<Value>>, String>>>>>,
     pending_title_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
     /// `ai_agent_generate` 的一次性请求通道（C9）：requestId → 模型输出原文。
-    pending_agent_draft_commands: Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
+    pending_agent_draft_commands:
+        Arc<Mutex<HashMap<String, oneshot::Sender<Result<String, String>>>>>,
     title_generating: Arc<Mutex<HashSet<String>>>,
     shutdown_started: Arc<AtomicBool>,
 }
@@ -1275,6 +1275,21 @@ struct AiStreamOptions {
     preserve_cline_conversation: bool,
     conversation_scope: Option<Value>,
     strategy_session_kind: Option<String>,
+    /// C29 快判轮：下发键（config 扩展 + 顶层键）、回传捕获槽与本轮冻结事实。
+    fastlane: Option<Box<FastlaneStreamOptions>>,
+}
+
+/// C29 快判轮的会话级参数（见 [`crate::fastlane::FastlaneDispatch`]）。
+///
+/// 三样东西绑在一起下沉到 `run_ai_stream`：
+/// ① 并入 `sendMessage.config` 的键（`profileType` + 18 个 `fastlane_*` + `typesafeApiKey`）；
+/// ② 并入 `sendMessage` 顶层的键（`fastlaneSnapshot` / `wakeConditions` / `fastlaneIntent`）；
+/// ③ 侧车 `fastlaneResult` 的**原文**捕获槽（解析只在 runner 里做一次，不在这里发明形状）。
+#[derive(Debug, Clone)]
+struct FastlaneStreamOptions {
+    config: Value,
+    payload: Value,
+    result_slot: Arc<Mutex<Option<Value>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1848,6 +1863,11 @@ enum AiEvent {
         received_at: Option<i64>,
         /// 网关自算排队：requestedAt → executionStartedAt。
         queue_ms: Option<i64>,
+        /// 投递段归因（纯增量）：sidecar 发出请求 → stdout 刷新完成 → Rust 读到整行 → 事件循环取出。
+        emit_at: Option<i64>,
+        write_at: Option<i64>,
+        read_at: Option<i64>,
+        picked_at: Option<i64>,
     },
     #[serde(rename_all = "camelCase")]
     Usage {
@@ -1973,6 +1993,17 @@ enum AiEvent {
         review_id: Option<String>,
         episode_id: Option<String>,
         requested_at: Option<i64>,
+        /// 投递段归因（纯增量）：sidecar 发出请求的时刻（`emitAt`）。
+        emit_at: Option<i64>,
+        /// 投递段归因（纯增量）：Rust stdout reader 读到整行的时刻（读侧插桩注入 `_readAt`）。
+        read_at: Option<i64>,
+    },
+    #[serde(rename_all = "camelCase")]
+    /// C29：快判轮的唯一回传（侧车 `fastlaneResult`，六组原始形状）。
+    /// 只在这个会话的 sink（快判 runner）里消费；不外发 UI、不进检查点。
+    FastlaneResult {
+        session_id: String,
+        result: serde_json::Value,
     },
     #[serde(rename_all = "camelCase")]
     Error { session_id: String, message: String },
@@ -2697,7 +2728,12 @@ async fn ai_delete_pending_prompt(
 }
 
 fn ai_message_is_forkable(message: &AiStoredMessage) -> bool {
-    let status = message.status.as_deref().unwrap_or("").trim().to_ascii_lowercase();
+    let status = message
+        .status
+        .as_deref()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
     let terminal = status.is_empty()
         || matches!(
             status.as_str(),
@@ -2759,11 +2795,7 @@ async fn ai_fork_session(
     if !ai_message_is_forkable(cutoff_message) {
         return Err("Only completed assistant messages can be branched".to_string());
     }
-    let fork_id = format!(
-        "session-{}-{:016x}-fork",
-        now_ms(),
-        rand::random::<u64>()
-    );
+    let fork_id = format!("session-{}-{:016x}-fork", now_ms(), rand::random::<u64>());
     let fork_title = format!("{} · 分支", source.title.trim());
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
@@ -3112,6 +3144,7 @@ fn ai_generate_chart_indicator(
             preserve_cline_conversation: false,
             conversation_scope: None,
             strategy_session_kind: None,
+            fastlane: None,
         };
         if let Err(message) = run_ai_stream(
             app_handle.clone(),
@@ -14098,7 +14131,41 @@ async fn run_ai_stream(
             "workspaceRoot".to_string(),
             serde_json::Value::String(workspace_root),
         );
+        // C33：AI Profile 链路的观察条件**类型规范**（与快判**同一份** `fastlane::wake_condition_schema()`，
+        // 按本 Profile 的 `allowed_wake_condition_types` 过滤后下发）。落点是侧车把它注入
+        // `background.finishRun` 的**工具描述** —— **不是** `nextWakePlan.conditions.items` 的 JSON schema
+        //（那会变成比 Rust 更严的第二道门）。根因：模型只能猜类型，于是写出 `{"type":"price"}` 这种
+        // 自创类型 → 整份计划被拒、0 条写库、卡片标红。
+        // 没有名单（交互会话没有 Profile；简报/复盘的名单已 `clear()`）→ `Null` = 不下发、不注入。
+        config_payload.insert(
+            "wakeConditionSchema".to_string(),
+            crate::ai_automation::background_wake_condition_schema(run_context.as_ref()),
+        );
+        // C29：快判轮的下发键 —— 侧车的 `normalizeFastlaneConfig` 读 `source.fastlane_*`，
+        // 顶层 `profileType === "fastlane"` 决定走 `runFastlaneCommand`（两次模型调用）。
+        if let Some(fastlane) = options.as_ref().and_then(|value| value.fastlane.as_deref()) {
+            if let Some(extra) = fastlane.config.as_object() {
+                for (key, value) in extra {
+                    config_payload.insert(key.clone(), value.clone());
+                }
+            }
+        }
     }
+    let mut payload = payload;
+    if let Some(fastlane) = options.as_ref().and_then(|value| value.fastlane.as_deref()) {
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(extra) = fastlane.payload.as_object() {
+                for (key, value) in extra {
+                    object.insert(key.clone(), value.clone());
+                }
+            }
+        }
+    }
+    // C29：侧车 `fastlaneResult` 只由快判 runner 的会话 sink 消费（普通会话收不到）。
+    let fastlane_result_slot = options
+        .as_ref()
+        .and_then(|value| value.fastlane.as_ref())
+        .map(|fastlane| fastlane.result_slot.clone());
     let payload = payload;
     emit_ai(
         &app,
@@ -14225,6 +14292,10 @@ async fn run_ai_stream(
                 execution_ended_at,
                 received_at,
                 queue_ms,
+                emit_at,
+                write_at,
+                read_at,
+                picked_at,
                 ..
             } => {
                 tool_events.push(json!({
@@ -14243,6 +14314,11 @@ async fn run_ai_stream(
                     "executionStartedAt": execution_started_at,
                     "executionEndedAt": execution_ended_at,
                     "queueMs": queue_ms,
+                    // 投递段归因（纯增量字段）：三段 + spawn 调度段的原始读数。
+                    "emitAt": emit_at,
+                    "writeAt": write_at,
+                    "readAt": read_at,
+                    "pickedAt": picked_at,
                     "type": "toolResult"
                 }));
             }
@@ -14309,17 +14385,18 @@ async fn run_ai_stream(
                         Some("completed"),
                     )?;
                     persist_ai_message_usage_summary(&tx, &completed_message_id, &completed_usage)?;
-                    let matched_by_id = if let Some(message_id) = completed_local_message_id.as_deref() {
-                        tx.execute(
-                            "UPDATE ai_messages SET status='sent'
+                    let matched_by_id =
+                        if let Some(message_id) = completed_local_message_id.as_deref() {
+                            tx.execute(
+                                "UPDATE ai_messages SET status='sent'
                              WHERE id=?1 AND session_id=?2 AND role='user'
                                AND status IN ('queued', 'steering')",
-                            params![message_id, completed_session_id],
-                        )
-                        .map_err(|error| error.to_string())?
-                    } else {
-                        0
-                    };
+                                params![message_id, completed_session_id],
+                            )
+                            .map_err(|error| error.to_string())?
+                        } else {
+                            0
+                        };
                     if matched_by_id == 0 {
                         if let Some(prompt) = completed_prompt.as_deref() {
                             tx.execute(
@@ -14349,12 +14426,8 @@ async fn run_ai_stream(
                 }));
                 turn_started_at = *started_at;
                 turn_first_token_at = None;
-                persisted_message_id = format!(
-                    "a-stream-{}-{}-{}",
-                    session_id,
-                    started_at,
-                    now_ms()
-                );
+                persisted_message_id =
+                    format!("a-stream-{}-{}-{}", session_id, started_at, now_ms());
                 ai_stream_checkpoint::persist_ai_stream_checkpoint(
                     &app,
                     &session_id,
@@ -14390,8 +14463,15 @@ async fn run_ai_stream(
                     let failed_session_id = session_id.clone();
                     let failed_prompt = prompt.clone();
                     let failed_local_message_id = local_message_id.clone();
-                    let failed_status = if delivery == "steer" { "steering" } else { "queued" }.to_string();
-                    let failed_tool_json = json!([{"type": "pendingPromptError", "message": safe_message}]).to_string();
+                    let failed_status = if delivery == "steer" {
+                        "steering"
+                    } else {
+                        "queued"
+                    }
+                    .to_string();
+                    let failed_tool_json =
+                        json!([{"type": "pendingPromptError", "message": safe_message}])
+                            .to_string();
                     let failed_app = app.clone();
                     tokio::task::spawn_blocking(move || {
                         let conn = open_database(&failed_app)?;
@@ -14517,8 +14597,14 @@ async fn run_ai_stream(
                 review_id,
                 episode_id,
                 requested_at,
+                emit_at,
+                read_at,
                 ..
             } => {
+                // 投递段归因：事件被事件循环取出的时刻。
+                // `read_at` 是 reader 读到整行的时刻；两者之差 = 事件在 sink 通道里等待循环的时刻，
+                // 也就是"循环被 checkpoint 落库 await 占住"的直接观测量。
+                let task_picked_at = now_ms();
                 let execution_context = AiToolExecutionContext {
                     session_id: session_id.clone(),
                     permission_mode: config.permission_mode.clone(),
@@ -14550,6 +14636,9 @@ async fn run_ai_stream(
                 let task_required_tool_satisfied = required_tool_satisfied.clone();
                 let task_execution_gate = tool_execution_gate.clone();
                 let task_requested_at = requested_at.unwrap_or_else(now_ms);
+                // `*` 取副本而非引用：闭包是 `'static`，不能把 `&event` 的借用带进去。
+                let task_emit_at = *emit_at;
+                let task_read_at = *read_at;
                 tauri::async_runtime::spawn(async move {
                     let received_at = now_ms();
                     let (result, execution_started_at, execution_ended_at) =
@@ -14596,7 +14685,11 @@ async fn run_ai_stream(
                         "executionStartedAt": execution_started_at,
                         "executionEndedAt": execution_ended_at,
                         "queueMs": execution_started_at.saturating_sub(task_requested_at),
-                        "executionMs": execution_ended_at.saturating_sub(execution_started_at)
+                        "executionMs": execution_ended_at.saturating_sub(execution_started_at),
+                        // 投递段归因（纯增量字段）：没有取到值时是 null，消费端一律按"缺省"读。
+                        "emitAt": task_emit_at,
+                        "readAt": task_read_at,
+                        "pickedAt": task_picked_at
                     });
                     let payload = match result {
                         Ok(value) => {
@@ -14635,6 +14728,15 @@ async fn run_ai_stream(
                 error_message = Some(safe_message);
             }
             AiEvent::Error { .. } => {}
+            // C29：快判轮回传只由快判 runner 的会话 sink 消费；普通会话不会收到它，
+            // 真收到了也当成未知事件忽略（不落检查点、不外发）。runner 的槽位在这里搬运原文。
+            AiEvent::FastlaneResult { result, .. } => {
+                if let Some(slot) = fastlane_result_slot.as_ref() {
+                    if let Ok(mut guard) = slot.lock() {
+                        *guard = Some(result.clone());
+                    }
+                }
+            }
             AiEvent::Done { .. } => {
                 done_emitted = true;
                 deferred_done = Some(event.clone());
@@ -14677,8 +14779,8 @@ async fn run_ai_stream(
     if let Ok(mut sinks) = runtime.session_sinks.lock() {
         sinks.remove(&session_id);
     }
-    let _completion_guard = completion_guard
-        .unwrap_or_else(|| AiSessionCompletionGuard::begin(&runtime, &session_id));
+    let _completion_guard =
+        completion_guard.unwrap_or_else(|| AiSessionCompletionGuard::begin(&runtime, &session_id));
     let was_cancelled = ai_session_cancelled(&runtime, &session_id);
     if !done_emitted && error_message.is_none() {
         error_message = Some("Cline sidecar 连接中断，未收到完成事件".to_string());
@@ -14689,6 +14791,20 @@ async fn run_ai_stream(
     }
     let terminal_state =
         ai_stream_terminal_state(was_cancelled, done_emitted, error_message.is_some());
+    // 投递段归因（纯增量事件）：把本轮 checkpoint 落库的时间片随运行记录一起落盘。
+    // 用途唯一——拿每个工具请求的 [readAt, pickedAt] 窗口去对拍"循环是否被落库占住"。
+    if ai_tool_delivery_trace_enabled() {
+        let checkpoint_ticks = ai_stream_checkpoint::take_ai_stream_checkpoint_ticks(&session_id);
+        tool_events.push(json!({
+            "type": "deliveryTrace",
+            "sessionId": session_id,
+            "checkpointIntervalMs": ai_stream_checkpoint::AI_STREAM_CHECKPOINT_INTERVAL_MS,
+            "checkpointTicks": checkpoint_ticks
+                .iter()
+                .map(|(started_at, ended_at)| json!([started_at, ended_at]))
+                .collect::<Vec<_>>()
+        }));
+    }
     tool_events.push(json!({
         "type": "turnTiming",
         "startedAt": turn_started_at,
@@ -14909,13 +15025,27 @@ async fn ensure_ai_sidecar(
     let stdout_reader = tauri::async_runtime::spawn(async move {
         let mut lines = BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
+            // 投递段归因（`readAt`）：整行已离开管道、进到 Rust 用户态的第一个可观测时刻。
+            // 只取时刻、只在开关打开且是本类事件时注入一个 `_readAt` 附加键；
+            // 解析、分发、落库路径与事件语义都不动。
+            let read_at = now_ms();
             let line = line.trim();
             if line.is_empty() {
                 continue;
             }
-            let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+            let Ok(mut value) = serde_json::from_str::<serde_json::Value>(line) else {
                 continue;
             };
+            if ai_tool_delivery_trace_enabled()
+                && matches!(
+                    value.get("type").and_then(Value::as_str),
+                    Some("toolExecuteRequest") | Some("tool_execute_request")
+                )
+            {
+                if let Some(object) = value.as_object_mut() {
+                    object.insert("_readAt".to_string(), json!(read_at));
+                }
+            }
             if value.get("type").and_then(Value::as_str) == Some("titleResult") {
                 let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
                 let result_tx = runtime_for_stdout
@@ -14925,9 +15055,17 @@ async fn ensure_ai_sidecar(
                     .and_then(|mut pending| pending.remove(request_id));
                 if let Some(result_tx) = result_tx {
                     let result = if value.get("ok").and_then(Value::as_bool) == Some(true) {
-                        Ok(value.get("title").and_then(Value::as_str).unwrap_or_default().to_string())
+                        Ok(value
+                            .get("title")
+                            .and_then(Value::as_str)
+                            .unwrap_or_default()
+                            .to_string())
                     } else {
-                        Err(value.get("message").and_then(Value::as_str).unwrap_or("AI title generation failed").to_string())
+                        Err(value
+                            .get("message")
+                            .and_then(Value::as_str)
+                            .unwrap_or("AI title generation failed")
+                            .to_string())
                     };
                     let _ = result_tx.send(result);
                 }
@@ -15391,9 +15529,17 @@ async fn send_ai_sidecar_command(
 
 fn fallback_ai_session_title(prompt: &str) -> String {
     let first_line = prompt.lines().next().unwrap_or(prompt).trim();
-    let first_sentence = first_line.split(['。', '.', '！', '!', '?', '？']).next().unwrap_or(first_line).trim();
+    let first_sentence = first_line
+        .split(['。', '.', '！', '!', '?', '？'])
+        .next()
+        .unwrap_or(first_line)
+        .trim();
     let title: String = first_sentence.chars().take(36).collect();
-    if title.is_empty() { "AI 对话".to_string() } else { title }
+    if title.is_empty() {
+        "AI 对话".to_string()
+    } else {
+        title
+    }
 }
 
 fn sanitize_generated_ai_title(value: &str) -> Option<String> {
@@ -15420,27 +15566,46 @@ async fn schedule_ai_session_title(
     }
     let title_is_placeholder = open_database(&app)
         .ok()
-        .and_then(|conn| conn.query_row(
-            "SELECT title FROM ai_sessions WHERE id=?1",
-            params![&session_id],
-            |row| row.get::<_, String>(0),
-        ).optional().ok().flatten())
+        .and_then(|conn| {
+            conn.query_row(
+                "SELECT title FROM ai_sessions WHERE id=?1",
+                params![&session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .ok()
+            .flatten()
+        })
         .is_some_and(|title| matches!(title.as_str(), "AI 对话" | "新对话"));
-    if !title_is_placeholder { return; }
+    if !title_is_placeholder {
+        return;
+    }
     let reserved = runtime
         .title_generating
         .lock()
         .map(|mut current| current.insert(session_id.clone()))
         .unwrap_or(false);
-    if !reserved { return; }
+    if !reserved {
+        return;
+    }
     let fallback = fallback_ai_session_title(&prompt);
     let request_id = format!("title-{}-{}", session_id, now_ms());
     let result = async {
         let config = load_ai_config(&app)?;
-        let active = config.models.iter().find(|model| model.id == config.active_model_id).or_else(|| config.models.first());
-        let Some(model) = active else { return Err("AI model is not configured".to_string()); };
+        let active = config
+            .models
+            .iter()
+            .find(|model| model.id == config.active_model_id)
+            .or_else(|| config.models.first());
+        let Some(model) = active else {
+            return Err("AI model is not configured".to_string());
+        };
         let (result_tx, result_rx) = oneshot::channel();
-        runtime.pending_title_commands.lock().map_err(|error| error.to_string())?.insert(request_id.clone(), result_tx);
+        runtime
+            .pending_title_commands
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(request_id.clone(), result_tx);
         let payload = json!({
             "type": "generateTitle",
             "requestId": request_id,
@@ -15461,21 +15626,30 @@ async fn schedule_ai_session_title(
             .await
             .map_err(|_| "AI title generation timeout".to_string())?
             .map_err(|_| "AI title response channel closed".to_string())?
-    }.await;
+    }
+    .await;
     if let Ok(mut pending) = runtime.pending_title_commands.lock() {
         pending.remove(&request_id);
     }
-    let title = result.ok().and_then(|value| sanitize_generated_ai_title(&value)).unwrap_or(fallback);
+    let title = result
+        .ok()
+        .and_then(|value| sanitize_generated_ai_title(&value))
+        .unwrap_or(fallback);
     if let Ok(conn) = open_database(&app) {
         let updated = conn.execute(
             "UPDATE ai_sessions SET title=?2, updated_at=?3 WHERE id=?1 AND title IN ('AI 对话','新对话')",
             params![&session_id, &title, now_ms()],
         ).unwrap_or(0);
         if updated == 1 {
-            let _ = app.emit("ai:session-title-updated", json!({ "sessionId": session_id, "title": title }));
+            let _ = app.emit(
+                "ai:session-title-updated",
+                json!({ "sessionId": session_id, "title": title }),
+            );
         }
     }
-    if let Ok(mut current) = runtime.title_generating.lock() { current.remove(&session_id); }
+    if let Ok(mut current) = runtime.title_generating.lock() {
+        current.remove(&session_id);
+    }
 }
 
 async fn shutdown_ai_sidecar(runtime: &AiRuntime) {
@@ -15551,6 +15725,26 @@ fn agent_start_tool_event(
 /// 流检查点（持久化）白名单：只有这些事件会落盘为部分消息。
 /// **C11 的 `AgentProgressNotice` 与 C17 的 `AgentDraftDelta` 都不在其中**——
 /// 它们是瞬时事件，持久化会把会话日志刷满且没有重放价值。
+/// 投递段归因插桩开关（纯增量字段，缺省开启）。
+///
+/// **一键关闭**：设环境变量 `DESIC_TOOL_DELIVERY_TRACE=0`（`false`/`off`/`no` 亦可），
+/// 重启应用即生效；侧车进程继承同一个变量，因此两侧同步关闭。关闭后：
+/// - 侧车不再写 `emitAt`、不再注册 stdout 写回调；
+/// - reader 不再注入 `_readAt`、不再记录 checkpoint 时间片；
+/// 事件内容与插桩前逐字一致。
+fn ai_tool_delivery_trace_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("DESIC_TOOL_DELIVERY_TRACE")
+                .ok()
+                .map(|value| value.trim().to_ascii_lowercase())
+                .as_deref(),
+            Some("0") | Some("false") | Some("off") | Some("no")
+        )
+    })
+}
+
 fn ai_event_triggers_checkpoint(event: &AiEvent) -> bool {
     matches!(
         event,
@@ -15587,6 +15781,7 @@ fn ai_event_session_id(event: &AiEvent) -> String {
         | AiEvent::ApprovalRequest { session_id, .. }
         | AiEvent::ApprovalResolved { session_id, .. }
         | AiEvent::ToolExecuteRequest { session_id, .. }
+        | AiEvent::FastlaneResult { session_id, .. }
         | AiEvent::Error { session_id, .. }
         | AiEvent::Done { session_id, .. } => session_id.clone(),
     }
@@ -15662,6 +15857,11 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
         .unwrap_or(default_session_id)
         .to_string();
     match event_type {
+        // C29：快判轮回传原样带上（六组形状由 `crate::fastlane::FastlaneSidecarResult` 解析）。
+        "fastlaneResult" => Some(AiEvent::FastlaneResult {
+            session_id,
+            result: value.clone(),
+        }),
         "status" => Some(AiEvent::Status {
             session_id,
             status: value
@@ -15804,6 +16004,23 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
             queue_ms: value
                 .get("queueMs")
                 .or_else(|| value.get("queue_ms"))
+                .and_then(|item| item.as_i64()),
+            // 投递段归因（纯增量字段）：老侧车 / 插桩关闭时全部为 `None`。
+            emit_at: value
+                .get("emitAt")
+                .or_else(|| value.get("emit_at"))
+                .and_then(|item| item.as_i64()),
+            write_at: value
+                .get("writeAt")
+                .or_else(|| value.get("write_at"))
+                .and_then(|item| item.as_i64()),
+            read_at: value
+                .get("readAt")
+                .or_else(|| value.get("read_at"))
+                .and_then(|item| item.as_i64()),
+            picked_at: value
+                .get("pickedAt")
+                .or_else(|| value.get("picked_at"))
                 .and_then(|item| item.as_i64()),
         }),
         "usage" => Some(AiEvent::Usage {
@@ -15965,7 +16182,10 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .and_then(|item| item.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            chars: value.get("chars").and_then(|item| item.as_i64()).unwrap_or(0),
+            chars: value
+                .get("chars")
+                .and_then(|item| item.as_i64())
+                .unwrap_or(0),
         }),
         "agentProgressNotice" | "agent_progress_notice" => Some(AiEvent::AgentProgressNotice {
             session_id,
@@ -15979,8 +16199,14 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
                 .and_then(|item| item.as_str())
                 .unwrap_or_default()
                 .to_string(),
-            elapsed_ms: value.get("elapsedMs").and_then(|item| item.as_i64()).unwrap_or(0),
-            silent_ms: value.get("silentMs").and_then(|item| item.as_i64()).unwrap_or(0),
+            elapsed_ms: value
+                .get("elapsedMs")
+                .and_then(|item| item.as_i64())
+                .unwrap_or(0),
+            silent_ms: value
+                .get("silentMs")
+                .and_then(|item| item.as_i64())
+                .unwrap_or(0),
             phase: value
                 .get("phase")
                 .and_then(|item| item.as_str())
@@ -16120,6 +16346,16 @@ fn cline_event_from_value(default_session_id: &str, value: &serde_json::Value) -
             requested_at: value
                 .get("requestedAt")
                 .or_else(|| value.get("requested_at"))
+                .and_then(|item| item.as_i64()),
+            // 投递段归因（纯增量字段）：侧车写的 `emitAt` + reader 注入的 `_readAt`。
+            // 两个键都不存在 = 插桩关闭 / 老侧车，取值 `None`，事件形状与行为不变。
+            emit_at: value
+                .get("emitAt")
+                .or_else(|| value.get("emit_at"))
+                .and_then(|item| item.as_i64()),
+            read_at: value
+                .get("_readAt")
+                .or_else(|| value.get("readAt"))
                 .and_then(|item| item.as_i64()),
         }),
         "error" => Some(AiEvent::Error {
@@ -16334,7 +16570,6 @@ fn profile_agent_scope_allows_tool(scope: &str, canonical: &str) -> bool {
     }
 }
 
-
 /// 点名时声明的收窄范围（C15.2）：白名单 `market / derivatives / intelligence /
 /// account / history`；`all` 是内部表示（等价"不限制"）。
 /// 缺省 / 空数组 = 不限制（全部只读工具，内部展开为 `all`）；含白名单外的值 → 拒，
@@ -16422,9 +16657,7 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             return Err(format!("未知的 Agent 库工具：{canonical}"));
         }
         if !is_main {
-            return Err(format!(
-                "agent.* 仅允许主 Agent 调用，已拒绝：{canonical}"
-            ));
+            return Err(format!("agent.* 仅允许主 Agent 调用，已拒绝：{canonical}"));
         }
         let in_run = context.run_context.is_some();
         if in_run && matches!(canonical, "agent.create" | "agent.update") {
@@ -16445,8 +16678,14 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             ai_triage::triage_allows_tool(
                 &state,
                 canonical,
-                context.account_context_id.as_deref().is_some_and(|id| !id.trim().is_empty())
-                    || run.account_id.as_deref().is_some_and(|id| !id.trim().is_empty()),
+                context
+                    .account_context_id
+                    .as_deref()
+                    .is_some_and(|id| !id.trim().is_empty())
+                    || run
+                        .account_id
+                        .as_deref()
+                        .is_some_and(|id| !id.trim().is_empty()),
             )?;
         }
     }
@@ -16460,7 +16699,12 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             .as_ref()
             .filter(|run| run.is_background())
             .ok_or_else(|| "background.reportTriage 只能用于后台 Profile Run".to_string())?;
-        if run.triage.lock().map(|state| state.config.is_off()).unwrap_or(true) {
+        if run
+            .triage
+            .lock()
+            .map(|state| state.config.is_off())
+            .unwrap_or(true)
+        {
             return Err("当前 Profile 未启用试判（triage.mode=off），无需提交试判结论".to_string());
         }
         return Ok(());
@@ -17304,6 +17548,129 @@ async fn ai_web_search(request: AiWebSearchRequest) -> Result<Value, String> {
     }))
 }
 
+/// C29 快判轮：把一份快判载荷送进侧车（`config.profileType === "fastlane"`），等 `fastlaneResult`。
+///
+/// 只做**搬运与等待**：不改形状、不补字段。解析与补 `trigger/gate/fetchMs/codeMs/totalMs`
+/// 由 `crate::fastlane::FastlaneRecord::from_sidecar` 在 runner 里做一次（口径唯一）。
+pub(crate) async fn ai_run_fastlane_session(
+    app: tauri::AppHandle,
+    session_id: String,
+    messages: Vec<AiChatMessage>,
+    mut run_context: BackgroundRunContext,
+    dispatch: crate::fastlane::FastlaneDispatch,
+    round: Arc<crate::fastlane::FastlaneRoundFacts>,
+) -> Result<crate::fastlane::FastlaneSidecarResult, String> {
+    let result_slot = Arc::new(Mutex::new(None::<Value>));
+    run_context.fastlane_round = Some(round.clone());
+    let options = AiStreamOptions {
+        permission_mode: Some(run_context.permission_mode.clone()),
+        fastlane: Some(Box::new(FastlaneStreamOptions {
+            config: dispatch.config.clone(),
+            payload: dispatch.payload.clone(),
+            result_slot: result_slot.clone(),
+        })),
+        ..Default::default()
+    };
+    let runtime = app.state::<AiRuntime>().inner().clone();
+    run_ai_stream(
+        app,
+        runtime,
+        session_id,
+        messages,
+        Some(run_context),
+        Some(options),
+    )
+    .await?;
+    let raw = result_slot
+        .lock()
+        .map_err(|error| error.to_string())?
+        .clone()
+        .ok_or_else(|| "侧车未回传 fastlaneResult（快判轮没有完成）".to_string())?;
+    serde_json::from_value::<crate::fastlane::FastlaneSidecarResult>(raw)
+        .map_err(|error| format!("fastlaneResult 解析失败：{error}"))
+}
+
+/// C29 快判轮的动作闸门（**顺序冻结，不可拆**）：
+/// ① 严格适配（未知/缺失/类型不符一律拒绝）→ ② `validate_round` 代码校验
+/// → ③ 冻结决策上下文候选（既有 `read_decision_context`，它同时产出预检）
+/// → ④ 预检 `blocked` 即拒。
+///
+/// 全部通过后才把 `decisionContextId`（以及 Run/Profile 身份）注入提交参数，交给**既有 commit
+/// 路径**（`tradeOpportunity.create` 的 materialize + 创建 + copilot 审批 / limited_auto 自动执行）。
+/// 这样"先校验后提交"在结构上成立：拿不到 `ValidatedRound` 就走不到冻结，也就拿不到可提交的候选。
+async fn authorize_fastlane_opportunity_commit(
+    app: &tauri::AppHandle,
+    round: &crate::fastlane::FastlaneRoundFacts,
+    input: Value,
+) -> Result<Value, String> {
+    let validated = round.adapt_and_validate(&input).map_err(|reasons| {
+        format!(
+            "快判代码校验未通过（本轮不创建机会）：{}",
+            reasons.join("；")
+        )
+    })?;
+    let intent = round.trace().intent.unwrap_or_else(|| "open".to_string());
+    let candidate = crate::fastlane::opportunity_input_from_plan(
+        validated.plan(),
+        &input,
+        &intent,
+        round.account_id.as_deref(),
+        &round.environment,
+        &round.inst_id,
+        round.target_leverage,
+        round.max_slippage_bps,
+        &round.session_id,
+    );
+    let request = json!({
+        "accountId": round.account_id,
+        "environment": round.environment,
+        "instId": round.inst_id,
+        "candidate": candidate,
+        "agentProfileId": round.profile_id,
+        "agentRunId": round.run_id,
+        "maxSingleTradeMarginPct": round.validation.profile_max_single_trade_margin_pct,
+    });
+    let request: crate::trade_commands::DecisionContextRequest =
+        serde_json::from_value(request).map_err(|error| format!("快判候选无效：{error}"))?;
+    let market_runtime = app.state::<MarketRuntime>();
+    let context =
+        crate::trade_commands::read_decision_context(app.clone(), market_runtime, request).await?;
+    let context_id = context
+        .get("decisionContextId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "最终复核缺少 decisionContextId".to_string())?
+        .to_string();
+    if context
+        .pointer("/precheck/blocked")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        let reasons = context
+            .pointer("/precheck/reasons")
+            .and_then(Value::as_array)
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .collect::<Vec<_>>()
+                    .join("；")
+            })
+            .filter(|text| !text.trim().is_empty())
+            .unwrap_or_else(|| "预检阻断但未给出原因".to_string());
+        let rejection = format!("precheck_blocked: {reasons}");
+        round.record_rejection(&[rejection.clone()]);
+        return Err(format!("快判预检阻断（本轮不创建机会）：{reasons}"));
+    }
+    round.record_decision_context(&context_id);
+    let mut commit = input;
+    if let Some(object) = commit.as_object_mut() {
+        object.insert("decisionContextId".to_string(), json!(context_id));
+        object.insert("agentRunId".to_string(), json!(round.run_id));
+        object.insert("agentProfileId".to_string(), json!(round.profile_id));
+    }
+    Ok(commit)
+}
+
 async fn execute_ai_tool(
     app: tauri::AppHandle,
     tool_name: &str,
@@ -17395,10 +17762,7 @@ async fn execute_ai_tool(
         return match canonical_name {
             "agent.list" => crate::agent_library::tool_agent_list(&app),
             "agent.read" => {
-                let id = input
-                    .get("id")
-                    .and_then(Value::as_str)
-                    .unwrap_or_default();
+                let id = input.get("id").and_then(Value::as_str).unwrap_or_default();
                 crate::agent_library::tool_agent_read(&app, id)
             }
             "agent.create" => crate::agent_library::tool_agent_create(&app, &input),
@@ -17759,6 +18123,15 @@ async fn execute_ai_tool(
             Ok(value)
         }
         "tradeOpportunity.create" => {
+            // C29：快判轮的提交参数先过动作闸门（适配 → validate_round → 冻结候选 + 预检），
+            // 再走下面的既有 commit 路径；非快判会话完全不受影响。
+            let fastlane_round = context
+                .run_context
+                .as_ref()
+                .and_then(|run| run.fastlane_round.clone());
+            if let Some(round) = fastlane_round.as_ref() {
+                input = authorize_fastlane_opportunity_commit(&app, round, input).await?;
+            }
             let mut request: TradeOpportunityCreateRequest = if context
                 .run_context
                 .as_ref()
@@ -17807,6 +18180,13 @@ async fn execute_ai_tool(
             }
             let value = serde_json::to_value(result).map_err(|err| err.to_string())?;
             ensure_opportunity_in_run_scope(&value, context)?;
+            // C29：把这轮真正创建出的机会 ID 记进快判轮的留痕（记录里 `action.opportunityId`）。
+            if let (Some(round), Some(id)) = (
+                fastlane_round.as_ref(),
+                value.get("id").and_then(Value::as_str),
+            ) {
+                round.record_opportunity(id);
+            }
             Ok(value)
         }
         "tradeOpportunity.revise" => {
@@ -20574,7 +20954,12 @@ fn emit_ai_ui_action(
     Ok(json!({ "id": id, "sent": true, "event": AI_CHART_ACTION_EVENT, "toolName": tool_name }))
 }
 
-const AI_MEMORY_PRIVATE_SNAPSHOT_MAX_AGE_MS: i64 = 15_000;
+/// 内存私有账户快照"还算新鲜"的上限：**这是"账户快照可用"的单一真相**。
+///
+/// 快判的 `account` 数据门限**直接引用本常量**（`fastlane::DEFAULT_MAX_DATA_AGE_MS`）：
+/// 快判门限若比本规则更严，就会出现"缓存按本规则判可用、快判门按更严的门限判过期"的
+/// 自相矛盾 —— 真机上表现为账户块恒 5–10s 旧、每轮被拦（2026-09-21 实测 7.5s / 10.3s）。
+pub(crate) const AI_MEMORY_PRIVATE_SNAPSHOT_MAX_AGE_MS: i64 = 15_000;
 
 fn ai_read_memory_account_snapshot(
     runtime: &MarketRuntime,
@@ -24973,7 +25358,9 @@ fn boot_log_dir() -> std::path::PathBuf {
     #[cfg(windows)]
     {
         if let Some(base) = std::env::var_os("LOCALAPPDATA") {
-            return std::path::PathBuf::from(base).join("com.desic.terminal").join("logs");
+            return std::path::PathBuf::from(base)
+                .join("com.desic.terminal")
+                .join("logs");
         }
     }
     #[cfg(target_os = "macos")]
@@ -24988,7 +25375,9 @@ fn boot_log_dir() -> std::path::PathBuf {
     #[cfg(all(not(windows), not(target_os = "macos")))]
     {
         if let Some(base) = std::env::var_os("XDG_DATA_HOME") {
-            return std::path::PathBuf::from(base).join("com.desic.terminal").join("logs");
+            return std::path::PathBuf::from(base)
+                .join("com.desic.terminal")
+                .join("logs");
         }
         if let Some(home) = std::env::var_os("HOME") {
             return std::path::PathBuf::from(home)
@@ -25054,7 +25443,14 @@ fn install_boot_panic_hook() {
     std::panic::set_hook(Box::new(|info| {
         let location = info
             .location()
-            .map(|location| format!("{}:{}:{}", location.file(), location.line(), location.column()))
+            .map(|location| {
+                format!(
+                    "{}:{}:{}",
+                    location.file(),
+                    location.line(),
+                    location.column()
+                )
+            })
             .unwrap_or_else(|| "<unknown>".to_string());
         let payload = if let Some(text) = info.payload().downcast_ref::<&str>() {
             (*text).to_string()
@@ -25203,7 +25599,8 @@ async fn finalize_data_root_bootstrap(
 async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
     if BOOTSTRAP_DATABASE_STARTED.swap(true, Ordering::AcqRel) {
         let runtime = app.state::<DatabaseRuntime>().inner().clone();
-        return match tauri::async_runtime::spawn_blocking(move || runtime.wait_until_ready()).await {
+        return match tauri::async_runtime::spawn_blocking(move || runtime.wait_until_ready()).await
+        {
             Ok(Ok(())) => true,
             _ => false,
         };
@@ -25228,7 +25625,9 @@ async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
             true
         }
         Err(error) => {
-            boot_log(&format!("bootstrap: database initialization FAILED: {error}"));
+            boot_log(&format!(
+                "bootstrap: database initialization FAILED: {error}"
+            ));
             eprintln!("startup database initialization failed: {error}");
             false
         }
@@ -25313,6 +25712,7 @@ pub fn run() {
             ai_agent_generate,
             ai_agent_generate_cancel,
             ai_automation_force_deep_run,
+            ai_fastlane_kill_switch,
             ai_agent_profile_run_now,
             ai_agent_profile_run_daily_review,
             ai_user_wake_condition_save,
@@ -26208,7 +26608,10 @@ mod tests {
             sanitize_generated_ai_title("  ## BTC market structure\nwith extra detail  "),
             Some("## BTC market structure with extra detail".to_string())
         );
-        assert_eq!(fallback_ai_session_title("Review BTC funding? Include flow."), "Review BTC funding");
+        assert_eq!(
+            fallback_ai_session_title("Review BTC funding? Include flow."),
+            "Review BTC funding"
+        );
         assert_eq!(fallback_ai_session_title("\n\n"), "AI 对话");
     }
 
@@ -26425,10 +26828,19 @@ mod tests {
             status: status.map(str::to_string),
             created_at: 1,
         };
-        assert!(ai_message_is_forkable(&message("assistant", Some("completed"))));
-        assert!(ai_message_is_forkable(&message("assistant", Some("failed"))));
+        assert!(ai_message_is_forkable(&message(
+            "assistant",
+            Some("completed")
+        )));
+        assert!(ai_message_is_forkable(&message(
+            "assistant",
+            Some("failed")
+        )));
         assert!(ai_message_is_forkable(&message("assistant", None)));
-        assert!(!ai_message_is_forkable(&message("assistant", Some("streaming"))));
+        assert!(!ai_message_is_forkable(&message(
+            "assistant",
+            Some("streaming")
+        )));
         assert!(!ai_message_is_forkable(&message("user", Some("sent"))));
     }
 
@@ -26470,7 +26882,8 @@ mod tests {
     #[test]
     fn agent_start_task_prompt_survives_the_event_boundary() {
         const TASK_PROMPT: &str = "本轮任务：读齐 BTC-USDT-SWAP 的行情/衍生品/新闻。\n依赖提示：与账户专家并行，互不等待。\nProfile 任务：只做 wait/abandon。";
-        const REPORT: &str = "# 数据汇总\n\n## 结论\n证据齐。\n\n| 项 | 值 |\n| --- | --- |\n| OI | `+0.4%` |";
+        const REPORT: &str =
+            "# 数据汇总\n\n## 结论\n证据齐。\n\n| 项 | 值 |\n| --- | --- |\n| OI | `+0.4%` |";
         let mut events = Vec::new();
         for raw in [
             json!({
@@ -26495,8 +26908,7 @@ mod tests {
                 "startedAt": 2_000
             }),
         ] {
-            let event =
-                cline_event_from_value("background:run-c23", &raw).expect("map agentStart");
+            let event = cline_event_from_value("background:run-c23", &raw).expect("map agentStart");
             match event {
                 AiEvent::AgentStart {
                     agent_id,
@@ -26642,6 +27054,45 @@ mod tests {
                 assert_eq!(configured_agent_scopes, vec!["market", "derivatives"]);
             }
             event => panic!("unexpected event: {event:?}"),
+        }
+
+        // 投递段归因（纯增量字段）的解析缝：侧车写 `emitAt`、reader 注入 `_readAt`，
+        // 两者都缺 + 都存在两种形态都要能被解析，且不改变其它字段。
+        for (label, extra, expected_emit, expected_read) in [
+            ("老侧车/插桩关闭", json!({}), None::<i64>, None::<i64>),
+            (
+                "插桩开启",
+                json!({ "emitAt": 1_786_000_000_100_i64, "_readAt": 1_786_000_000_180_i64 }),
+                Some(1_786_000_000_100_i64),
+                Some(1_786_000_000_180_i64),
+            ),
+        ] {
+            let mut payload = json!({
+                "type": "toolExecuteRequest",
+                "sessionId": "background:run-test",
+                "executionId": "execution-1",
+                "toolName": "market.readTicker",
+                "agentRole": "main",
+                "requestedAt": 1_786_000_000_000_i64
+            });
+            if let (Some(target), Some(source)) = (payload.as_object_mut(), extra.as_object()) {
+                for (key, value) in source {
+                    target.insert(key.clone(), value.clone());
+                }
+            }
+            match cline_event_from_value("background:run-test", &payload) {
+                Some(AiEvent::ToolExecuteRequest {
+                    requested_at,
+                    emit_at,
+                    read_at,
+                    ..
+                }) => {
+                    assert_eq!(requested_at, Some(1_786_000_000_000), "{label}");
+                    assert_eq!(emit_at, expected_emit, "{label}");
+                    assert_eq!(read_at, expected_read, "{label}");
+                }
+                event => panic!("{label}: unexpected event: {event:?}"),
+            }
         }
     }
 
@@ -28835,23 +29286,26 @@ mod tests {
         name: &str,
         role: &str,
     ) -> desic_agent_automation::AiAgentDefinition {
-        let mut definition = desic_agent_automation::builtin_agent_definition(id)
-            .unwrap_or_else(|| desic_agent_automation::AiAgentDefinition {
-                id: id.to_string(),
-                name: name.to_string(),
-                role: role.to_string(),
-                envelope: desic_agent_automation::AGENT_ENVELOPE_STANDARD.to_string(),
-                skills: Vec::new(),
-                requires_account: role == "account_risk",
-                source: desic_agent_automation::AGENT_SOURCE_CUSTOM.to_string(),
-                version: 1,
-                created_at: 0,
-                summary: String::new(),
-                body: "## 职责
-测试职责。".to_string(),
-                deprecated: false,
-                scopes_deprecated: false,
-                path: std::path::PathBuf::new(),
+        let mut definition =
+            desic_agent_automation::builtin_agent_definition(id).unwrap_or_else(|| {
+                desic_agent_automation::AiAgentDefinition {
+                    id: id.to_string(),
+                    name: name.to_string(),
+                    role: role.to_string(),
+                    envelope: desic_agent_automation::AGENT_ENVELOPE_STANDARD.to_string(),
+                    skills: Vec::new(),
+                    requires_account: role == "account_risk",
+                    source: desic_agent_automation::AGENT_SOURCE_CUSTOM.to_string(),
+                    version: 1,
+                    created_at: 0,
+                    summary: String::new(),
+                    body: "## 职责
+测试职责。"
+                        .to_string(),
+                    deprecated: false,
+                    scopes_deprecated: false,
+                    path: std::path::PathBuf::new(),
+                }
             });
         definition.id = id.to_string();
         definition.name = name.to_string();
@@ -28899,6 +29353,7 @@ mod tests {
             trigger: json!({}),
             review_id: None,
             episode_id: None,
+            fastlane_round: None,
         }
     }
 
@@ -29512,7 +29967,6 @@ mod tests {
         assert!(authorize_ai_tool("intelligence.news.list", &auto_risk).is_err());
     }
 
-
     /// 契约 C15.2：专家工具面的唯一授权来源是"主 Agent 点名时声明的收窄范围"——
     /// 名单外被拒；声明白名单外域被拒；缺省/空数组 = 全部只读工具；收窄 = 子集。
     #[test]
@@ -29532,8 +29986,12 @@ mod tests {
             context.configured_agent_id = Some(agents[0].to_string());
             context.configured_agent_scopes =
                 declared.iter().map(|scope| (*scope).to_string()).collect();
-            context.active_skill_ids.insert("okx-market-intelligence".to_string());
-            context.active_skill_ids.insert("market-radar-research".to_string());
+            context
+                .active_skill_ids
+                .insert("okx-market-intelligence".to_string());
+            context
+                .active_skill_ids
+                .insert("market-radar-research".to_string());
             context.run_context = Some(test_background_run_context(Some("account-test"), selected));
             context
         };
@@ -29575,7 +30033,10 @@ mod tests {
 
         let mut empty = test_ai_tool_context("advisor", "subagent", true);
         empty.configured_agent_id = Some("desic-market-structure".to_string());
-        empty.run_context = Some(test_background_run_context(Some("account-test"), Vec::new()));
+        empty.run_context = Some(test_background_run_context(
+            Some("account-test"),
+            Vec::new(),
+        ));
         let error = authorize_ai_tool("market.readTicker", &empty)
             .expect_err("an empty selection must reject every delegated agent");
         assert!(error.contains("未勾选任何专家"), "{error}");
@@ -29646,7 +30107,11 @@ mod tests {
         // `maxIterations===void 0 || iteration<maxIterations`，schema 是 optional，
         // 因此"不下发"就是"不设上限"。
         assert_eq!(ai_session_max_iterations(None), None, "缺省不下发上限");
-        assert_eq!(ai_session_max_iterations(Some(120)), Some(120), "显式请求优先");
+        assert_eq!(
+            ai_session_max_iterations(Some(120)),
+            Some(120),
+            "显式请求优先"
+        );
 
         let config = with_max_iterations(json!({ "provider": "openai-compatible" }), None);
         assert!(
@@ -29677,8 +30142,10 @@ mod tests {
         assert!(authorize_ai_tool("agent.create", &delegated).is_err());
 
         let mut background = test_ai_tool_context("advisor", "main", false);
-        background.run_context =
-            Some(test_background_run_context(Some("account-test"), Vec::new()));
+        background.run_context = Some(test_background_run_context(
+            Some("account-test"),
+            Vec::new(),
+        ));
         assert!(authorize_ai_tool("agent.list", &background).is_ok());
         assert!(authorize_ai_tool("agent.read", &background).is_ok());
         let error = authorize_ai_tool("agent.create", &background)
@@ -29726,6 +30193,7 @@ mod tests {
             trigger: json!({}),
             review_id: None,
             episode_id: None,
+            fastlane_round: None,
         });
 
         let mut intelligence_input = json!({ "instId": "BTC-USDT-SWAP" });

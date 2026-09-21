@@ -547,7 +547,7 @@ mod tests {
         assert_eq!(normalize_agent_create_role("account_risk"), "account_risk");
         assert_eq!(normalize_agent_create_role("Market Structure"), "market_structure");
         assert_eq!(normalize_agent_create_role("中文角色"), "custom");
-        assert!(validate_agent_source_for_save("desic-market-structure", "builtin").is_ok());
+        assert!(validate_agent_source_for_save("desic-contrarian-review", "builtin").is_ok());
         assert!(validate_agent_source_for_save("my-agent", "builtin").is_err());
         assert!(validate_agent_source_for_save("my-agent", "custom").is_ok());
     }
