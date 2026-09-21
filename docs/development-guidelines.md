@@ -402,3 +402,16 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 源码更新只允许干净、未分叉的 `main` 快进到 `origin/main`。存在本地修改、分支不符或历史分叉时只提示原因，不得自动 stash、reset、rebase 或覆盖文件。
 - Release 必须分别验证 Windows x64、macOS Apple Silicon 和 macOS Intel 的安装、升级、自动重启及数据保留。没有实际验证的平台不得宣称更新链路已可用。
 - Windows Release 的 Rust 缓存必须由 `main` 分支预热并使用稳定共享键；预热时先生成正式构建所需的 sidecar 和 `frontendDist`，再使用 `tauri/custom-protocol` feature 编译。标签构建只恢复缓存、不保存标签专属缓存，避免每个版本重复完整编译和上传无复用价值的缓存。
+
+## 代码格式化：禁止在本仓库裸跑 `cargo fmt`（2026-09-21）
+
+**事故**：本仓库**不是全量 fmt-clean** 的（`lib.rs` / `agent_library.rs` / `storage_config.rs` 等文件的 HEAD 版本本身就不满足 `rustfmt --check`）。因此
+`cargo fmt --manifest-path src-tauri/Cargo.toml -p desic-terminal` **会把整个 workspace 的 `.rs` 全部重排**，而不是只格式化目标 crate。
+
+**当时后果**：3 个带未提交改动的文件（`lib.rs`、`agent_library.rs`、`storage_config.rs`）的排版被重排且**不可逐字节还原**（无备份、无本地快照、无文件 checkpoint）；4 个与本轮无关的文件已 `git checkout --` 恢复。语义未变（编译通过、`cargo test --workspace` 810 passed / 0 failed），但 `git diff` 混入格式噪声。用户裁决：**接受现状**，不做全仓重排。
+
+**规则**：
+1. **禁止**裸跑 `cargo fmt`（无论带不带 `-p`）—— 它的写盘范围是整个 workspace。
+2. 需要格式化时，**只对你自己这轮新建/编辑的那一个文件**跑：`rustfmt --edition 2021 <file>`。
+3. 若确实要做全仓格式化，必须**单开一个 `style:` 提交**、并在动手前 `git status` 确认无未提交改动（或先提交/暂存）。
+4. 在带未提交改动的仓库里做任何"批量写盘"的工具操作前，先确认**有可回退的备份**。

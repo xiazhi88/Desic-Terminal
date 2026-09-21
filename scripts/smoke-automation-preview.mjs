@@ -37,7 +37,117 @@ function assertInsideViewport(box, scenario, label) {
   }
 }
 
-const C20_DEFAULT_AGENT_IDS = ["desic-data-digest", "desic-account-state", "desic-decision-proposal", "desic-contrarian-review"];
+// C20.1（改写版）：内置库只剩一个可选的对手盘（counterparty）。预览夹具 = 1 内置
+// （对手盘）+ 2 非内置（1 自定义 + 1 AI 创建）；勾选器里的可选行数由夹具清单算出来，
+// 不再硬编码旧的 6 行 / 4 个默认角色。
+const C20_BUILTIN_AGENT_IDS = ["desic-contrarian-review"];
+const PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT = C20_BUILTIN_AGENT_IDS.length;
+// custom-mean-reversion-desk（source=custom）+ ai-volatility-regime（source=ai）。
+const PREVIEW_FIXTURE_NON_BUILTIN_AGENT_COUNT = 2;
+const PREVIEW_AGENT_COUNT = PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT + PREVIEW_FIXTURE_NON_BUILTIN_AGENT_COUNT;
+
+// C31 收尾：`migrationNotes`（剔除已删内置 Agent 的**可见提示**）演示夹具。
+// 夹具内容逐字取产品文案（`AiAutomationPanel` 的 `AUTOMATION_PREVIEW_PROFILE_MIGRATION_NOTES`，
+// 真源 = `agents.rs` 的 `removed_builtin_agent_notice` + `ai_automation.rs` 保存路径提示）。
+// 注意：产品文案是「它的职责（取数与事实核对）已归主 Agent 自己完成」，字面量
+// 「职责已归主 Agent」并**不存在**于产品文案里（那是契约文档的转述）——断言用正则匹配语义，
+// 不把断言绑死在不存在的字面量上。
+const C31_REMOVED_AGENT_IDS = ["desic-data-digest", "desic-decision-proposal"];
+const C31_MIGRATION_NOTE_COUNT = 2;
+const C31_RESPONSIBILITY_MOVED = /职责[^。]*已归主 Agent/;
+
+/**
+ * C31 收尾：迁移提示块（`[data-profile-migration-notes]`）的可见性 / 不静默 / 非死按钮断言。
+ *
+ * `phase="load"` 在**任何交互之前**跑：提示必须自己就渲染出来（不靠点击才出现 = 不静默），
+ * 且可见、可命中（不是被盖住的装饰）；`phase="after-interaction"` 在勾选器被反复操作之后再跑：
+ * 提示必须依然在（不是一次性闪现，也不随名单变化消失）。
+ */
+async function verifyProfileMigrationNotes(page, scenario, phase) {
+  const label = `${scenario.label}/config migration notes(${phase})`;
+  const block = page.locator("[data-profile-migration-notes]");
+  const count = await block.count();
+  if (count !== 1) {
+    throw new Error(`${label}: expected exactly one [data-profile-migration-notes] block, got ${count}`);
+  }
+  if (!(await block.isVisible())) {
+    throw new Error(`${label}: the migration-notes block must be visible（不许静默丢弃用户的勾选）`);
+  }
+  // role=note：这是**说明**，不是控件壳（死按钮的特征之一就是"看着能点、其实是禁用控件"）。
+  if ((await block.getAttribute("role")) !== "note") {
+    throw new Error(`${label}: the migration-notes block must be role=note, got ${await block.getAttribute("role")}`);
+  }
+  const notes = block.locator("[data-profile-migration-note]");
+  const noteCount = await notes.count();
+  if (noteCount !== C31_MIGRATION_NOTE_COUNT) {
+    throw new Error(`${label}: expected ${C31_MIGRATION_NOTE_COUNT} migration notes（读取路径 + 保存路径两条）, got ${noteCount}`);
+  }
+  const noteTexts = (await notes.allTextContents()).map((text) => text.trim());
+  for (const text of noteTexts) {
+    if (!text) throw new Error(`${label}: empty migration note（文案不能是空壳）: ${JSON.stringify(noteTexts)}`);
+  }
+  const joined = noteTexts.join("\n");
+  if (!C31_RESPONSIBILITY_MOVED.test(joined)) {
+    throw new Error(`${label}: 提示必须说明"职责已归主 Agent"（产品文案：它的职责（取数与事实核对）已归主 Agent 自己完成，咨询改为可选。）: ${JSON.stringify(noteTexts)}`);
+  }
+  for (const id of C31_REMOVED_AGENT_IDS) {
+    if (!joined.includes(id)) {
+      throw new Error(`${label}: 被剔除的真实 id ${id} 必须在提示里可见（不许静默丢弃）: ${JSON.stringify(noteTexts)}`);
+    }
+  }
+  const title = (await block.locator("strong").first().innerText()).trim();
+  if (!title) throw new Error(`${label}: the migration-notes title must not be empty`);
+  // 死按钮自检：块内不得有 disabled / aria-disabled / 被隐藏或被清空的**文案**。
+  // 注意排除纯装饰（例如 `<strong>` 里的 AlertTriangle 图标是 `aria-hidden="true"` 的）——
+  // 只有"带自己的文字"或"可交互"的元素才参与判定，否则会把装饰图标误报成死元素。
+  const dead = await block.evaluate((node) => {
+    const problems = [];
+    const invisible = (element) => {
+      const style = window.getComputedStyle(element);
+      return style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0;
+    };
+    if (node.hasAttribute("disabled") || node.getAttribute("aria-disabled") === "true") problems.push("note:disabled");
+    if (node.getAttribute("aria-hidden") === "true" || node.hasAttribute("hidden")) problems.push("note:hidden");
+    if (invisible(node)) problems.push("note:invisible");
+    node.querySelectorAll("*").forEach((element, index) => {
+      const where = `child${index}:${element.tagName.toLowerCase()}`;
+      const interactive = element.matches("button, [role=button], a[href], input, select, textarea");
+      const ownText = Array.from(element.childNodes)
+        .some((child) => child.nodeType === Node.TEXT_NODE && (child.textContent ?? "").trim().length > 0);
+      if (interactive && (element.hasAttribute("disabled") || element.getAttribute("aria-disabled") === "true")) {
+        problems.push(`${where}:disabled`);
+      }
+      if (ownText && (element.getAttribute("aria-hidden") === "true" || element.hasAttribute("hidden"))) {
+        problems.push(`${where}:text-hidden`);
+      }
+      if (ownText && invisible(element)) {
+        const style = window.getComputedStyle(element);
+        problems.push(`${where}:text-invisible(${style.visibility}/${style.display}/opacity=${style.opacity})`);
+      }
+    });
+    return problems;
+  });
+  if (dead.length > 0) {
+    throw new Error(`${label}: the migration-notes block contains dead/disabled elements: ${JSON.stringify(dead)}`);
+  }
+  if (phase === "load") {
+    // 可命中：提示块占据真实版面，不是被覆盖/半透明的装饰。
+    const hit = await block.evaluate((node) => {
+      const box = node.getBoundingClientRect();
+      if (box.width <= 0 || box.height <= 0) return false;
+      const target = document.elementFromPoint(box.x + Math.min(24, box.width / 2), box.y + Math.min(12, box.height / 2));
+      return Boolean(target && (target === node || node.contains(target)));
+    });
+    if (!hit) {
+      throw new Error(`${label}: the migration-notes block must be hit-testable（不是被别的元素盖住的装饰）`);
+    }
+  }
+  await page.screenshot({
+    path: path.join(artifactDir, `automation-${scenario.label}-profile-migration-notes-${phase}.png`),
+    fullPage: false
+  });
+  return joined;
+}
 
 async function readPageState(page) {
   return page.evaluate(() => {
@@ -64,8 +174,9 @@ async function boxesFor(page, selector) {
   }));
 }
 
-// C13：Profile 勾选器（勾选制，无方案模板）。预览夹具 = 7 个 Agent（5 内置 / 1 自定义 /
-// 1 AI 创建），初始勾选前 4 个。断言：渲染、可勾选/取消、清空后出现空态提示、全选内置。
+// C13：Profile 勾选器（勾选制，无方案模板）。预览夹具 = 1 个内置（对手盘）+ 2 个非内置
+// （1 自定义 / 1 AI 创建），初始只勾选对手盘（= 允许咨询）。断言：渲染、可勾选/取消、
+// 清空后出现空态提示、全选内置（新编制下最多 1 个）。
 async function verifyAgentSelection(page, scenario) {
   await page.goto(`${baseUrl}?view=config&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
   await page.waitForSelector('.automation-preview-page[data-preview-view="config"] [data-agent-selector]', { timeout: 30_000 });
@@ -81,23 +192,26 @@ async function verifyAgentSelection(page, scenario) {
     throw new Error(`${scenario.label}/config: preview root height is unstable: ${JSON.stringify(state)}`);
   }
 
+  // C31 收尾：**交互之前**就要能看到迁移提示（不许静默）。下面所有断言都在此基础上继续。
+  const migrationNotesText = await verifyProfileMigrationNotes(page, scenario, "load");
+
   const selector = page.locator("[data-agent-selector]");
   const items = selector.locator("[data-agent-selector-item][data-agent-id]");
-  // C20：默认启用集 = 新 4 个流程角色（+ 预览夹具里的 1 自定义 + 1 AI 创建）；
-  // 旧 7 个收进"已停用（历史角色）"折叠组，默认不挂载。
-  if (await items.count() !== 6) {
-    throw new Error(`${scenario.label}/config: expected six selectable Agents, got ${await items.count()}`);
+  // C20.1（改写版）：可选行 = 1 内置（对手盘）+ 2 非内置（夹具清单）；已下线的历史专家
+  // 既不在库里、也不在 DOM 里（连"已停用（历史角色）"折叠组都没有）。
+  if (await items.count() !== PREVIEW_AGENT_COUNT) {
+    throw new Error(`${scenario.label}/config: expected ${PREVIEW_AGENT_COUNT} selectable Agents, got ${await items.count()}`);
   }
   const ids = await items.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-agent-id")));
   const builtinIds = await items.evaluateAll((nodes) => nodes
     .filter((node) => node.getAttribute("data-agent-source") === "builtin")
     .map((node) => node.getAttribute("data-agent-id")));
-  if (builtinIds.length !== 4) {
-    throw new Error(`${scenario.label}/config: expected four builtin Agents, got ${JSON.stringify(builtinIds)}`);
+  if (builtinIds.length !== PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT) {
+    throw new Error(`${scenario.label}/config: expected ${PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT} builtin Agent, got ${JSON.stringify(builtinIds)}`);
   }
-  for (const expected of C20_DEFAULT_AGENT_IDS) {
+  for (const expected of C20_BUILTIN_AGENT_IDS) {
     if (!ids.includes(expected)) {
-      throw new Error(`${scenario.label}/config: missing default builtin Agent ${expected}: ${JSON.stringify(ids)}`);
+      throw new Error(`${scenario.label}/config: missing builtin Agent ${expected}: ${JSON.stringify(ids)}`);
     }
   }
   // C20.5（改写版）：旧专家**彻底隐藏**——页面里根本不存在停用分组，也不应出现任何 deprecated 钩子。
@@ -117,32 +231,34 @@ async function verifyAgentSelection(page, scenario) {
 
   const checkboxes = selector.locator("[data-agent-selector-item] input[type=checkbox]");
   const checkedCount = () => selector.locator("[data-agent-selector-item] input[type=checkbox]:checked").count();
-  // 初始勾选：迁移后的形态 = 默认 4 个角色（可能还带用户自定义），因此断言"≥4 且四个默认角色都在"。
+  // 初始勾选：迁移后的形态 = 只勾选可选的内置对手盘（咨询开关 = 允许），其余非内置专家不勾。
   const initialChecked = await checkedCount();
-  if (initialChecked < C20_DEFAULT_AGENT_IDS.length) {
-    throw new Error(`${scenario.label}/config: 初始勾选应至少包含默认 ${C20_DEFAULT_AGENT_IDS.length} 个角色，实际 ${initialChecked}`);
+  if (initialChecked < C20_BUILTIN_AGENT_IDS.length) {
+    throw new Error(`${scenario.label}/config: 初始勾选应至少包含 ${C20_BUILTIN_AGENT_IDS.length} 个内置角色，实际 ${initialChecked}`);
   }
   const initialCheckedIds = await selector.locator("[data-agent-selector-item] input[type=checkbox]:checked").evaluateAll((nodes) =>
     nodes.map((node) => node.closest("[data-agent-selector-item]")?.getAttribute("data-agent-id")));
-  for (const expected of C20_DEFAULT_AGENT_IDS) {
+  for (const expected of C20_BUILTIN_AGENT_IDS) {
     if (!initialCheckedIds.includes(expected)) {
-      throw new Error(`${scenario.label}/config: 初始勾选缺少默认角色 ${expected}：${JSON.stringify(initialCheckedIds)}`);
+      throw new Error(`${scenario.label}/config: 初始勾选缺少内置角色 ${expected}：${JSON.stringify(initialCheckedIds)}`);
     }
   }
   // 勾选/取消勾选（点标签而非复选框，走真实用户路径）——用相对计数，避免绑死夹具总数。
+  // 新编制下初始只勾了内置对手盘，因此"第一个未勾选的专家"就是自定义台（source=custom 排在 ai 之前），
+  // 正好用来覆盖"勾一个 → 取消一个"两个方向。
   const beforeSelect = await checkedCount();
   await items.filter({ has: page.locator("input[type=checkbox]:not(:checked)") }).first().locator("input").check();
   if (await checkedCount() !== beforeSelect + 1) throw new Error(`${scenario.label}/config: selecting an Agent did not update the checkbox state`);
-  await selector.locator("[data-agent-selector-item][data-agent-id=desic-account-state] input[type=checkbox]").uncheck();
+  await selector.locator("[data-agent-selector-item][data-agent-id=custom-mean-reversion-desk] input[type=checkbox]").uncheck();
   if (await checkedCount() !== beforeSelect) throw new Error(`${scenario.label}/config: unselecting an Agent did not update the checkbox state`);
-  if (await checkboxes.count() !== 6) throw new Error(`${scenario.label}/config: checkbox count changed unexpectedly（C20 默认集 = 4 内置 + 1 自定义 + 1 AI 创建，停用 7 个折叠）`);
+  if (await checkboxes.count() !== PREVIEW_AGENT_COUNT) throw new Error(`${scenario.label}/config: checkbox count changed unexpectedly（C20.1 夹具 = 1 内置 + 1 自定义 + 1 AI 创建）`);
 
   await page.screenshot({
     path: path.join(artifactDir, `automation-${scenario.label}-agent-selector.png`),
     fullPage: false
   });
 
-  // 清空 → 空态提示；全选内置 → **只选默认 4 个角色**（C20：停用项不被全选选中）。
+  // 清空 → 空态提示；全选内置 → 只选中**唯一的内置对手盘**（非内置专家不被全选选中）。
   await selector.locator("[data-agent-select-clear]").click();
   if (await checkedCount() !== 0) throw new Error(`${scenario.label}/config: clear did not empty the selection`);
   const emptyHint = selector.locator("[data-agent-selector-empty]");
@@ -157,19 +273,20 @@ async function verifyAgentSelection(page, scenario) {
     fullPage: false
   });
   await selector.locator("[data-agent-select-all]").click();
-  if (await checkedCount() !== C20_DEFAULT_AGENT_IDS.length) {
-    throw new Error(`${scenario.label}/config: select-all-builtin 应只选中默认 ${C20_DEFAULT_AGENT_IDS.length} 个角色，实际 ${await checkedCount()}`);
+  if (await checkedCount() !== C20_BUILTIN_AGENT_IDS.length) {
+    throw new Error(`${scenario.label}/config: select-all-builtin 应只选中内置的 ${C20_BUILTIN_AGENT_IDS.length} 个角色（对手盘），实际 ${await checkedCount()}`);
   }
   const checkedIds = await selector.locator("[data-agent-selector-item] input[type=checkbox]:checked").evaluateAll((nodes) =>
     nodes.map((node) => node.closest("[data-agent-selector-item]")?.getAttribute("data-agent-id")));
-  for (const expected of C20_DEFAULT_AGENT_IDS) {
+  for (const expected of C20_BUILTIN_AGENT_IDS) {
     if (!checkedIds.includes(expected)) {
-      throw new Error(`${scenario.label}/config: 全选后缺少默认角色 ${expected}：${JSON.stringify(checkedIds)}`);
+      throw new Error(`${scenario.label}/config: 全选后缺少内置角色 ${expected}：${JSON.stringify(checkedIds)}`);
     }
   }
 
-  // 输出契约标签（C20.4）：四类都要在勾选器里出现过。
-  for (const kind of ["summary", "state", "proposal", "rebuttal"]) {
+  // 输出契约标签（C20.4）：标签按**当前编制**产出 —— 内置对手盘 = 反驳，非内置（role=custom）= 通用分析。
+  // 旧四类标签里的"摘要 / 状态清单 / 候选"随已下线的 3 个内置角色一起消失。
+  for (const kind of ["rebuttal", "generic"]) {
     if (await selector.locator(`[data-agent-output="${kind}"]`).count() < 1) {
       throw new Error(`${scenario.label}/config: 缺少输出契约标签 ${kind}`);
     }
@@ -239,6 +356,14 @@ async function verifyAgentSelection(page, scenario) {
   if (await selector.locator("[data-single-agent-mode-select] button[aria-haspopup]").count() !== 1) {
     throw new Error(`${scenario.label}/config: 单 Agent 模式选择必须用设计系统下拉`);
   }
+  // C28：TypeSafe / Jev 快速判定已整体移除 —— 源码层不存在，页面上不得再有控件或文案。
+  if (await page.locator("[class*='typesafe'], [data-typesafe]").count() !== 0) {
+    throw new Error(`${scenario.label}/config: TypeSafe 控件应已移除`);
+  }
+  if (/TypeSafe|Jev/i.test(await selector.innerText())) {
+    throw new Error(`${scenario.label}/config: Profile 编辑里不应再出现 TypeSafe / Jev 文案`);
+  }
+
   // C25②：协作关闭的说明提示已按要求移除 —— 断言"不存在"而不是"存在且可读"。
   if (await selector.locator("[data-agent-collaboration-off-hint]").count() !== 0) {
     throw new Error(`${scenario.label}/config: 协作关闭的说明提示应已移除`);
@@ -263,7 +388,7 @@ async function verifyAgentSelection(page, scenario) {
   if (await selector.locator("[data-agent-collaboration-off-hint]").count() !== 0) {
     throw new Error(`${scenario.label}/config: the collaboration-off hint must disappear once collaboration is on`);
   }
-  if (await items.count() !== 6) {
+  if (await items.count() !== PREVIEW_AGENT_COUNT) {
     throw new Error(`${scenario.label}/config: the Agent list must expand again once collaboration is on (got ${await items.count()})`);
   }
   if (await selector.locator("[data-agent-selector-item] input[type=checkbox][disabled]").count() !== 0) {
@@ -278,10 +403,17 @@ async function verifyAgentSelection(page, scenario) {
     throw new Error(`${scenario.label}/config: clearing the selection must not switch collaboration off`);
   }
   await selector.locator("[data-agent-select-all]").click();
+
+  // C31 收尾：勾选被清空 / 全选 / 协作开关来回切过之后，迁移提示**必须还在**（不是一次性闪现，
+  // 也不因为名单变化而消失），且文案逐字不变 —— 这是"不静默"的另一半。
+  const afterInteraction = await verifyProfileMigrationNotes(page, scenario, "after-interaction");
+  if (afterInteraction !== migrationNotesText) {
+    throw new Error(`${scenario.label}/config: migration notes changed after Agent-selection interactions: ${JSON.stringify({ before: migrationNotesText, after: afterInteraction })}`);
+  }
 }
 
-// C13：agents tab（Agent 库三栏）。断言：列出内置 Agent、打开编辑器、内置 Agent 只读
-// （保存不可用 + 正文只读 + 只读说明），自定义 Agent 可编辑但保存需要改动。
+// C13：agents tab（Agent 库三栏）。断言：列出内置 Agent（新编制下只有对手盘一个）、
+// 打开编辑器、内置 Agent 只读（保存不可用 + 正文只读 + 只读说明），自定义 Agent 可编辑但保存需要改动。
 async function verifyAgentLibrary(page, scenario) {
   await page.goto(`${baseUrl}?view=agents&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
   await page.waitForSelector('.automation-preview-page[data-preview-view="agents"] [data-agents-tab]', { timeout: 30_000 });
@@ -291,19 +423,20 @@ async function verifyAgentLibrary(page, scenario) {
 
   const library = page.locator("[data-agents-tab]");
   const rows = library.locator("[data-agent-library-item][data-agent-id]");
-  if (await rows.count() !== 6) {
-    throw new Error(`${scenario.label}/agents: expected six listed Agents, got ${await rows.count()}`);
+  // C20.1（改写版）：库里同样只有夹具清单上的 3 条（1 内置 + 1 自定义 + 1 AI 创建），不硬编码行数。
+  if (await rows.count() !== PREVIEW_AGENT_COUNT) {
+    throw new Error(`${scenario.label}/agents: expected ${PREVIEW_AGENT_COUNT} listed Agents, got ${await rows.count()}`);
   }
   const listedIds = await rows.evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-agent-id")));
   const builtinListed = await rows.evaluateAll((nodes) => nodes
     .filter((node) => node.getAttribute("data-agent-source") === "builtin")
     .map((node) => node.getAttribute("data-agent-id")));
-  if (builtinListed.length !== 4) {
-    throw new Error(`${scenario.label}/agents: expected four builtin Agents in the library, got ${JSON.stringify(builtinListed)}`);
+  if (builtinListed.length !== PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT) {
+    throw new Error(`${scenario.label}/agents: expected ${PREVIEW_FIXTURE_BUILTIN_AGENT_COUNT} builtin Agent in the library, got ${JSON.stringify(builtinListed)}`);
   }
-  for (const expected of C20_DEFAULT_AGENT_IDS) {
+  for (const expected of C20_BUILTIN_AGENT_IDS) {
     if (!listedIds.includes(expected)) {
-      throw new Error(`${scenario.label}/agents: 默认角色 ${expected} 未列出：${JSON.stringify(listedIds)}`);
+      throw new Error(`${scenario.label}/agents: 内置角色 ${expected} 未列出：${JSON.stringify(listedIds)}`);
     }
   }
   // C20.5（改写版）：库里**彻底看不到**旧专家——没有停用分组、没有 deprecated 钩子、也没有"已停用/历史角色"字样。
@@ -317,8 +450,8 @@ async function verifyAgentLibrary(page, scenario) {
     throw new Error(`${scenario.label}/agents: 库里不应再出现已下线专家的痕迹`);
   }
 
-  // 打开内置 Agent 编辑器：只读（保存禁用 + 正文 readOnly + 只读说明可见 + 删除禁用）。
-  await library.locator('[data-agent-id="desic-data-digest"]').click();
+  // 打开内置 Agent（对手盘）编辑器：只读（保存禁用 + 正文 readOnly + 只读说明可见 + 删除禁用）。
+  await library.locator('[data-agent-id="desic-contrarian-review"]').click();
   const editor = library.locator("[data-agent-editor]");
   await editor.waitFor({ state: "visible", timeout: 10_000 });
   const saveButton = library.locator("[data-agent-save]");
@@ -915,6 +1048,76 @@ async function verifyRun(page, scenario) {
   if (await page.locator("[data-run-wake-plan-rejected]").count() !== 1) {
     throw new Error(`${scenario.label}/run: 被拒的收尾计划必须显式标注`);
   }
+
+  // C33③：计划未写入 = **警示**（黄）不是**失败**（红）—— 底层工具 ok=false 不变，只改呈现；
+  // 文案必须说清"这一轮的结论仍然有效"，否则用户会以为整轮白跑。
+  const rejectedCard = page.locator('[data-run-wake-plan-rejected]').first();
+  if (await page.locator('[data-run-tool-step-status="warning"] [data-run-wake-plan-rejected]').count() !== 1) {
+    throw new Error(`${scenario.label}/run: 未写入的计划卡片必须标记为警示（warning），实际没有`);
+  }
+  if (await page.locator('.automation-tool-step.wake.failed').count() !== 0
+    || await page.locator('[data-run-tool-step-status="failed"].automation-tool-step.wake').count() !== 0) {
+    throw new Error(`${scenario.label}/run: 观察条件卡片不得再按"失败"（红）呈现`);
+  }
+  const rejectedCardText = String(await rejectedCard.locator("xpath=..").innerText() || "");
+  if (!rejectedCardText.includes("警示")) {
+    throw new Error(`${scenario.label}/run: 未写入的计划卡片状态必须是"警示"：${JSON.stringify(rejectedCardText)}`);
+  }
+  if (!rejectedCardText.includes("计划未写入（这一轮的结论仍然有效）")) {
+    throw new Error(`${scenario.label}/run: 未写入的文案必须说明"这一轮的结论仍然有效"`);
+  }
+  if (rejectedCardText.includes("失败")) {
+    throw new Error(`${scenario.label}/run: 未写入的计划卡片不得再出现"失败"字样`);
+  }
+
+  // C33②（真机形状）：模型自创类型 `price` → **只丢那一条**：写库 7 条、计划 8 条、原因可见。
+  const unknownWakeTile = page.locator('[data-fastlane-wake-condition="price"]');
+  if (await unknownWakeTile.count() !== 1) {
+    throw new Error(`${scenario.label}/run: 未知条件类型必须恰好渲染 1 条（实际 ${await unknownWakeTile.count()}）`);
+  }
+  if (await unknownWakeTile.first().getAttribute("data-fastlane-wake-unknown") !== "price") {
+    throw new Error(`${scenario.label}/run: 未知类型必须带显式钩子（data-fastlane-wake-unknown）`);
+  }
+  const unknownWakeText = String(await unknownWakeTile.first().getAttribute("data-fastlane-wake-text") || "");
+  if (unknownWakeText !== "未知条件类型：price（未写入）") {
+    throw new Error(`${scenario.label}/run: 未知类型必须说人话，实际 ${JSON.stringify(unknownWakeText)}`);
+  }
+  if (unknownWakeText.includes("{")) {
+    throw new Error(`${scenario.label}/run: 未知类型不得把原始 JSON 贴出来`);
+  }
+  const wakeDropped = page.locator("[data-run-wake-plan-dropped]");
+  if (await wakeDropped.count() !== 1) {
+    throw new Error(`${scenario.label}/run: 计划 8 条 / 写库 7 条必须显式标注（实际 ${await wakeDropped.count()}）`);
+  }
+  if (await wakeDropped.first().getAttribute("data-run-wake-plan-dropped") !== "7") {
+    throw new Error(`${scenario.label}/run: 丢弃提示必须带**写库真值**（期望 7）`);
+  }
+  // 口径一致：卡片标题行的条数也必须是**写库真值**（7），不是计划条数（8）—— 否则卡片自相矛盾。
+  const wakeCardText = String(await wakeDropped.first().locator("xpath=ancestor::article[contains(@class,'automation-tool-step')][1]").innerText() || "");
+  if (!wakeCardText.includes("保存 7 条动态观察条件")) {
+    throw new Error(`${scenario.label}/run: 卡片标题行的条数必须取写库真值：${JSON.stringify(wakeCardText)}`);
+  }
+  if (wakeCardText.includes("保存 8 条动态观察条件")) {
+    throw new Error(`${scenario.label}/run: 不得把计划条数当成写库条数`);
+  }
+  const dropReasons = page.locator("[data-run-wake-drop-reasons]");
+  const dropReasonsText = String(await dropReasons.first().innerText() || "");
+  if (await dropReasons.count() !== 1
+    || !dropReasonsText.includes("已丢弃 1 条观察条件：price：类型不在 Profile 白名单")) {
+    throw new Error(`${scenario.label}/run: 丢弃原因必须可见且与记录同句（实际 ${JSON.stringify(dropReasonsText)}）`);
+  }
+  // C33③：整张卡片里的观察条件文案**一律不得出现原始 JSON**（真机：未知类型整段贴 JSON、
+  // 已知类型带附加字段时也把 `{"type":…}` 重复一遍 —— 用户看的是天书）。
+  const runWakeTexts = await page.locator("[data-fastlane-wake-text]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-fastlane-wake-text") || ""));
+  const jsonWakeTexts = runWakeTexts.filter((text) => /[{}]/.test(text));
+  if (jsonWakeTexts.length !== 0) {
+    throw new Error(`${scenario.label}/run: 观察条件文案里不得出现原始 JSON（${JSON.stringify(jsonWakeTexts)}）`);
+  }
+  // 具名类型的附加字段必须仍可见（逐字段人话，不是把信息删掉）。
+  if (!runWakeTexts.some((text) => /states: filled/.test(text))) {
+    throw new Error(`${scenario.label}/run: 附加字段必须逐字段说人话（期望含 "states: filled"）：${JSON.stringify(runWakeTexts)}`);
+  }
   if (/35 条/.test(await page.locator(".automation-run-section").first().innerText())) {
     throw new Error(`${scenario.label}/run: 不应再出现累加出来的虚高计数`);
   }
@@ -1116,6 +1319,397 @@ async function verifyModelError(page, scenario) {
   });
 }
 
+/**
+ * C29.19：**开关值从渲染结果读**（不是让脚本去 grep 源码）——
+ * 预览页根节点由真实组件把 `FASTLANE_MODE_ENABLED` 暴露成 `data-fastlane-mode-enabled`。
+ * 属性缺失 → 直接失败（否则分叉会静默走错分支）。
+ */
+async function readFastlaneModeEnabled(page) {
+  await page.goto(`${baseUrl}?view=new-profile&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector('.automation-preview-page[data-preview-view="new-profile"]', { timeout: 30_000 });
+  const root = page.locator(".automation-preview-page").first();
+  const value = await root.getAttribute("data-fastlane-mode-enabled");
+  if (value !== "true" && value !== "false") {
+    throw new Error(`preview: 预览页必须暴露 data-fastlane-mode-enabled（实际 ${JSON.stringify(value)}）`);
+  }
+  return value === "true";
+}
+
+/** 总入口：**按开关分叉**（C29.19）——开关关走"撤下"断言，开关开走原有的全部快判断言。 */
+async function verifyFastlane(page, scenario) {
+  const fastlaneEnabled = await readFastlaneModeEnabled(page);
+  if (fastlaneEnabled) {
+    await verifyFastlaneEnabledSurfaces(page, scenario);
+    return;
+  }
+  await verifyFastlaneWithdrawn(page, scenario);
+}
+
+/**
+ * C29.19（开关**关**）：快判从产品面撤下 —— 用户看不见、也点不到。
+ *
+ * 断言只覆盖**走开关的组件**（真组件，不是桩）：新建 Profile 选择器、运行记录里的快判卡片。
+ * 快判自己的既有断言（两张卡 / 8 分组 / 六组）**没有删**，它们在 `verifyFastlaneEnabledSurfaces`
+ * 里逐字保留，下个版本开关翻 `true` 时整体重新生效。
+ */
+async function verifyFastlaneWithdrawn(page, scenario) {
+  // ① 新建 Profile 选择器：**只留原有 AI Profile 卡片**（快判卡片不渲染）。
+  await page.goto(`${baseUrl}?view=new-profile&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector('.automation-preview-page[data-preview-view="new-profile"]', { timeout: 30_000 });
+  const picker = page.locator(".fastlane-picker").first();
+  await picker.waitFor({ state: "visible", timeout: 10_000 });
+  const aiCard = page.locator('[data-profile-card="ai"]');
+  if (await aiCard.count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane-off: 新建 Profile 必须保留 1 张 AI Profile 卡片（实际 ${await aiCard.count()}）`);
+  }
+  const aiBullets = await page.locator(".fastlane-card.is-ai .fastlane-card__body strong").count();
+  if (aiBullets < 3) {
+    throw new Error(`${scenario.label}/fastlane-off: AI Profile 卡片应至少有 3 条原理（实际 ${aiBullets}）`);
+  }
+  if (await page.locator('[data-profile-card="fastlane"]').count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane-off: 开关关闭时快判卡片不得出现在选择器里`);
+  }
+  if (await page.locator(".fastlane-card.is-fastlane").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane-off: 开关关闭时不得渲染快判卡片（.fastlane-card.is-fastlane）`);
+  }
+  // 原有 AI 卡片的「查看原理」照常可用（撤下没有伤到原有卡片）。
+  await page.locator(".fastlane-card.is-ai .fastlane-card__why").first().click();
+  if (await page.locator(".fastlane-card.is-ai .fastlane-card__detail").count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane-off: AI Profile 卡片的「查看原理」应仍可展开`);
+  }
+  // 快判配置窗口的入口与弹窗都不存在（配置窗口是独立组件，属"撤下"范围）。
+  if (await page.locator("[data-fastlane-config]").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane-off: 选择器页面不得出现快判配置窗口`);
+  }
+
+  // ② 运行记录：快判卡片入口（六组记录 / 快判关键动作）不渲染。
+  //    预览路由**保留**（下个版本仍用）：因此这里同时钉住"路由还能渲染"与"快判卡片不出现"。
+  await page.goto(`${baseUrl}?view=fastlane-run&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector('.automation-preview-page[data-preview-view="fastlane-run"]', { timeout: 30_000 });
+  await page.locator(".automation-preview-run").first().waitFor({ state: "visible", timeout: 20_000 });
+  if (await page.locator(".automation-preview-run").count() !== 5) {
+    throw new Error(`${scenario.label}/fastlane-off: 运行记录预览路由必须照常渲染（实际 ${await page.locator(".automation-preview-run").count()} 条）`);
+  }
+  for (const hook of ["[data-run-fastlane]", "[data-run-fastlane-trigger]", "[data-run-fastlane-gate]", "[data-run-fastlane-jev]", "[data-run-fastlane-llm]", "[data-run-fastlane-action]", "[data-run-fastlane-timing]", "[data-run-fastlane-key-actions]"]) {
+    if (await page.locator(hook).count() !== 0) {
+      throw new Error(`${scenario.label}/fastlane-off: 开关关闭时运行记录不得渲染快判卡片（${hook}）`);
+    }
+  }
+
+  // ③ 开关值必须是显式的 `false`（= 本版本的发布状态），否则"撤下"就不是本版本的行为。
+  const root = page.locator(".automation-preview-page").first();
+  if (await root.getAttribute("data-fastlane-mode-enabled") !== "false") {
+    throw new Error(`${scenario.label}/fastlane-off: 本版本的开关必须显式为 false`);
+  }
+}
+
+async function verifyFastlaneEnabledSurfaces(page, scenario) {
+  // C29：快判模式 UI（卡片选择 / 独立配置窗口 / 运行记录六组）。
+  await page.goto(`${baseUrl}?view=new-profile&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector('.automation-preview-page[data-preview-view="new-profile"]', { timeout: 30_000 });
+  const picker = page.locator(".fastlane-picker").first();
+  await picker.waitFor({ state: "visible", timeout: 10_000 });
+  for (const kind of ["ai", "fastlane"]) {
+    const card = page.locator(`[data-profile-card="${kind}"]`);
+    if (await card.count() !== 1) {
+      throw new Error(`${scenario.label}/fastlane: 新建 Profile 应有 ${kind} 卡片（实际 ${await card.count()}）`);
+    }
+    const article = page.locator(`.fastlane-card.is-${kind}`);
+    const bullets = await article.locator(".fastlane-card__body strong").count();
+    if (bullets < 3) {
+      throw new Error(`${scenario.label}/fastlane: ${kind} 卡片应至少有 3 条原理（实际 ${bullets}）`);
+    }
+  }
+  const aiBox = await page.locator(".fastlane-card.is-ai").first().boundingBox();
+  const flBox = await page.locator(".fastlane-card.is-fastlane").first().boundingBox();
+  if (!aiBox || !flBox || Math.abs(aiBox.y - flBox.y) > 2 || Math.abs(aiBox.width - flBox.width) > 2) {
+    throw new Error(`${scenario.label}/fastlane: 两张卡片应等宽并列同一行`);
+  }
+  const why = page.locator(".fastlane-card.is-fastlane .fastlane-card__why").first();
+  await why.click();
+  if (!String(await why.getAttribute("aria-expanded") || "").includes("true")) {
+    throw new Error(`${scenario.label}/fastlane: 「查看原理」应可展开`);
+  }
+
+  // 独立配置窗口：8 个分组 + 关键控件
+  await page.goto(`${baseUrl}?view=fastlane-config&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  const config = page.locator("[data-fastlane-config]").first();
+  await config.waitFor({ state: "visible", timeout: 15_000 });
+  const expectedGroups = ["basic", "trigger", "style", "risk", "session", "notify", "ops", "advanced"];
+  const actualGroups = await page.locator("[data-fastlane-group]").evaluateAll((nodes) =>
+    nodes.map((n) => n.getAttribute("data-fastlane-group")));
+  if (JSON.stringify(actualGroups) !== JSON.stringify(expectedGroups)) {
+    throw new Error(`${scenario.label}/fastlane: 配置分组应为 ${expectedGroups.join("/")}，实际 ${actualGroups.join("/")}`);
+  }
+  for (const hook of [
+    "[data-fastlane-conditions]", "[data-fastlane-kill-switch]", "[data-fastlane-kill-close-positions]",
+    "[data-fastlane-llm-reasoning]", "[data-fastlane-notify]", "[data-fastlane-style-preset]"
+  ]) {
+    if (await page.locator(hook).count() < 1) {
+      throw new Error(`${scenario.label}/fastlane: 配置窗口缺少 ${hook}`);
+    }
+  }
+  const reasoning = String(await page.locator("[data-fastlane-llm-reasoning]").first().innerText() || "");
+  if (!/关闭|none|强制/i.test(reasoning)) {
+    throw new Error(`${scenario.label}/fastlane: 思考开关必须显示为强制关闭（实际 "${reasoning}"）`);
+  }
+  if (await page.locator("[data-fastlane-style-preset]").count() < 3) {
+    throw new Error(`${scenario.label}/fastlane: 风格应有 3 个预设`);
+  }
+  // P0（保存失败）回归：同一条构造路径生成的快判 payload 必须可被 JSON.stringify 序列化；
+  // 且守卫必须能给"敌对循环注入"报出具体键路径（真机上用户会看到这条路径）。
+  const serializable = await page.locator("[data-profile-payload-serializable]").first().getAttribute("data-profile-payload-serializable");
+  if (serializable !== "ok") {
+    throw new Error(`${scenario.label}/fastlane: 快判保存载荷必须可序列化（实际 ${serializable}）`);
+  }
+  const cyclePath = await page.locator("[data-profile-payload-cycle-path]").first().getAttribute("data-profile-payload-cycle-path");
+  if (!cyclePath || !cyclePath.includes("profile")) {
+    throw new Error(`${scenario.label}/fastlane: 循环引用守卫必须报出键路径（实际 ${cyclePath}）`);
+  }
+
+  // C29：执行模式收窄 —— 快判只支持副驾驶 / 自动执行（受限），不得再出现「顾问」选项。
+  const modeSelect = page.locator("[data-fastlane-mode-select]").first();
+  if (await modeSelect.count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane: 缺少执行模式选择控件`);
+  }
+  await modeSelect.locator("button[aria-haspopup]").first().click();
+  await page.waitForTimeout(200);
+  const modeOptions = await page.locator("[role='option'], [data-terminal-select-option]").evaluateAll((nodes) =>
+    nodes.map((n) => String(n.textContent || "").trim()));
+  if (!modeOptions.some((label) => /副驾驶|Copilot/i.test(label))) {
+    throw new Error(`${scenario.label}/fastlane: 执行模式应含副驾驶（实际 ${JSON.stringify(modeOptions)}）`);
+  }
+  if (modeOptions.some((label) => /顾问|Advisor/i.test(label))) {
+    throw new Error(`${scenario.label}/fastlane: 快判不应提供「顾问」选项（实际 ${JSON.stringify(modeOptions)}）`);
+  }
+  if (modeOptions.some((label) => /自动执行|受限|Limited/i.test(label)) === false) {
+    throw new Error(`${scenario.label}/fastlane: 执行模式应含自动执行（受限）（实际 ${JSON.stringify(modeOptions)}）`);
+  }
+  await page.keyboard.press("Escape");
+
+  // C29：Jev 服务地址（私有部署入口）必须在「高级」组内且默认值为官方地址。
+  const jevBase = page.locator("[data-fastlane-jev-base-url]");
+  if (await jevBase.count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane: 缺少 Jev 服务地址输入（实际 ${await jevBase.count()}）`);
+  }
+  if ((await jevBase.inputValue()) !== "https://api.typesafe.ai") {
+    throw new Error(`${scenario.label}/fastlane: Jev 服务地址默认值应为官方地址（实际 ${await jevBase.inputValue()}）`);
+  }
+  const inAdvanced = await page.evaluate(() => {
+    const input = document.querySelector("[data-fastlane-jev-base-url]");
+    return Boolean(input?.closest('[data-fastlane-group="advanced"]'));
+  });
+  if (!inAdvanced) {
+    throw new Error(`${scenario.label}/fastlane: Jev 服务地址应在 advanced 分组内`);
+  }
+  // 真机问题①：通知层必须高于配置窗口（modal 打开时 toast 仍可见、不被遮挡）。
+  await page.locator("[data-fastlane-kill-switch]").first().click();
+  await page.waitForTimeout(250);
+  const toastLayer = await page.locator("[data-toast-layer]").first().getAttribute("data-toast-layer").catch(() => null);
+  if (toastLayer !== "above-modal") {
+    throw new Error(`${scenario.label}/fastlane: 通知层契约属性应为 above-modal（实际 ${toastLayer}）`);
+  }
+  const layerCompare = await page.evaluate(() => {
+    const stack = document.querySelector(".notification-stack");
+    const backdrop = document.querySelector(".modal-backdrop");
+    if (!stack || !backdrop) return null;
+    return {
+      stack: Number(getComputedStyle(stack).zIndex) || 0,
+      backdrop: Number(getComputedStyle(backdrop).zIndex) || 0
+    };
+  });
+  if (!layerCompare || layerCompare.stack <= layerCompare.backdrop) {
+    throw new Error(`${scenario.label}/fastlane: 通知层 z-index 必须高于 modal（实际 ${JSON.stringify(layerCompare)}）`);
+  }
+
+  // P0 根因回归：`onClick={onSave}` 会把 React 事件当参数传进保存回调（事件 → DOM → 循环引用 → IPC 失败）。
+  // 预览里真点一次保存，回调收到的参数个数必须是 0。
+  await page.locator(".fastlane-config-modal .modal-actions .confirm").first().click();
+  await page.waitForTimeout(150);
+  const saveArgCount = await page.locator("[data-profile-payload-save-arg-count]").first().getAttribute("data-profile-payload-save-arg-count");
+  if (saveArgCount !== "0") {
+    throw new Error(`${scenario.label}/fastlane: 保存回调不得收到事件参数（实际收到 ${saveArgCount} 个）`);
+  }
+  // 真机问题②：保存成功后配置窗口必须自动关闭，并给出成功通知。
+  if (await page.locator("[data-fastlane-config]").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane: 保存成功后配置窗口应自动关闭`);
+  }
+  if (await page.locator('[data-preview-toast="success"]').count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 保存成功后应出现成功通知`);
+  }
+
+  // 运行记录六组（观望 + 创建机会两条夹具）
+  await page.goto(`${baseUrl}?view=fastlane-run&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-run-fastlane]", { timeout: 20_000 });
+  if (await page.locator("[data-run-fastlane]").count() < 2) {
+    throw new Error(`${scenario.label}/fastlane: 运行记录夹具应有两条（观望 + 创建机会）`);
+  }
+  for (const hook of ["trigger", "gate", "jev", "llm", "action", "timing"]) {
+    if (await page.locator(`[data-run-fastlane-${hook}]`).count() < 1) {
+      throw new Error(`${scenario.label}/fastlane: 运行记录缺少 ${hook} 组`);
+    }
+  }
+  if (await page.locator("[data-run-fastlane-action][data-fastlane-action-kind='opportunity']").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 缺少"创建机会"型记录`);
+  }
+  if (await page.locator("[data-run-fastlane-action][data-fastlane-action-kind='watch']").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 缺少"观望"型记录`);
+  }
+  // 变更 A（2026-09-21）：**门未过但按降险放行**必须看得见 ——
+  // ① 那一条的代码门仍是 ok=false（不许被改写成"通过"）；② 有豁免 chip（bypassedFor=risk_reduction，
+  // 文案来自 i18n 键 fastlaneRunGateBypassed）；③ 有作用域说明（appliedTo=open）；
+  // ④ 记录里标出 intent=reduce（与停机平仓轮的 close 区分）。
+  {
+    const bypass = page.locator("[data-fastlane-gate-bypassed='risk_reduction']").first();
+    if (await bypass.count() < 1) {
+      throw new Error(`${scenario.label}/fastlane: 缺少"降险豁免"chip（data-fastlane-gate-bypassed）`);
+    }
+    const bypassText = String(await bypass.innerText() || "").trim();
+    if (!bypassText) {
+      throw new Error(`${scenario.label}/fastlane: 降险豁免 chip 文案不得为空（i18n 键 fastlaneRunGateBypassed）`);
+    }
+    const bypassed = await page.evaluate(() => {
+      const chip = document.querySelector("[data-fastlane-gate-bypassed='risk_reduction']");
+      const record = chip?.closest("[data-run-fastlane]");
+      const gate = record?.querySelector("[data-run-fastlane-gate]");
+      return {
+        gateOk: gate?.getAttribute("data-fastlane-gate-ok") ?? null,
+        appliedTo: record?.querySelector("[data-fastlane-gate-applied-to]")?.getAttribute("data-fastlane-gate-applied-to") ?? null,
+        intent: record?.querySelector("[data-run-fastlane-intent]")?.getAttribute("data-run-fastlane-intent") ?? null,
+        actionKind: record?.querySelector("[data-run-fastlane-action]")?.getAttribute("data-fastlane-action-kind") ?? null
+      };
+    });
+    if (bypassed.gateOk !== "false") {
+      throw new Error(`${scenario.label}/fastlane: 降险豁免那条的门必须仍是 ok=false（实际 ${bypassed.gateOk}）`);
+    }
+    if (bypassed.appliedTo !== "open") {
+      throw new Error(`${scenario.label}/fastlane: 必须标出这道门只作用于开新仓（实际 ${bypassed.appliedTo}）`);
+    }
+    if (bypassed.intent !== "reduce") {
+      throw new Error(`${scenario.label}/fastlane: 记录必须标出 intent=reduce（实际 ${bypassed.intent}）`);
+    }
+    if (bypassed.actionKind !== "opportunity") {
+      throw new Error(`${scenario.label}/fastlane: 降险豁免那条应已创建机会（实际 ${bypassed.actionKind}）`);
+    }
+  }
+  const watchReason = String(await page.locator("[data-run-fastlane-watch-reason]").first().innerText() || "");
+  if (!watchReason.trim()) {
+    throw new Error(`${scenario.label}/fastlane: 观望必须给出原因文案`);
+  }
+  // C29：观望原因枚举必须覆盖到"非交易时段"（代码门 session_closed），且文案非空。
+  const reasonCodes = await page.locator("[data-run-fastlane-watch-reason]").evaluateAll((nodes) =>
+    nodes.map((n) => n.getAttribute("data-run-fastlane-watch-reason")));
+  if (!reasonCodes.includes("session_closed")) {
+    throw new Error(`${scenario.label}/fastlane: 缺少 session_closed 观望原因（实际 ${JSON.stringify(reasonCodes)}）`);
+  }
+  if (!reasonCodes.includes("low_quality") || !reasonCodes.includes("validation_failed")) {
+    throw new Error(`${scenario.label}/fastlane: 既有观望原因不应被新枚举挤掉（实际 ${JSON.stringify(reasonCodes)}）`);
+  }
+  // 用页面内查找（避免跨卡片 locator 组合）：定位含 session_closed 的那条记录，读它自己的代码门结果。
+  const sessionGate = await page.evaluate(() => {
+    const reason = document.querySelector('[data-run-fastlane-watch-reason="session_closed"]');
+    const record = reason?.closest("[data-run-fastlane]");
+    const gate = record?.querySelector("[data-run-fastlane-gate]");
+    return gate?.getAttribute("data-fastlane-gate-ok") ?? null;
+  });
+  if (sessionGate !== "false") {
+    throw new Error(`${scenario.label}/fastlane: 非交易时段那条的代码门应为 ok=false（实际 ${sessionGate}）`);
+  }
+  if (await page.locator("[data-run-fastlane-timing]").first().innerText().then((t) => /--|undefined|NaN/.test(t))) {
+    throw new Error(`${scenario.label}/fastlane: 分段耗时不完整`);
+  }
+  // C29.8①：参数调用卡片必须**可视化**（结论引文 + 状态 chips + 参数网格 + 折叠原始输出），
+  // 而不是把 `params` 整段 JSON 摊在卡片里。
+  if (await page.locator("[data-run-fastlane-llm-summary]").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 参数调用卡片缺少"结论"引文`);
+  }
+  if (await page.locator("[data-run-fastlane-llm-chips] .fastlane-chip").count() < 2) {
+    throw new Error(`${scenario.label}/fastlane: 参数调用卡片状态 chips 不足（校验 + 原因）`);
+  }
+  if (await page.locator("[data-run-fastlane-llm-facts] dt").count() < 4) {
+    throw new Error(`${scenario.label}/fastlane: 参数网格未渲染（应逐项列出参数键值）`);
+  }
+  if (await page.locator("[data-run-fastlane-llm-raw]").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 原始输出必须保留但折叠`);
+  }
+  const rawOpened = await page.locator("[data-run-fastlane-llm-raw]").first().evaluate((node) => node.hasAttribute("open"));
+  if (rawOpened) {
+    throw new Error(`${scenario.label}/fastlane: 原始输出应默认收起（结论/参数才是首屏）`);
+  }
+  if (await page.locator("[data-run-fastlane-llm] > pre").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane: 参数调用卡片不应再有裸露的 JSON <pre>`);
+  }
+  // C29.8②：观察条件清单落在**关键动作**区（旧模式运行详情的位置）；快判记录卡片里只报口径，
+  // 同一份清单不得在同一个弹窗里出现两次。
+  if (await page.locator("[data-run-fastlane-action] [data-run-fastlane-action-wakes]").count() < 2) {
+    throw new Error(`${scenario.label}/fastlane: 动作卡片缺少观察条件口径行`);
+  }
+  if (await page.locator("[data-run-fastlane-wake-summary]").count() < 2) {
+    throw new Error(`${scenario.label}/fastlane: 动作卡片必须给出"已写库 N/M"口径`);
+  }
+  if (await page.locator("[data-run-fastlane-action] [data-fastlane-wake-list]").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane: 观察条件清单不应在快判记录卡片里重复出现`);
+  }
+  // 口径差可见：夹具里"校验失败那条"计划 2 条、写库 0 条 → 必须出现提示（不能静默）
+  if (await page.locator("[data-run-fastlane-wake-partial]").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 计划条数与写库条数不一致时必须提示`);
+  }
+  // 关键动作区：**复用旧模式的卡片外壳与瓷砖样式**（`.automation-tool-step wake` +
+  // `.automation-run-wake-list`），不得另做一套快判专属样式。
+  const keyActionWake = page.locator('[data-run-key-action="wake"]');
+  if (await keyActionWake.count() < 3) {
+    throw new Error(`${scenario.label}/fastlane: 关键动作区缺少观察条件（实际 ${await keyActionWake.count()} 条记录）`);
+  }
+  if (await page.locator('[data-run-key-action="wake"].automation-tool-step.wake').count() < 3) {
+    throw new Error(`${scenario.label}/fastlane: 观察条件必须复用旧模式的 automation-tool-step 外壳`);
+  }
+  if (await page.locator("[data-fastlane-wake-list='key-actions'].automation-run-wake-list").count() < 3) {
+    throw new Error(`${scenario.label}/fastlane: 观察条件清单必须复用旧模式的 automation-run-wake-list 瓷砖样式`);
+  }
+  const keyActionTypes = await page.locator("[data-fastlane-wake-list='key-actions'] [data-fastlane-wake-condition]").evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-fastlane-wake-condition")));
+  for (const expected of ["timer", "price_cross", "price_change_pct", "position_changed", "candle_volume_ratio"]) {
+    if (!keyActionTypes.includes(expected)) {
+      throw new Error(`${scenario.label}/fastlane: 关键动作的观察条件清单缺少 ${expected}（实际 ${JSON.stringify(keyActionTypes)}）`);
+    }
+  }
+  const timerWakeText = String(await page.locator("[data-fastlane-wake-list='key-actions'] [data-fastlane-wake-condition='timer']").first().innerText() || "");
+  if (!/分钟|minutes/.test(timerWakeText)) {
+    throw new Error(`${scenario.label}/fastlane: 观察条件必须渲染成人话（定时类应含分钟数，实际 ${JSON.stringify(timerWakeText)}）`);
+  }
+  // 人话里不得混进 JSON（真机踩过：`订单状态变化 · {"instId":…}`）
+  const jsonInWakeText = await page.locator("[data-fastlane-wake-list] [data-fastlane-wake-text]")
+    .evaluateAll((nodes) => nodes.map((node) => node.getAttribute("data-fastlane-wake-text") || "").filter((text) => text.includes("{")).length);
+  if (jsonInWakeText !== 0) {
+    throw new Error(`${scenario.label}: 观察条件文案里混进了 JSON（${jsonInWakeText} 条）`);
+  }
+  if (await page.locator("[data-run-key-action-wake-partial]").count() < 1) {
+    throw new Error(`${scenario.label}/fastlane: 关键动作里的"计划 N / 写库 M"不一致必须提示`);
+  }
+  // 只有"参数调用没跑"的那条（非交易时段）才允许显示"没有外部动作"
+  if (await page.locator(".automation-run-empty-action").count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane: 只有未执行参数调用的那条才应显示"没有外部动作"`);
+  }
+  // C29.8 的可视化结果留档（人工复核用：结论引文 / 参数网格 / 观察条件清单）。
+  // 注意：页面滚动发生在工作区内层容器里，`fullPage` 拍不到折叠以下的内容（上一版就是这样：
+  // 断言全绿、图里只有四条折叠标题）。这里改为**展开受控 `<details>` + 按元素截图**。
+  await page.evaluate(() => {
+    document.querySelectorAll(".automation-preview-fastlane details.automation-run-collapsible").forEach((node) => {
+      if (!node.open) node.querySelector("summary")?.click();
+    });
+  });
+  await page.waitForTimeout(300);
+  const fastlanePreview = page.locator(".automation-preview-fastlane").first();
+  await fastlanePreview.scrollIntoViewIfNeeded();
+  await fastlanePreview.screenshot({
+    path: path.join(artifactDir, `automation-${scenario.label}-fastlane-run.png`)
+  });
+  // 快判轮不显示专家区块
+  if (await page.locator("[data-run-contributions], [data-agent-lane]").count() !== 0) {
+    throw new Error(`${scenario.label}/fastlane: 快判轮不应显示专家贡献区块`);
+  }
+}
+
 async function verifyMinimalMode(page, scenario) {
   // C24：极简模式运行 —— 徽标 + 一句话 summary 原样展示 + 超长警告走既有提醒行。
   await page.goto(`${baseUrl}?view=minimal&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
@@ -1261,6 +1855,7 @@ async function verifyScenario(browser, scenario) {
   await verifyAgentSelection(page, scenario);
   await verifyAgentLibrary(page, scenario);
   await verifyRun(page, scenario);
+  await verifyFastlane(page, scenario);
   await verifyMinimalMode(page, scenario);
   await verifyTriageSettings(page, scenario);
   await verifyTriageRun(page, scenario);

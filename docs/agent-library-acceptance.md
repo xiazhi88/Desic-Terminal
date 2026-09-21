@@ -3,6 +3,20 @@
 配套文档：`docs/agent-library-contract.md`（冻结接口）、`docs/multi-agent-dispatch-plan-v3.md`（方案）。
 本手册只讲**怎么验、看什么、怎么判**；reviewer 只读不改代码，产出缺陷单（模板见 Part C）。
 
+> **修订记录 · 2026-09-20（何茗 · 产品）· 未 commit**
+> 依据：C20.5 裁决（司南，`msg_24ff9218` / 最终落地口径 `msg_bb8d8eed`）+ 事实复核（顾砚，`msg_23a5bfbd`）。
+> 改动：Part E 的 **E1 / E2 / E3** 期望值改为 C20.5 生效后的口径；**B4 日志行 ↔ E1 加交叉引用**（`written` / `upgraded` 是两个计数）。
+> **未改动**：**`scopes` 的四处叙述**（B7 / B8，属 C15 的验证用例，**有意保留**）。
+> **第二轮（2026-09-20 · 顾砚核完 B6，`msg_3bf19750`）**：B6 的 `auto` 期望值 **8 → 4**（依据：实现 `agents.rs:1297→1312`；单测 `:1917→1935`）—— **第一轮「B6 标待核、不改值」已被本轮取代**（留痕，不覆盖旧记录）。
+> **注意四个数字各就各位（别混成一个）**：**落盘内置目录 11（E2）· UI 列表 4（E3）· boot.log 首启 11（E1，本次新建数、仅 > 0 输出）· 旧 `auto` 迁移后勾选 4（B6）**。
+> 五元组（**第二轮改前**）：SHA-1 `1e62d2faeca41c827194fe3a3235b2d9e5027350` · size `13079` · 行数 `133` · mtime `2026-09-20 08:09:46` · 测量时刻 `2026-09-20T00:09:49Z`。
+> 五元组（**第二轮改后 · 写入本行之前**）：SHA-1 `171540befa6fdffa3b90c65e5f1ac0561053a3c1` · size `14006` · 行数 `135` · mtime `2026-09-20 08:10:23` · 测量时刻 `2026-09-20T00:10:32Z`（自指说明同前：写入本行会再次改变哈希，**入档请用 `git hash-object` 重新取值**）。
+> 五元组（**改前**）：SHA-1 `8f42e3696e77ebb806bb67288834481d00825044` · size `9963` · 行数 `122` · mtime `2026-09-18 17:40:58` · 测量时刻 `2026-09-20T00:08:49Z`。
+> 五元组（**改后 · 写入本修订记录之前**）：SHA-1 `e5766c664dc04b2e891c4f080169866ebb9eb382` · size `11966` · 行数 `129` · mtime `2026-09-20 08:09:14` · 测量时刻 `2026-09-20T00:09:17Z`。
+> 五元组（**含本修订记录 · 当前基线**）：SHA-1 `b5ef39c5d2212255520676768b74376fb9f36212` · size `12353` · 行数 `131` · mtime `2026-09-20 08:09:36` · 测量时刻 `2026-09-20T00:09:41Z`。
+> ⚠️ **自指说明（五元组记不进自己）**：把五元组写进文件这一动作**本身会改变 SHA-1 / size / 行数**，因此本记录里的任何哈希**只描述"写入该行之前"的状态**，永远无法等于"写入之后"的最终值。**入档时请用 `git hash-object <file>` 重新取值**，并以本记录 + `git diff` 作为归属证据；**不要**拿本记录里的哈希去校验最终文件（那样必然对不上，且不是文件错了）。
+> diff 证据：`git diff --stat` = **1 file changed, 12 insertions(+), 5 deletions(-)**；共 **4 处 hunk**（修订记录 / B4 日志行交叉引用 / B6 `auto` 标待核 / E1·E2·E3 期望值）。
+
 ---
 
 ## Part A 命令闸门（每条都要真实跑过并抄回输出结论）
@@ -47,7 +61,7 @@
 - **未改动的旧版本可安全升级**：在清单（`ai_automation_settings.builtin_agent_files_fingerprint`，与 `skill_files_fingerprint` 同构）记录存在且与盘上文件哈希一致时，把该文件内容替换成上一版 → 再跑安装 → **被覆盖为当前版本**（`upgraded`），并回写清单。
 - **清单缺失时保守**：删掉清单键、保留一个内容不等于当前内置的文件 → 安装**不覆盖**该文件，记 `manifest_missing` 并在 boot_log 出现 `builtin agent fingerprint manifest missing`，且**不回写清单**（不猜测用户是否改过）。
 - **幂等**：连续两次安装，第二次 `written=0 / upgraded=0`，清单条目数 == 内置 Agent 数。
-- **日志**：`builtin agent bundles: written N upgraded N kept(user-modified/unknown) N`。
+- **日志**：`builtin agent bundles: written N upgraded N kept(user-modified/unknown) N`（⚠️ `written` 与 `upgraded` 是**两个独立计数**：升级走 `upgraded`，**不触发 Part E 的 E1 那一行** —— 与 E1 交叉引用，勿读成矛盾）。
 
 ### B5 后台 Run 不能创建 Agent（双重拒绝）
 - 手法：① JS：`describeToolPolicy("agent.create", { backgroundRun: true, agentRole: "main" })` → `allowed === false`、`policy === "disabled:agent-authoring-interactive-only"`；② Rust：构造带后台 `run_context` 的 `AiToolExecutionContext` 调 `authorize_ai_tool("agent.create", ...)` → `Err`。
@@ -56,7 +70,7 @@
 ### B6 迁移正确且幂等
 - 手法：准备旧 profile 三种形态（`off` / `auto` / `custom` + `multiAgents`）与一条旧模板（`ai_agent_schemes.agents_json` 含 2 个 agent + `instructions`），跑迁移：
   - `off` → `enabledAgentIds == []`
-  - `auto` → 8 个 `desic-*`
+  - `auto` → **4 个**（= `default_enabled_agent_ids()`，即**新 4 流程角色**；**不是旧内置的 8 个**）。依据（A 正文级，两条独立）：实现 `agents.rs:1297 plan_legacy_agent_migration` → `:1312` 对旧 `auto` 形态直接置 `plan.enabled_agent_ids = default_enabled_agent_ids()`；单测 `agents.rs:1917 migration_covers_off_auto_custom_and_scheme_entries` → `:1935 assert_eq!(auto.enabled_agent_ids, default_enabled_agent_ids())`。`default_enabled_agent_ids()`（`:1102-1108`）的过滤条件是 `!spec.deprecated` ⇒ 长度 **4**（`deprecated_builtin_agent_ids()` 才是 7）。**断言以该单测为准** —— 将来角色集变更时，本行随该单测失效，须一并更新
   - `custom` → 每个 agent 落成 `agents/<slug>/AGENTS.md`（`source: custom`），id 进入勾选
   - 旧模板 → 2 个库文件出现、指令被丢弃且计入迁移报告
   - 旧 `auto-*` id → 按 C1 alias 映射为 `desic-*`
@@ -83,9 +97,9 @@
 
 | # | 步骤 | 期望证据 |
 | --- | --- | --- |
-| E1 | 启动应用，读启动日志（macOS `~/Library/Logs/com.desic.terminal/boot.log`，Windows `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`） | 出现 `agents: builtin bundles installed: 8`（首次）或不再出现（二次启动幂等） |
-| E2 | 检查 dev 工作区 `<repo>/.cline/agents/`（打包版为 `<data_dir>/workspace/.cline/agents/`） | 8 个内置目录，各含 `AGENTS.md`，frontmatter 含 `id/name/role/envelope/source: builtin` |
-| E3 | 打开 `AI 自动化 → agents` | 列出 8 个内置 Agent（`data-agent-library-item`），点开编辑器为**只读**、保存按钮禁用 |
+| E1 | 启动应用，读启动日志（macOS `~/Library/Logs/com.desic.terminal/boot.log`，Windows `%LOCALAPPDATA%\com.desic.terminal\logs\boot.log`） | 该行数字 = **本次新建数**（`written`，**仅在 > 0 时输出**）：**全新数据目录（`agents/` 下无预置文件）首启 = `11`**；**二次启动不出现该行**；**升级场景（内置正文变更，走 `upgraded`）同样不出现该行** ⇒ **不得把「升级后应出现该行」当期望**（与 B4 的 `written` / `upgraded` 两个计数交叉引用，勿读成矛盾） |
+| E2 | 检查 dev 工作区 `<repo>/.cline/agents/`（打包版为 `<data_dir>/workspace/.cline/agents/`） | **11 个**内置目录（7 个 `deprecated` + 4 个默认角色），各含 `AGENTS.md`，frontmatter 含 `id/name/role/envelope/source: builtin`｜**dev 路径口径待接口冻结清单 v1**（实际由 `runtime_paths()` 决定；dev 下 `data_dir` 是否等于 repo 根**未核**） |
+| E3 | 打开 `AI 自动化 → agents` | 列出 **4 个**内置 Agent（新 4 流程角色；`ai_agents_list` **默认不返回 `deprecated`** ⇒ **UI 不渲染旧 7 个，也不可在勾选器勾回** —— C20.5 裁决），点开编辑器为**只读**、保存按钮禁用｜⚠️ **三个数字各就各位：落盘 11 / 列表 4 / boot.log 首启 11** |
 | E4 | 手动创建一个自定义 Agent 并保存 | `<repo>/.cline/agents/custom-*/AGENTS.md` 出现，列表出现 `source: custom` 条目 |
 | E5 | 在 Profile 编辑器勾选 1–2 个 Agent 并保存 → 关闭重开该 Profile | 勾选持久化；`ai_agent_profiles.enabled_agent_ids_json` 与界面一致 |
 | E6 | 改一个内置 `AGENTS.md` 正文后重启应用 | 文件仍是改动后的内容（不被覆盖），列表该条显示"已本地改动"（`modified: true`） |

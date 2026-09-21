@@ -17,6 +17,11 @@ const CANONICAL_REQUIRED_ENABLED_AI_SKILL_IDS = CANONICAL_REQUIRED_AI_SKILL_IDS.
   (id) => id !== "desic-core-operations"
 );
 const IMPLICIT_FIXED_SKILL_ID = "desic-core-operations";
+// C31：Skill 分两类 —— 内置固定规范（不可编辑，只有这一个）vs 可编辑 Skill
+// （`trading-philosophy` 是默认载体 + 用户自建）。Rust 与 TS 各有一份同名清单，
+// 这里锁定它们逐字一致，否则"哪些能改"会在两处漂移。
+const CANONICAL_NON_EDITABLE_SKILL_IDS = ["desic-core-operations"];
+const CANONICAL_EDITABLE_PHILOSOPHY_SKILL_ID = "trading-philosophy";
 
 function parseQuotedIds(source) {
   return [...source.matchAll(/"([^"]+)"/g)].map((match) => match[1]);
@@ -135,6 +140,49 @@ async function main() {
     smokeRequiredIds,
     CANONICAL_REQUIRED_AI_SKILL_IDS,
     "smoke-terminal-preview required skill list must cover the canonical 6-skill set"
+  );
+
+  // C31：不可编辑清单（Rust 常量 vs UI 常量）必须逐字一致，且理念 Skill 必须**不在**其中。
+  const mainStorageConfigSource = await readRepoFile("src-tauri/src/storage_config.rs");
+  const rustNonEditable = extractQuotedArray(
+    mainStorageConfigSource,
+    /pub\(crate\) const NON_EDITABLE_SKILL_IDS:\s*\[&str; \d+\] = \[([\s\S]*?)\];/,
+    "storage_config NON_EDITABLE_SKILL_IDS"
+  );
+  assert.deepEqual(
+    rustNonEditable,
+    CANONICAL_NON_EDITABLE_SKILL_IDS,
+    "storage_config NON_EDITABLE_SKILL_IDS must equal the canonical non-editable set"
+  );
+  const tsNonEditable = extractQuotedArray(
+    appSource,
+    /const NON_EDITABLE_SKILL_IDS = \[([\s\S]*?)\] as const;/,
+    "src/ui/App.tsx NON_EDITABLE_SKILL_IDS"
+  );
+  assert.deepEqual(
+    tsNonEditable,
+    CANONICAL_NON_EDITABLE_SKILL_IDS,
+    "src/ui/App.tsx NON_EDITABLE_SKILL_IDS must equal the canonical non-editable set"
+  );
+  assert.ok(
+    !rustNonEditable.includes(CANONICAL_EDITABLE_PHILOSOPHY_SKILL_ID),
+    "C31: trading-philosophy must stay editable (it is the default philosophy carrier)"
+  );
+  const editablePhilosophyMatch = mainStorageConfigSource.match(
+    /pub\(crate\) const EDITABLE_PHILOSOPHY_SKILL_ID: &str = "([^"]+)";/
+  );
+  assert.ok(
+    editablePhilosophyMatch,
+    "storage_config EDITABLE_PHILOSOPHY_SKILL_ID not found"
+  );
+  assert.equal(
+    editablePhilosophyMatch[1],
+    CANONICAL_EDITABLE_PHILOSOPHY_SKILL_ID,
+    "the editable philosophy carrier must be trading-philosophy"
+  );
+  assert.ok(
+    CANONICAL_REQUIRED_AI_SKILL_IDS.includes(CANONICAL_EDITABLE_PHILOSOPHY_SKILL_ID),
+    "C31: the philosophy carrier stays required (always injected) — required != non-editable"
   );
 
   console.log(
