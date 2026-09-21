@@ -33,6 +33,49 @@ const BACKUP_FILE_MAGIC: &[u8; 8] = b"DESICUP1";
 const BACKUP_CHUNK_SIZE: usize = 1024 * 1024;
 const BACKUP_RETENTION_COUNT: usize = 3;
 
+/// Attempts for one install request. The release asset is fetched from
+/// `api.github.com`, which redirects to `release-assets.githubusercontent.com`;
+/// a single dropped connection between those two hosts failed the whole update
+/// with a transport error the user could only clear by clicking again.
+const APP_UPDATE_INSTALL_ATTEMPTS: u32 = 3;
+const APP_UPDATE_INSTALL_RETRY_DELAY_MS: [u64; 2] = [1_000, 3_000];
+
+/// True when a failed download is worth retrying: transport-level failures and
+/// server-side 5xx, not a signature mismatch or a missing asset.
+fn app_update_install_is_retryable(message: &str) -> bool {
+    let lowered = message.to_ascii_lowercase();
+    [
+        // reqwest transport wording, which is what a dropped proxy hop reports.
+        "error sending request",
+        "error decoding response body",
+        "connection",
+        "timed out",
+        "timeout",
+        // Server-side hiccups.
+        "http 500",
+        "http 502",
+        "http 503",
+        "http 504",
+    ]
+    .iter()
+    .any(|needle| lowered.contains(needle))
+}
+
+fn app_update_release_page_url(version: &str) -> String {
+    format!("https://github.com/xiazhi88/Desic-Terminal/releases/tag/v{version}")
+}
+
+/// Final wording for a download that survived every attempt. Says what failed,
+/// that it was retried, and how to install without the in-app updater.
+fn app_update_install_failure_message(version: &str, error: &str) -> String {
+    format!(
+        "下载或安装更新失败（已自动重试 {APP_UPDATE_INSTALL_ATTEMPTS} 次）：{error}。\
+         这通常是网络到 GitHub 的链路不稳或代理未放行 release-assets.githubusercontent.com；\
+         可稍后重试，或手动下载安装：{}",
+        app_update_release_page_url(version)
+    )
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AppUpdateState {
@@ -380,43 +423,66 @@ pub(crate) async fn app_update_install(
     let updater = builder
         .build()
         .map_err(|error| format!("初始化更新器失败: {error}"))?;
-    let update = updater
-        .check()
-        .await
-        .map_err(|error| format!("更新检查请求失败: {error}"))?
-        .ok_or_else(|| "签名更新清单中已没有可用更新".to_string())?;
-    let downloaded = Arc::new(AtomicU64::new(0));
-    let downloaded_for_progress = downloaded.clone();
-    let app_for_progress = app.clone();
-    let app_for_finish = app.clone();
-    update
-        .download_and_install(
-            move |chunk, total| {
-                let downloaded = downloaded_for_progress
-                    .fetch_add(chunk as u64, Ordering::Relaxed)
-                    .saturating_add(chunk as u64);
-                let _ = app_for_progress.emit(
-                    APP_UPDATE_DOWNLOAD_EVENT,
-                    AppUpdateDownloadProgress {
-                        downloaded,
-                        total,
-                        finished: false,
-                    },
+    let mut attempt = 1_u32;
+    loop {
+        // Re-resolve the update for every attempt: the download may have picked
+        // a chunk, so a fresh handle is what makes a retry a clean restart.
+        let update = updater
+            .check()
+            .await
+            .map_err(|error| format!("更新检查请求失败: {error}"))?
+            .ok_or_else(|| "签名更新清单中已没有可用更新".to_string())?;
+        let version = update.version.clone();
+        let downloaded = Arc::new(AtomicU64::new(0));
+        let downloaded_for_progress = downloaded.clone();
+        let app_for_progress = app.clone();
+        let app_for_finish = app.clone();
+        let outcome = update
+            .download_and_install(
+                move |chunk, total| {
+                    let downloaded = downloaded_for_progress
+                        .fetch_add(chunk as u64, Ordering::Relaxed)
+                        .saturating_add(chunk as u64);
+                    let _ = app_for_progress.emit(
+                        APP_UPDATE_DOWNLOAD_EVENT,
+                        AppUpdateDownloadProgress {
+                            downloaded,
+                            total,
+                            finished: false,
+                        },
+                    );
+                },
+                move || {
+                    let _ = app_for_finish.emit(
+                        APP_UPDATE_DOWNLOAD_EVENT,
+                        AppUpdateDownloadProgress {
+                            downloaded: downloaded.load(Ordering::Relaxed),
+                            total: None,
+                            finished: true,
+                        },
+                    );
+                },
+            )
+            .await;
+        match outcome {
+            Ok(()) => break,
+            Err(error) => {
+                let message = error.to_string();
+                if attempt >= APP_UPDATE_INSTALL_ATTEMPTS
+                    || !app_update_install_is_retryable(&message)
+                {
+                    return Err(app_update_install_failure_message(&version, &message));
+                }
+                let delay = APP_UPDATE_INSTALL_RETRY_DELAY_MS
+                    [(attempt as usize - 1).min(APP_UPDATE_INSTALL_RETRY_DELAY_MS.len() - 1)];
+                eprintln!(
+                    "app update download failed (attempt {attempt}/{APP_UPDATE_INSTALL_ATTEMPTS}), retrying in {delay}ms: {message}"
                 );
-            },
-            move || {
-                let _ = app_for_finish.emit(
-                    APP_UPDATE_DOWNLOAD_EVENT,
-                    AppUpdateDownloadProgress {
-                        downloaded: downloaded.load(Ordering::Relaxed),
-                        total: None,
-                        finished: true,
-                    },
-                );
-            },
-        )
-        .await
-        .map_err(|error| format!("下载或安装更新失败: {error}"))?;
+                sleep(Duration::from_millis(delay)).await;
+                attempt = attempt.saturating_add(1);
+            }
+        }
+    }
     let mut state = runtime
         .state
         .lock()
@@ -886,6 +952,42 @@ mod tests {
         let latest = Version::parse("0.1.0").unwrap();
         let current = Version::parse("0.1.0").unwrap();
         assert!(latest <= current);
+    }
+
+    #[test]
+    fn only_transport_and_server_failures_are_retried() {
+        // The wording a dropped proxy hop produces.
+        assert!(app_update_install_is_retryable(
+            "error sending request for url (https://api.github.com/repos/x/releases/assets/1)"
+        ));
+        assert!(app_update_install_is_retryable(
+            "error decoding response body: connection closed before message completed"
+        ));
+        assert!(app_update_install_is_retryable("operation timed out"));
+        assert!(app_update_install_is_retryable(
+            "download returned HTTP 503 Service Unavailable"
+        ));
+        // Faults that a retry cannot fix must fail on the first attempt.
+        assert!(!app_update_install_is_retryable(
+            "signature verification failed for the downloaded update"
+        ));
+        assert!(!app_update_install_is_retryable("asset not found (HTTP 404)"));
+        assert!(!app_update_install_is_retryable(
+            "update is not supported in the current environment"
+        ));
+        assert!(!app_update_install_is_retryable(""));
+    }
+
+    #[test]
+    fn the_failure_message_states_attempts_and_offers_a_manual_download() {
+        let message = app_update_install_failure_message("0.2.1", "error sending request for url (x)");
+        assert!(message.contains("已自动重试 3 次"), "{message}");
+        assert!(message.contains("error sending request for url (x)"), "{message}");
+        assert!(
+            message.contains("https://github.com/xiazhi88/Desic-Terminal/releases/tag/v0.2.1"),
+            "the manual fallback must point at this version's page: {message}"
+        );
+        assert_eq!(APP_UPDATE_INSTALL_ATTEMPTS, 3);
     }
 
     #[test]
