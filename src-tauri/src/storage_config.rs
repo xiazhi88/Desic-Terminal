@@ -3295,17 +3295,29 @@ fn ui_preferences_summary_from(
     }
 }
 
+/// 界面语言偏好（"system" 或某个具体 locale）解析成受支持的 locale。
+///
+/// "跟随系统"过去只依赖前端写入的 `resolvedLanguage`：那个字段直到用户改过一次语言才
+/// 会被写回，且系统语言不在支持列表内时只能取默认值。这里补上真正的操作系统语言查询，
+/// 让"跟随系统"在从未打开过语言设置时也成立（结论语言曾被它悄悄定成英文）。
 pub(crate) fn automation_prompt_locale() -> String {
     let config = load_ui_preferences_config().unwrap_or_default();
-    if config.language == "system" {
-        match_supported_ui_locale(config.resolved_language.as_deref())
+    automation_prompt_locale_from(&config, sys_locale::get_locale().as_deref())
+}
+
+fn automation_prompt_locale_from(
+    config: &UiPreferencesConfig,
+    system_locale: Option<&str>,
+) -> String {
+    if config.language != "system" {
+        return match_supported_ui_locale(Some(&config.language))
             .unwrap_or("en-US")
-            .to_string()
-    } else {
-        match_supported_ui_locale(Some(&config.language))
-            .unwrap_or("en-US")
-            .to_string()
+            .to_string();
     }
+    match_supported_ui_locale(system_locale)
+        .or_else(|| match_supported_ui_locale(config.resolved_language.as_deref()))
+        .unwrap_or("en-US")
+        .to_string()
 }
 
 #[tauri::command]
@@ -4895,6 +4907,43 @@ pub(crate) fn save_notification_webhook(webhook: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn following_the_system_language_reads_the_operating_system_locale() {
+        let system = UiPreferencesConfig {
+            language: "system".to_string(),
+            resolved_language: None,
+        };
+        // The regression this guards: a Chinese Windows/macOS with a stale
+        // resolvedLanguage resolved to en-US and every run answered in English.
+        assert_eq!(automation_prompt_locale_from(&system, Some("zh-CN")), "zh-CN");
+        assert_eq!(automation_prompt_locale_from(&system, Some("zh-Hans-CN")), "zh-CN");
+        assert_eq!(automation_prompt_locale_from(&system, Some("zh-TW")), "zh-TW");
+        assert_eq!(automation_prompt_locale_from(&system, Some("ja_JP")), "ja-JP");
+        // Unsupported or missing system locale falls back to whatever the frontend
+        // recorded, and only then to en-US.
+        let recorded = UiPreferencesConfig {
+            language: "system".to_string(),
+            resolved_language: Some("ko-KR".to_string()),
+        };
+        assert_eq!(automation_prompt_locale_from(&recorded, Some("xx-YY")), "ko-KR");
+        assert_eq!(automation_prompt_locale_from(&system, Some("xx-YY")), "en-US");
+        assert_eq!(automation_prompt_locale_from(&system, None), "en-US");
+    }
+
+    #[test]
+    fn an_explicit_interface_language_outranks_the_operating_system() {
+        let explicit = UiPreferencesConfig {
+            language: "en-US".to_string(),
+            resolved_language: Some("zh-CN".to_string()),
+        };
+        assert_eq!(automation_prompt_locale_from(&explicit, Some("zh-CN")), "en-US");
+        let chinese = UiPreferencesConfig {
+            language: "zh-CN".to_string(),
+            resolved_language: None,
+        };
+        assert_eq!(automation_prompt_locale_from(&chinese, Some("en-US")), "zh-CN");
+    }
 
     #[test]
     fn skill_resource_paths_accept_only_relative_normal_components() {
