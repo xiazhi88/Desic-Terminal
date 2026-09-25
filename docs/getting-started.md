@@ -52,15 +52,17 @@ Desic Terminal 是一个 **AI 原生的 OKX USDT 永续合约交易终端**，�
 | Windows x64 | `Desic-Terminal_Windows-x64-setup.exe` |
 | macOS Apple Silicon（M1+） | `Desic-Terminal_macOS-arm64.dmg` |
 | macOS Intel | `Desic-Terminal_macOS-x64.dmg` |
+| Linux（Ubuntu 22.04+ x64） | 暂无官方安装包，请参考仓库 [README 开发章节](../README.md#开发) 本地构建 deb/AppImage |
 
 > [!IMPORTANT]
 > 当前安装包未使用 Apple Developer ID / Windows Authenticode 签名。macOS 首次启动时把应用拖入"应用程序"，右键选择"打开"；Windows 的 SmartScreen 提示请确认下载来源后选择继续。
 
 **系统要求**
 
-- Windows 10+ 或 macOS 12+
+- Windows 10+、macOS 12+ 或 Ubuntu 22.04+（x64）
 - 能访问 OKX 与所选 AI 供应商的网络环境
 - **无需安装 Python**：系统化策略研究所需的 Python 运行时已随安装包内置
+- Linux 本地构建额外需要（Ubuntu/Debian）：`sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf`（可选：`lsof`、`sqlite3`，部分 smoke 脚本依赖）
 
 ---
 

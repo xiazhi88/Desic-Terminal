@@ -34,6 +34,14 @@ function platformArchive() {
       outputName: "node"
     };
   }
+  if (targetPlatform === "linux") {
+    return {
+      fileName: `node-v${nodeVersion}-linux-${targetArch}.tar.gz`,
+      nodeRelativePath: path.join(`node-v${nodeVersion}-linux-${targetArch}`, "bin", "node"),
+      npmRootRelativePath: path.join(`node-v${nodeVersion}-linux-${targetArch}`, "lib", "node_modules", "npm"),
+      outputName: "node"
+    };
+  }
   if (targetPlatform === "win32") {
     return {
       fileName: `node-v${nodeVersion}-win-${targetArch}.zip`,

@@ -36,6 +36,16 @@ function sqlitePath() {
       if (fs.existsSync(macDb)) return macDb;
     }
   }
+  if (process.platform === "linux") {
+    const dataHome = process.env.XDG_DATA_HOME
+      || (process.env.HOME && path.join(process.env.HOME, ".local", "share"));
+    if (dataHome) {
+      for (const identifier of ["com.desic.terminal", "com.desic.tradeai"]) {
+        const linuxDb = path.join(dataHome, identifier, "desic_trade_ai.sqlite3");
+        if (fs.existsSync(linuxDb)) return linuxDb;
+      }
+    }
+  }
   const localDb = path.join(workspaceRoot(), "desic_trade_ai.sqlite3");
   if (fs.existsSync(localDb)) return localDb;
   throw new Error("desktop sqlite database missing");

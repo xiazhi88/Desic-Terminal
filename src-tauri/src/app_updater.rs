@@ -343,21 +343,35 @@ async fn check_installed_update(app: &tauri::AppHandle) -> Result<AppUpdateState
         .ok()
         .zip(Version::parse(&current).ok())
         .is_some_and(|(latest, installed)| latest > installed);
+    // Tauri updater 的下载安装在 Linux 上仅支持 AppImage；deb/rpm 安装只能
+    // 手动更新，提前给出明确 blocked_reason 而不是安装阶段的泛化报错。
+    let linux_non_appimage = cfg!(target_os = "linux")
+        && available
+        && std::env::var_os("APPIMAGE").is_none();
     Ok(AppUpdateState {
         runtime_mode: "installed".to_string(),
-        status: if available { "available" } else { "current" }.to_string(),
+        status: if linux_non_appimage {
+            "blocked"
+        } else if available {
+            "available"
+        } else {
+            "current"
+        }
+        .to_string(),
         current_version: current,
         latest_version: Some(latest_text),
         current_revision: None,
         latest_revision: None,
         commits_behind: 0,
-        available,
+        available: available && !linux_non_appimage,
         release_name: release.name.or(Some(release.tag_name)),
         release_notes: release.body,
         release_url: release.html_url,
         published_at: release.published_at,
         checked_at: Some(now_ms()),
-        blocked_reason: None,
+        blocked_reason: linux_non_appimage.then(|| {
+            "Linux 自动更新仅支持 AppImage 安装；deb/rpm 安装请从 GitHub Releases 手动下载新版本".to_string()
+        }),
         backup_path: None,
         restart_required: false,
     })

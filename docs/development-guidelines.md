@@ -28,7 +28,7 @@ node scripts/kill-dev-port.mjs
 
 - `scripts/start-dev-ready.mjs` 必须保持 Node 直接 spawn Vite，不要再用 PowerShell `Start-Process` 中转。之前中转方式出现过 Vite 实际已启动但 ready 检测失败的问题。
 - dev ready 日志使用每次独立文件名，避免 Windows 上旧 Vite 进程占用 `vite-dev.stdout.log` 导致 `EBUSY`。
-- `scripts/kill-dev-port.mjs` 必须保持跨平台：Windows 只清理匹配 workspace/Vite 的进程树，macOS 只清理匹配 workspace/Vite 的监听进程，禁止按端口无条件杀死其它应用。
+- `scripts/kill-dev-port.mjs` 必须保持跨平台：Windows 只清理匹配 workspace/Vite 的进程树，macOS/Linux 只清理匹配 workspace/Vite 的监听进程（依赖 `lsof`），禁止按端口无条件杀死其它应用。
 - Debug 模式继续使用项目内 `config/cache/logs/diagnostics/.cline`，兼容现有 Windows 开发数据；Release 模式必须使用 Tauri `app_config_dir/app_cache_dir/app_log_dir/app_data_dir`，禁止把 `CARGO_MANIFEST_DIR` 当安装后的可写目录。
 - Release AI sidecar 必须通过 `npm run prepare:sidecar` 生成：Cline SDK 打成单文件，Node 版本固定并校验官方 SHA-256；生成目录 `src-tauri/resources/ai-sidecar` 不提交二进制。修改 sidecar 后至少验证包内运行时能返回 `ready` 和 `core-ready` 且无 error 事件。
 - Windows GUI 进程启动任何 CLI、Python、Git、PowerShell、ACL 工具或 AI 子进程时，必须设置 `CREATE_NO_WINDOW`；Node sidecar 还必须设置 `windowsHide: true`，包括第三方 SDK 内部的 `spawn`/`exec` 路径。不要只隐藏主 sidecar，配置探测、更新器和辅助命令也必须无控制台窗口。
@@ -38,6 +38,7 @@ node scripts/kill-dev-port.mjs
 - Windows 安装目录可能包含空格。启动随包 Node 时必须把 `ai-sidecar` 设为进程启动目录并使用相对入口 `sidecar.mjs`，再通过 `DESIC_SIDECAR_WORK_DIR` 切换业务工作目录；禁止直接把带空格的绝对脚本路径作为 Node 入口。Release 构建必须运行 `npm run smoke:ai-packaged-ready`，真实启动随包 Node 并等待 `core-ready`。
 - Windows NSIS 正式产物使用 `npm run tauri:build -- --bundles nsis`。构建后必须同时检查命令退出码、日志中是否出现 `failed to bundle project`、目标 EXE 是否存在及其 SHA-256；不能只依据 Tauri 输出的 `Built application at` 判断成功。
 - Windows 构建机系统盘或 `%TEMP%` 空间不足时，NSIS 可能以 `error creating mmap` 失败。可以把 `TEMP`、`TMP` 与 `CARGO_TARGET_DIR` 指向有足够空间的本地磁盘；这些临时 target、安装包、哈希和签名文件均属于构建产物，不提交到 Git。
+- Linux 构建使用 `npm run tauri:build -- --bundles deb,appimage`。`src-tauri/tauri.linux.conf.json` 是 Linux 平台覆盖配置：Tauri 平台配置的数组是整体替换而非逐项合并，其中完整重写了 `app.windows`（splash 不启用系统级透明，规避无合成器或部分 Wayland 场景的黑底），修改 `tauri.conf.json` 的窗口定义时必须同步该文件。前端由 `src/lib/platform.ts` 设置 `html[data-os="linux"]`，配合 CSS 为 splash 提供实色兜底背景。
 - Debug NSIS 只能用于本地安装验证，不得作为正式 Release。正式对外产物必须使用 Cargo Release、完成 Authenticode 签名，并在干净用户环境验证安装、升级、卸载、WebView2、本地敏感配置及包内 sidecar。
 - Rust smoke binary 源码必须留在 `src-tauri/crates/smoke-tools/src/bin`，不能放回主 crate 的 `src/bin`，否则 Tauri bundler 会把 smoke binary 误识别为应用附件。
 - Rust 已改为 workspace：
@@ -400,7 +401,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 安装包更新与源码更新都必须先创建成功的加密数据快照。快照覆盖 SQLite、账户、代理、AI、通知、界面、关注列表和自定义 Skill，最多保留三份；备份失败必须中止更新。
 - 用户数据和凭据必须位于应用数据目录或本地敏感配置目录，不得写进安装目录、前端资源或可被升级替换的源码文件。
 - 源码更新只允许干净、未分叉的 `main` 快进到 `origin/main`。存在本地修改、分支不符或历史分叉时只提示原因，不得自动 stash、reset、rebase 或覆盖文件。
-- Release 必须分别验证 Windows x64、macOS Apple Silicon 和 macOS Intel 的安装、升级、自动重启及数据保留。没有实际验证的平台不得宣称更新链路已可用。
+- Release 必须分别验证 Windows x64、macOS Apple Silicon 和 macOS Intel 的安装、升级、自动重启及数据保留。没有实际验证的平台不得宣称更新链路已可用。Linux（Ubuntu x64）当前定位为本地开发与本地构建平台（`npm run tauri:build -- --bundles deb,appimage`）：应用内自动更新仅支持 AppImage 安装，deb 安装提示手动下载；Linux 尚无官方发布流水线，不得在 README 或发行说明中宣称提供官方 Linux 安装包或已验证的 Linux 更新链路。
 - Windows Release 的 Rust 缓存必须由 `main` 分支预热并使用稳定共享键；预热时先生成正式构建所需的 sidecar 和 `frontendDist`，再使用 `tauri/custom-protocol` feature 编译。标签构建只恢复缓存、不保存标签专属缓存，避免每个版本重复完整编译和上传无复用价值的缓存。
 
 ## 代码格式化：禁止在本仓库裸跑 `cargo fmt`（2026-09-21）

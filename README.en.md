@@ -20,7 +20,7 @@
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
     <img alt="TypeScript 6" src="https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white" />
     <img alt="OKX USDT perpetual" src="https://img.shields.io/badge/OKX-USDT%20Perpetual-111111" />
-    <img alt="Windows and macOS" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS-6D5DFB" />
+    <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS%20%7C%20Linux-6D5DFB" />
   </p>
 
   <p>
@@ -45,6 +45,7 @@ Download the build for your platform:
 | Windows x64 | **[Download EXE installer](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** |
 | macOS Apple Silicon (M1+) | **[Download Apple Silicon DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** |
 | macOS Intel | **[Download Intel DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
+| Linux (Ubuntu 22.04+ x64) | No official package yet — build locally, see [Development](#development): `npm run tauri build -- --bundles deb,appimage` |
 
 See [GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases) for release notes and all assets.
 
@@ -181,7 +182,10 @@ docs/                        User guides and development documentation
 
 ## Development
 
-The project is under active development. The repository ships CI pipelines for Windows x64, macOS Apple Silicon and macOS Intel installers plus signed updater artifacts; treat the builds actually published and platform-verified on GitHub Releases as authoritative. Development requires Node.js, npm, Rust stable, and the platform dependencies of Tauri 2.
+The project is under active development. The repository ships CI pipelines for Windows x64, macOS Apple Silicon and macOS Intel installers plus signed updater artifacts; Linux (Ubuntu 22.04+ x64) is supported for local development and local packaging (`npm run tauri build -- --bundles deb,appimage`), with official release packages not yet available. Treat the builds actually published and platform-verified on GitHub Releases as authoritative. Development requires Node.js, npm, Rust stable, and the platform dependencies of Tauri 2.
+
+> [!NOTE]
+> In-app auto-update on Linux only supports AppImage installs; deb installs are prompted to download updates manually.
 
 ```bash
 npm install
@@ -208,7 +212,7 @@ Run the smoke suites relevant to your change as well. See [PRODUCT.md](PRODUCT.m
 
 ## Project Status
 
-The current scope is OKX USDT linear perpetuals on Windows and macOS desktops. Other exchanges, spot, options and mobile are out of scope for now. Automated execution is a high-risk capability: start from `advisor` mode and a demo account, then raise privileges gradually based on run records, reconciliation and position reviews.
+The current scope is OKX USDT linear perpetuals on Windows, macOS and Linux desktops. Other exchanges, spot, options and mobile are out of scope for now. Automated execution is a high-risk capability: start from `advisor` mode and a demo account, then raise privileges gradually based on run records, reconciliation and position reviews.
 
 ## Related Projects
 

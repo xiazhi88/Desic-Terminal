@@ -52,15 +52,17 @@ Download the build for your platform from [GitHub Releases](https://github.com/x
 | Windows x64 | `Desic-Terminal_Windows-x64-setup.exe` |
 | macOS Apple Silicon (M1+) | `Desic-Terminal_macOS-arm64.dmg` |
 | macOS Intel | `Desic-Terminal_macOS-x64.dmg` |
+| Linux (Ubuntu 22.04+ x64) | No official package yet — build deb/AppImage locally, see the [README development section](../README.en.md#development) |
 
 > [!IMPORTANT]
 > Current packages are unsigned. On macOS, drag the app into Applications and right-click → Open on first launch; Windows SmartScreen prompts require verifying the download source.
 
 **Requirements**
 
-- Windows 10+ or macOS 12+
+- Windows 10+, macOS 12+ or Ubuntu 22.04+ (x64)
 - Network access to OKX and your chosen AI provider
 - **No Python install needed** — the systematic research runtime ships inside the installer
+- Building on Linux additionally requires (Ubuntu/Debian): `sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev build-essential curl wget file libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev patchelf` (optional: `lsof`, `sqlite3`, used by some smoke scripts)
 
 ---
 
