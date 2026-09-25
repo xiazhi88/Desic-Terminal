@@ -1,40 +1,52 @@
 <div align="center">
-  <img src="public/assets/brand/desic-terminal-icon.png" width="88" alt="Desic Terminal" />
+  <img src="public/assets/brand/desic-terminal-icon.png" width="80" alt="Desic Terminal" />
 
   <h1>Desic Terminal</h1>
 
   <p><a href="./README.en.md">English</a> · 简体中文（当前）</p>
 
-  <p><strong>AI 原生的 OKX USDT 永续合约交易终端。</strong></p>
-  <p>行情、图表、交易、情报、AI 助手、自动化与策略研究共享同一份实时状态与审计上下文。</p>
-
   <p>
     <strong><a href="https://desicterminal.cn/">官方网站</a></strong>
     · <a href="https://desicterminal.cn/#download">官网下载</a>
     · <a href="https://github.com/xiazhi88/Desic-Terminal/releases">版本发布</a>
+    · <a href="docs/getting-started.md">入门教程</a>
   </p>
 
   <p>
     <img alt="Tauri 2" src="https://img.shields.io/badge/Tauri-2-24C8DB?logo=tauri&logoColor=white" />
-    <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" />
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
-    <img alt="TypeScript 6" src="https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white" />
+    <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" />
     <img alt="OKX USDT perpetual" src="https://img.shields.io/badge/OKX-USDT%20Perpetual-111111" />
     <img alt="Windows and macOS" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS-6D5DFB" />
+    <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-3DA639" />
   </p>
+
+  <p><strong>AI 原生的 OKX USDT 永续合约交易终端</strong><br />
+  行情、图表、下单、市场情报、AI 助手与策略研究共享同一份实时状态与审计链路。</p>
 
   <p>
     <a href="#安装">安装</a> ·
-    <a href="#文档">文档</a> ·
+    <a href="#三十秒上手">三十秒上手</a> ·
+    <a href="#界面一览">界面一览</a> ·
     <a href="#核心能力">核心能力</a> ·
     <a href="#市场雷达">市场雷达</a> ·
-    <a href="#安全与执行原则">安全</a> ·
-    <a href="#开发">开发</a> ·
-    <a href="#社区与支持">社区</a>
+    <a href="#ai-与交易的边界">AI 与交易的边界</a> ·
+    <a href="#开发">开发</a>
   </p>
 </div>
 
-[![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)](https://desicterminal.cn/)
+[![Desic Terminal 交易工作台](docs/assets/readme/trading-workspace.png)](docs/assets/readme/trading-workspace.png)
+
+## 三十秒上手
+
+|  |  |
+| --- | --- |
+| **1. 装** | **[Windows EXE](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** · **[macOS Apple Silicon](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** · **[macOS Intel](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
+| **2. 连** | 用**模拟盘 API Key** 起步；AI 也可以在配置里选本机已登录的 Codex / Claude Code，不必先购买模型 API Key |
+| **3. 看** | 打开**市场雷达**看全市场强弱 → 把标的拉进图表 → 在图上直接下单，或交给 AI 出结论 |
+
+> [!IMPORTANT]
+> 当前安装包尚未使用 Apple Developer ID 或 Windows Authenticode 签名。macOS 首次启动时，请将应用拖入"应用程序"，右键应用选择"打开"；如果仍被拦截，请前往"系统设置 → 隐私与安全性"选择"仍要打开"。Windows 首次安装可能显示 SmartScreen 提示，请确认下载地址属于本仓库后再选择继续运行。
 
 ## 安装
 
@@ -46,10 +58,28 @@
 | macOS Apple Silicon（M1 及更新芯片） | **[下载 Apple Silicon DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** |
 | macOS Intel | **[下载 Intel DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
 
-也可以前往 **[GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases)** 查看版本说明和全部附件。
+也可以前往 **[GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases)** 查看版本说明和全部附件；应用内置更新检查与签名校验。
 
-> [!IMPORTANT]
-> 当前安装包尚未使用 Apple Developer ID 或 Windows Authenticode 签名。macOS 首次启动时，请将应用拖入"应用程序"，右键应用选择"打开"；如果仍被拦截，请前往"系统设置 → 隐私与安全性"选择"仍要打开"。Windows 首次安装可能显示 SmartScreen 提示，请确认下载地址属于本仓库后再选择继续运行。
+## 界面一览
+
+<table>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/trading-workspace.png" alt="交易工作台：K 线、盘口、成交与委托面板" /><br /><sub><b>交易工作台</b>：多周期 K 线、24 个主副图指标、实时盘口与逐笔成交、限价 / 市价 / 计划委托、止盈止损</sub></td>
+    <td width="50%"><img src="docs/assets/readme/multi-chart-workspace.png" alt="多图表独立窗口与图上快速交易" /><br /><sub><b>多图表工作区</b>：独立窗口四宫格、模板与布局、在图上直接做多 / 做空 / 设提醒</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/ai-trading-assistant.png" alt="AI 交易助手输出证据分析与本轮决策" /><br /><sub><b>AI 交易助手</b>：读取账户与市场证据，输出偏空 / 偏多证据、本轮决策与下次唤醒条件</sub></td>
+    <td width="50%"><img src="docs/assets/readme/ai-custom-indicator.png" alt="AI 自定义指标与指标库" /><br /><sub><b>指标库与 AI 自定义指标</b>：内置指标库，并可用自然语言生成安全的 DSL 指标</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/automation-profile.png" alt="AI 自动化 Profile 配置" /><br /><sub><b>AI 自动化</b>：Profile 配置模式、账户、环境、模型、关注品种与协作编排</sub></td>
+    <td width="50%"><img src="docs/assets/readme/multi-agent-orchestration.png" alt="多 Agent 协作编排" /><br /><sub><b>协作编排</b>：主 Agent 唯一决策，按需点名市场结构 / 情报资金 / 账户风险 / 反方审查等专家</sub></td>
+  </tr>
+  <tr>
+    <td width="50%"><img src="docs/assets/readme/market-intelligence.png" alt="市场情报：仓位状态、主动成交、资金与基差、市场压力" /><br /><sub><b>市场情报</b>：新闻与情绪、仓位状态 OI / 价格、主动成交、资金与基差、市场压力与样本采集</sub></td>
+    <td width="50%"><!-- TODO(素材)：现有 market-radar.png 为 1440×900，与其它 Retina 截图不一致，重截后替换 --><img src="docs/assets/readme/market-radar.png" alt="市场雷达：全市场排名与市场宽度" /><br /><sub><b>市场雷达</b>：全市场综合排名、分类强弱与市场宽度、评分归因与点时验证</sub></td>
+  </tr>
+</table>
 
 ## 文档
 
@@ -88,7 +118,9 @@
 > [!NOTE]
 > 市场雷达评分只用于确定下一步研究顺序，不是收益预测、买卖信号、策略入场条件或订单命令。Radar AI 工具不能修改筛选、提醒、策略、账户或订单。
 
-### 权限不是提示词
+## AI 与交易的边界
+
+权限不是提示词。模式决定 AI 能做什么，代码决定它做不到什么。
 
 | 模式 | 读取市场与账户 | 交易机会 | 外部交易副作用 |
 | --- | :---: | :---: | --- |
