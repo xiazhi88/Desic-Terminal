@@ -1,0 +1,32 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "windows": [
+      {
+        "label": "splash",
+        "title": "Desic Terminal",
+        "width": 1180,
+        "height": 580,
+        "decorations": false,
+        "resizable": false,
+        "shadow": true,
+        "transparent": false,
+        "center": true,
+        "visible": false
+      },
+      {
+        "label": "main",
+        "title": "Desic Terminal",
+        "width": 1440,
+        "height": 900,
+        "minWidth": 720,
+        "minHeight": 540,
+        "decorations": false,
+        "resizable": true,
+        "shadow": true,
+        "center": true,
+        "visible": false
+      }
+    ]
+  }
+}

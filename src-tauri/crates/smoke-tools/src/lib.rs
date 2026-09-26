@@ -43,6 +43,23 @@ pub fn desktop_database_path(file_name: &str) -> Option<PathBuf> {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".local").join("share"))
+        })
+    {
+        for identifier in ["com.desic.terminal", "com.desic.tradeai"] {
+            let path = data_home.join(identifier).join(file_name);
+            if path.exists() {
+                return Some(path);
+            }
+        }
+    }
+
     let local = workspace_root().join(file_name);
     local.exists().then_some(local)
 }

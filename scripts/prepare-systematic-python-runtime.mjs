@@ -33,6 +33,10 @@ const BUNDLED = {
     "win32|x64": {
       triple: "x86_64-pc-windows-msvc",
       sha256: "07c977bbe4abad07e3bbc314608633e6c74eab482a7bae81f4361cda970b45e6"
+    },
+    "linux|x64": {
+      triple: "x86_64-unknown-linux-gnu",
+      sha256: "aaca2af2ab4d7b68a712660d1334c0cfd5ec13c0312ccd30c29122d8d0342320"
     }
   }
 };

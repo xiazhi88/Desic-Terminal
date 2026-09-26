@@ -7,6 +7,9 @@ import "./theme/data-voice.css";
 import "./theme/motion.css";
 import "./theme/signature.css";
 import { i18n, initializeI18n } from "./i18n/runtime";
+import { applyPlatformAttribute } from "./lib/platform";
+
+applyPlatformAttribute();
 
 const searchParams = new URLSearchParams(window.location.search);
 const isMascotPreview =

@@ -17,7 +17,7 @@
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
     <img alt="React 19" src="https://img.shields.io/badge/React-19-149ECA?logo=react&logoColor=white" />
     <img alt="OKX USDT perpetual" src="https://img.shields.io/badge/OKX-USDT%20Perpetual-111111" />
-    <img alt="Windows and macOS" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS-6D5DFB" />
+    <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS%20%7C%20Linux-6D5DFB" />
     <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-3DA639" />
   </p>
 
@@ -41,7 +41,7 @@
 
 |  |  |
 | --- | --- |
-| **1. 装** | **[Windows EXE](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** · **[macOS Apple Silicon](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** · **[macOS Intel](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
+| **1. 装** | **[Windows EXE](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** · **[macOS Apple Silicon](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** · **[macOS Intel](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** · Linux（Ubuntu）见下方本地构建 |
 | **2. 连** | 用**模拟盘 API Key** 起步；AI 也可以在配置里选本机已登录的 Codex / Claude Code，不必先购买模型 API Key |
 | **3. 看** | 打开**市场雷达**看全市场强弱 → 把标的拉进图表 → 在图上直接下单，或交给 AI 出结论 |
 
@@ -57,6 +57,7 @@
 | Windows x64 | **[下载 EXE 安装程序](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_Windows-x64-setup.exe)** |
 | macOS Apple Silicon（M1 及更新芯片） | **[下载 Apple Silicon DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-arm64.dmg)** |
 | macOS Intel | **[下载 Intel DMG](https://github.com/xiazhi88/Desic-Terminal/releases/latest/download/Desic-Terminal_macOS-x64.dmg)** |
+| Linux（Ubuntu 22.04+ x64） | 暂无官方安装包，请参考 [开发](#开发) 章节在本地构建：`npm run tauri build -- --bundles deb,appimage` |
 
 也可以前往 **[GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases)** 查看版本说明和全部附件；应用内置更新检查与签名校验。
 
@@ -213,7 +214,10 @@ docs/                        使用文档与开发规范
 
 ## 开发
 
-当前项目处于持续开发阶段。仓库已经配置 Windows x64、macOS Apple Silicon 与 macOS Intel 的安装包和安全更新产物流水线；正式安装包仍以 GitHub Releases 中实际发布并完成平台验证的版本为准。开发环境需要 Node.js、npm、Rust stable，以及 Tauri 2 对应的平台依赖。
+当前项目处于持续开发阶段。仓库已经配置 Windows x64、macOS Apple Silicon 与 macOS Intel 的安装包和安全更新产物流水线；Linux（Ubuntu 22.04+ x64）已支持本地开发与本地打包（`npm run tauri build -- --bundles deb,appimage`），官方发布安装包尚未上线。正式安装包仍以 GitHub Releases 中实际发布并完成平台验证的版本为准。开发环境需要 Node.js、npm、Rust stable，以及 Tauri 2 对应的平台依赖。
+
+> [!NOTE]
+> Linux 自动更新仅支持 AppImage 安装方式；deb 安装的应用内更新会提示手动下载。
 
 ```bash
 npm install
@@ -240,7 +244,7 @@ npm run smoke:config-security
 
 ## 项目状态
 
-当前聚焦 OKX USDT 线性永续、Windows 与 macOS 桌面端。多交易所、现货、期权和移动端不在现阶段范围内。自动化执行属于高风险能力，应从 `advisor` 和模拟盘开始验证，并根据运行记录、对账与仓位复盘逐步提升权限。
+当前聚焦 OKX USDT 线性永续、Windows、macOS 与 Linux 桌面端。多交易所、现货、期权和移动端不在现阶段范围内。自动化执行属于高风险能力，应从 `advisor` 和模拟盘开始验证，并根据运行记录、对账与仓位复盘逐步提升权限。
 
 ## 相关项目
 

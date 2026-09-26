@@ -17,6 +17,7 @@ config/*.password
 *.key
 *.p12
 *.pfx
+.zcode/
 
 # Runtime data, caches, and diagnostics
 cache/

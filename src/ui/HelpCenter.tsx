@@ -20,6 +20,7 @@ import {
 import { useEffect, useMemo, useState, type RefObject } from "react";
 import { useTranslation } from "react-i18next";
 import clsx from "clsx";
+import { detectDesktopPlatform } from "../lib/platform";
 
 export type HelpSettingsTab = "account" | "proxy" | "ai" | "prompt" | "skills" | "notifications" | "storage";
 export type HelpWorkspace = "terminal" | "automation" | "intelligence" | "data";
@@ -52,15 +53,18 @@ type HelpQuestion = {
 };
 
 type ShortcutPlatform = {
-  id: "macos" | "windows";
-  label: "macOS" | "Windows";
+  id: "macos" | "windows" | "linux";
+  label: "macOS" | "Windows" | "Linux";
   modifier: "Option" | "Alt";
 };
 
 function resolveShortcutPlatform(): ShortcutPlatform {
-  const platform = typeof navigator === "undefined" ? "" : navigator.platform || navigator.userAgent;
-  if (/Mac|iPhone|iPad|iPod/i.test(platform)) {
+  const platform = detectDesktopPlatform();
+  if (platform === "macos") {
     return { id: "macos", label: "macOS", modifier: "Option" };
+  }
+  if (platform === "linux") {
+    return { id: "linux", label: "Linux", modifier: "Alt" };
   }
   return { id: "windows", label: "Windows", modifier: "Alt" };
 }
