@@ -155,6 +155,14 @@ function isGenericAiFailure(value: string | undefined) {
   return !value || /^(failed|error|生成失败|AI 运行失败|AI 模型响应失败)$/i.test(value.trim());
 }
 
+/// 失败消息的内容只在「确实像一句错误说明」时充当失败文案。
+/// 长正文（模型已经产出的回答）与多行文本一律返回空，避免把回答渲染成错误。
+function aiFailureDetailFromContent(content: string, status: string | null | undefined) {
+  const text = content.trim();
+  if (text && text.length <= 160 && !text.includes("\n")) return text;
+  return isFailureStatus(status ?? undefined) ? "" : (status ?? "");
+}
+
 function normalizeAiFailureMessage(value: string | undefined) {
   const message = value?.trim() ?? "";
   if (isGenericAiFailure(message)) return processText("runFailed", "AI run failed", "AI 运行失败");
@@ -1676,9 +1684,11 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
   const metadata = parseStoredAiMetadata(message.toolJson);
   const storedStatus = message.status?.trim().toLowerCase();
   const failed = storedStatus === "failed" || storedStatus === "error";
-  const failureDetail = failed
-    ? (message.content.trim() || (!isFailureStatus(message.status ?? undefined) ? message.status ?? "" : ""))
-    : "";
+  // 正文不能当作失败原因：provider 可能在返回完整回答之后才报错，旧实现会把
+  // 整段回答塞进「AI 运行错误」红框（实测 2119 字的完整研判被当成错误文案）。
+  // 只有短小、单行、确实像错误说明的内容才作为失败文案；长正文返回空，
+  // 该消息就按正常回答渲染，不再显示错误横幅。
+  const failureDetail = failed ? aiFailureDetailFromContent(message.content, message.status) : "";
   const completed = failed || storedStatus === "interrupted" || storedStatus === "cancelled" || storedStatus === "canceled" || storedStatus === "completed" || storedStatus === "done" || storedStatus === "success" || storedStatus === "idle";
   const recovered = recoverLegacyFinalText(message.content, metadata.timeline ?? [], completed && !failed);
   metadata.timeline = recovered.timeline;
@@ -1703,7 +1713,7 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
     firstTokenAt: metadata.firstTokenAt,
     completedAt: metadata.completedAt,
     error: failed,
-    errorMessage: failed ? normalizeAiFailureMessage(failureDetail) : undefined,
+    errorMessage: failed && failureDetail ? normalizeAiFailureMessage(failureDetail) : undefined,
     status: completed ? undefined : message.status ?? undefined
   };
 }

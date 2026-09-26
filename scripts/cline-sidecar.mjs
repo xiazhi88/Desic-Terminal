@@ -1087,6 +1087,27 @@ function resultText(result) {
   return value?.text || value?.outputText || "";
 }
 
+/// 收尾判定：provider 可能在**已经产出完整回答之后**仍以 error 收尾
+/// （实测 deepseek-v4-flash 会话：正文 2119 字完整返回，finishReason 却是 error）。
+/// 旧逻辑把这种情况当作硬失败：回答被记成 failed，而且因为错误文案回退到正文，
+/// 界面上整段回答会被塞进「AI 运行错误」红框里。
+/// 现在只要有真实回答，就以回答为准：照常投递、按 completed 记账，收尾错误降级为提示。
+function assistantTerminalOutcome({ finishReason, text, errorMessage }) {
+  const answer = String(text || "").trim();
+  if (finishReason !== "error") {
+    return { hardFailure: false, deliverText: Boolean(answer), downgradedNote: "", effectiveFinishReason: finishReason };
+  }
+  if (answer) {
+    return {
+      hardFailure: false,
+      deliverText: true,
+      downgradedNote: String(errorMessage || "").trim() || "模型未提供具体原因",
+      effectiveFinishReason: "completed"
+    };
+  }
+  return { hardFailure: true, deliverText: false, downgradedNote: "", effectiveFinishReason: "error" };
+}
+
 function latestUserText(snapshot) {
   const messages = Array.isArray(snapshot?.messages) ? snapshot.messages : [];
   for (let index = messages.length - 1; index >= 0; index -= 1) {
@@ -5545,17 +5566,25 @@ async function sendMessage(cline, input) {
       const resultValue = result?.result || result;
       const text = resultText(result);
       const finishReason = resultValue?.finishReason || "completed";
-      if (finishReason === "error") {
+      const outcome = assistantTerminalOutcome({
+        finishReason,
+        text,
+        errorMessage: resultValue?.errorMessage || resultValue?.error
+      });
+      if (outcome.hardFailure) {
         const errorMessage = resultValue?.errorMessage || resultValue?.error || text || "AI 模型响应失败";
         emit({ type: "error", sessionId, message: errorMessage });
         emit({ type: "status", sessionId, status: "failed", message: errorMessage });
+      } else if (outcome.downgradedNote) {
+        console.error(`[cline-sidecar] provider reported an error finish after a complete answer: ${outcome.downgradedNote}`);
+        emit({ type: "status", sessionId, status: "running", message: `模型收尾报错，已保留回答：${outcome.downgradedNote}` });
       }
-      if (!state.cancelled && finishReason !== "error" && text) {
+      if (!state.cancelled && outcome.deliverText && text) {
         const lifecycle = reduceAssistantTextLifecycle(state, {
           type: "finalText",
           sessionId,
           content: text,
-          finishReason,
+          finishReason: outcome.effectiveFinishReason,
           source: "send-result"
         });
         emitAssistantTextOutputs(state, sessionId, lifecycle.outputs);
@@ -5563,7 +5592,7 @@ async function sendMessage(cline, input) {
       await emitContextUsageSnapshot(cline, state, sessionId);
       if (!state.cancelled && !state.done) {
         state.done = true;
-        emit({ type: "done", sessionId, finishReason });
+        emit({ type: "done", sessionId, finishReason: outcome.effectiveFinishReason });
       }
       return;
     }
@@ -5706,17 +5735,25 @@ async function sendMessage(cline, input) {
     }
     let text = resultText(startResult);
     const finishReason = startResult.result?.finishReason || "completed";
-    if (finishReason === "error") {
+    const outcome = assistantTerminalOutcome({
+      finishReason,
+      text,
+      errorMessage: startResult.result?.errorMessage || startResult.result?.error
+    });
+    if (outcome.hardFailure) {
       const errorMessage = startResult.result?.errorMessage || startResult.result?.error || text || "AI 模型响应失败";
       emit({ type: "error", sessionId, message: errorMessage });
       emit({ type: "status", sessionId, status: "failed", message: errorMessage });
+    } else if (outcome.downgradedNote) {
+      console.error(`[cline-sidecar] provider reported an error finish after a complete answer: ${outcome.downgradedNote}`);
+      emit({ type: "status", sessionId, status: "running", message: `模型收尾报错，已保留回答：${outcome.downgradedNote}` });
     }
-    if (!state.cancelled && finishReason !== "error" && text) {
+    if (!state.cancelled && outcome.deliverText && text) {
       const lifecycle = reduceAssistantTextLifecycle(state, {
         type: "finalText",
         sessionId,
         content: text,
-        finishReason,
+        finishReason: outcome.effectiveFinishReason,
         source: "start-result"
       });
       emitAssistantTextOutputs(state, sessionId, lifecycle.outputs);
@@ -5724,7 +5761,7 @@ async function sendMessage(cline, input) {
     await emitContextUsageSnapshot(cline, state, sessionId);
     if (!state.cancelled && !state.done) {
       state.done = true;
-      emit({ type: "done", sessionId, finishReason });
+      emit({ type: "done", sessionId, finishReason: outcome.effectiveFinishReason });
     }
   } catch (error) {
     if (!state.cancelled) {
@@ -5983,6 +6020,7 @@ export {
   consumeExpectedTurnStart,
   countReceivedProfileAgentReports,
   createDesicLeadDispatchTools,
+  assistantTerminalOutcome,
   createDesicTools,
   createLeadDispatchController,
   createProviderFetch,

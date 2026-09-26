@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
-import { aiRequestIdleTimeoutMs, bindConfiguredAgentToolEvent, buildSystemPrompt, catalogContextWindowFor, consumeExpectedTurnStart, createDesicTools, createProviderFetch, createRuntimeConfig, estimateContextBreakdown, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, mutatePendingPrompts, normalizeCommand, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, runProviderNetworkRetry, sanitizeDiagnosticText, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { aiRequestIdleTimeoutMs, assistantTerminalOutcome, bindConfiguredAgentToolEvent, buildSystemPrompt, catalogContextWindowFor, consumeExpectedTurnStart, createDesicTools, createProviderFetch, createRuntimeConfig, estimateContextBreakdown, invalidToolArgumentsResult, isTransientAiNetworkError, loadClineSdk, mapCoreEvent, mapToolResult, mutatePendingPrompts, normalizeCommand, prepareBackgroundOpportunityCommit, reduceAssistantTextLifecycle, rememberBackgroundOpportunityCommitResult, rememberDecisionContext, runProviderNetworkRetry, sanitizeDiagnosticText, validateBackgroundOpportunityCommitInput, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const sessionId = "indicator-stream-test";
 const sanitizedDiagnostic = sanitizeDiagnosticText("Authorization: Bearer obvious-placeholder-token api_key=obvious-placeholder-query sk-obvious-placeholder-value");
@@ -920,9 +920,14 @@ await assert.rejects(
 );
 
 await loadClineSdk();
+// deepseek-v4-flash 命中「已知上游错误」覆盖表：@cline/llms 目录仍标 128000，
+// 但 DeepSeek 官方口径 V4 全系 1M，覆盖表在查目录之前生效。
 const catalogContextWindow = await catalogContextWindowFor({ provider: "deepseek", model: "deepseek-v4-flash" });
-assert.ok(Number.isFinite(catalogContextWindow.contextWindow) && catalogContextWindow.contextWindow > 0);
-assert.equal(catalogContextWindow.contextWindowSource, "clineModelCatalog");
+assert.deepEqual(catalogContextWindow, { contextWindow: 1000000, contextWindowSource: "catalogOverride" });
+// 未被覆盖的模型仍然以目录为准。
+const openAiCatalogWindow = await catalogContextWindowFor({ provider: "openai-native", model: "gpt-5.4-mini" });
+assert.equal(openAiCatalogWindow.contextWindowSource, "clineModelCatalog");
+assert.ok(Number.isFinite(openAiCatalogWindow.contextWindow) && openAiCatalogWindow.contextWindow > 0);
 const customContextWindow = await catalogContextWindowFor({ provider: "deepseek", model: "unknown-custom-model", contextWindow: 123456 });
 assert.deepEqual(customContextWindow, { contextWindow: 123456, contextWindowSource: "customModelConfig" });
 assert.deepEqual(await catalogContextWindowFor({ provider: "deepseek", model: "unknown-custom-model" }), { contextWindow: 256000, contextWindowSource: "fallback" });
@@ -1045,3 +1050,35 @@ try {
 }
 
 console.log("cline nested agent_event streaming mapper passed");
+
+// 收尾判定：provider 在完整回答之后报 error 时，回答优先、不能记成失败。
+{
+  const answered = assistantTerminalOutcome({
+    finishReason: "error",
+    text: "## 结论\n\n长期趋势判断……",
+    errorMessage: "provider stream closed"
+  });
+  assert.equal(answered.hardFailure, false);
+  assert.equal(answered.deliverText, true);
+  assert.equal(answered.effectiveFinishReason, "completed");
+  assert.equal(answered.downgradedNote, "provider stream closed");
+
+  const failedWithoutAnswer = assistantTerminalOutcome({
+    finishReason: "error",
+    text: "   ",
+    errorMessage: "provider stream closed"
+  });
+  assert.equal(failedWithoutAnswer.hardFailure, true);
+  assert.equal(failedWithoutAnswer.deliverText, false);
+  assert.equal(failedWithoutAnswer.effectiveFinishReason, "error");
+
+  const completed = assistantTerminalOutcome({ finishReason: "completed", text: "答案", errorMessage: "" });
+  assert.equal(completed.hardFailure, false);
+  assert.equal(completed.deliverText, true);
+  assert.equal(completed.effectiveFinishReason, "completed");
+  assert.equal(completed.downgradedNote, "");
+
+  const emptyCompleted = assistantTerminalOutcome({ finishReason: "completed", text: "", errorMessage: "" });
+  assert.equal(emptyCompleted.deliverText, false);
+  console.log("cline assistant terminal outcome passed");
+}
