@@ -193,6 +193,12 @@ const REST_BASE: &str = "https://www.okx.com";
 const OKX_ICON_BASE: &str = "https://static.okx.com/cdn/oksupport/asset/currency/icon";
 const MARKET_ICON_DOWNLOAD_CONCURRENCY: usize = 6;
 const MARKET_ASSETS_CACHE_VERSION: u32 = 4;
+/// 合约列表缓存的新鲜期。期内启动直接复用缓存：不重拉 `/instruments`、不重试 icon，
+/// 启动动画里的「正在准备交易对资源」因此瞬间通过。新上线的交易对最迟在下一次
+/// 超过该窗口的启动出现；首次启动（无缓存）仍然完整同步。
+const MARKET_ASSETS_CACHE_TTL_MS: i64 = 6 * 60 * 60 * 1000;
+/// icon 下载失败后的退避窗口：已失败过的币种在这个窗口内不再重试。
+const MARKET_ICON_RETRY_BACKOFF_MS: i64 = 5 * 60_000;
 const PUBLIC_WS: &str = "wss://ws.okx.com:8443/ws/v5/public";
 const BUSINESS_WS: &str = "wss://ws.okx.com:8443/ws/v5/business";
 const PRIVATE_WS: &str = "wss://ws.okx.com:8443/ws/v5/private";
@@ -4609,9 +4615,39 @@ async fn okx_ws_probe(
     }
 }
 
+/// 缓存是否仍在新鲜期内（可以直接复用，不联网）。
+fn market_assets_cache_is_fresh(cache_version: u32, updated_at: i64, now: i64) -> bool {
+    cache_version >= MARKET_ASSETS_CACHE_VERSION
+        && now >= updated_at
+        && now - updated_at < MARKET_ASSETS_CACHE_TTL_MS
+}
+
+/// icon 失败是否仍在退避窗口内（窗口内不再重试这些币种）。
+fn market_icon_retry_is_backing_off(retry_after: Option<i64>, now: i64) -> bool {
+    retry_after.is_some_and(|retry_after| now < retry_after)
+}
+
 #[tauri::command]
 async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSummary, String> {
-    let updated_at = now_ms();
+    let now = now_ms();
+    // 上一次同步的结果既决定「能否直接复用」，也决定 icon 失败退避是否生效。
+    let previous = load_market_assets_summary(&app).ok().flatten();
+    if let Some(cached) = previous.as_ref() {
+        if market_assets_cache_is_fresh(cached.cache_version, cached.updated_at, now) {
+            boot_log(&format!(
+                "market assets: cache hit ({} instruments, {:.1}h old); skipping sync",
+                cached.total,
+                (now - cached.updated_at) as f64 / 3_600_000.0
+            ));
+            return Ok(cached.clone());
+        }
+    }
+    let icon_backoff_bases: Vec<String> = previous
+        .as_ref()
+        .filter(|cached| market_icon_retry_is_backing_off(cached.icon_retry_after, now))
+        .map(|cached| cached.icon_failed_bases.clone())
+        .unwrap_or_default();
+    let updated_at = now;
     let envelope: OkxEnvelope<OkxInstrument> =
         get_json("/api/v5/public/instruments?instType=SWAP").await?;
     let cache_dir = market_assets_cache_dir(&app)?;
@@ -4639,11 +4675,17 @@ async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSum
             .as_ref()
             .map(|path| path.to_string_lossy().to_string());
         let icon_cached = icon_path.as_ref().is_some_and(|path| path.exists());
+        let base_for_task = base.to_ascii_lowercase();
+        // 退避窗口内失败过的币种不再重试：它们的 icon 本来就不存在，
+        // 每次启动重试 3 次只会把启动拖长。
+        let icon_backing_off = !icon_cached
+            && icon_backoff_bases
+                .iter()
+                .any(|skipped| skipped.eq_ignore_ascii_case(&base_for_task));
         if let Some(path) = icon_path.clone() {
-            if !icon_cached {
+            if !icon_cached && !icon_backing_off {
                 let permit = semaphore.clone();
                 let client = client.clone();
-                let base_for_task = base.to_ascii_lowercase();
                 tasks.push(tauri::async_runtime::spawn(async move {
                     let _permit = permit
                         .acquire_owned()
@@ -4664,7 +4706,9 @@ async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSum
         ));
     }
 
-    let mut failed_bases = Vec::new();
+    // 退避中的币种仍然算「失败」，否则它们的失败记录会在下一次同步时丢失、
+    // 导致刚过退避就再次被重试。
+    let mut failed_bases = icon_backoff_bases.clone();
     for task in tasks {
         match task.await {
             Ok(Ok(_base)) => {}
@@ -4686,6 +4730,8 @@ async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSum
     failed_bases.sort();
     failed_bases.dedup();
     let icon_failed = failed_bases.len();
+    // 仍在退避窗口内时保留原窗口，不因本次同步顺延。
+    let previous_retry_after = previous.as_ref().and_then(|cached| cached.icon_retry_after);
     let summary = MarketAssetsSummary {
         cache_version: MARKET_ASSETS_CACHE_VERSION,
         total: refreshed.len(),
@@ -4693,7 +4739,11 @@ async fn okx_sync_market_assets(app: tauri::AppHandle) -> Result<MarketAssetsSum
         icon_failed,
         icon_failed_bases: failed_bases,
         icon_retry_after: if icon_failed > 0 {
-            Some(updated_at + 5 * 60_000)
+            Some(
+                previous_retry_after
+                    .filter(|retry_after| *retry_after > updated_at)
+                    .unwrap_or(updated_at + MARKET_ICON_RETRY_BACKOFF_MS),
+            )
         } else {
             None
         },
@@ -30493,5 +30543,43 @@ mod tests {
         assert_eq!(retry_after_seconds(&headers), Some(3));
         assert_eq!(okx_rate_limit_delay_ms(Some(3), 0), crate::okx_rate_limit::default_backoff_ms(Some(3), 0));
         assert_eq!(OKX_PRIVATE_RATE_LIMIT_MAX_ATTEMPTS, 3);
+    }
+
+    #[test]
+    fn market_assets_cache_is_reused_only_inside_the_freshness_window() {
+        let now = 1_800_000_000_000_i64;
+        // 窗口内：直接复用，不联网。
+        assert!(market_assets_cache_is_fresh(
+            MARKET_ASSETS_CACHE_VERSION,
+            now - 60_000,
+            now
+        ));
+        // 刚过期：重新同步。
+        assert!(!market_assets_cache_is_fresh(
+            MARKET_ASSETS_CACHE_VERSION,
+            now - MARKET_ASSETS_CACHE_TTL_MS,
+            now
+        ));
+        // 旧版本缓存：即使很新也必须重建。
+        assert!(!market_assets_cache_is_fresh(
+            MARKET_ASSETS_CACHE_VERSION - 1,
+            now - 1_000,
+            now
+        ));
+        // 时钟回拨（updated_at 在未来）：不能当成新鲜，否则会永远不再同步。
+        assert!(!market_assets_cache_is_fresh(
+            MARKET_ASSETS_CACHE_VERSION,
+            now + 60_000,
+            now
+        ));
+    }
+
+    #[test]
+    fn icon_retry_backoff_suppresses_recently_failed_bases() {
+        let now = 1_800_000_000_000_i64;
+        assert!(market_icon_retry_is_backing_off(Some(now + 1), now));
+        assert!(!market_icon_retry_is_backing_off(Some(now), now));
+        assert!(!market_icon_retry_is_backing_off(Some(now - 1), now));
+        assert!(!market_icon_retry_is_backing_off(None, now));
     }
 }
