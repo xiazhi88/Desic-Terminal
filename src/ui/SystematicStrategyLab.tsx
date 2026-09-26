@@ -307,7 +307,8 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   const [endPolicy, setEndPolicy] = useState<"markToMarket" | "closeAtLastClose">("markToMarket");
   const [runtimePreparation, setRuntimePreparation] = useState<SystematicPythonRuntimeView | null>(null);
   const [preparingPython, setPreparingPython] = useState(false);
-  const [pythonPrepareStage, setPythonPrepareStage] = useState<{ stage: string; mirror: string | null } | null>(null);
+  const [pythonPrepareStage, setPythonPrepareStage] = useState<PythonPrepareStage | null>(null);
+  const [pythonPrepareClock, setPythonPrepareClock] = useState(0);
   const pythonPreparationAttemptedRef = useRef(false);
   const backtestDefaultRangeSymbolRef = useRef<string | null>(null);
   const backtestReproductionSymbolRef = useRef<string | null>(null);
@@ -346,6 +347,12 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
   );
   const runs = backtestPage?.items ?? overview?.backtests ?? [];
   const pythonRuntime = runtimePreparation ?? overview?.pythonRuntime;
+  // pip writes a line only when it has something to say, which can be minutes
+  // apart on a slow mirror. The counter therefore ticks locally from the last
+  // line the backend reported instead of waiting for the next event.
+  const pythonPrepareElapsedMs = pythonPrepareStage
+    ? pythonPrepareStage.elapsedMs + Math.max(0, pythonPrepareClock - pythonPrepareStage.receivedAt)
+    : 0;
 
   // A refresh must not walk a run's progress backwards. The engine throttles the
   // progress *row* far more than the event stream, so a freshly loaded page can
@@ -389,7 +396,18 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       if (!active) return;
       if (event.type === "pythonEnvironmentStage") {
         if (event.stage) {
-          setPythonPrepareStage({ stage: event.stage, mirror: event.mirror ?? null });
+          const stage = event.stage;
+          setPythonPrepareStage((current) => ({
+            stage,
+            mirror: event.mirror ?? null,
+            attempt: typeof event.attempt === "number" ? event.attempt : 0,
+            attemptTotal: typeof event.attemptTotal === "number" ? event.attemptTotal : 0,
+            // An attempt preamble carries no output; keep showing the last line
+            // instead of clearing the only evidence on screen.
+            line: typeof event.line === "string" ? event.line : current?.line ?? null,
+            elapsedMs: typeof event.elapsedMs === "number" ? event.elapsedMs : 0,
+            receivedAt: Date.now(),
+          }));
         }
         return;
       }
@@ -479,6 +497,11 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     void prepareSystematicPythonEnvironment().then(async (next) => {
       if (!active) return;
       if (next) setRuntimePreparation(next);
+      // 收尾必须在这里完成：setRuntimePreparation 会改变 pythonRuntime，effect
+      // 依赖随之变化并触发 cleanup（active=false）。若把收尾只放在 finally 里，
+      // 安装成功反而会让「正在安装」永远停住。
+      setPreparingPython(false);
+      setPythonPrepareStage(null);
       if (next?.available) await refresh();
     }).catch((error) => {
       if (!active) return;
@@ -491,14 +514,27 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         sampleTestAvailable: false,
         sampleTestConfigured: false,
       });
-    }).finally(() => {
-      if (active) {
-        setPreparingPython(false);
-        setPythonPrepareStage(null);
-      }
+      setPreparingPython(false);
+      setPythonPrepareStage(null);
     });
     return () => { active = false; };
   }, [desktop, pythonRuntime?.environmentExists, pythonRuntime?.setupRequired, refresh]);
+
+  // 兜底：环境一旦可用就收起准备提示，即使上面的收尾被依赖变化打断也不会卡住。
+  useEffect(() => {
+    if (!pythonRuntime?.available) return;
+    setPreparingPython(false);
+    setPythonPrepareStage(null);
+  }, [pythonRuntime?.available]);
+
+  // Seconds must keep moving while pip is quiet, otherwise a slow mirror looks
+  // exactly like a frozen installer.
+  useEffect(() => {
+    if (!preparingPython) return;
+    setPythonPrepareClock(Date.now());
+    const timer = window.setInterval(() => setPythonPrepareClock(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, [preparingPython]);
 
   useEffect(() => {
     if (!selectedStrategyId && strategies[0]) setSelectedStrategyId(strategies[0].id);
@@ -1213,17 +1249,19 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
           </div>
         </div>
         <div className="systematic-strategy-lab__statusline">
-          <RuntimeState runtime={pythonRuntime} preparing={preparingPython} stage={pythonPrepareStage} text={text} />
+          <RuntimeState runtime={pythonRuntime} preparing={preparingPython} stage={pythonPrepareStage} elapsedMs={pythonPrepareElapsedMs} text={text} />
           <button className="systematic-lab__icon-button" type="button" onClick={refreshPythonEnvironment} title={text.refresh} aria-label={text.refresh}>
             <RefreshCw size={14} />
           </button>
         </div>
         {preparingPython ? (
-          <div className="systematic-strategy-lab__prepare-track" role="progressbar" aria-label={text.runtimePreparing}>
-            <span style={{ width: `${pythonPrepareProgressPct(pythonPrepareStage)}%` }} />
+          <div className="systematic-strategy-lab__prepare-track is-indeterminate" role="progressbar" aria-label={text.runtimePreparing}>
+            <span />
           </div>
         ) : null}
       </header>
+
+      <PythonEnvironmentStatus runtime={pythonRuntime} preparing={preparingPython} stage={pythonPrepareStage} elapsedMs={pythonPrepareElapsedMs} text={text} onRetry={refreshPythonEnvironment} />
 
       <nav className="systematic-strategy-lab__tabs" aria-label={text.workflow}>
         <TabButton active={tab === "strategy"} icon={<Code2 size={14} />} label={text.strategy} onClick={() => setTab("strategy")} />
@@ -4707,31 +4745,117 @@ function ProfileSignalsView({ text, profiles, desktop, refresh, chinese, onOpenP
   </section>;
 }
 
-function pythonPrepareProgressPct(stage: { stage: string; mirror: string | null } | null): number {
-  if (!stage) return 14;
-  if (stage.stage === "venv") return 34;
-  if (stage.stage === "dependencies") return 68;
-  return 14;
+/// Live state of one environment-preparation run, as reported by the backend.
+type PythonPrepareStage = {
+  stage: string;
+  mirror: string | null;
+  /** Package index being tried, 1-based; 0 before the first attempt is known. */
+  attempt: number;
+  /** Total package indexes available. */
+  attemptTotal: number;
+  /** Newest installer output line, already cleaned and truncated. */
+  line: string | null;
+  elapsedMs: number;
+  /** When the panel received this update, used to keep the clock moving. */
+  receivedAt: number;
+};
+
+function pythonPrepareStageLabel(stage: PythonPrepareStage | null | undefined, text: Copy): string {
+  if (stage?.stage === "venv") return text.runtimeCreatingVenv;
+  if (stage?.stage === "dependencies") {
+    return stage.mirror ? `${text.runtimeInstallingDeps} · ${stage.mirror}` : text.runtimeInstallingDeps;
+  }
+  if (stage?.stage === "verifying") return text.runtimeVerifying;
+  if (stage?.stage === "finalizing") return text.runtimeFinalizing;
+  return text.runtimePreparing;
 }
 
-function RuntimeState({ runtime, preparing, stage, text }: Readonly<{
+function pythonPrepareAttemptLabel(stage: PythonPrepareStage | null | undefined, elapsedMs: number, text: Copy): string {
+  const parts: string[] = [];
+  if (stage && stage.attemptTotal > 0 && stage.attempt > 0) {
+    parts.push(text.runtimeAttemptProgress.replace("{attempt}", String(stage.attempt)).replace("{total}", String(stage.attemptTotal)));
+  }
+  if (elapsedMs > 0) {
+    parts.push(text.runtimeElapsed.replace("{seconds}", String(Math.max(0, Math.floor(elapsedMs / 1000)))));
+  }
+  return parts.join(" · ");
+}
+
+function RuntimeState({ runtime, preparing, stage, elapsedMs, text }: Readonly<{
   runtime?: SystematicPythonRuntimeView | null;
   preparing: boolean;
-  stage?: { stage: string; mirror: string | null } | null;
+  stage?: PythonPrepareStage | null;
+  elapsedMs: number;
   text: Copy;
 }>) {
   if (runtime?.available) {
     return null;
   }
   if (preparing || runtime?.state === "setupRequired") {
-    const label = stage?.stage === "venv"
-      ? text.runtimeCreatingVenv
-      : stage?.stage === "dependencies"
-        ? (stage.mirror ? `${text.runtimeInstallingDeps} · ${stage.mirror}` : text.runtimeInstallingDeps)
-        : text.runtimePreparing;
-    return <span className="systematic-lab__status is-muted"><LoaderCircle size={12} className="is-spinning" />{label}</span>;
+    const elapsed = pythonPrepareAttemptLabel(stage, elapsedMs, text);
+    return <span className="systematic-lab__status is-muted" title={stage?.line ?? undefined}><LoaderCircle size={12} className="is-spinning" />{pythonPrepareStageLabel(stage, text)}{elapsed ? ` · ${elapsed}` : ""}</span>;
   }
-  return <span className="systematic-lab__status is-guarded"><AlertTriangle size={12} />{runtime?.state === "missingPython" ? text.runtimeMissingPython : runtime?.state === "missingVenvModule" ? text.runtimeMissingVenvModule : text.runtimeGuarded}</span>;
+  const stateLabel = runtime?.state === "missingPython" ? text.runtimeMissingPython : runtime?.state === "missingVenvModule" ? text.runtimeMissingVenvModule : text.runtimeGuarded;
+  // A recorded failure turns the badge itself into an explanation; the full text
+  // stays available as a tooltip and in the notice below.
+  const reason = (runtime?.reason ?? "").split("\n")[0]?.trim() ?? "";
+  return <span className="systematic-lab__status is-guarded" title={runtime?.reason || undefined}><AlertTriangle size={12} />{stateLabel}{reason ? <span className="systematic-lab__status-reason"> · {reason}</span> : null}</span>;
+}
+
+/// Always-visible strip under the workspace header.
+///
+/// The environment has no honest percentage: pip reports no fraction of its
+/// work, and a single mirror attempt can take minutes on its own. The strip is
+/// therefore indeterminate and carries the numbers that are actually known —
+/// which mirror, which attempt, how long, and the newest output line — instead
+/// of a bar that pretends to measure something. The failure state renders the
+/// recorded reason and the path of the full transcript, on every tab rather than
+/// only in the strategy and tuning banners.
+function PythonEnvironmentStatus({ runtime, preparing, stage, elapsedMs, text, onRetry }: Readonly<{
+  runtime?: SystematicPythonRuntimeView | null;
+  preparing: boolean;
+  stage: PythonPrepareStage | null;
+  elapsedMs: number;
+  text: Copy;
+  onRetry: () => void;
+}>) {
+  if (preparing) {
+    const attempt = pythonPrepareAttemptLabel(stage, elapsedMs, text);
+    return (
+      <div className="systematic-lab__prepare-notice" role="status">
+        <LoaderCircle size={13} className="is-spinning" />
+        <span className="systematic-lab__prepare-notice-stage">{pythonPrepareStageLabel(stage, text)}</span>
+        {attempt ? <span className="systematic-lab__prepare-notice-meta">{attempt}</span> : null}
+        {stage?.line ? (
+          <span className="systematic-lab__prepare-notice-output" title={stage.line}>
+            <span>{text.runtimeLatestOutput}</span>
+            <code>{stage.line}</code>
+          </span>
+        ) : null}
+      </div>
+    );
+  }
+  if (runtime?.available || runtime?.state === "setupRequired") return null;
+  const stateLabel = runtime?.state === "missingPython" ? text.runtimeMissingPython : runtime?.state === "missingVenvModule" ? text.runtimeMissingVenvModule : text.runtimeGuarded;
+  const reason = (runtime?.reason ?? "").split("\n")[0]?.trim() ?? "";
+  const logPath = runtime?.setupFailure?.logPath ?? null;
+  return (
+    <div className="systematic-lab__prepare-notice is-failed" role="status">
+      <AlertTriangle size={13} />
+      <span className="systematic-lab__prepare-notice-stage">{stateLabel}</span>
+      {reason ? <span className="systematic-lab__prepare-notice-output" title={runtime?.reason}>{reason}</span> : null}
+      {logPath ? (
+        <span className="systematic-lab__prepare-notice-failure" title={logPath}>
+          <span>{text.runtimeSetupLog}</span>
+          <code>{logPath}</code>
+        </span>
+      ) : null}
+      <button className="systematic-lab__command-button" type="button" onClick={onRetry}>
+        <RefreshCw size={12} />
+        {text.retryPython}
+      </button>
+    </div>
+  );
 }
 
 function PythonEnvironmentNotice({ runtime, preparing, text, onRetry }: Readonly<{
@@ -5599,7 +5723,7 @@ function copy(chinese: boolean) {
       strategy: "策略", factors: "因子", backtest: "回测", review: "结果与回放", forward: "前向模拟", profiles: "Profiles", allProfiles: "全部 Profiles", profileFilter: "Profile", openProfile: "打开 Profile",
       python: "Python", myStrategies: "我的策略", newStrategy: "新建 Python 策略", resizeStrategyList: "拖动调整策略列表宽度（双击恢复默认）", resizeInspector: "拖动调整参数栏宽度（双击恢复默认）", searchStrategies: "搜索策略", noStrategyMatches: "未找到匹配的策略", searchContract: "搜索合约", noMatchingContract: "没有匹配的合约",
       noStrategies: "还没有策略", noStrategiesDetail: "新建策略后，在每根已收线 K 线上定义动作。",
-      pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimeCreatingVenv: "正在创建本地 Python 环境…", runtimeInstallingDeps: "正在安装策略依赖", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
+      pythonStrategy: "PYTHON 策略", runtimeReady: "本地 Python 已就绪", runtimeGuarded: "Python 环境未就绪", runtimePreparing: "正在准备 Python", runtimeCreatingVenv: "正在创建本地 Python 环境…", runtimeInstallingDeps: "正在安装策略依赖", runtimeVerifying: "正在校验 Python 依赖", runtimeFinalizing: "正在完成安装 · 切换环境目录", runtimeAttemptProgress: "第 {attempt}/{total} 个镜像", runtimeElapsed: "已用 {seconds} 秒", runtimeLatestOutput: "最新输出", runtimeSetupLog: "安装日志：", runtimePreparingDetail: "正在创建 Desic 本地 Python 环境并安装策略允许使用的依赖。完成后即可运行 Python 回测。", runtimeMissingPython: "未检测到 Python", runtimeMissingPythonDetail: "请安装 Python 3.12 至 3.13，并将 Python 加入系统 PATH。完成后点击“重新检测”。", runtimeMissingVenvModule: "Python 缺少 venv 模块", runtimeMissingVenvModuleDetail: "检测到的 Python 缺少 venv 模块，无法创建本地研究环境。请从 python.org 重新安装 Python 3.12 至 3.13（安装时保留默认组件，官方安装器自带 venv），或使用安装程序的修复选项，然后点击“重新检测”。", retryPython: "重新检测",
       save: "保存版本", name: "名称", description: "说明", source: "策略源码", strategyParameters: "策略参数", parameters: "参数", parameterTuning: "参数调优范围", parameterTuningHint: "平台固定支持顶层数值参数；仅调整范围与步长", parameterTuningUnavailable: "策略参数数据无效。", noNumericParameters: "当前参数中没有可调优的顶层数值。", noVisualParameters: "没有可视化的标量参数。", parameter: "参数", parameterDefault: "当前值", tuningMin: "最小", tuningMax: "最大", tuningStep: "步长", bestBacktest: "最佳回测", backtestDays: "回测 {days} 天", openBestBacktest: "查看最佳回测", deleteStrategy: "删除策略", deleteStrategyConfirm: "删除策略“{name}”及其所有本地回测、报告和调优记录？此操作不可撤销。", strategyDeleted: "策略已删除", strategyDeleteFailed: "无法删除策略", deleteBacktest: "删除回测", deleteBacktestConfirm: "删除“{name}”的该回测记录和本地回放数据？此操作不可撤销。", backtestDeleted: "回测已删除", backtestDeleteFailed: "无法删除回测", strategyUnchanged: "策略没有变更", strategyUnchangedDetail: "名称、说明、源码、参数和调优范围均未变化，未创建新版本。",
       versionHistory: "版本历史", closeVersionHistory: "关闭版本历史", versionHistoryHint: "历史快照不可修改；载入后只会写入当前未保存草稿。", versionLabel: "版本 {version}", latestVersion: "最新", versionUsage: "回测 {backtests} · Profiles {profiles}", noVersions: "没有可用版本", noVersionsDetail: "保存策略后会在此保留不可变版本。", loading: "正在加载", setCompareBaseline: "设为对比基线", compareBaseline: "对比基线：{version}", compareVersions: "比较版本", compareDraft: "与当前草稿比较", currentDraft: "当前草稿", loadVersionToDraft: "载入到草稿", versionLoadedToDraft: "版本已载入草稿", versionLoadedToDraftDetail: "{version} 已载入编辑器，尚未保存，也不会覆盖历史版本。", backtestThisVersion: "回测此版本", selectVersion: "选择一个版本以审阅、比较或载入草稿。", versionBacktests: "回测", versionProfiles: "Profiles", versionHash: "源码哈希", noDescription: "没有说明", closeComparison: "关闭比较", compareSections: "比较内容", historicalVersion: "历史版本",
       aiAssistant: "AI 策略助手", closeAiAssistant: "关闭 AI 策略助手", aiSourceApplied: "AI 已写入源码", aiSourceAppliedDetail: "只写入当前未保存草稿；请审阅后手动保存版本。", aiSourceWriteCancelled: "你已手动编辑源码，已停止 AI 写入。", aiAssistantFailed: "AI 策略助手不可用", aiChatConnecting: "正在连接策略助手", aiSourceWriting: "正在写入编辑器", aiChatWorking: "正在处理", aiChatReady: "可继续对话", aiChatEmpty: "说明要修改、解释或审阅的策略逻辑。AI 会先读取当前编辑器内容；只有使用写入工具时才会修改当前未保存源码。", aiChatSession: "策略 AI 会话", aiChatNewSession: "新建会话", you: "你", ai: "AI", aiChatPlaceholder: "例如：解释当前入场条件，并将止损改为以 ATR 为基础", aiChatPrompt: "向 AI 策略助手提问", aiChatStop: "停止生成", aiChatSend: "发送",
@@ -5647,7 +5771,7 @@ function copy(chinese: boolean) {
     strategy: "Strategy", factors: "Factors", backtest: "Backtest", review: "Results & replay", forward: "Forward simulation", profiles: "Profiles", allProfiles: "All Profiles", profileFilter: "Profile", openProfile: "Open Profile",
     python: "Python", myStrategies: "My strategies", newStrategy: "New Python strategy", resizeStrategyList: "Drag to resize the strategy list (double-click to reset)", resizeInspector: "Drag to resize the parameters panel (double-click to reset)", searchStrategies: "Search strategies", noStrategyMatches: "No matching strategy", searchContract: "Search contract", noMatchingContract: "No matching contract",
     noStrategies: "No strategy yet", noStrategiesDetail: "Create one to define an action on each confirmed bar.",
-    pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimeCreatingVenv: "Creating the local Python environment…", runtimeInstallingDeps: "Installing strategy dependencies", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",
+    pythonStrategy: "PYTHON STRATEGY", runtimeReady: "Local Python ready", runtimeGuarded: "Python environment pending", runtimePreparing: "Preparing Python", runtimeCreatingVenv: "Creating the local Python environment…", runtimeInstallingDeps: "Installing strategy dependencies", runtimeVerifying: "Verifying Python dependencies", runtimeFinalizing: "Finishing the installation · switching environment", runtimeAttemptProgress: "mirror {attempt} of {total}", runtimeElapsed: "{seconds}s elapsed", runtimeLatestOutput: "Latest output", runtimeSetupLog: "Setup log:", runtimePreparingDetail: "Creating the Desic local Python environment and installing the strategy allowlist dependencies. Python backtests enable when it finishes.", runtimeMissingPython: "Python not found", runtimeMissingPythonDetail: "Install Python 3.12 through 3.13, add it to your system PATH, then select Recheck.", runtimeMissingVenvModule: "Python missing venv module", runtimeMissingVenvModuleDetail: "The detected Python is missing its venv module, so the local research environment cannot be created. Reinstall Python 3.12 through 3.13 from python.org keeping the default components (the official installer includes venv), or use the installer's repair option, then select Recheck.", retryPython: "Recheck",
     save: "Save version", name: "Name", description: "Description", source: "Strategy source", strategyParameters: "Strategy parameters", parameters: "Parameters", parameterTuning: "Parameter tuning ranges", parameterTuningHint: "The platform recognizes top-level numeric parameters; adjust only range and step", parameterTuningUnavailable: "Strategy parameters are invalid.", noNumericParameters: "This strategy has no top-level numeric parameters to tune.", noVisualParameters: "No scalar parameters can be edited visually.", parameter: "Parameter", parameterDefault: "Current", tuningMin: "Min", tuningMax: "Max", tuningStep: "Step", bestBacktest: "Best backtest", backtestDays: "{days}d backtest", openBestBacktest: "Open best backtest", deleteStrategy: "Delete strategy", deleteStrategyConfirm: "Delete strategy “{name}” with all of its local backtests, reports, and optimization records? This cannot be undone.", strategyDeleted: "Strategy deleted", strategyDeleteFailed: "Could not delete strategy", deleteBacktest: "Delete backtest", deleteBacktestConfirm: "Delete this backtest record and local replay data for “{name}”? This cannot be undone.", backtestDeleted: "Backtest deleted", backtestDeleteFailed: "Could not delete backtest", strategyUnchanged: "No strategy changes", strategyUnchangedDetail: "Name, description, source, parameters, and tuning ranges are unchanged, so no version was created.",
     versionHistory: "Version history", closeVersionHistory: "Close version history", versionHistoryHint: "Historical snapshots are immutable. Loading one writes only to the current unsaved draft.", versionLabel: "Version {version}", latestVersion: "Latest", versionUsage: "Backtests {backtests} · Profiles {profiles}", noVersions: "No saved version", noVersionsDetail: "Saved strategies keep immutable snapshots here.", loading: "Loading", setCompareBaseline: "Set comparison baseline", compareBaseline: "Baseline: {version}", compareVersions: "Compare versions", compareDraft: "Compare with draft", currentDraft: "Current draft", loadVersionToDraft: "Load into draft", versionLoadedToDraft: "Version loaded into draft", versionLoadedToDraftDetail: "{version} is now in the editor, unsaved, and did not replace historical snapshots.", backtestThisVersion: "Backtest this version", selectVersion: "Select a version to review, compare, or load into the draft.", versionBacktests: "Backtests", versionProfiles: "Profiles", versionHash: "Source hash", noDescription: "No description", closeComparison: "Close comparison", compareSections: "Comparison section", historicalVersion: "Historical version",
     aiAssistant: "AI strategy assistant", closeAiAssistant: "Close AI strategy assistant", aiSourceApplied: "AI source written", aiSourceAppliedDetail: "Only the current unsaved draft changed. Review it, then save a version manually.", aiSourceWriteCancelled: "You edited the source, so AI writing stopped.", aiAssistantFailed: "AI strategy assistant unavailable", aiChatConnecting: "Connecting strategy assistant", aiSourceWriting: "Writing into the editor", aiChatWorking: "Working", aiChatReady: "Ready for another message", aiChatEmpty: "Ask to change, explain, or review the strategy. AI reads the current editor first and can change only this unsaved source through its write tool.", aiChatSession: "Strategy AI session", aiChatNewSession: "New session", you: "You", ai: "AI", aiChatPlaceholder: "For example: explain the current entry logic and use an ATR-based stop", aiChatPrompt: "Ask the AI strategy assistant", aiChatStop: "Stop generation", aiChatSend: "Send",

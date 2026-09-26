@@ -546,6 +546,14 @@ export type SystematicPythonRuntimeView = {
   sampleTestAvailable: boolean;
   sampleTestConfigured: boolean;
   sampleTestInterpreterLabel?: string | null;
+  /** Last recorded environment-creation failure; absent while the environment is usable. */
+  setupFailure?: SystematicPythonSetupFailureView | null;
+};
+
+export type SystematicPythonSetupFailureView = {
+  /** Absolute path of the `setup.log` transcript written by the failed installation. */
+  logPath: string;
+  failedAt: number;
 };
 
 export type SystematicPythonSampleTestView = {
@@ -594,6 +602,12 @@ export type SystematicEvent = {
   estimatedRemainingMs?: number | null;
   stage?: string;
   mirror?: string | null;
+  /** `pythonEnvironmentStage`: cleaned, single-line installer output. */
+  line?: string;
+  /** `pythonEnvironmentStage`: 1-based package-index attempt. */
+  attempt?: number;
+  /** `pythonEnvironmentStage`: number of package indexes available. */
+  attemptTotal?: number;
   /** Present on `factorSaved`, `factorDeleted`, and `factorDataSync`. */
   factorId?: string;
   /** Present on `factorEvaluationProgress`. */

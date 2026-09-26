@@ -132,6 +132,78 @@
   transition: width 900ms cubic-bezier(0.22, 1, 0.36, 1);
 }
 
+/* The installer has no honest percentage — pip reports no fraction of its work
+   and a single mirror attempt can run for minutes — so the track slides instead
+   of pretending to fill, and the strip below carries the real counters. */
+.systematic-strategy-lab__prepare-track.is-indeterminate > span {
+  width: 32%;
+  border-radius: 2px;
+  transition: none;
+  animation: systematic-lab-prepare-slide 1.6s cubic-bezier(0.45, 0, 0.35, 1) infinite;
+}
+
+@keyframes systematic-lab-prepare-slide {
+  from { transform: translateX(-105%); }
+  to { transform: translateX(330%); }
+}
+
+/* Preparation and failure strip. It sits outside the tab panels so the stage,
+   the elapsed time, the newest installer line, and a failure reason with the
+   transcript path stay visible on every tab. */
+.systematic-lab__prepare-notice {
+  min-height: 27px;
+  display: flex;
+  align-items: center;
+  gap: var(--lab-space-xs);
+  overflow: hidden;
+  padding: 4px 14px;
+  border-bottom: 1px solid var(--lab-line-soft);
+  background: rgba(181, 141, 255, 0.06);
+  color: var(--lab-muted);
+  font-size: var(--lab-text-label);
+  white-space: nowrap;
+}
+
+.systematic-lab__prepare-notice.is-failed {
+  color: var(--lab-warning);
+  background: rgba(230, 179, 91, 0.07);
+  border-bottom-color: rgba(230, 179, 91, 0.16);
+}
+
+.systematic-lab__prepare-notice > svg { flex: 0 0 auto; }
+.systematic-lab__prepare-notice-stage { flex: 0 0 auto; font-weight: 700; }
+.systematic-lab__prepare-notice-meta { flex: 0 0 auto; color: var(--lab-weak); }
+.systematic-lab__prepare-notice-output {
+  min-width: 0;
+  flex: 1 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  color: var(--lab-weak);
+}
+
+.systematic-lab__prepare-notice-output code,
+.systematic-lab__prepare-notice-failure code {
+  min-width: 0;
+  overflow: hidden;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: var(--lab-text-micro);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.systematic-lab__prepare-notice-failure {
+  min-width: 0;
+  flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+}
+
+.systematic-lab__prepare-notice > button { flex: 0 0 auto; }
+
 .systematic-strategy-lab__prepare-track > span::after {
   content: "";
   position: absolute;
@@ -212,6 +284,9 @@
 }
 .systematic-lab__status.is-ready { border-color: rgba(75, 184, 169, 0.38); color: var(--lab-state-ok); background: rgba(75, 184, 169, 0.1); }
 .systematic-lab__status.is-guarded { border-color: rgba(230, 179, 91, 0.36); color: var(--lab-warning); background: rgba(230, 179, 91, 0.09); }
+/* The badge stays one line; the failure reason inside it is clipped rather than
+   pushing the refresh control out of the header. The full text is the tooltip. */
+.systematic-lab__status-reason { max-width: 320px; overflow: hidden; text-overflow: ellipsis; }
 .systematic-lab__status.is-failed { border-color: rgba(239, 113, 129, 0.38); color: var(--lab-state-error); background: rgba(239, 113, 129, 0.09); }
 .systematic-lab__status.is-muted { color: var(--lab-weak); }
 

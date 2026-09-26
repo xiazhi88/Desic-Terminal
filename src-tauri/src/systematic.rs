@@ -41,6 +41,7 @@ use desic_systematic::{
     VerdictFinding, VerdictInput, VirtualPortfolio, VisualRuleDefinition,
     MAX_KLINE_FACTOR_LOOKBACK_BARS, ONE_MINUTE_MS, STRATEGY_TIMEFRAMES,
 };
+use desic_storage_config::ProxyConfig;
 use rand::RngCore;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -49,7 +50,7 @@ use sha2::{Digest, Sha256};
 use tauri::{Emitter, Manager};
 use tauri_plugin_dialog::{DialogExt, FilePath};
 use tokio::{
-    io::{AsyncRead, AsyncReadExt, AsyncWriteExt},
+    io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt},
     process::Command,
     sync::{oneshot, Mutex as AsyncMutex, Notify, Semaphore},
     time::{sleep, timeout, Duration},
@@ -109,6 +110,23 @@ const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 12;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMATIC_PYTHON_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
+// The environment root is the stable place for installation evidence: the venv
+// staging directory is deleted after a failure, so anything written there would
+// vanish exactly when a user needs to look at it.
+const SYSTEMATIC_PYTHON_SETUP_LOG_FILE: &str = "setup.log";
+const SYSTEMATIC_PYTHON_SETUP_FAILURE_FILE: &str = "setup-failure.json";
+/// Cleaned output lines travel to the UI inside events, so each one is bounded
+/// before it leaves the process.
+const SYSTEMATIC_PYTHON_STAGE_LINE_MAX_CHARS: usize = 200;
+/// Retained tail per stream, used for the failure detail. The visible transcript
+/// goes to `setup.log`, so this only has to cover the diagnostic end of a run.
+const SYSTEMATIC_PYTHON_STREAM_TAIL_LINES: usize = 240;
+/// Proxy variables exported to (or cleared from) every Python environment
+/// preparation subprocess. Both cases are exported because pip reads the
+/// uppercase form through `requests` while some tooling only honours the
+/// lowercase one.
+const SYSTEMATIC_PYTHON_PROXY_KEYS: &[&str] =
+    &["HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"];
 // Windows Defender and similar endpoint scanners can briefly retain a handle on
 // freshly installed Python launchers. Retrying the same-directory rename avoids
 // treating that transient lock as a broken environment.
@@ -973,6 +991,38 @@ pub(crate) struct SystematicPythonRuntimeView {
     pub sample_test_available: bool,
     pub sample_test_configured: bool,
     pub sample_test_interpreter_label: Option<String>,
+    /// Last recorded environment-creation failure. Present only while the
+    /// environment is not usable and a failure on disk has not been superseded
+    /// by a successful build, so a retry cannot erase the evidence of the run
+    /// that failed.
+    pub setup_failure: Option<SystematicPythonSetupFailureView>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicPythonSetupFailureView {
+    /// Absolute path of the transcript written by the failed installation.
+    pub log_path: String,
+    pub failed_at: i64,
+}
+
+/// One package-index attempt, kept verbatim so the persisted failure names every
+/// mirror that was tried instead of collapsing them into one line.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPythonSetupAttempt {
+    mirror: String,
+    detail: String,
+}
+
+/// Durable record of a failed environment build at `<env root>/setup-failure.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LocalPythonSetupFailure {
+    reason: String,
+    log_path: String,
+    failed_at: i64,
+    attempts: Vec<LocalPythonSetupAttempt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -13695,6 +13745,282 @@ fn local_python_environment_manifest_path(venv_path: &Path) -> PathBuf {
     venv_path.join(SYSTEMATIC_PYTHON_ENVIRONMENT_MANIFEST)
 }
 
+fn local_python_setup_log_path() -> PathBuf {
+    local_python_environment_root().join(SYSTEMATIC_PYTHON_SETUP_LOG_FILE)
+}
+
+fn local_python_setup_failure_path() -> PathBuf {
+    local_python_environment_root().join(SYSTEMATIC_PYTHON_SETUP_FAILURE_FILE)
+}
+
+/// Appends one line to the installation transcript.
+///
+/// The transcript is the only artefact of a failed install that survives the
+/// staging directory being deleted, so a write error is reported on stderr but
+/// never propagated: losing a log line must not turn a working install into a
+/// failed one.
+fn append_local_python_setup_log(line: &str) {
+    let path = local_python_setup_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    match fs::OpenOptions::new().create(true).append(true).open(&path) {
+        Ok(mut file) => {
+            if let Err(error) = writeln!(file, "{line}") {
+                eprintln!("systematic_python_setup_log_write_failed error={error}");
+            }
+        }
+        Err(error) => eprintln!("systematic_python_setup_log_open_failed error={error}"),
+    }
+}
+
+fn read_local_python_setup_failure_record(path: &Path) -> Option<LocalPythonSetupFailure> {
+    let raw = fs::read_to_string(path).ok()?;
+    serde_json::from_str::<LocalPythonSetupFailure>(&raw).ok()
+}
+
+fn write_local_python_setup_failure_record(
+    path: &Path,
+    failure: &LocalPythonSetupFailure,
+) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| error.to_string())?;
+    }
+    let encoded = serde_json::to_vec_pretty(failure).map_err(|error| error.to_string())?;
+    fs::write(path, encoded).map_err(|error| error.to_string())
+}
+
+/// Persists a failed environment build under the environment root, never inside
+/// the staging directory: the staging directory is removed on failure, which
+/// used to leave the user with no explanation at all after a retry.
+fn record_local_python_setup_failure(reason: &str, attempts: Vec<LocalPythonSetupAttempt>) {
+    let failure = LocalPythonSetupFailure {
+        reason: reason.to_string(),
+        log_path: local_python_setup_log_path().to_string_lossy().to_string(),
+        failed_at: now_ms(),
+        attempts,
+    };
+    let path = local_python_setup_failure_path();
+    if let Err(error) = write_local_python_setup_failure_record(&path, &failure) {
+        eprintln!("systematic_python_setup_failure_write_failed error={error}");
+    }
+}
+
+/// A successful build is the only thing that invalidates a recorded failure.
+fn clear_local_python_setup_failure() {
+    let path = local_python_setup_failure_path();
+    if path.exists() {
+        if let Err(error) = fs::remove_file(&path) {
+            eprintln!("systematic_python_setup_failure_clear_failed error={error}");
+        }
+    }
+}
+
+fn local_python_setup_failure_view() -> Option<SystematicPythonSetupFailureView> {
+    read_local_python_setup_failure_record(&local_python_setup_failure_path()).map(|failure| {
+        SystematicPythonSetupFailureView {
+            log_path: failure.log_path,
+            failed_at: failure.failed_at,
+        }
+    })
+}
+
+/// Proxy URL exported to the Python environment preparation subprocesses.
+///
+/// Only HTTP and HTTPS are honoured. pip can reach a SOCKS proxy only with
+/// PySocks installed, which is one of the packages being installed, so exporting
+/// a `socks5h` URL would turn a working direct connection into a guaranteed
+/// failure. Every unusable configuration returns `None`, which clears inherited
+/// values instead of exporting a broken one.
+fn local_python_proxy_url(config: &ProxyConfig) -> Option<String> {
+    if !config.enabled {
+        return None;
+    }
+    let scheme = match config.proxy_type.trim().to_uppercase().as_str() {
+        "HTTP" => "http",
+        "HTTPS" => "https",
+        _ => return None,
+    };
+    let host = config.host.trim();
+    if host.is_empty() || config.port == 0 {
+        return None;
+    }
+    let mut url = reqwest::Url::parse(&format!("{scheme}://{host}:{}", config.port)).ok()?;
+    if let Some(username) = config
+        .username
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.set_username(username).ok()?;
+        url.set_password(Some(config.password.as_deref().unwrap_or(""))).ok()?;
+    }
+    Some(url.to_string())
+}
+
+/// `Some(url)` exports the proxy, `None` clears whatever the desktop process
+/// inherited. The second case is not a no-op: a stale shell proxy is a common
+/// reason for an install that hangs before it can explain itself.
+fn local_python_proxy_environment(url: Option<&str>) -> Vec<(&'static str, Option<String>)> {
+    SYSTEMATIC_PYTHON_PROXY_KEYS
+        .iter()
+        .map(|key| (*key, url.map(str::to_string)))
+        .collect()
+}
+
+/// Explains why no proxy is exported. Never echoes the configured URL, which can
+/// carry credentials.
+fn local_python_proxy_note(config: &ProxyConfig) -> String {
+    if !config.enabled || config.proxy_type.trim().eq_ignore_ascii_case("NONE") {
+        "No application proxy is configured; the installer runs without exported proxy variables"
+            .to_string()
+    } else {
+        format!(
+            "The application proxy type {} is not usable by pip; the installer runs without exported proxy variables",
+            config.proxy_type.trim()
+        )
+    }
+}
+
+/// Proxy environment for one preparation subprocess plus its transcript note.
+///
+/// Reading the application configuration must never block an install, so a
+/// failure to read it falls back to clearing inherited proxy variables, which is
+/// the same behaviour as a disabled proxy.
+fn local_python_proxy_environment_for_setup() -> (Vec<(&'static str, Option<String>)>, String) {
+    match crate::storage_config::load_proxy_config() {
+        Ok(config) => {
+            let environment =
+                local_python_proxy_environment(local_python_proxy_url(&config).as_deref());
+            let note = if environment
+                .iter()
+                .any(|(_, value)| value.is_some())
+            {
+                "Using the application proxy for the Python installer".to_string()
+            } else {
+                local_python_proxy_note(&config)
+            };
+            (environment, note)
+        }
+        Err(error) => (
+            local_python_proxy_environment(None),
+            format!(
+                "Desic could not read its proxy configuration ({error}); the installer runs without exported proxy variables"
+            ),
+        ),
+    }
+}
+
+fn apply_local_python_proxy_environment(
+    command: &mut Command,
+    environment: &[(&'static str, Option<String>)],
+) {
+    for (key, value) in environment {
+        match value {
+            Some(value) => {
+                command.env(key, value);
+            }
+            None => {
+                command.env_remove(key);
+            }
+        }
+    }
+}
+
+/// Returns the printable form of one output character, or `None` for control
+/// bytes that would corrupt a single-line UI field.
+fn normalize_local_python_log_character(character: char) -> Option<char> {
+    match character {
+        '\t' => Some(' '),
+        value if value.is_control() => None,
+        value => Some(value),
+    }
+}
+
+/// Cleans one output line for the transcript and the UI.
+///
+/// pip writes ANSI colour codes and carriage-return progress rewrites; both would
+/// corrupt a single-line field. The length limit keeps an event payload small
+/// enough to be sent for every line.
+fn sanitize_local_python_log_line(line: &str) -> String {
+    // Only the newest carriage-return segment describes the current state.
+    let segment = line
+        .rsplit('\r')
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(line);
+    let mut cleaned = String::new();
+    let mut length = 0_usize;
+    let mut truncated = false;
+    let mut characters = segment.chars();
+    while let Some(raw) = characters.next() {
+        if raw == '\u{1b}' {
+            // Consume the introducer and its payload: `ESC [ … m` for colours,
+            // `ESC ] … BEL` for the window-title form.
+            match characters.next() {
+                Some('[') => {
+                    for next in characters.by_ref() {
+                        if ('@'..='~').contains(&next) {
+                            break;
+                        }
+                    }
+                }
+                Some(']') => {
+                    for next in characters.by_ref() {
+                        if next == '\u{7}' || next == '\u{1b}' {
+                            break;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        let Some(character) = normalize_local_python_log_character(raw) else {
+            continue;
+        };
+        if length >= SYSTEMATIC_PYTHON_STAGE_LINE_MAX_CHARS {
+            truncated = true;
+            break;
+        }
+        cleaned.push(character);
+        length += 1;
+    }
+    if truncated {
+        cleaned.push('…');
+    }
+    cleaned.trim().to_string()
+}
+
+/// Masks credential pairs that an HTTP client can echo back inside its own error
+/// text, so neither the transcript nor the UI ever carries a proxy password.
+fn redact_local_python_log_credentials(line: &str) -> String {
+    let mut redacted = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(scheme_end) = rest.find("://") {
+        let (head, tail) = rest.split_at(scheme_end + 3);
+        redacted.push_str(head);
+        let authority_end = tail
+            .find(|character: char| {
+                matches!(
+                    character,
+                    '/' | '?' | '#' | ' ' | '"' | '\'' | ')' | ',' | '<' | '>'
+                )
+            })
+            .unwrap_or(tail.len());
+        let (authority, remainder) = tail.split_at(authority_end);
+        match authority.split_once('@') {
+            Some((_, host)) => {
+                redacted.push_str("***@");
+                redacted.push_str(host);
+            }
+            None => redacted.push_str(authority),
+        }
+        rest = remainder;
+    }
+    redacted.push_str(rest);
+    redacted
+}
+
 /// Move a fully prepared environment into its final location. On Windows, an
 /// on-access scanner can retain a just-created Python launcher briefly after
 /// pip exits, causing the same-volume rename to return `PermissionDenied`.
@@ -13741,7 +14067,7 @@ fn local_python_runtime_view() -> SystematicPythonRuntimeView {
     let environment_exists = venv_path.is_dir();
     let interpreter = local_python_venv_interpreter_path(&venv_path);
     let manifest = read_local_python_environment_manifest(&venv_path);
-    match manifest {
+    let mut view = match manifest {
         Ok(manifest) if interpreter.is_file() => SystematicPythonRuntimeView {
             available: true,
             state: "ready".to_string(),
@@ -13752,6 +14078,7 @@ fn local_python_runtime_view() -> SystematicPythonRuntimeView {
             sample_test_available: true,
             sample_test_configured: false,
             sample_test_interpreter_label: None,
+            setup_failure: None,
         },
         _ if !environment_exists => SystematicPythonRuntimeView {
             available: false,
@@ -13763,6 +14090,7 @@ fn local_python_runtime_view() -> SystematicPythonRuntimeView {
             sample_test_available: true,
             sample_test_configured: false,
             sample_test_interpreter_label: None,
+            setup_failure: None,
         },
         _ if !interpreter.is_file() => SystematicPythonRuntimeView {
             available: false,
@@ -13774,6 +14102,7 @@ fn local_python_runtime_view() -> SystematicPythonRuntimeView {
             sample_test_available: true,
             sample_test_configured: false,
             sample_test_interpreter_label: None,
+            setup_failure: None,
         },
         _ => SystematicPythonRuntimeView {
             available: false,
@@ -13785,8 +14114,26 @@ fn local_python_runtime_view() -> SystematicPythonRuntimeView {
             sample_test_available: true,
             sample_test_configured: false,
             sample_test_interpreter_label: None,
+            setup_failure: None,
         },
+    };
+    // This view is a filesystem snapshot recomputed on every overview, so it is
+    // also the only place that can still explain a failure after the panel, the
+    // window, or the whole app was restarted. A recorded failure replaces the
+    // generic text: it names the mirror that answered and the tail of its error,
+    // which is what distinguishes a rejecting mirror from an offline machine.
+    if !view.available {
+        if let Some(failure) =
+            read_local_python_setup_failure_record(&local_python_setup_failure_path())
+        {
+            view.reason = failure.reason;
+            view.setup_failure = Some(SystematicPythonSetupFailureView {
+                log_path: failure.log_path,
+                failed_at: failure.failed_at,
+            });
+        }
     }
+    view
 }
 
 fn read_local_python_environment_manifest(
@@ -13822,6 +14169,7 @@ fn local_python_runtime_unavailable_view(
         sample_test_available: true,
         sample_test_configured: false,
         sample_test_interpreter_label: None,
+        setup_failure: local_python_setup_failure_view(),
     }
 }
 
@@ -13916,6 +14264,8 @@ fn local_python_environment_failure_view(
             ),
         )
     };
+    // The recorded log path travels with the in-memory reason so the failure can
+    // be inspected before any overview refresh happens.
     local_python_runtime_unavailable_view(state, reason, false, Some(label))
 }
 
@@ -14046,6 +14396,15 @@ async fn ensure_local_python_environment(
                 return Ok(local_python_environment_failure_view(&interpreter, &error));
             }
         };
+        // 写清单 + 原子切换目录是最后一步，同样报一个阶段避免界面停在上一步。
+        emit_systematic_event(
+            app,
+            json!({
+                "type": "pythonEnvironmentStage",
+                "stage": "finalizing",
+                "timestamp": now_ms(),
+            }),
+        );
         write_local_python_environment_manifest(&staging, &version, &python_source)?;
         match activate_staged_local_python_environment(&staging, &venv_path).await {
             Ok(()) => version,
@@ -14114,6 +14473,9 @@ async fn ensure_local_python_environment(
             .unwrap_or_else(|| format!("system:{python_version}"));
         write_local_python_environment_manifest(&venv_path, &python_version, &source)?;
     }
+    // Reaching this point means the environment is complete, which also covers a
+    // venv that already carried its manifest: any recorded failure is stale.
+    clear_local_python_setup_failure();
     Ok(local_python_runtime_view())
 }
 
@@ -14178,6 +14540,11 @@ async fn create_local_python_venv(
     interpreter: &LocalPythonInterpreter,
     destination: &Path,
 ) -> Result<(), String> {
+    let (proxy_environment, proxy_note) = local_python_proxy_environment_for_setup();
+    append_local_python_setup_log(&format!(
+        "=== venv creation at {} ({proxy_note}) ===",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
     let mut command = Command::new(&interpreter.program);
     command
         .args(&interpreter.leading_args)
@@ -14187,6 +14554,7 @@ async fn create_local_python_venv(
     command.env_remove("PYTHONHOME");
     command.env_remove("PYTHONPATH");
     command.env_remove("VIRTUAL_ENV");
+    apply_local_python_proxy_environment(&mut command, &proxy_environment);
     run_local_python_command(
         &mut command,
         "create the local Python environment",
@@ -14203,24 +14571,45 @@ async fn install_local_python_dependencies(
     if !interpreter.is_file() {
         return Err("The local Python environment has no interpreter".to_string());
     }
-    let requirements_path = local_python_environment_root().join(format!(
+    let environment_root = local_python_environment_root();
+    fs::create_dir_all(&environment_root).map_err(|error| {
+        format!("Could not create the local Python environment directory: {error}")
+    })?;
+    let requirements_path = environment_root.join(format!(
         ".requirements-{}",
         SYSTEMATIC_ID_SEQUENCE.fetch_add(1, Ordering::Relaxed)
     ));
     fs::write(&requirements_path, SYSTEMATIC_PYTHON_REQUIREMENTS)
         .map_err(|error| format!("Could not prepare Python dependency metadata: {error}"))?;
+    let (proxy_environment, proxy_note) = local_python_proxy_environment_for_setup();
+    append_local_python_setup_log(&format!(
+        "=== dependency install at {} ({proxy_note}) ===",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+    ));
     // Try each index in turn. A mirror that is lagging, rate-limiting, or
     // refusing wheel downloads must not strand the user with no research
     // runtime, so only an exhausted list is reported as a failure.
-    let mut failures = Vec::<String>::new();
+    let mut failures = Vec::<LocalPythonSetupAttempt>::new();
     let mut installed_from = None;
-    for (label, index_url) in SYSTEMATIC_PYTHON_PACKAGE_INDEXES {
+    let attempt_total = SYSTEMATIC_PYTHON_PACKAGE_INDEXES.len();
+    for (index, (label, index_url)) in SYSTEMATIC_PYTHON_PACKAGE_INDEXES.iter().enumerate() {
+        let attempt = index + 1;
+        let started = Instant::now();
+        append_local_python_setup_log(&format!(
+            "=== attempt {attempt}/{attempt_total} ({label}) at {} ===",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ));
+        // The stage event is emitted before the first output line so the panel
+        // can name the mirror it is waiting on even while pip is silent.
         emit_systematic_event(
             app,
             json!({
                 "type": "pythonEnvironmentStage",
                 "stage": "dependencies",
                 "mirror": label,
+                "attempt": attempt,
+                "attemptTotal": attempt_total,
+                "elapsedMs": 0,
                 "timestamp": now_ms(),
             }),
         );
@@ -14247,39 +14636,85 @@ async fn install_local_python_dependencies(
         // A user-level PIP_INDEX_URL would otherwise override the flag above.
         command.env_remove("PIP_INDEX_URL");
         command.env_remove("PIP_EXTRA_INDEX_URL");
-        match run_local_python_command(
+        let context = LocalPythonStreamContext {
+            app,
+            stage: "dependencies",
+            mirror: Some(label),
+            attempt,
+            attempt_total,
+            started,
+        };
+        match run_local_python_streaming_command(
             &mut command,
             &format!("install Desic Python dependencies from {label}"),
             SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT,
+            &proxy_environment,
+            Some(&context),
         )
         .await
         {
             Ok(_) => {
                 installed_from = Some(*label);
+                append_local_python_setup_log(&format!(
+                    "--- attempt {attempt}/{attempt_total} ({label}) finished after {}s",
+                    started.elapsed().as_secs()
+                ));
                 break;
             }
-            Err(error) => failures.push(error),
+            Err(error) => {
+                append_local_python_setup_log(&format!(
+                    "--- attempt {attempt}/{attempt_total} ({label}) failed after {}s: {error}",
+                    started.elapsed().as_secs()
+                ));
+                failures.push(LocalPythonSetupAttempt {
+                    mirror: (*label).to_string(),
+                    detail: error,
+                });
+            }
         }
     }
     let _ = fs::remove_file(&requirements_path);
     if installed_from.is_none() {
-        return Err(format!(
+        let reason = format!(
             "Could not install Desic Python dependencies from any package index ({}). {}",
             SYSTEMATIC_PYTHON_PACKAGE_INDEXES
                 .iter()
                 .map(|(label, _)| *label)
                 .collect::<Vec<_>>()
                 .join(", "),
-            failures.join(" | ")
+            failures
+                .iter()
+                .map(|failure| failure.detail.clone())
+                .collect::<Vec<_>>()
+                .join(" | ")
+        );
+        append_local_python_setup_log(&format!(
+            "=== dependency install failed at {}: {reason} ===",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
         ));
+        record_local_python_setup_failure(&reason, failures);
+        return Err(reason);
     }
 
+    // pip 结束后还有一次导入校验，期间没有任何输出。把阶段报出去，
+    // 否则界面会停在「正在安装策略依赖」上，看起来像卡死。
+    emit_systematic_event(
+        app,
+        json!({
+            "type": "pythonEnvironmentStage",
+            "stage": "verifying",
+            "timestamp": now_ms(),
+        }),
+    );
     let mut verify = Command::new(interpreter);
     verify
         .arg("-I")
         .arg("-c")
         .arg("import sys, numpy, pandas, sklearn; print('.'.join(map(str, sys.version_info[:3])))");
     configure_local_python_execution_command(&mut verify);
+    // Applied after the execution environment is cleared, so the proxy is the
+    // one this app is configured with and never an inherited shell value.
+    apply_local_python_proxy_environment(&mut verify, &proxy_environment);
     let version = run_local_python_command(
         &mut verify,
         "verify the local Python environment",
@@ -14306,7 +14741,11 @@ fn write_local_python_environment_manifest(
     };
     let encoded = serde_json::to_vec_pretty(&manifest).map_err(|error| error.to_string())?;
     fs::write(local_python_environment_manifest_path(venv_path), encoded)
-        .map_err(|error| format!("Could not record the local Python environment: {error}"))
+        .map_err(|error| format!("Could not record the local Python environment: {error}"))?;
+    // The manifest is the success marker of an environment build, so a stored
+    // failure describes a run that no longer applies.
+    clear_local_python_setup_failure();
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -14357,6 +14796,204 @@ fn configure_local_python_execution_std_command(command: &mut StdCommand) {
             command.env(key, value);
         }
     }
+}
+
+/// One pipe of a streamed preparation command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalPythonOutputStream {
+    Stdout,
+    Stderr,
+}
+
+/// Where a streamed preparation command reports progress.
+struct LocalPythonStreamContext<'a> {
+    app: &'a tauri::AppHandle,
+    /// `pythonEnvironmentStage` stage name; `dependencies` for pip.
+    stage: &'a str,
+    mirror: Option<&'a str>,
+    attempt: usize,
+    attempt_total: usize,
+    started: Instant,
+}
+
+impl LocalPythonStreamContext<'_> {
+    fn emit_line(&self, line: &str) {
+        emit_systematic_event(
+            self.app,
+            json!({
+                "type": "pythonEnvironmentStage",
+                "stage": self.stage,
+                "mirror": self.mirror,
+                "line": line,
+                "elapsedMs": self.started.elapsed().as_millis() as i64,
+                "attempt": self.attempt,
+                "attemptTotal": self.attempt_total,
+                "timestamp": now_ms(),
+            }),
+        );
+    }
+}
+
+/// Bounded tail of both pipes, kept for the failure detail. The full transcript
+/// goes to `setup.log`, so this only has to cover the diagnostic end of a run.
+#[derive(Debug, Default)]
+struct LocalPythonStreamTail {
+    stdout: String,
+    stderr: String,
+}
+
+impl LocalPythonStreamTail {
+    fn push(&mut self, output: LocalPythonOutputStream, line: &str) {
+        let target = match output {
+            LocalPythonOutputStream::Stdout => &mut self.stdout,
+            LocalPythonOutputStream::Stderr => &mut self.stderr,
+        };
+        target.push_str(line);
+        target.push('\n');
+        let mut line_count = target.lines().count();
+        while line_count > SYSTEMATIC_PYTHON_STREAM_TAIL_LINES {
+            let Some(end) = target.find('\n') else {
+                break;
+            };
+            // Drop whole lines so the tail always starts at a line boundary.
+            target.drain(..=end);
+            line_count -= 1;
+        }
+    }
+}
+
+/// Drains one pipe into the shared line channel.
+///
+/// stdout and stderr are read by two independent tasks. A subprocess that fills
+/// its stderr pipe while nobody reads it blocks forever, which is the "install
+/// hangs and shows nothing" shape this replaces. `tokio::process` child pipes
+/// are non-blocking and only implement `AsyncRead`, so each drain is a spawned
+/// task rather than an OS thread; the guarantee is the same and neither stream
+/// can stall the other.
+fn spawn_local_python_stream_drain<R>(
+    stream: R,
+    output: LocalPythonOutputStream,
+    sender: tokio::sync::mpsc::UnboundedSender<(LocalPythonOutputStream, String)>,
+) where
+    R: AsyncRead + Unpin + Send + 'static,
+{
+    tokio::spawn(async move {
+        let mut lines = tokio::io::BufReader::new(stream).lines();
+        loop {
+            match lines.next_line().await {
+                Ok(Some(line)) => {
+                    if sender.send((output, line)).is_err() {
+                        break;
+                    }
+                }
+                Ok(None) | Err(_) => break,
+            }
+        }
+    });
+}
+
+/// Runs one preparation command while streaming both pipes into the transcript,
+/// the UI events, and the failure tail.
+///
+/// The 180 second budget covers the whole run and still terminates the child:
+/// exceeding it kills the process and reports the same timeout error the
+/// buffered runner produced, so no timeout semantics change. Output is bounded
+/// by the retained tail, so a chatty pip run cannot grow the process without
+/// limit the way buffering every byte did.
+async fn run_local_python_streaming_command(
+    command: &mut Command,
+    action: &str,
+    duration: Duration,
+    proxy_environment: &[(&'static str, Option<String>)],
+    context: Option<&LocalPythonStreamContext<'_>>,
+) -> Result<String, String> {
+    hide_local_python_command_window(command);
+    apply_local_python_proxy_environment(command, proxy_environment);
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        // A dropped future must not leave pip running against a venv that is
+        // about to be deleted.
+        .kill_on_drop(true);
+    let mut child = command
+        .spawn()
+        .map_err(|error| format!("Could not {action}: {error}"))?;
+    let Some(stdout) = child.stdout.take() else {
+        return Err(format!(
+            "Could not {action}: the Python process exposed no stdout pipe"
+        ));
+    };
+    let Some(stderr) = child.stderr.take() else {
+        return Err(format!(
+            "Could not {action}: the Python process exposed no stderr pipe"
+        ));
+    };
+    let (sender, mut receiver) =
+        tokio::sync::mpsc::unbounded_channel::<(LocalPythonOutputStream, String)>();
+    spawn_local_python_stream_drain(stdout, LocalPythonOutputStream::Stdout, sender.clone());
+    spawn_local_python_stream_drain(stderr, LocalPythonOutputStream::Stderr, sender.clone());
+    // The loop ends when both drains have dropped their senders.
+    drop(sender);
+
+    let mut tail = LocalPythonStreamTail::default();
+    let mut stdout_text = String::new();
+    let mut timed_out = false;
+    let deadline = sleep(duration);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => {
+                timed_out = true;
+                break;
+            }
+            message = receiver.recv() => match message {
+                Some((output, raw)) => {
+                    // Redact first so a truncation further down cannot keep a
+                    // half-printed credential.
+                    let line = sanitize_local_python_log_line(
+                        &redact_local_python_log_credentials(&raw),
+                    );
+                    if line.is_empty() {
+                        continue;
+                    }
+                    tail.push(output, &line);
+                    append_local_python_setup_log(&line);
+                    if output == LocalPythonOutputStream::Stdout {
+                        stdout_text.push_str(&line);
+                        stdout_text.push('\n');
+                    }
+                    if let Some(context) = context {
+                        context.emit_line(&line);
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    if timed_out {
+        let _ = child.kill().await;
+        append_local_python_setup_log(&format!(
+            "--- timed out after {}s while trying to {action}",
+            duration.as_secs()
+        ));
+        return Err(format!("Timed out while trying to {action}"));
+    }
+    let status = child
+        .wait()
+        .await
+        .map_err(|error| format!("Could not {action}: {error}"))?;
+    if !status.success() {
+        let mut message = format!("Could not {action} (Python exited with {status}).");
+        match local_python_command_failure_detail(tail.stdout.as_bytes(), tail.stderr.as_bytes()) {
+            Some(detail) => message.push_str(&format!(" {detail}")),
+            None => message.push_str(
+                " Check the Python installation, network access, and package index settings.",
+            ),
+        }
+        return Err(message);
+    }
+    Ok(stdout_text.trim().to_string())
 }
 
 /// Condenses a failed child process's output into a short, actionable reason.
@@ -17017,6 +17654,234 @@ mod tests {
 
         // A process that failed without saying anything keeps the generic hint.
         assert!(local_python_command_failure_detail(b"", b"   \n  \n").is_none());
+    }
+
+    fn proxy_config(proxy_type: &str, host: &str, port: u16) -> ProxyConfig {
+        ProxyConfig {
+            enabled: true,
+            proxy_type: proxy_type.to_string(),
+            host: host.to_string(),
+            port,
+            username: None,
+            password: None,
+        }
+    }
+
+    #[test]
+    fn python_setup_proxy_environment_follows_the_application_proxy() {
+        let url = local_python_proxy_url(&proxy_config("HTTP", "127.0.0.1", 7890))
+            .expect("an enabled HTTP proxy must be exported");
+        assert_eq!(url, "http://127.0.0.1:7890/");
+        let exported = local_python_proxy_environment(Some(&url));
+        assert_eq!(
+            exported.len(),
+            SYSTEMATIC_PYTHON_PROXY_KEYS.len(),
+            "pip and requests both need to see the proxy"
+        );
+        for (key, value) in &exported {
+            assert!(SYSTEMATIC_PYTHON_PROXY_KEYS.contains(key));
+            assert_eq!(value.as_deref(), Some(url.as_str()));
+        }
+        assert!(exported
+            .iter()
+            .any(|(key, _)| *key == "https_proxy" && key.len() > 0));
+
+        // An https proxy keeps its scheme; credentials travel inside the URL and
+        // never appear in the transcript note.
+        let mut authenticated = proxy_config("HTTPS", "proxy.example", 8443);
+        authenticated.username = Some("desic-user".to_string());
+        authenticated.password = Some("placeholder-secret".to_string());
+        let authenticated_url = local_python_proxy_url(&authenticated)
+            .expect("an authenticated proxy is still usable");
+        assert!(authenticated_url.starts_with("https://desic-user:"));
+        assert!(
+            !local_python_proxy_note(&authenticated).contains("placeholder-secret"),
+            "the log note must never carry the proxy password"
+        );
+
+        // Disabled, unsupported, malformed, and unknown configurations all clear
+        // the inherited variables instead of exporting something unusable: a
+        // stale shell proxy is a common reason an install hangs silently.
+        let cleared = local_python_proxy_environment(None);
+        assert_eq!(cleared.len(), SYSTEMATIC_PYTHON_PROXY_KEYS.len());
+        assert!(cleared.iter().all(|(_, value)| value.is_none()));
+
+        let mut disabled = proxy_config("HTTP", "127.0.0.1", 7890);
+        disabled.enabled = false;
+        assert!(local_python_proxy_url(&disabled).is_none());
+        assert!(local_python_proxy_url(&proxy_config("SOCKS5", "127.0.0.1", 7890)).is_none());
+        assert!(local_python_proxy_url(&proxy_config("NONE", "127.0.0.1", 7890)).is_none());
+        assert!(local_python_proxy_url(&proxy_config("HTTP", "   ", 7890)).is_none());
+        assert!(local_python_proxy_url(&proxy_config("HTTP", "127.0.0.1", 0)).is_none());
+        assert!(local_python_proxy_url(&proxy_config("HTTP", "not a host", 7890)).is_none());
+        assert!(local_python_proxy_url(&proxy_config("QUIC", "127.0.0.1", 7890)).is_none());
+    }
+
+    #[test]
+    fn python_setup_log_lines_are_cleaned_and_bounded() {
+        assert_eq!(
+            sanitize_local_python_log_line("\u{1b}[32mCollecting\u{1b}[0m numpy==1.26.4"),
+            "Collecting numpy==1.26.4"
+        );
+        // A progress writer rewrites its own line; only the newest state counts.
+        assert_eq!(
+            sanitize_local_python_log_line("progress 10%\rprogress 90%"),
+            "progress 90%"
+        );
+        assert_eq!(sanitize_local_python_log_line("  \u{7}\u{0}  "), "");
+        assert_eq!(
+            sanitize_local_python_log_line("\u{1b}]0;pip\u{7}Installing"),
+            "Installing"
+        );
+
+        let long = format!("ERROR: {}", "x".repeat(400));
+        let cleaned = sanitize_local_python_log_line(&long);
+        assert_eq!(
+            cleaned.chars().count(),
+            SYSTEMATIC_PYTHON_STAGE_LINE_MAX_CHARS + 1,
+            "the ellipsis is the only character past the limit"
+        );
+        assert!(cleaned.ends_with('…'));
+
+        // A failing HTTP client can echo the proxy URL back, credentials
+        // included, which must never reach the transcript or the UI.
+        let redacted = redact_local_python_log_credentials(
+            "ERROR: Cannot connect to proxy 'http://desic-user:placeholder-secret@127.0.0.1:7890/'",
+        );
+        assert!(!redacted.contains("placeholder-secret"));
+        assert!(!redacted.contains("desic-user"));
+        assert!(redacted.contains("127.0.0.1:7890"));
+        assert_eq!(
+            redact_local_python_log_credentials("Looking in indexes: https://pypi.org/simple"),
+            "Looking in indexes: https://pypi.org/simple"
+        );
+    }
+
+    #[test]
+    fn python_setup_stream_tail_keeps_only_the_diagnostic_end() {
+        let mut tail = LocalPythonStreamTail::default();
+        let total = SYSTEMATIC_PYTHON_STREAM_TAIL_LINES + 20;
+        for index in 0..total {
+            tail.push(
+                LocalPythonOutputStream::Stdout,
+                &format!("Downloading package-{index}"),
+            );
+        }
+        assert_eq!(tail.stdout.lines().count(), SYSTEMATIC_PYTHON_STREAM_TAIL_LINES);
+        assert!(tail.stdout.contains(&format!("package-{}", total - 1)));
+        assert!(!tail.stdout.contains("package-0\n"));
+        assert!(tail.stderr.is_empty());
+
+        tail.push(LocalPythonOutputStream::Stderr, "ERROR: HTTP error 403");
+        assert_eq!(tail.stdout.lines().count(), SYSTEMATIC_PYTHON_STREAM_TAIL_LINES);
+        let detail = local_python_command_failure_detail(b"", tail.stderr.as_bytes())
+            .expect("a streamed failure must still produce a reason");
+        assert!(detail.contains("403"));
+    }
+
+    #[test]
+    fn python_setup_failure_record_round_trips_through_disk() {
+        let root = std::env::temp_dir().join(systematic_id("python-setup-failure-test"));
+        let path = root.join(SYSTEMATIC_PYTHON_SETUP_FAILURE_FILE);
+        let failure = LocalPythonSetupFailure {
+            reason: "Could not install Desic Python dependencies from any package index (Tsinghua, Aliyun, PyPI). ERROR: HTTP error 403".to_string(),
+            log_path: root
+                .join(SYSTEMATIC_PYTHON_SETUP_LOG_FILE)
+                .to_string_lossy()
+                .to_string(),
+            failed_at: 1_700_000_000_000,
+            attempts: vec![
+                LocalPythonSetupAttempt {
+                    mirror: "Tsinghua".to_string(),
+                    detail: "ERROR: HTTP error 403".to_string(),
+                },
+                LocalPythonSetupAttempt {
+                    mirror: "Aliyun".to_string(),
+                    detail: "ERROR: Connection reset by peer".to_string(),
+                },
+            ],
+        };
+        // Writing also has to create the environment root that holds it.
+        write_local_python_setup_failure_record(&path, &failure).expect("write the failure record");
+        assert_eq!(read_local_python_setup_failure_record(&path), Some(failure));
+        assert_eq!(
+            read_local_python_setup_failure_record(&root.join("missing.json")),
+            None
+        );
+
+        fs::write(&path, "not json").expect("write an unreadable record");
+        assert_eq!(read_local_python_setup_failure_record(&path), None);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    /// Drives a real subprocess through the streaming runner, which is the part
+    /// that cannot be covered by a pure test: both pipes have to be drained
+    /// concurrently or a chatty stderr writer deadlocks the child, and the
+    /// timeout has to kill a process that ignores it. Uses the same opt-in
+    /// interpreter variable as the other interpreter-dependent tests.
+    #[test]
+    fn setup_command_streams_both_pipes_and_enforces_the_timeout() {
+        let Ok(interpreter) = std::env::var("DESIC_SYSTEMATIC_TEST_PYTHON") else {
+            return;
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime");
+
+        // stderr gets enough volume to fill the pipe buffer if it were left
+        // unread, plus an ANSI colour code that has to be cleaned.
+        runtime.block_on(async {
+            let mut command = Command::new(&interpreter);
+            command.arg("-c").arg(
+                "import sys\nprint('\u{1b}[32mstdout-line\u{1b}[0m')\nfor index in range(4000):\n    print(f'stderr-line-{index}', file=sys.stderr)\nprint('stderr-last-line', file=sys.stderr)\n",
+            );
+            let stdout = run_local_python_streaming_command(
+                &mut command,
+                "exercise the streamed setup command",
+                Duration::from_secs(30),
+                &local_python_proxy_environment(None),
+                None,
+            )
+            .await
+            .expect("a successful command returns its stdout");
+            assert_eq!(stdout, "stdout-line");
+            let transcript =
+                fs::read_to_string(local_python_setup_log_path()).expect("read the transcript");
+            assert!(transcript.contains("stdout-line"));
+            assert!(
+                transcript.contains("stderr-last-line"),
+                "the stderr pipe has to be drained as it fills"
+            );
+            assert!(
+                !transcript.contains('\u{1b}'),
+                "control sequences must not reach the transcript"
+            );
+        });
+
+        runtime.block_on(async {
+            let started = Instant::now();
+            let mut command = Command::new(&interpreter);
+            command.arg("-c").arg("import time; time.sleep(60)");
+            let error = run_local_python_streaming_command(
+                &mut command,
+                "exercise the streamed setup timeout",
+                Duration::from_secs(2),
+                &local_python_proxy_environment(None),
+                None,
+            )
+            .await
+            .expect_err("a command that outlives its budget must fail");
+            assert_eq!(
+                error,
+                "Timed out while trying to exercise the streamed setup timeout"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(20),
+                "the timeout has to terminate the child instead of waiting for it"
+            );
+        });
     }
 
     #[test]
