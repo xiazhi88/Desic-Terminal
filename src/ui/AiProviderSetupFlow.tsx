@@ -3,7 +3,7 @@ import { ArrowLeft, Check, CircleAlert, Copy, ExternalLink, KeyRound, Laptop, Re
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { useTranslation } from "react-i18next";
 import type { AiLocalCliStatus } from "../types";
-import { loadAiLocalAuthStatus } from "../lib/ai";
+import { listAiModels, loadAiLocalAuthStatus } from "../lib/ai";
 import { aiProviderCatalogOptions, aiRecommendedProviderOptions, isBuiltInProviderId } from "../lib/aiProviderCatalog";
 import openaiIcon from "../assets/ai-providers/openai.svg";
 import anthropicIcon from "../assets/ai-providers/anthropic.svg";
@@ -34,6 +34,11 @@ export type AiProviderTemplateId =
   | "zhipu"
   | "custom";
 
+/** 推荐模型选项；contextWindow 为表单预填的默认上下文大小（tokens）。 */
+export type AiProviderModelOption = TerminalSelectOption & {
+  contextWindow?: number;
+};
+
 export type AiProviderTemplate = Readonly<{
   id: AiProviderTemplateId;
   name: string;
@@ -42,7 +47,7 @@ export type AiProviderTemplate = Readonly<{
   provider: string;
   baseUrl: string;
   icon?: string;
-  modelOptions: readonly TerminalSelectOption[];
+  modelOptions: readonly AiProviderModelOption[];
 }>;
 
 export type AiProviderAccessGuide = Readonly<{
@@ -166,17 +171,17 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.openai.com/v1",
     icon: openaiIcon,
     modelOptions: [
-      { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", description: "推荐 · 智能、成本与速度平衡" },
-      { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", description: "最新旗舰 · 复杂推理与编码" },
-      { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", description: "高频、低成本任务" },
-      { value: "gpt-5.6", label: "GPT-5.6", description: "官方别名 · 当前指向 GPT-5.6 Sol" },
-      { value: "gpt-5.5", label: "GPT-5.5", description: "高质量通用与 Agent 任务" },
-      { value: "gpt-5.5-pro", label: "GPT-5.5 Pro", description: "高成本 · Responses API 深度推理" },
-      { value: "gpt-5.4", label: "GPT-5.4", description: "成熟的专业工作模型" },
-      { value: "gpt-5.4-pro", label: "GPT-5.4 Pro", description: "高成本 · Responses API" },
-      { value: "gpt-5.4-mini", label: "GPT-5.4 Mini", description: "轻量 Agent 与子任务" },
-      { value: "gpt-5.4-nano", label: "GPT-5.4 Nano", description: "分类、提取与批量轻任务" },
-      { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", description: "专用编码 Agent 模型" },
+      { value: "gpt-5.6-terra", label: "GPT-5.6 Terra", description: "推荐 · 智能、成本与速度平衡", contextWindow: 1050000 },
+      { value: "gpt-5.6-sol", label: "GPT-5.6 Sol", description: "最新旗舰 · 复杂推理与编码", contextWindow: 1050000 },
+      { value: "gpt-5.6-luna", label: "GPT-5.6 Luna", description: "高频、低成本任务", contextWindow: 1050000 },
+      { value: "gpt-5.6", label: "GPT-5.6", description: "官方别名 · 当前指向 GPT-5.6 Sol", contextWindow: 1050000 },
+      { value: "gpt-5.5", label: "GPT-5.5", description: "高质量通用与 Agent 任务", contextWindow: 1050000 },
+      { value: "gpt-5.5-pro", label: "GPT-5.5 Pro", description: "高成本 · Responses API 深度推理", contextWindow: 1050000 },
+      { value: "gpt-5.4", label: "GPT-5.4", description: "成熟的专业工作模型", contextWindow: 1050000 },
+      { value: "gpt-5.4-pro", label: "GPT-5.4 Pro", description: "高成本 · Responses API", contextWindow: 1050000 },
+      { value: "gpt-5.4-mini", label: "GPT-5.4 Mini", description: "轻量 Agent 与子任务", contextWindow: 400000 },
+      { value: "gpt-5.4-nano", label: "GPT-5.4 Nano", description: "分类、提取与批量轻任务", contextWindow: 400000 },
+      { value: "gpt-5.3-codex", label: "GPT-5.3 Codex", description: "专用编码 Agent 模型", contextWindow: 400000 },
     ],
   },
   {
@@ -188,13 +193,13 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.anthropic.com/v1",
     icon: anthropicIcon,
     modelOptions: [
-      { value: "claude-sonnet-5", label: "Claude Sonnet 5", description: "推荐 · 速度与智能平衡" },
-      { value: "claude-fable-5", label: "Claude Fable 5", description: "最新最高能力 · 长程 Agent" },
-      { value: "claude-opus-5", label: "Claude Opus 5", description: "最新 · 复杂编码与企业 Agent" },
-      { value: "claude-opus-4-8", label: "Claude Opus 4.8", description: "成熟复杂推理与 Agent 编排" },
-      { value: "claude-opus-4-7", label: "Claude Opus 4.7", description: "复杂编码与企业任务" },
-      { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", description: "稳定的 Agent 模型" },
-      { value: "claude-haiku-4-5", label: "Claude Haiku 4.5", description: "快速轻量任务" },
+      { value: "claude-sonnet-5", label: "Claude Sonnet 5", description: "推荐 · 速度与智能平衡", contextWindow: 1000000 },
+      { value: "claude-fable-5", label: "Claude Fable 5", description: "最新最高能力 · 长程 Agent", contextWindow: 1000000 },
+      { value: "claude-opus-5", label: "Claude Opus 5", description: "最新 · 复杂编码与企业 Agent", contextWindow: 1000000 },
+      { value: "claude-opus-4-8", label: "Claude Opus 4.8", description: "成熟复杂推理与 Agent 编排", contextWindow: 1000000 },
+      { value: "claude-opus-4-7", label: "Claude Opus 4.7", description: "复杂编码与企业任务", contextWindow: 1000000 },
+      { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", description: "稳定的 Agent 模型", contextWindow: 1000000 },
+      { value: "claude-haiku-4-5", label: "Claude Haiku 4.5", description: "快速轻量任务", contextWindow: 200000 },
     ],
   },
   {
@@ -206,14 +211,14 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://generativelanguage.googleapis.com/v1beta",
     icon: geminiIcon,
     modelOptions: [
-      { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash", description: "推荐 · Agent 与多模态" },
-      { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash", description: "稳定高性能" },
-      { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", description: "最新轻量 · 高频自动化" },
-      { value: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview", description: "复杂推理预览版" },
-      { value: "gemini-3.1-pro-preview-customtools", label: "Gemini 3.1 Pro Custom Tools", description: "预览版 · 强化自定义工具调用" },
-      { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", description: "稳定轻量模型" },
-      { value: "gemini-flash-latest", label: "Gemini Flash Latest", description: "滚动别名 · 自动指向最新 Flash" },
-      { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro", description: "成熟通用模型" },
+      { value: "gemini-3.6-flash", label: "Gemini 3.6 Flash", description: "推荐 · Agent 与多模态", contextWindow: 1048576 },
+      { value: "gemini-3.5-flash", label: "Gemini 3.5 Flash", description: "稳定高性能", contextWindow: 1048576 },
+      { value: "gemini-3.5-flash-lite", label: "Gemini 3.5 Flash-Lite", description: "最新轻量 · 高频自动化", contextWindow: 1048576 },
+      { value: "gemini-3.1-pro-preview", label: "Gemini 3.1 Pro Preview", description: "复杂推理预览版", contextWindow: 1048576 },
+      { value: "gemini-3.1-pro-preview-customtools", label: "Gemini 3.1 Pro Custom Tools", description: "预览版 · 强化自定义工具调用", contextWindow: 1048576 },
+      { value: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", description: "稳定轻量模型", contextWindow: 1048576 },
+      { value: "gemini-flash-latest", label: "Gemini Flash Latest", description: "滚动别名 · 自动指向最新 Flash", contextWindow: 1048576 },
+      { value: "gemini-2.5-pro", label: "Gemini 2.5 Pro", description: "成熟通用模型", contextWindow: 1048576 },
     ],
   },
   {
@@ -225,7 +230,7 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.x.ai/v1",
     icon: xaiIcon,
     modelOptions: [
-      { value: "grok-4.5", label: "Grok 4.5", description: "推荐 · 最新通用推理" },
+      { value: "grok-4.5", label: "Grok 4.5", description: "推荐 · 最新通用推理", contextWindow: 500000 },
       { value: "grok-4.3", label: "Grok 4.3", description: "稳定通用模型" },
       { value: "grok-build-0.1", label: "Grok Build 0.1", description: "Agent 与编码任务" },
     ],
@@ -239,8 +244,8 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.deepseek.com/v1",
     icon: deepseekIcon,
     modelOptions: [
-      { value: "deepseek-v4-pro", label: "DeepSeek V4 Pro", description: "推荐 · 复杂推理与 Agent" },
-      { value: "deepseek-v4-flash", label: "DeepSeek V4 Flash", description: "低延迟与高性价比" },
+      { value: "deepseek-v4-pro", label: "DeepSeek V4 Pro", description: "推荐 · 复杂推理与 Agent", contextWindow: 1000000 },
+      { value: "deepseek-v4-flash", label: "DeepSeek V4 Flash", description: "低延迟与高性价比", contextWindow: 1000000 },
     ],
   },
   {
@@ -252,13 +257,13 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     icon: qwenIcon,
     modelOptions: [
-      { value: "qwen3.7-plus", label: "Qwen3.7 Plus", description: "推荐 · Agent、工具调用与 1M 上下文" },
-      { value: "qwen3.7-max", label: "Qwen3.7 Max", description: "旗舰复杂推理任务" },
-      { value: "qwen3.7-flash", label: "Qwen3.7 Flash", description: "最新轻量 · 高频低延迟任务" },
-      { value: "qwen3.6-flash", label: "Qwen3.6 Flash", description: "高频低延迟任务" },
-      { value: "qwen3-coder-plus", label: "Qwen3 Coder Plus", description: "1M 上下文编码 Agent" },
+      { value: "qwen3.7-plus", label: "Qwen3.7 Plus", description: "推荐 · Agent、工具调用与 1M 上下文", contextWindow: 1000000 },
+      { value: "qwen3.7-max", label: "Qwen3.7 Max", description: "旗舰复杂推理任务", contextWindow: 1000000 },
+      { value: "qwen3.7-flash", label: "Qwen3.7 Flash", description: "最新轻量 · 高频低延迟任务", contextWindow: 1000000 },
+      { value: "qwen3.6-flash", label: "Qwen3.6 Flash", description: "高频低延迟任务", contextWindow: 1000000 },
+      { value: "qwen3-coder-plus", label: "Qwen3 Coder Plus", description: "1M 上下文编码 Agent", contextWindow: 1000000 },
       { value: "qwen3-coder-next", label: "Qwen3 Coder Next", description: "新一代编码与工具调用" },
-      { value: "qwen-long", label: "Qwen Long", description: "超长文档 · 10M 上下文" },
+      { value: "qwen-long", label: "Qwen Long", description: "超长文档 · 10M 上下文", contextWindow: 10000000 },
     ],
   },
   {
@@ -270,11 +275,11 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.moonshot.cn/v1",
     icon: kimiIcon,
     modelOptions: [
-      { value: "kimi-k2.6", label: "Kimi K2.6", description: "推荐 · Agent 与长上下文" },
-      { value: "kimi-k2.7-code", label: "Kimi K2.7 Code", description: "最新编码 Agent · 256K 上下文" },
-      { value: "kimi-k2.7-code-highspeed", label: "Kimi K2.7 Code Highspeed", description: "高速编码 Agent" },
-      { value: "kimi-k2.5", label: "Kimi K2.5", description: "多模态与通用任务" },
-      { value: "kimi-k2-thinking", label: "Kimi K2 Thinking", description: "深度推理任务" },
+      { value: "kimi-k2.6", label: "Kimi K2.6", description: "推荐 · Agent 与长上下文", contextWindow: 262144 },
+      { value: "kimi-k2.7-code", label: "Kimi K2.7 Code", description: "最新编码 Agent · 256K 上下文", contextWindow: 262144 },
+      { value: "kimi-k2.7-code-highspeed", label: "Kimi K2.7 Code Highspeed", description: "高速编码 Agent", contextWindow: 262144 },
+      { value: "kimi-k2.5", label: "Kimi K2.5", description: "多模态与通用任务", contextWindow: 262144 },
+      { value: "kimi-k2-thinking", label: "Kimi K2 Thinking", description: "深度推理任务", contextWindow: 262144 },
     ],
   },
   {
@@ -286,11 +291,11 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
     icon: doubaoIcon,
     modelOptions: [
-      { value: "doubao-seed-2-0-pro-260215", label: "Doubao Seed 2.0 Pro", description: "推荐 · 旗舰 Agent 通用模型" },
-      { value: "doubao-seed-2-0-mini-260428", label: "Doubao Seed 2.0 Mini", description: "新快照 · 多模态与推理" },
-      { value: "doubao-seed-2-0-lite-260428", label: "Doubao Seed 2.0 Lite", description: "新快照 · 高频低成本任务" },
-      { value: "doubao-seed-2-0-code-preview-260215", label: "Doubao Seed 2.0 Code Preview", description: "预览版 · 编码 Agent" },
-      { value: "doubao-1-5-pro-256k-250115", label: "Doubao 1.5 Pro 256K", description: "长上下文通用模型" },
+      { value: "doubao-seed-2-0-pro-260215", label: "Doubao Seed 2.0 Pro", description: "推荐 · 旗舰 Agent 通用模型", contextWindow: 256000 },
+      { value: "doubao-seed-2-0-mini-260428", label: "Doubao Seed 2.0 Mini", description: "新快照 · 多模态与推理", contextWindow: 256000 },
+      { value: "doubao-seed-2-0-lite-260428", label: "Doubao Seed 2.0 Lite", description: "新快照 · 高频低成本任务", contextWindow: 256000 },
+      { value: "doubao-seed-2-0-code-preview-260215", label: "Doubao Seed 2.0 Code Preview", description: "预览版 · 编码 Agent", contextWindow: 262144 },
+      { value: "doubao-1-5-pro-256k-250115", label: "Doubao 1.5 Pro 256K", description: "长上下文通用模型", contextWindow: 128000 },
     ],
   },
   {
@@ -302,12 +307,12 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://api.minimaxi.com/anthropic/v1",
     icon: minimaxIcon,
     modelOptions: [
-      { value: "MiniMax-M3", label: "MiniMax M3", description: "推荐 · Agent 与长上下文" },
-      { value: "MiniMax-M2.7", label: "MiniMax M2.7", description: "推理与工具调用" },
-      { value: "MiniMax-M2.7-highspeed", label: "MiniMax M2.7 Highspeed", description: "高速推理版本" },
-      { value: "MiniMax-M2.5", label: "MiniMax M2.5", description: "高性价比模型" },
-      { value: "MiniMax-M2.5-highspeed", label: "MiniMax M2.5 Highspeed", description: "高速高性价比版本" },
-      { value: "MiniMax-M2.1", label: "MiniMax M2.1", description: "稳定工具调用模型" },
+      { value: "MiniMax-M3", label: "MiniMax M3", description: "推荐 · Agent 与长上下文", contextWindow: 1000000 },
+      { value: "MiniMax-M2.7", label: "MiniMax M2.7", description: "推理与工具调用", contextWindow: 204800 },
+      { value: "MiniMax-M2.7-highspeed", label: "MiniMax M2.7 Highspeed", description: "高速推理版本", contextWindow: 204800 },
+      { value: "MiniMax-M2.5", label: "MiniMax M2.5", description: "高性价比模型", contextWindow: 204800 },
+      { value: "MiniMax-M2.5-highspeed", label: "MiniMax M2.5 Highspeed", description: "高速高性价比版本", contextWindow: 204800 },
+      { value: "MiniMax-M2.1", label: "MiniMax M2.1", description: "稳定工具调用模型", contextWindow: 204800 },
     ],
   },
   {
@@ -319,14 +324,14 @@ export const AI_PROVIDER_TEMPLATES: readonly AiProviderTemplate[] = [
     baseUrl: "https://open.bigmodel.cn/api/paas/v4",
     icon: zhipuIcon,
     modelOptions: [
-      { value: "glm-5.2", label: "GLM-5.2", description: "推荐 · 通用与 Agent 任务" },
-      { value: "glm-5.1", label: "GLM-5.1", description: "复杂推理与编码" },
-      { value: "glm-5-turbo", label: "GLM-5 Turbo", description: "低延迟工具调用" },
-      { value: "glm-5", label: "GLM-5", description: "稳定旗舰模型" },
-      { value: "glm-5v-turbo", label: "GLM-5V Turbo", description: "多模态 Coding 与图表理解" },
-      { value: "glm-4.7", label: "GLM-4.7", description: "稳定通用模型" },
-      { value: "glm-4.7-flashx", label: "GLM-4.7 FlashX", description: "高速增强版本" },
-      { value: "glm-4.7-flash", label: "GLM-4.7 Flash", description: "快速轻量任务" },
+      { value: "glm-5.2", label: "GLM-5.2", description: "推荐 · 通用与 Agent 任务", contextWindow: 1000000 },
+      { value: "glm-5.1", label: "GLM-5.1", description: "复杂推理与编码", contextWindow: 200000 },
+      { value: "glm-5-turbo", label: "GLM-5 Turbo", description: "低延迟工具调用", contextWindow: 200000 },
+      { value: "glm-5", label: "GLM-5", description: "稳定旗舰模型", contextWindow: 204800 },
+      { value: "glm-5v-turbo", label: "GLM-5V Turbo", description: "多模态 Coding 与图表理解", contextWindow: 200000 },
+      { value: "glm-4.7", label: "GLM-4.7", description: "稳定通用模型", contextWindow: 204800 },
+      { value: "glm-4.7-flashx", label: "GLM-4.7 FlashX", description: "高速增强版本", contextWindow: 200000 },
+      { value: "glm-4.7-flash", label: "GLM-4.7 Flash", description: "快速轻量任务", contextWindow: 200000 },
     ],
   },
   {
@@ -407,60 +412,186 @@ export function AiModelIdControl({
   value,
   onChange,
   ariaLabel = "Model ID",
+  fetchedOptions,
+  onFetchModels,
+  fetching = false,
+  fetchDisabledReason,
+  onModelOptionPicked,
 }: {
   template: AiProviderTemplate | null;
   value: string;
   onChange: (value: string) => void;
   ariaLabel?: string;
+  /** Model ids pulled from the configured endpoint; merged ahead of the recommendations. */
+  fetchedOptions?: readonly string[];
+  onFetchModels?: () => void;
+  fetching?: boolean;
+  /** Why fetching is unavailable; shown as the button tooltip while disabled. */
+  fetchDisabledReason?: string;
+  /** Recommended-option picks carry their default context window so the form can prefill it. */
+  onModelOptionPicked?: (contextWindow?: number) => void;
 }) {
   const { t } = useTranslation("settings");
   const isRecommendedModel = Boolean(template?.modelOptions.some((option) => option.value === value));
   const [customMode, setCustomMode] = useState(() => !template || !isRecommendedModel);
-  const options = useMemo(() => [
-    ...(template?.modelOptions ?? []).map((option) => ({ ...option, description: t("providerModelOption") })),
-    { value: CUSTOM_MODEL_VALUE, label: t("customModelId"), description: t("otherModelId") },
-  ], [t, template]);
+  const options = useMemo<TerminalSelectOption[]>(() => {
+    const recommended = template?.modelOptions ?? [];
+    const recommendedIds = new Set(recommended.map((option) => option.value));
+    const fetched = (fetchedOptions ?? [])
+      .filter((id) => !recommendedIds.has(id))
+      .map((id) => ({ value: id, label: id, description: t("fetchedModelOption") }));
+    return [
+      ...fetched,
+      ...recommended.map((option) => ({ ...option, description: t("providerModelOption") })),
+      { value: CUSTOM_MODEL_VALUE, label: t("customModelId"), description: t("otherModelId") },
+    ];
+  }, [t, template, fetchedOptions]);
 
-  if (!template || customMode) {
+  // A fetch that returns the current value means the list now covers it, so the
+  // picker can leave free-text mode on its own.
+  useEffect(() => {
+    if (customMode && fetchedOptions?.includes(value)) setCustomMode(false);
+  }, [customMode, fetchedOptions, value]);
+
+  const fetchButton = onFetchModels ? (
+    <button
+      type="button"
+      className="ai-model-id-fetch"
+      onClick={onFetchModels}
+      disabled={fetching || Boolean(fetchDisabledReason)}
+      title={fetchDisabledReason || t("fetchLatestModels")}
+    >
+      <RefreshCw size={12} className={clsx(fetching && "spinning")} />
+      {fetching ? t("fetchingModels") : t("fetchLatestModels")}
+    </button>
+  ) : null;
+
+  const canPickFromList = Boolean(template) || (fetchedOptions?.length ?? 0) > 0;
+  if (!canPickFromList || customMode) {
     return (
-      <div className="ai-model-id-custom">
-        <input
-          aria-label={ariaLabel}
-          value={value}
-          placeholder={t("customModelIdPlaceholder")}
-          onChange={(event) => onChange(event.target.value)}
-        />
-        {template ? (
-          <button
-            type="button"
-            onClick={() => {
-              setCustomMode(false);
-              onChange(template.modelOptions[0]?.value ?? "");
-            }}
-          >
-            {t("chooseRecommendedModel")}
-          </button>
-        ) : null}
+      <div className="ai-model-id-row">
+        <div className="ai-model-id-custom">
+          <input
+            aria-label={ariaLabel}
+            value={value}
+            placeholder={t("customModelIdPlaceholder")}
+            onChange={(event) => onChange(event.target.value)}
+          />
+          {canPickFromList ? (
+            <button
+              type="button"
+              onClick={() => {
+                setCustomMode(false);
+                if (template && !template.modelOptions.some((option) => option.value === value) && !(fetchedOptions ?? []).includes(value)) {
+                  const first = template.modelOptions[0];
+                  onChange(first?.value ?? "");
+                  onModelOptionPicked?.(first?.contextWindow);
+                }
+              }}
+            >
+              {template ? t("chooseRecommendedModel") : t("selectModel")}
+            </button>
+          ) : null}
+        </div>
+        {fetchButton}
       </div>
     );
   }
 
   return (
-    <TerminalSelect
-      ariaLabel={ariaLabel}
-      value={value}
-      placeholder={t("selectModel")}
-      options={options}
-      onChange={(next) => {
-        if (next === CUSTOM_MODEL_VALUE) {
-          setCustomMode(true);
-          onChange("");
-          return;
-        }
-        onChange(next);
-      }}
-      menuMinWidth={320}
-    />
+    <div className="ai-model-id-row">
+      <TerminalSelect
+        ariaLabel={ariaLabel}
+        value={value}
+        placeholder={t("selectModel")}
+        options={options}
+        onChange={(next) => {
+          if (next === CUSTOM_MODEL_VALUE) {
+            setCustomMode(true);
+            onChange("");
+            return;
+          }
+          onChange(next);
+          onModelOptionPicked?.(template?.modelOptions.find((option) => option.value === next)?.contextWindow);
+        }}
+        menuMinWidth={320}
+      />
+      {fetchButton}
+    </div>
+  );
+}
+
+export function AiProviderIdControl({
+  value,
+  onChange,
+  ariaLabel = "Provider",
+  includeLocalCli = true,
+}: {
+  value: string;
+  onChange: (value: string) => void;
+  ariaLabel?: string;
+  /** Local CLI channels have their own guided flow; dropdowns can hide them. */
+  includeLocalCli?: boolean;
+}) {
+  const { t } = useTranslation("settings");
+  const [showAll, setShowAll] = useState(false);
+  const [typedMode, setTypedMode] = useState(false);
+  const trimmed = value.trim();
+  const recommendedOptions = useMemo(() => aiRecommendedProviderOptions(), []);
+  // A saved id outside the short list (e.g. deepseek) keeps the full catalog
+  // open so the dropdown can actually show the current selection.
+  const expandForValue = trimmed !== ""
+    && !recommendedOptions.some((option) => option.value === trimmed)
+    && aiProviderCatalogOptions().some((option) => option.value === trimmed);
+  const expanded = showAll || expandForValue;
+  const options = useMemo<TerminalSelectOption[]>(
+    () => [
+      ...(expanded ? aiProviderCatalogOptions() : recommendedOptions)
+        .filter((option) => includeLocalCli || !aiProviderUsesLocalCli(option.value)),
+      {
+        value: CUSTOM_PROVIDER_OPTION_VALUE,
+        label: t("providerCustomOption"),
+        description: t("providerCustomOptionDescription")
+      }
+    ],
+    [expanded, includeLocalCli, recommendedOptions, t]
+  );
+  // True when the id is not one the visible options offer, so the select and
+  // the free-text field cannot disagree about what is selected.
+  const typing = typedMode || trimmed === "" || !options.some((option) => option.value === trimmed);
+  return (
+    <>
+      <TerminalSelect
+        value={typing ? CUSTOM_PROVIDER_OPTION_VALUE : trimmed}
+        options={options}
+        onChange={(next) => {
+          if (next === CUSTOM_PROVIDER_OPTION_VALUE) {
+            setTypedMode(true);
+            return;
+          }
+          setTypedMode(false);
+          onChange(next);
+        }}
+        ariaLabel={ariaLabel}
+      />
+      {typing ? (
+        <input
+          aria-label={ariaLabel}
+          value={value}
+          placeholder="openai-compatible"
+          onChange={(event) => onChange(event.target.value)}
+        />
+      ) : (
+        <button
+          type="button"
+          className="ai-provider-catalog-toggle"
+          aria-expanded={expanded}
+          onClick={() => setShowAll((current) => !current)}
+        >
+          {t(expanded ? "providerCatalogHideAll" : "providerCatalogShowAll")}
+        </button>
+      )}
+    </>
   );
 }
 
@@ -485,30 +616,13 @@ export function AiProviderSetupFlow({
     contextWindow: undefined,
   });
   const [validationMessage, setValidationMessage] = useState("");
-  // True while the custom connection is typing a Provider id that the catalog
-  // does not list; the dropdown stays the default path.
-  const [useCustomProviderId, setUseCustomProviderId] = useState(false);
-  // A custom connection only needs "which protocol", and every vendor/gateway
-  // is reached through one of the recommended ids. The full SDK list stays one
-  // click away for the rare endpoint that needs its own entry.
-  const [showAllProviders, setShowAllProviders] = useState(false);
-  const customProviderOptions = useMemo<TerminalSelectOption[]>(
-    () => [
-      ...(showAllProviders ? aiProviderCatalogOptions() : aiRecommendedProviderOptions()),
-      {
-        value: CUSTOM_PROVIDER_OPTION_VALUE,
-        label: t("settings:providerCustomOption"),
-        description: t("settings:providerCustomOptionDescription")
-      }
-    ],
-    [showAllProviders, t]
-  );
-  // True when the draft id is not one the visible options offer, so the select
-  // and the free-text field cannot disagree about what is selected.
-  const usesTypedProviderId =
-    useCustomProviderId ||
-    draft.provider.trim() === "" ||
-    !customProviderOptions.some((option) => option.value === draft.provider.trim());
+  // Tracks whether the Context window field was edited by hand; until then a
+  // recommended-model pick may prefill it with the template default.
+  const [contextTouched, setContextTouched] = useState(false);
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [fetchMessage, setFetchMessage] = useState<string | null>(null);
+  const [fetchFailed, setFetchFailed] = useState(false);
   const [authMode, setAuthMode] = useState<"api-key" | "local-cli">("api-key");
   const [localStatuses, setLocalStatuses] = useState<AiLocalCliStatus[]>([]);
   const [checkingLocalAuth, setCheckingLocalAuth] = useState(false);
@@ -532,21 +646,78 @@ export function AiProviderSetupFlow({
     const baseName = template.id === "custom" ? t("settings:customModelName") : t(`settings:aiProviderName_${template.id}`);
     setSelectedId(template.id);
     setAuthMode("api-key");
-    setUseCustomProviderId(false);
     setDraft({
       name: createUniqueAiModelName(baseName, existingNames),
       provider: template.provider,
       model: template.modelOptions[0]?.value ?? "",
       baseUrl: template.baseUrl,
       apiKey: "",
-      contextWindow: undefined,
+      contextWindow: template.modelOptions[0]?.contextWindow,
     });
     setValidationMessage("");
+    setContextTouched(false);
+    setFetchedModels([]);
+    setFetchMessage(null);
+    setFetchFailed(false);
   };
 
   const updateDraft = (patch: Partial<AiProviderSetupValue>) => {
     setDraft((current) => ({ ...current, ...patch }));
     setValidationMessage("");
+    // A fetched list only describes the endpoint it came from.
+    if ("provider" in patch || "baseUrl" in patch || "apiKey" in patch) {
+      setFetchedModels([]);
+      setFetchMessage(null);
+      setFetchFailed(false);
+    }
+  };
+
+  const applyProviderChange = (provider: string) => {
+    if (provider === "openai-codex-cli") {
+      updateDraft({ provider, baseUrl: "local://codex-cli", apiKey: "" });
+      return;
+    }
+    if (provider === "claude-code") {
+      updateDraft({ provider, baseUrl: "local://claude-code", apiKey: "" });
+      return;
+    }
+    if (aiProviderUsesLocalCli(draft.provider) && draft.baseUrl.startsWith("local://")) {
+      updateDraft({ provider, baseUrl: selectedTemplate && selectedTemplate.id !== "custom" ? selectedTemplate.baseUrl : "" });
+      return;
+    }
+    updateDraft({ provider });
+  };
+
+  const localCliDraft = authMode === "local-cli" || aiProviderUsesLocalCli(draft.provider);
+  const canFetchModels = !localCliDraft && Boolean(draft.baseUrl.trim()) && Boolean(draft.apiKey.trim());
+
+  const fetchModels = async () => {
+    setFetchingModels(true);
+    setFetchMessage(null);
+    setFetchFailed(false);
+    try {
+      const list = await listAiModels({
+        id: "setup-draft",
+        name: draft.name.trim() || "draft",
+        provider: draft.provider.trim(),
+        model: draft.model.trim(),
+        baseUrl: draft.baseUrl.trim(),
+        apiKey: draft.apiKey.trim() || undefined,
+      });
+      if (!list) {
+        setFetchFailed(true);
+        setFetchMessage(t("settings:fetchModelsDesktopOnly"));
+        return;
+      }
+      setFetchedModels(list);
+      setFetchMessage(t("settings:modelsFetchedCount", { count: list.length }));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setFetchFailed(true);
+      setFetchMessage(message);
+    } finally {
+      setFetchingModels(false);
+    }
   };
 
   const localConnection = selectedTemplate ? AI_LOCAL_CONNECTIONS[selectedTemplate.id] ?? null : null;
@@ -689,41 +860,10 @@ export function AiProviderSetupFlow({
         </label>
         <label>
           <span>Provider</span>
-          {isCustom ? (
-            <>
-              <TerminalSelect
-                value={usesTypedProviderId ? CUSTOM_PROVIDER_OPTION_VALUE : draft.provider.trim()}
-                options={customProviderOptions}
-                onChange={(value) => {
-                  if (value === CUSTOM_PROVIDER_OPTION_VALUE) {
-                    setUseCustomProviderId(true);
-                    return;
-                  }
-                  setUseCustomProviderId(false);
-                  updateDraft({ provider: value });
-                }}
-                ariaLabel="Provider"
-              />
-              {usesTypedProviderId ? (
-                <input
-                  aria-label="Provider"
-                  value={draft.provider}
-                  placeholder="openai-compatible"
-                  onChange={(event) => updateDraft({ provider: event.target.value })}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="ai-provider-catalog-toggle"
-                  aria-expanded={showAllProviders}
-                  onClick={() => setShowAllProviders((value) => !value)}
-                >
-                  {t(showAllProviders ? "settings:providerCatalogHideAll" : "settings:providerCatalogShowAll")}
-                </button>
-              )}
-            </>
-          ) : (
+          {authMode === "local-cli" ? (
             <input value={draft.provider} readOnly />
+          ) : (
+            <AiProviderIdControl value={draft.provider} onChange={applyProviderChange} includeLocalCli={false} />
           )}
           <small>{t(isCustom ? "settings:customProviderHelp" : "settings:templateProviderHelp")}</small>
         </label>
@@ -734,24 +874,32 @@ export function AiProviderSetupFlow({
             template={isCustom ? null : selectedTemplate}
             value={draft.model}
             onChange={(model) => updateDraft({ model })}
+            fetchedOptions={fetchedModels}
+            onFetchModels={fetchModels}
+            fetching={fetchingModels}
+            fetchDisabledReason={canFetchModels ? undefined : t("settings:fetchModelsNeedCredentials")}
+            onModelOptionPicked={(contextWindow) => {
+              if (!contextTouched) updateDraft({ contextWindow });
+            }}
           />
-          <small>{t("settings:modelSelectionHelp")}</small>
+          <small className={clsx(fetchFailed && "invalid")}>{fetchMessage ?? t("settings:modelSelectionHelp")}</small>
         </label>
         <label>
-          <span>Context window (tokens)</span>
+          <span>{t("settings:contextWindowLabel")}</span>
           <input
             type="number"
             min={1}
             step={1}
             value={draft.contextWindow ?? ""}
-            placeholder="例如 256000"
+            placeholder={t("settings:contextWindowPlaceholder")}
             onChange={(event) => {
               const value = event.target.value.trim();
               const parsed = Number(value);
+              setContextTouched(true);
               updateDraft({ contextWindow: value && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined });
             }}
           />
-          <small>{isCustom ? "填写正整数；留空时运行时按 256K 回退。" : "可填写未列出容量的回退值；Cline 精确目录匹配仍优先。"}</small>
+          <small>{t(isBuiltInProviderId(draft.provider) ? "settings:contextWindowHelpCatalog" : "settings:contextWindowHelpCustom")}</small>
         </label>
         <label className="wide">
           <span>Base URL</span>

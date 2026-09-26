@@ -577,6 +577,48 @@
   color: var(--text);
 }
 
+/* Model ID row: picker/input on the left, "fetch latest models" on the right. */
+.ai-model-id-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+  align-items: start;
+}
+
+.ai-model-id-fetch {
+  min-height: 36px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border: 1px solid rgba(139, 92, 246, 0.34);
+  border-radius: 6px;
+  background: rgba(139, 92, 246, 0.08);
+  color: #cdbbf4;
+  padding: 0 10px;
+  font-size: 10px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.ai-model-id-fetch:hover:not(:disabled) {
+  border-color: rgba(159, 130, 231, 0.6);
+  color: var(--text);
+}
+
+.ai-model-id-fetch:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.ai-model-id-fetch .spinning {
+  animation: ai-provider-spin 800ms linear infinite;
+}
+
+.ai-provider-form-grid label > small.invalid {
+  color: #ff8397;
+}
+
 .ai-provider-setup-footer.form-footer > span.invalid {
   color: #ff8397;
 }

@@ -3127,6 +3127,154 @@ pub(crate) async fn ai_test_connection(
     })
 }
 
+/// 拉取模型列表只需要连接信息（provider/baseUrl/apiKey），不要求 Model ID——
+/// 用户通常还没选定模型。apiKey 为空时回落到已保存配置的 Key，与连接测试一致。
+struct AiModelListAccess {
+    provider: String,
+    base_url: String,
+    api_key: String,
+}
+
+fn resolve_ai_model_list_access(
+    stored: Option<&AiConfig>,
+    update: &AiModelConfigUpdate,
+) -> Result<AiModelListAccess, String> {
+    let provider = update.provider.trim().to_string();
+    let base_url = update.base_url.trim().trim_end_matches('/').to_string();
+    if provider.is_empty() || base_url.is_empty() {
+        return Err("请补全选中模型的 Provider 和 Base URL".to_string());
+    }
+    let id = update.id.trim();
+    let stored_model = stored.and_then(|config| config.models.iter().find(|item| item.id == id));
+    let stored_key = stored_model
+        .map(|item| item.api_key.trim())
+        .filter(|value| !value.is_empty());
+    let api_key = update
+        .api_key
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .or(stored_key)
+        .unwrap_or_default()
+        .to_string();
+    if api_key.is_empty() {
+        let label = if update.name.trim().is_empty() {
+            provider.as_str()
+        } else {
+            update.name.trim()
+        };
+        return Err(format!("AI 模型配置缺少 API Key：{}", label));
+    }
+    Ok(AiModelListAccess {
+        provider,
+        base_url,
+        api_key,
+    })
+}
+
+/// OpenAI 与 Anthropic 的模型列表响应都是 `data[].id` 包装。
+fn parse_data_wrapped_model_list(payload: &serde_json::Value) -> Vec<String> {
+    payload
+        .get("data")
+        .and_then(|data| data.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("id").and_then(|id| id.as_str()))
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Gemini 的 `/models` 同时返回 embedding 等非生成模型，只保留支持
+/// generateContent 的条目，并去掉 `models/` 资源名前缀。
+fn parse_gemini_model_list(payload: &serde_json::Value) -> Vec<String> {
+    payload
+        .get("models")
+        .and_then(|models| models.as_array())
+        .map(|items| {
+            items
+                .iter()
+                .filter(|item| {
+                    item.get("supportedGenerationMethods")
+                        .and_then(|methods| methods.as_array())
+                        .map(|methods| {
+                            methods
+                                .iter()
+                                .any(|method| method.as_str() == Some("generateContent"))
+                        })
+                        .unwrap_or(false)
+                })
+                .filter_map(|item| item.get("name").and_then(|name| name.as_str()))
+                .map(|name| name.trim().trim_start_matches("models/").to_string())
+                .filter(|name| !name.is_empty())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[tauri::command]
+pub(crate) async fn ai_list_models(
+    app: tauri::AppHandle,
+    model: AiModelConfigUpdate,
+) -> Result<Vec<String>, String> {
+    let stored = match load_ai_config(&app) {
+        Ok(config) => Some(config),
+        Err(error) if is_unconfigured_ai_config_error(&error) => None,
+        Err(error) => return Err(error),
+    };
+    let access = resolve_ai_model_list_access(stored.as_ref(), &model)?;
+    if ai_provider_uses_local_cli(&access.provider) {
+        return Err("本机 CLI 供应商不提供模型列表接口，请手动填写 Model ID".to_string());
+    }
+    let protocol = ai_connection_probe_protocol(&access.provider);
+    let endpoint = format!("{}/models", access.base_url);
+    let client = reqwest_client()?;
+    let request = match protocol {
+        AiConnectionProbeProtocol::AnthropicMessages => client
+            .get(endpoint)
+            .header("x-api-key", &access.api_key)
+            .header("anthropic-version", "2023-06-01"),
+        AiConnectionProbeProtocol::GeminiGenerateContent => client
+            .get(endpoint)
+            .header("x-goog-api-key", &access.api_key),
+        AiConnectionProbeProtocol::OpenAiResponses | AiConnectionProbeProtocol::OpenAiChat => {
+            client
+                .get(endpoint)
+                .header(AUTHORIZATION, format!("Bearer {}", access.api_key))
+        }
+    };
+    let response = request
+        .send()
+        .await
+        .map_err(|err| format!("拉取模型列表失败: {}", err))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let text = response.text().await.unwrap_or_default();
+        return Err(format!(
+            "拉取模型列表 HTTP {}: {}",
+            status,
+            sanitize_secret(&text, &access.api_key)
+        ));
+    }
+    let payload: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|err| format!("模型列表响应不是有效 JSON: {}", err))?;
+    let mut models = match protocol {
+        AiConnectionProbeProtocol::GeminiGenerateContent => parse_gemini_model_list(&payload),
+        _ => parse_data_wrapped_model_list(&payload),
+    };
+    models.sort();
+    models.dedup();
+    if models.is_empty() {
+        return Err("供应商返回的模型列表为空".to_string());
+    }
+    Ok(models)
+}
+
 #[tauri::command]
 pub(crate) fn proxy_config_summary() -> Result<ProxyConfigSummary, String> {
     Ok(proxy_config_summary_from(load_proxy_config()?))
@@ -6515,6 +6663,93 @@ wire_api = "responses"
             ai_connection_probe_endpoint(&deepseek).expect("compatible endpoint"),
             "https://api.deepseek.com/v1/chat/completions"
         );
+    }
+
+    #[test]
+    fn parse_data_wrapped_model_list_reads_openai_and_anthropic_shapes() {
+        let payload = json!({
+            "object": "list",
+            "data": [
+                { "id": "gpt-test-newest", "object": "model" },
+                { "id": " claude-test-model " },
+                { "id": "  " },
+                { "name": "missing-id" }
+            ]
+        });
+        assert_eq!(
+            parse_data_wrapped_model_list(&payload),
+            vec!["gpt-test-newest".to_string(), "claude-test-model".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_gemini_model_list_keeps_only_generative_models() {
+        let payload = json!({
+            "models": [
+                {
+                    "name": "models/gemini-test-flash",
+                    "supportedGenerationMethods": ["generateContent", "countTokens"]
+                },
+                {
+                    "name": "models/embedding-test",
+                    "supportedGenerationMethods": ["embedContent"]
+                },
+                { "name": "models/no-methods" }
+            ]
+        });
+        assert_eq!(
+            parse_gemini_model_list(&payload),
+            vec!["gemini-test-flash".to_string()]
+        );
+    }
+
+    #[test]
+    fn parse_model_lists_tolerate_missing_sections() {
+        assert!(parse_data_wrapped_model_list(&json!({})).is_empty());
+        assert!(parse_data_wrapped_model_list(&json!({ "data": {} })).is_empty());
+        assert!(parse_gemini_model_list(&json!({})).is_empty());
+        assert!(parse_gemini_model_list(&json!({ "models": {} })).is_empty());
+    }
+
+    #[test]
+    fn model_list_access_does_not_require_a_model_id_and_reuses_the_saved_key() {
+        let mut config = config_with_skills(
+            desic_storage_config::default_ai_skill_definitions(),
+            Vec::new(),
+        );
+        config.models.push(AiModelConfig {
+            id: "model-openai".to_string(),
+            name: "OpenAI".to_string(),
+            provider: "openai-native".to_string(),
+            model: "gpt-test-model".to_string(),
+            base_url: "https://api.example.invalid/v1".to_string(),
+            api_key: "placeholder-openai-key".to_string(),
+            permission_mode: "advisor".to_string(),
+            reasoning_depth: "medium".to_string(),
+            context_window: None,
+        });
+        let request = AiModelConfigUpdate {
+            id: "model-openai".to_string(),
+            name: "OpenAI edited".to_string(),
+            provider: "openai-native".to_string(),
+            model: String::new(),
+            base_url: "https://api.example.invalid/v1/".to_string(),
+            api_key: None,
+            permission_mode: Some("advisor".to_string()),
+            reasoning_depth: Some("medium".to_string()),
+            context_window: None,
+        };
+        let access = resolve_ai_model_list_access(Some(&config), &request)
+            .expect("model list access should not require a model id");
+        assert_eq!(access.api_key, "placeholder-openai-key");
+        assert_eq!(access.base_url, "https://api.example.invalid/v1");
+
+        let missing_key = AiModelConfigUpdate {
+            id: "model-new".to_string(),
+            name: "Fresh".to_string(),
+            ..request
+        };
+        assert!(resolve_ai_model_list_access(Some(&config), &missing_key).is_err());
     }
 
     #[test]

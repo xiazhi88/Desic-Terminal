@@ -410,10 +410,23 @@ function knownModelsFor(config) {
   };
 }
 
+// Vendor-documented corrections for entries where the upstream @cline/llms
+// catalog lags behind the provider. Checked before the catalog so the saved
+// value (and template prefill) is what the runtime actually enforces.
+// deepseek-v4-flash: DeepSeek documents a 1M context window for both V4
+// models; @cline/llms still lists 128000.
+const CATALOG_CONTEXT_WINDOW_OVERRIDES = {
+  "deepseek:deepseek-v4-flash": 1000000
+};
+
 async function catalogContextWindowFor(config) {
   const providerId = normalizeProviderId(config);
   const modelId = String(config.model || "").trim();
   if (!modelId) return { contextWindow: DEFAULT_CONTEXT_WINDOW, contextWindowSource: "fallback" };
+  const override = CATALOG_CONTEXT_WINDOW_OVERRIDES[`${providerId}:${modelId}`];
+  if (Number.isFinite(override) && override > 0) {
+    return { contextWindow: override, contextWindowSource: "catalogOverride" };
+  }
   if (typeof getModelsForProvider === "function") {
     const models = await getModelsForProvider(providerId).catch(() => null);
     const contextWindow = models?.[modelId]?.contextWindow;

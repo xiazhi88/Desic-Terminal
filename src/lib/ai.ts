@@ -42,6 +42,10 @@ export async function testAiConnection(model: AiModelConfigUpdate): Promise<AiCo
   return invokeDesktop<AiConnectionTestResult>("ai_test_connection", { model });
 }
 
+export async function listAiModels(model: AiModelConfigUpdate): Promise<string[] | null> {
+  return invokeDesktop<string[]>("ai_list_models", { model });
+}
+
 export async function createAiSession(title?: string): Promise<AiSessionSnapshot | null> {
   return invokeOptional<AiSessionSnapshot>("ai_create_session", { request: { title } });
 }

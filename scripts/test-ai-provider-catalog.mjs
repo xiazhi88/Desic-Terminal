@@ -92,6 +92,58 @@ assert.equal(
 );
 assert.ok(full.every((option) => option.description.includes(option.value)));
 
+// 6) Template-prefilled contextWindow defaults must not disagree with the
+//    @cline/llms catalog: the runtime resolves the window from the catalog
+//    first, so a conflicting template value would be silently ignored. The
+//    only sanctioned exceptions are the vendor-documented overrides mirrored
+//    in cline-sidecar.mjs CATALOG_CONTEXT_WINDOW_OVERRIDES (checked before
+//    the catalog at runtime). Models missing from the catalog keep their
+//    vendor-sourced defaults unchecked.
+//    Keep in sync with scripts/cline-sidecar.mjs CATALOG_CONTEXT_WINDOW_OVERRIDES.
+const CATALOG_CONTEXT_WINDOW_OVERRIDES = {
+  "deepseek:deepseek-v4-flash": 1000000
+};
+const templateContextWindows = [];
+let scannedProvider = null;
+for (const line of flowSource.split("\n")) {
+  const providerMatch = line.match(/^\s{4}provider: "([^"]+)",$/);
+  if (providerMatch) scannedProvider = providerMatch[1];
+  const optionMatch = line.match(/^\s{6}\{ value: "([^"]+)".*contextWindow: (\d+) \},$/);
+  if (optionMatch && scannedProvider) {
+    templateContextWindows.push({
+      provider: scannedProvider,
+      model: optionMatch[1],
+      contextWindow: Number(optionMatch[2])
+    });
+  }
+}
+assert.ok(
+  templateContextWindows.length >= 50,
+  `expected template contextWindow defaults, found ${templateContextWindows.length}`
+);
+let catalogChecked = 0;
+for (const entry of templateContextWindows) {
+  const catalogModels = sdk.getProviderCollectionSync(entry.provider)?.models ?? {};
+  const catalogWindow = catalogModels[entry.model]?.contextWindow;
+  if (typeof catalogWindow !== "number") continue;
+  catalogChecked += 1;
+  const override = CATALOG_CONTEXT_WINDOW_OVERRIDES[`${entry.provider}:${entry.model}`];
+  if (override) {
+    assert.equal(
+      entry.contextWindow,
+      override,
+      `template default contextWindow for ${entry.provider}/${entry.model} (${entry.contextWindow}) disagrees with the sanctioned override (${override}); the catalog lists ${catalogWindow}`
+    );
+    continue;
+  }
+  assert.equal(
+    entry.contextWindow,
+    catalogWindow,
+    `template default contextWindow for ${entry.provider}/${entry.model} (${entry.contextWindow}) disagrees with the @cline/llms catalog (${catalogWindow})`
+  );
+}
+assert.ok(catalogChecked > 20, `expected catalog cross-checks, got ${catalogChecked}`);
+
 console.log(
   `ai provider catalog: ok (${AI_BUILT_IN_PROVIDER_IDS.length} built-in providers, ${short.length} shown by default, ${templateProviders.length} template providers verified against @cline/llms)`
 );

@@ -126,10 +126,11 @@ use crate::private_history::{
     private_history_status as private_history_status_impl,
 };
 use crate::storage_config::{
-    ai_agent_template_preview_codex, ai_config_summary, ai_local_auth_status, ai_save_config,
-    ai_sidecar_proxy_url, ai_skill_import, ai_skill_install_git, ai_skill_pick_source,
-    ai_skill_set_runtime_trust, ai_test_connection, export_diagnostics, frontend_log,
-    load_accounts_config, load_ai_config, load_notification_webhook, load_proxy_config,
+    ai_agent_template_preview_codex, ai_config_summary, ai_list_models, ai_local_auth_status,
+    ai_save_config, ai_sidecar_proxy_url, ai_skill_import, ai_skill_install_git,
+    ai_skill_pick_source, ai_skill_set_runtime_trust, ai_test_connection, export_diagnostics,
+    frontend_log, load_accounts_config, load_ai_config, load_notification_webhook,
+    load_proxy_config,
     load_watchlist_config, migrate_sensitive_config, proxy_authorization_header,
     proxy_config_summary, reqwest_client, runtime_cache_root, runtime_work_dir,
     save_accounts_config, save_notification_webhook, save_proxy_config, save_ui_preferences,
@@ -25881,6 +25882,7 @@ pub fn run() {
             ai_agent_template_preview_codex,
             ai_skill_pick_source,
             ai_test_connection,
+            ai_list_models,
             ai_automation_summary,
             ai_automation_overview,
             ai_automation_section,
