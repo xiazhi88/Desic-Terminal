@@ -9605,6 +9605,36 @@ async fn sync_kline_set(
     reports
 }
 
+/// K 线基线期望窗口的合约上线时间下界。合约上线晚于回看窗口起点时，上线前
+/// 不存在任何 K 线，那部分"缺失"永远补不齐，启动基线会卡在重试循环；查询
+/// 失败时返回 None，保持不裁剪的旧行为。
+async fn kline_symbol_list_time_ms(app: &tauri::AppHandle, symbol: &str) -> Option<i64> {
+    if let Ok(Some(cached)) = load_market_assets_cache(app.clone()) {
+        if let Some(instrument) = cached
+            .instruments
+            .iter()
+            .find(|item| item.inst_id == symbol)
+        {
+            if let Ok(list_time) = instrument.list_time.parse::<i64>() {
+                if list_time > 0 {
+                    return Some(list_time);
+                }
+            }
+        }
+    }
+    let path = format!(
+        "/api/v5/public/instruments?instType=SWAP&instId={}",
+        url_encode(symbol)
+    );
+    let envelope: OkxEnvelope<OkxInstrument> = get_json(&path).await.ok()?;
+    envelope
+        .data
+        .into_iter()
+        .next()
+        .and_then(|instrument| instrument.list_time.parse::<i64>().ok())
+        .filter(|list_time| *list_time > 0)
+}
+
 async fn sync_one_kline_range(
     app: &tauri::AppHandle,
     symbol: &str,
@@ -9617,7 +9647,14 @@ async fn sync_one_kline_range(
     let lookback_ms = recent_hours
         .map(|hours| hours * 60 * 60_000)
         .unwrap_or_else(|| required_days.max(1) * 86_400_000);
-    let start_open = align_open_time(end_open.saturating_sub(lookback_ms), interval, step);
+    let mut start_open = align_open_time(end_open.saturating_sub(lookback_ms), interval, step);
+    // 新上线合约的期望窗口不得早于上线时间（例如 30 天回看遇上周 22 天
+    // 上市的合约，上线前的约 7 天 K 线在交易所侧不存在）。
+    if let Some(list_time_ms) = kline_symbol_list_time_ms(app, symbol).await {
+        if list_time_ms > start_open {
+            start_open = align_open_time(list_time_ms, interval, step);
+        }
+    }
     sync_kline_window(app, symbol, interval, start_open, end_open).await
 }
 
