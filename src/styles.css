@@ -27599,6 +27599,11 @@ button {
   font-variant-numeric: tabular-nums;
 }
 
+.startup-data-root-progress-skipped {
+  color: var(--warn);
+  font-size: 11px;
+}
+
 .startup-data-root-progress-current {
   overflow: hidden;
   color: #7f8691;

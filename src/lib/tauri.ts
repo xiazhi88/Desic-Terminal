@@ -197,6 +197,8 @@ export type DataRootMigrationProgress = {
   currentPath: string;
   targetRoot: string | null;
   error: string | null;
+  /** cache 通道内因被占用而跳过的文件数（可重建，不影响迁移结果） */
+  skippedFiles: number;
 };
 
 /** 迁移过程中后端推送 MigrationProgress 的事件名 */

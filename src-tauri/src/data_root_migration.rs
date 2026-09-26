@@ -6,6 +6,9 @@
 //!   只有校验通过才写它，因此任何失败都能安全留在旧目录（不会出现"两边都不完整"）；
 //! - 默认布局下 config 与 data 同目录、logs 位于 cache 之内，所以迁移按**显式规则逐项复制**
 //!   （见 `build_migration_plan`），而不是整目录搬家，避免重复复制与目录错位；
+//! - WebView2 的用户数据目录（Windows 上的 `EBWebView`）位于 cache 之内，被运行中的
+//!   `msedgewebview2.exe` 独占锁定，且应用始终读取默认位置的那一份，因此不参与复制、统计与清理；
+//! - cache 通道的单个文件被占用时只跳过并计数（缓存内容可重建），config / data / logs 仍然严格失败；
 //! - 旧数据删除是**独立动作**，只在迁移成功且用户明确确认后执行，并保留固定位置的标记文件。
 
 use std::path::{Path, PathBuf};
@@ -22,6 +25,15 @@ const PENDING_MIGRATION_FILE: &str = "data-migration-pending.json";
 const LAST_MIGRATION_FILE: &str = "data-migration-last.json";
 /// 数据库文件名（与 lib.rs 的 database_path 保持一致）
 const DATABASE_FILE: &str = "desic_trade_ai.sqlite3";
+/// WebView2 用户数据目录名：Windows 上 `app_cache_dir()` 解析到 `%LOCALAPPDATA%\<identifier>`，
+/// WebView2 默认把用户数据放在同级的 `EBWebView`，因此它恰好落在 cache 通道里
+const WEBVIEW_DATA_DIR_NAME: &str = "EBWebView";
+
+/// WebView2 用户数据目录：位于 cache 通道内，由运行中的 WebView2 进程独占锁定。
+/// 应用没有配置自定义的 WebView2 数据目录，新根下的拷贝永远不会被读取，因此复制、统计与清理都跳过它。
+fn webview_data_dir(cache_dir: &Path) -> PathBuf {
+    cache_dir.join(WEBVIEW_DATA_DIR_NAME)
+}
 
 #[derive(Clone, Serialize, Default)]
 #[serde(rename_all = "camelCase")]
@@ -34,6 +46,8 @@ pub(crate) struct MigrationProgress {
     pub(crate) current_path: String,
     pub(crate) target_root: Option<String>,
     pub(crate) error: Option<String>,
+    /// cache 通道内因被占用而跳过的文件数（缓存内容可重建，不影响迁移结果）
+    pub(crate) skipped_files: usize,
 }
 
 #[derive(Clone, Serialize, Default)]
@@ -137,6 +151,7 @@ fn write_last_migration(
     from_root: &str,
     from_dirs: &[MigrationDirUsage],
     to_root: &Path,
+    skipped_files: usize,
 ) -> Result<(), String> {
     let path = marker_path(app, LAST_MIGRATION_FILE)?;
     let payload = serde_json::json!({
@@ -144,6 +159,7 @@ fn write_last_migration(
         "fromDirs": from_dirs,
         "toRoot": to_root.to_string_lossy(),
         "migratedAt": chrono::Local::now().timestamp_millis(),
+        "skippedFiles": skipped_files,
     });
     std::fs::write(&path, serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?)
         .map_err(|err| format!("写入迁移记录失败: {err}"))
@@ -193,8 +209,8 @@ fn data_dir_of(paths: &storage_config::RuntimePaths) -> PathBuf {
         .unwrap_or_else(|| paths.diagnostics_dir.clone())
 }
 
-/// 目录占用统计（有上限，避免超大目录阻塞；跳过符号链接）
-fn measure_dir(path: &Path, max_entries: u64) -> (u64, u64) {
+/// 目录占用统计（有上限，避免超大目录阻塞；跳过符号链接与 `skip_paths` 前缀下的条目）
+fn measure_dir(path: &Path, max_entries: u64, skip_paths: &[PathBuf]) -> (u64, u64) {
     let mut bytes = 0_u64;
     let mut files = 0_u64;
     let mut stack = vec![path.to_path_buf()];
@@ -206,9 +222,13 @@ fn measure_dir(path: &Path, max_entries: u64) -> (u64, u64) {
             if files >= max_entries {
                 return (bytes, files);
             }
+            let entry_path = entry.path();
+            if skip_paths.iter().any(|skip| entry_path.starts_with(skip)) {
+                continue;
+            }
             let Ok(metadata) = entry.metadata() else { continue };
             if metadata.is_dir() {
-                stack.push(entry.path());
+                stack.push(entry_path);
             } else if metadata.is_file() {
                 bytes += metadata.len();
                 files += 1;
@@ -227,36 +247,122 @@ fn label_of_dirs(paths: &storage_config::RuntimePaths) -> Vec<(&'static str, Pat
     ]
 }
 
+/// 各运行时目录的占用统计：cache 通道排除被 WebView2 独占锁定的数据目录，避免设置页数字虚高。
+/// 「数据目录概览」与「迁移记录」共用同一套规则，避免两处口径分叉。
+fn usage_of_paths(paths: &storage_config::RuntimePaths) -> Vec<MigrationDirUsage> {
+    label_of_dirs(paths)
+        .into_iter()
+        .map(|(label, dir)| {
+            let skip_paths = if dir == paths.cache_dir {
+                vec![webview_data_dir(&paths.cache_dir)]
+            } else {
+                Vec::new()
+            };
+            let (bytes, files) = measure_dir(&dir, 200_000, &skip_paths);
+            MigrationDirUsage {
+                label: label.to_string(),
+                path: dir.to_string_lossy().into_owned(),
+                bytes,
+                files,
+            }
+        })
+        .collect()
+}
+
 fn usage_of(app: &tauri::AppHandle) -> Result<(String, Vec<MigrationDirUsage>, u64, u64), String> {
     let (custom, paths) = current_runtime_dirs(app)?;
     let display_root = custom
         .clone()
         .map(|root| root.to_string_lossy().into_owned())
         .unwrap_or_else(|| data_dir_of(&paths).to_string_lossy().into_owned());
-    let mut usage = Vec::new();
-    let mut total_bytes = 0;
-    let mut total_files = 0;
-    for (label, dir) in label_of_dirs(&paths) {
-        let (bytes, files) = measure_dir(&dir, 200_000);
-        total_bytes += bytes;
-        total_files += files;
-        usage.push(MigrationDirUsage {
-            label: label.to_string(),
-            path: dir.to_string_lossy().into_owned(),
-            bytes,
-            files,
-        });
-    }
+    let usage = usage_of_paths(&paths);
+    let total_bytes = usage.iter().map(|dir| dir.bytes).sum();
+    let total_files = usage.iter().map(|dir| dir.files).sum();
     Ok((display_root, usage, total_bytes, total_files))
 }
 
 // ===== 迁移计划 =====
+
+/// 复制通道：决定单个文件复制失败时是整体失败还是跳过（见 `is_rebuildable`）
+#[derive(Clone, Copy)]
+enum CopyChannel {
+    Config,
+    Data,
+    Cache,
+    Logs,
+}
+
+impl CopyChannel {
+    /// cache 内容（行情图标缓存、npm/pip 缓存、账单归档）全部可重建，单个文件被占用时跳过并计数
+    fn is_rebuildable(self) -> bool {
+        matches!(self, CopyChannel::Cache)
+    }
+}
 
 #[derive(Clone)]
 struct CopyItem {
     source: PathBuf,
     destination: PathBuf,
     bytes: u64,
+    channel: CopyChannel,
+}
+
+/// 单个条目的复制结果
+enum CopyOutcome {
+    Copied,
+    /// cache 通道内被占用/不可读而跳过（内容可重建）
+    Skipped(std::io::Error),
+}
+
+/// 复制进度累计：`skipped` 只统计可重建通道里被跳过的文件
+#[derive(Default)]
+struct CopyTally {
+    copied: u64,
+    bytes: u64,
+    skipped: usize,
+}
+
+impl CopyTally {
+    /// 复制单个条目并累计；返回 Err 表示该通道不允许跳过，调用方必须整体失败
+    fn record(&mut self, item: &CopyItem) -> Result<(), String> {
+        match copy_item(item) {
+            Ok(CopyOutcome::Copied) => {
+                self.copied += 1;
+                self.bytes += item.bytes;
+                Ok(())
+            }
+            Ok(CopyOutcome::Skipped(error)) => {
+                self.skipped += 1;
+                eprintln!("data root migration: skipped {} ({error})", item.source.display());
+                Ok(())
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+fn copy_item(item: &CopyItem) -> Result<CopyOutcome, String> {
+    if let Some(parent) = item.destination.parent() {
+        if let Err(error) = std::fs::create_dir_all(parent) {
+            return Err(format!("创建目录 {} 失败: {error}", parent.display()));
+        }
+    }
+    // 断点续传：目标已存在且大小一致时跳过
+    let already_copied = std::fs::metadata(&item.destination)
+        .map(|metadata| metadata.len() == item.bytes)
+        .unwrap_or(false);
+    if already_copied {
+        return Ok(CopyOutcome::Copied);
+    }
+    match std::fs::copy(&item.source, &item.destination) {
+        Ok(_) => Ok(CopyOutcome::Copied),
+        Err(error) if item.channel.is_rebuildable() => Ok(CopyOutcome::Skipped(error)),
+        Err(error) => Err(format!(
+            "复制 {} → {} 失败: {error}",
+            item.source.display(),
+            item.destination.display()
+        )),
+    }
 }
 
 /// 配置目录中属于「数据」的条目：默认布局下 config 与 data 是同一目录，这些必须走 data 通道
@@ -285,10 +391,22 @@ fn should_clean_entry(name: &str) -> bool {
     !RESERVED_MARKER_FILES.contains(&name) && !is_temp_entry(name)
 }
 
+/// 清理旧数据目录内容时是否删除该条目：标记文件必须保留；cache 通道内的 WebView2 数据目录
+/// 仍被运行中的进程独占锁定，删除既会失败也不是可回收的数据。
+fn should_clean_old_entry(label: &str, root: &Path, target: &Path) -> bool {
+    let name = target
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    should_clean_entry(&name) && !(label == "cache" && target.starts_with(webview_data_dir(root)))
+}
+
 fn collect_dir(
     source: &Path,
     destination: &Path,
+    channel: CopyChannel,
     skip_names: &[String],
+    skip_paths: &[PathBuf],
     items: &mut Vec<CopyItem>,
 ) -> Result<(), String> {
     let entries = match std::fs::read_dir(source) {
@@ -302,15 +420,20 @@ fn collect_dir(
             continue;
         }
         let source_path = entry.path();
+        // 绝对路径前缀比较：只排除指定的子树，不误伤同名的用户目录
+        if skip_paths.iter().any(|skip| source_path.starts_with(skip)) {
+            continue;
+        }
         let destination_path = destination.join(&name);
         let Ok(metadata) = entry.metadata() else { continue };
         if metadata.is_dir() {
-            collect_dir(&source_path, &destination_path, &[], items)?;
+            collect_dir(&source_path, &destination_path, channel, &[], skip_paths, items)?;
         } else if metadata.is_file() {
             items.push(CopyItem {
                 source: source_path,
                 destination: destination_path,
                 bytes: metadata.len(),
+                channel,
             });
         }
     }
@@ -320,6 +443,7 @@ fn collect_dir(
 fn collect_named(
     source_dir: &Path,
     destination_dir: &Path,
+    channel: CopyChannel,
     names: &[&str],
     items: &mut Vec<CopyItem>,
 ) -> Result<(), String> {
@@ -331,12 +455,13 @@ fn collect_named(
         let destination_path = destination_dir.join(name);
         let Ok(metadata) = std::fs::metadata(&source_path) else { continue };
         if metadata.is_dir() {
-            collect_dir(&source_path, &destination_path, &[], items)?;
+            collect_dir(&source_path, &destination_path, channel, &[], &[], items)?;
         } else if metadata.is_file() {
             items.push(CopyItem {
                 source: source_path,
                 destination: destination_path,
                 bytes: metadata.len(),
+                channel,
             });
         }
     }
@@ -354,18 +479,7 @@ fn build_migration_plan(
         from_root: custom
             .map(|root| root.to_string_lossy().into_owned())
             .unwrap_or_else(|| data_dir.to_string_lossy().into_owned()),
-        from_dirs: label_of_dirs(&paths)
-            .into_iter()
-            .map(|(label, dir)| {
-                let (bytes, files) = measure_dir(&dir, 200_000);
-                MigrationDirUsage {
-                    label: label.to_string(),
-                    path: dir.to_string_lossy().into_owned(),
-                    bytes,
-                    files,
-                }
-            })
-            .collect(),
+        from_dirs: usage_of_paths(&paths),
     };
     Ok((items, roots))
 }
@@ -389,14 +503,22 @@ fn build_plan_for(
     collect_dir(
         &paths.config_dir,
         &target_root.join("config"),
+        CopyChannel::Config,
         &config_skip,
+        &[],
         &mut items,
     )?;
 
     // data：数据库（含 WAL/SHM）+ workspace + diagnostics + update-backups
-    collect_named(data_dir, &target_root.join("data"), &DATA_OWNED_NAMES, &mut items)?;
+    collect_named(
+        data_dir,
+        &target_root.join("data"),
+        CopyChannel::Data,
+        &DATA_OWNED_NAMES,
+        &mut items,
+    )?;
 
-    // cache：排除嵌套的 logs 目录（默认布局下 log_dir 位于 cache 内）
+    // cache：排除嵌套的 logs 目录（默认布局下 log_dir 位于 cache 内）与 WebView2 用户数据目录
     let mut cache_skip: Vec<String> = Vec::new();
     let logs_nested_in_cache =
         paths.log_dir != paths.cache_dir && paths.log_dir.starts_with(&paths.cache_dir);
@@ -407,15 +529,27 @@ fn build_plan_for(
             }
         }
     }
+    // WebView2 数据目录被运行中的进程独占锁定，且应用始终读取默认位置的那一份，
+    // 复制到新根只是死数据；按绝对路径前缀排除，避免误伤同名的用户目录。
+    let cache_skip_paths = vec![webview_data_dir(&paths.cache_dir)];
     collect_dir(
         &paths.cache_dir,
         &target_root.join("cache"),
+        CopyChannel::Cache,
         &cache_skip,
+        &cache_skip_paths,
         &mut items,
     )?;
 
     // logs
-    collect_dir(&paths.log_dir, &target_root.join("logs"), &[], &mut items)?;
+    collect_dir(
+        &paths.log_dir,
+        &target_root.join("logs"),
+        CopyChannel::Logs,
+        &[],
+        &[],
+        &mut items,
+    )?;
     Ok(items)
 }
 
@@ -539,6 +673,7 @@ fn run_migration_blocking(
         state.error = None;
         state.copied_files = 0;
         state.copied_bytes = 0;
+        state.skipped_files = 0;
         state.current_path.clear();
     });
 
@@ -554,8 +689,7 @@ fn run_migration_blocking(
         state.phase = "copying".to_string();
     });
 
-    let mut copied_files = 0_u64;
-    let mut copied_bytes = 0_u64;
+    let mut tally = CopyTally::default();
     for item in &items {
         if cancel_flag().load(Ordering::SeqCst) {
             update_progress(app, |state| {
@@ -564,34 +698,16 @@ fn run_migration_blocking(
             crate::boot_log("migration: cancelled by user");
             return Ok(progress_snapshot());
         }
-        if let Some(parent) = item.destination.parent() {
-            if let Err(error) = std::fs::create_dir_all(parent) {
-                return fail_migration(app, format!("创建目录 {} 失败: {error}", parent.display()));
-            }
+        // cache 通道内被占用的文件只跳过并计数，其余通道必须严格成功
+        if let Err(error) = tally.record(item) {
+            return fail_migration(app, error);
         }
-        // 断点续传：目标已存在且大小一致时跳过
-        let already_copied = std::fs::metadata(&item.destination)
-            .map(|metadata| metadata.len() == item.bytes)
-            .unwrap_or(false);
-        if !already_copied {
-            if let Err(error) = std::fs::copy(&item.source, &item.destination) {
-                return fail_migration(
-                    app,
-                    format!(
-                        "复制 {} → {} 失败: {error}",
-                        item.source.display(),
-                        item.destination.display()
-                    ),
-                );
-            }
-        }
-        copied_files += 1;
-        copied_bytes += item.bytes;
-        if copied_files % 10 == 0 || copied_files == total_files {
+        if tally.copied % 10 == 0 || tally.copied == total_files {
             let current = item.source.to_string_lossy().into_owned();
             update_progress(app, |state| {
-                state.copied_files = copied_files;
-                state.copied_bytes = copied_bytes;
+                state.copied_files = tally.copied;
+                state.copied_bytes = tally.bytes;
+                state.skipped_files = tally.skipped;
                 state.current_path = current;
             });
         }
@@ -599,8 +715,9 @@ fn run_migration_blocking(
 
     update_progress(app, |state| {
         state.phase = "verifying".to_string();
-        state.copied_files = copied_files;
-        state.copied_bytes = copied_bytes;
+        state.copied_files = tally.copied;
+        state.copied_bytes = tally.bytes;
+        state.skipped_files = tally.skipped;
     });
     if let Err(error) = verify_migration(target) {
         return fail_migration(app, error);
@@ -612,19 +729,23 @@ fn run_migration_blocking(
     if let Err(error) = storage_config::write_custom_data_root(app, target) {
         return fail_migration(app, format!("写入数据根标记失败: {error}"));
     }
-    if let Err(error) = write_last_migration(app, &roots.from_root, &roots.from_dirs, target) {
+    if let Err(error) =
+        write_last_migration(app, &roots.from_root, &roots.from_dirs, target, tally.skipped)
+    {
         // 迁移记录失败不影响切换结果，只记录日志
         crate::boot_log(&format!("migration: record write failed: {error}"));
     }
     clear_pending_migration(app);
     update_progress(app, |state| {
         state.phase = "done".to_string();
+        state.skipped_files = tally.skipped;
         state.current_path.clear();
     });
     crate::boot_log(&format!(
-        "migration: done ({} files, {} bytes) → {}",
-        copied_files,
-        copied_bytes,
+        "migration: done ({} files, {} bytes, {} skipped) → {}",
+        tally.copied,
+        tally.bytes,
+        tally.skipped,
         target.display()
     ));
     Ok(progress_snapshot())
@@ -668,16 +789,23 @@ pub(crate) async fn cleanup_old_data_root(app: tauri::AppHandle) -> Result<(), S
         };
         for dir in &from_dirs {
             let path = PathBuf::from(&dir.path);
+            // cache 通道内的 WebView2 数据目录仍被运行中的进程独占锁定，保留不删
+            let locked_webview = webview_data_dir(&path);
+            if dir.label == "cache" && locked_webview.exists() {
+                crate::boot_log(&format!(
+                    "cleanup: keep locked webview data {}",
+                    locked_webview.display()
+                ));
+            }
             let entries = match std::fs::read_dir(&path) {
                 Ok(entries) => entries,
                 Err(_) => continue,
             };
             for entry in entries.flatten() {
-                let name = entry.file_name().to_string_lossy().into_owned();
-                if !should_clean_entry(&name) {
+                let target = entry.path();
+                if !should_clean_old_entry(&dir.label, &path, &target) {
                     continue;
                 }
-                let target = entry.path();
                 let result = if entry.metadata().map(|meta| meta.is_dir()).unwrap_or(false) {
                     std::fs::remove_dir_all(&target)
                 } else {
@@ -813,5 +941,151 @@ mod tests {
         assert!(should_clean_entry(DATABASE_FILE));
         assert!(should_clean_entry("workspace"));
         assert!(should_clean_entry("frontend-2026-01-01.jsonl"));
+    }
+
+    fn destination_relatives(items: &[CopyItem], target: &Path) -> Vec<String> {
+        items
+            .iter()
+            .map(|item| {
+                item.destination
+                    .strip_prefix(target)
+                    .expect("relative")
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            })
+            .collect()
+    }
+
+    #[test]
+    fn plan_excludes_locked_webview_data_dir() {
+        let source = TempRoot::new("webview-src");
+        let target = TempRoot::new("webview-dst");
+        let paths = default_layout_paths(source.path());
+        let data_dir = data_dir_of(&paths);
+
+        write_file(&paths.cache_dir.join("icons").join("btc.png"), "png");
+        write_file(
+            &paths.cache_dir
+                .join(WEBVIEW_DATA_DIR_NAME)
+                .join("Default")
+                .join("Network")
+                .join("Cookies"),
+            "cookie",
+        );
+        // 只按绝对路径前缀排除：同前缀目录与更深层的同名目录都必须照常复制
+        write_file(
+            &paths.cache_dir.join(format!("{WEBVIEW_DATA_DIR_NAME}-old")).join("keep.txt"),
+            "keep",
+        );
+        write_file(
+            &paths.cache_dir.join("tools").join(WEBVIEW_DATA_DIR_NAME).join("keep.txt"),
+            "keep",
+        );
+
+        let items = build_plan_for(&paths, &data_dir, target.path()).expect("build plan");
+        let relatives = destination_relatives(&items, target.path());
+
+        assert!(relatives.contains(&"cache/icons/btc.png".to_string()), "{relatives:?}");
+        assert!(
+            !relatives.iter().any(|item| item.starts_with(&format!("cache/{WEBVIEW_DATA_DIR_NAME}/"))),
+            "WebView2 数据目录被独占锁定，不应进入迁移计划: {relatives:?}"
+        );
+        assert!(
+            relatives.contains(&format!("cache/{WEBVIEW_DATA_DIR_NAME}-old/keep.txt")),
+            "{relatives:?}"
+        );
+        assert!(
+            relatives.contains(&format!("cache/tools/{WEBVIEW_DATA_DIR_NAME}/keep.txt")),
+            "{relatives:?}"
+        );
+    }
+
+    #[test]
+    fn cache_channel_skips_locked_files_and_counts_them() {
+        let root = TempRoot::new("cache-skip");
+        let readable_source = root.path().join("readable.bin");
+        write_file(&readable_source, "data");
+        // 源文件缺失等价于被占用/不可读导致的复制失败
+        let locked_source = root.path().join("locked.bin");
+        let locked_item = |channel: CopyChannel| CopyItem {
+            source: locked_source.clone(),
+            destination: root.path().join("out").join("locked.bin"),
+            bytes: 4,
+            channel,
+        };
+
+        let mut tally = CopyTally::default();
+        let readable = CopyItem {
+            source: readable_source.clone(),
+            destination: root.path().join("out").join("readable.bin"),
+            bytes: 4,
+            channel: CopyChannel::Cache,
+        };
+        tally.record(&readable).expect("copy readable cache file");
+        assert_eq!((tally.copied, tally.bytes, tally.skipped), (1, 4, 0));
+
+        // cache 通道：跳过并计数，而不是整体失败
+        tally
+            .record(&locked_item(CopyChannel::Cache))
+            .expect("cache channel tolerates locked files");
+        assert_eq!((tally.copied, tally.bytes, tally.skipped), (1, 4, 1));
+
+        // config / data / logs 通道保持严格失败，且不改变计数
+        for channel in [CopyChannel::Config, CopyChannel::Data, CopyChannel::Logs] {
+            assert!(tally.record(&locked_item(channel)).is_err(), "strict channel must fail");
+        }
+        assert_eq!((tally.copied, tally.bytes, tally.skipped), (1, 4, 1));
+    }
+
+    #[test]
+    fn usage_and_cleanup_exclude_locked_webview_data_dir() {
+        let root = TempRoot::new("webview-usage");
+        let paths = default_layout_paths(root.path());
+        write_file(&paths.cache_dir.join("icons").join("btc.png"), "png");
+        write_file(
+            &paths.cache_dir
+                .join(WEBVIEW_DATA_DIR_NAME)
+                .join("Default")
+                .join("Network")
+                .join("Cookies"),
+            "cookie-data",
+        );
+
+        let usage = usage_of_paths(&paths);
+        let cache_usage = usage.iter().find(|dir| dir.label == "cache").expect("cache usage");
+        assert_eq!(
+            (cache_usage.bytes, cache_usage.files),
+            (3, 1),
+            "cache 用量不应包含被锁定的 WebView2 数据目录"
+        );
+        // 未传排除项时 WebView2 仍会被统计，证明上面的差额来自排除规则
+        assert_eq!(measure_dir(&paths.cache_dir, 200_000, &[]), (14, 2));
+
+        let cache_dir = paths.cache_dir.clone();
+        let webview_dir = cache_dir.join(WEBVIEW_DATA_DIR_NAME);
+        assert!(!should_clean_old_entry("cache", &cache_dir, &webview_dir));
+        assert!(!should_clean_old_entry(
+            "cache",
+            &cache_dir,
+            &webview_dir.join("Default").join("Network").join("Cookies")
+        ));
+        assert!(should_clean_old_entry(
+            "cache",
+            &cache_dir,
+            &cache_dir.join(format!("{WEBVIEW_DATA_DIR_NAME}-old"))
+        ));
+        assert!(should_clean_old_entry(
+            "cache",
+            &cache_dir,
+            &cache_dir.join("tools").join(WEBVIEW_DATA_DIR_NAME)
+        ));
+        assert!(should_clean_old_entry("cache", &cache_dir, &cache_dir.join("icons")));
+        // 其它通道不受影响，固定标记文件照旧保留
+        assert!(should_clean_old_entry(
+            "config",
+            &paths.config_dir,
+            &paths.config_dir.join(WEBVIEW_DATA_DIR_NAME)
+        ));
+        assert!(!should_clean_old_entry("cache", &cache_dir, &cache_dir.join("data-dir.json")));
     }
 }

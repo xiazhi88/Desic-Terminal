@@ -1197,7 +1197,8 @@ function createInitialMigrationProgress(targetRoot: string | null): DataRootMigr
     totalBytes: 0,
     currentPath: "",
     targetRoot,
-    error: null
+    error: null,
+    skippedFiles: 0
   };
 }
 
@@ -1307,6 +1308,7 @@ function DataRootMigrationWizard({
   const failed = phase === "failed";
   const totalBytes = progress?.totalBytes ?? 0;
   const copiedBytes = progress?.copiedBytes ?? 0;
+  const skippedFiles = progress?.skippedFiles ?? 0;
   const bytePercent = totalBytes > 0 ? Math.round((copiedBytes / totalBytes) * 100) : 0;
   const percent = phase === "done" ? 100 : totalBytes > 0 ? Math.min(99, Math.max(0, bytePercent)) : phase === "verifying" || phase === "switching" ? 100 : 0;
 
@@ -1337,6 +1339,11 @@ function DataRootMigrationWizard({
         <div className="startup-data-root-progress-files">
           {t("common:startupDataRootMigrateFiles", { copied: progress?.copiedFiles ?? 0, total: progress?.totalFiles ?? 0, size: formatBytes(copiedBytes) })}
         </div>
+        {skippedFiles > 0 ? (
+          <p className="startup-data-root-progress-skipped">
+            {t("common:startupDataRootMigrateSkipped", { count: skippedFiles })}
+          </p>
+        ) : null}
         <div className="startup-data-root-progress-current" title={progress?.currentPath || undefined}>
           {progress?.currentPath ?? ""}
         </div>
