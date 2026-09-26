@@ -72,7 +72,7 @@ fn load_cached_instrument(
         .map(instrument_from_summary))
 }
 
-async fn fetch_instrument_from_okx(inst_id: &str) -> Result<OkxInstrument, String> {
+pub(crate) async fn fetch_instrument_from_okx(inst_id: &str) -> Result<OkxInstrument, String> {
     let path = format!(
         "/api/v5/public/instruments?instType=SWAP&instId={}",
         url_encode(inst_id)

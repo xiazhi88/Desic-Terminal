@@ -174,7 +174,8 @@ use crate::trade_domain::{
 };
 use crate::trade_support::{
     available_balance_value, ensure_instruments_cached, ensure_trade_account,
-    estimated_margin_candidate, fetch_instrument, format_leverage_rows,
+    estimated_margin_candidate, fetch_instrument, fetch_instrument_from_okx,
+    format_leverage_rows,
     instrument_allows_fractional_contracts, instrument_minimum_base_quantity,
     instrument_quantity_instruction, leverage_info_path, leverage_pos_sides, leverage_rows_match,
     position_available, select_position_tier,
@@ -9622,17 +9623,29 @@ async fn kline_symbol_list_time_ms(app: &tauri::AppHandle, symbol: &str) -> Opti
             }
         }
     }
-    let path = format!(
-        "/api/v5/public/instruments?instType=SWAP&instId={}",
-        url_encode(symbol)
-    );
-    let envelope: OkxEnvelope<OkxInstrument> = get_json(&path).await.ok()?;
-    envelope
-        .data
-        .into_iter()
-        .next()
+    fetch_instrument_from_okx(symbol)
+        .await
+        .ok()
         .and_then(|instrument| instrument.list_time.parse::<i64>().ok())
         .filter(|list_time| *list_time > 0)
+}
+
+/// 把 K 线期望窗口起点裁剪到合约上线时间，返回新的起点。已实测 OKX 新上线
+/// 合约的 listTime 均为整分钟对齐（2026-09-26 核对近 120 天 146 个 SWAP
+/// 合约），而启动基线只同步 1m K 线，因此 floor 对齐恰好落在真实存在的
+/// 首根 K 线上，不会把上线前的空档误判为缺失。
+fn clip_expected_start_to_list_time(
+    start_open: i64,
+    list_time_ms: Option<i64>,
+    bar: &str,
+    step_ms: i64,
+) -> i64 {
+    match list_time_ms {
+        Some(list_time_ms) if list_time_ms > start_open => {
+            align_open_time(list_time_ms, bar, step_ms)
+        }
+        _ => start_open,
+    }
 }
 
 async fn sync_one_kline_range(
@@ -9650,11 +9663,8 @@ async fn sync_one_kline_range(
     let mut start_open = align_open_time(end_open.saturating_sub(lookback_ms), interval, step);
     // 新上线合约的期望窗口不得早于上线时间（例如 30 天回看遇上周 22 天
     // 上市的合约，上线前的约 7 天 K 线在交易所侧不存在）。
-    if let Some(list_time_ms) = kline_symbol_list_time_ms(app, symbol).await {
-        if list_time_ms > start_open {
-            start_open = align_open_time(list_time_ms, interval, step);
-        }
-    }
+    let list_time_ms = kline_symbol_list_time_ms(app, symbol).await;
+    start_open = clip_expected_start_to_list_time(start_open, list_time_ms, interval, step);
     sync_kline_window(app, symbol, interval, start_open, end_open).await
 }
 
@@ -26471,6 +26481,55 @@ mod tests {
         assert_eq!(
             tauri::async_runtime::block_on(runtime.reserve(&symbols, &intervals)).len(),
             4
+        );
+    }
+
+    #[test]
+    fn clip_expected_start_keeps_window_without_list_time() {
+        let start_open = 1_700_000_040_000; // 28_333_334 * 60_000，整分钟对齐
+        assert_eq!(
+            clip_expected_start_to_list_time(start_open, None, "1m", 60_000),
+            start_open
+        );
+    }
+
+    #[test]
+    fn clip_expected_start_keeps_window_when_listing_predates_it() {
+        let start_open = 1_700_000_040_000;
+        let list_time = start_open - 86_400_000;
+        assert_eq!(
+            clip_expected_start_to_list_time(start_open, Some(list_time), "1m", 60_000),
+            start_open
+        );
+    }
+
+    #[test]
+    fn clip_expected_start_clips_to_minute_aligned_list_time() {
+        let start_open = 1_700_000_040_000;
+        let list_time = start_open + 30 * 60_000;
+        assert_eq!(
+            clip_expected_start_to_list_time(start_open, Some(list_time), "1m", 60_000),
+            list_time
+        );
+    }
+
+    #[test]
+    fn clip_expected_start_floors_unaligned_list_time_to_bar_boundary() {
+        let step = 3_600_000;
+        let start_open = 1_699_999_200_000; // 472_222 * 3_600_000，整小时对齐
+        let list_time = start_open + 5 * step + 1_800_000; // 落在某小时内部
+        assert_eq!(
+            clip_expected_start_to_list_time(start_open, Some(list_time), "1H", step),
+            start_open + 5 * step
+        );
+    }
+
+    #[test]
+    fn clip_expected_start_keeps_window_when_list_time_is_exactly_at_start() {
+        let start_open = 1_700_000_040_000;
+        assert_eq!(
+            clip_expected_start_to_list_time(start_open, Some(start_open), "1m", 60_000),
+            start_open
         );
     }
 
