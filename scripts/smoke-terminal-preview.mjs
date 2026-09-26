@@ -1218,16 +1218,18 @@ async function verifySettingsConfigurationPage(page) {
   const openAiTemplateState = await page.evaluate(() => {
     const fields = Array.from(document.querySelectorAll(".ai-provider-form-grid input"));
     return {
-      provider: fields[1]?.value || "",
+      provider: document.querySelector('.ai-provider-form-grid [role="combobox"]')?.getAttribute("data-value") || "",
       model: document.querySelector('.ai-provider-model-field [role="combobox"]')?.getAttribute("data-value") || "",
-      baseUrl: fields[3]?.value || "",
-      providerReadOnly: fields[1]?.readOnly ?? false,
+      contextWindow: document.querySelector('.ai-provider-form-grid input[type="number"]')?.value ?? null,
+      baseUrl: fields[2]?.value || "",
+      fetchDisabled: document.querySelector(".ai-model-id-fetch")?.disabled ?? null,
       guideText: document.querySelector(".ai-provider-guide")?.textContent || "",
       guideHref: document.querySelector(".ai-provider-guide a")?.getAttribute("href") || "",
       localDisabled: document.querySelectorAll(".ai-provider-auth-mode > button")[1]?.disabled ?? false
     };
   });
-  if (openAiTemplateState.provider !== "openai-native" || openAiTemplateState.model !== "gpt-5.6-terra" || openAiTemplateState.baseUrl !== "https://api.openai.com/v1" || !openAiTemplateState.providerReadOnly
+  if (openAiTemplateState.provider !== "openai-native" || openAiTemplateState.model !== "gpt-5.6-terra" || openAiTemplateState.baseUrl !== "https://api.openai.com/v1"
+    || openAiTemplateState.contextWindow !== "1050000" || openAiTemplateState.fetchDisabled !== true
     || !openAiTemplateState.guideText.includes("订阅") || !openAiTemplateState.guideText.includes("API 用量") || !openAiTemplateState.guideHref.includes("platform.openai.com/api-keys") || !openAiTemplateState.localDisabled) {
     throw new Error(`OpenAI provider template was not updated to the current Cline/API mapping: ${JSON.stringify(openAiTemplateState)}`);
   }
@@ -1236,7 +1238,11 @@ async function verifySettingsConfigurationPage(page) {
   if (!openAiModels.some((text) => text.includes("GPT-5.6 Sol")) || !openAiModels.some((text) => text.includes("GPT-5.6 Terra")) || !openAiModels.some((text) => text.includes("GPT-5.6 Luna"))) {
     throw new Error(`OpenAI current model options are incomplete: ${JSON.stringify(openAiModels)}`);
   }
-  await page.keyboard.press("Escape");
+  await page.locator(".terminal-select-option", { hasText: "GPT-5.4 Mini" }).click();
+  const prefilledContext = await page.locator('.ai-provider-form-grid input[type="number"]').inputValue();
+  if (prefilledContext !== "400000") {
+    throw new Error(`recommended model should prefill its default context window: ${JSON.stringify({ prefilledContext })}`);
+  }
   await page.getByRole("button", { name: "返回供应商列表" }).click();
   await page.locator('[data-provider-template="deepseek"]').click();
   await page.waitForSelector(".ai-provider-form-grid");
@@ -1244,15 +1250,14 @@ async function verifySettingsConfigurationPage(page) {
     const fields = Array.from(document.querySelectorAll(".ai-provider-form-grid input"));
     return {
       name: fields[0]?.value || "",
-      provider: fields[1]?.value || "",
+      provider: document.querySelector('.ai-provider-form-grid [role="combobox"]')?.getAttribute("data-value") || "",
       model: document.querySelector('.ai-provider-model-field [role="combobox"]')?.getAttribute("data-value") || "",
-      baseUrl: fields[3]?.value || "",
-      providerReadOnly: fields[1]?.readOnly ?? false,
+      baseUrl: fields[2]?.value || "",
       guideText: document.querySelector(".ai-provider-guide")?.textContent || "",
       guideHref: document.querySelector(".ai-provider-guide a")?.getAttribute("href") || ""
     };
   });
-  if (templateState.name !== "DeepSeek" || templateState.provider !== "deepseek" || templateState.model !== "deepseek-v4-pro" || templateState.baseUrl !== "https://api.deepseek.com/v1" || !templateState.providerReadOnly
+  if (templateState.name !== "DeepSeek" || templateState.provider !== "deepseek" || templateState.model !== "deepseek-v4-pro" || templateState.baseUrl !== "https://api.deepseek.com/v1"
     || !templateState.guideText.includes("创建 API Key") || !templateState.guideHref.includes("platform.deepseek.com/api_keys")) {
     throw new Error(`DeepSeek provider template was not applied: ${JSON.stringify(templateState)}`);
   }
@@ -1283,6 +1288,18 @@ async function verifySettingsConfigurationPage(page) {
   if (!await page.locator(".ai-model-config-editor > .ai-provider-guide").count()) {
     throw new Error("selected AI model editor should retain its provider access guide");
   }
+  const editorState = await page.evaluate(() => {
+    const editor = document.querySelector(".ai-model-config-editor");
+    return {
+      providerValue: editor?.querySelector('.settings-form-grid [role="combobox"]')?.getAttribute("data-value") || "",
+      contextValue: editor?.querySelector('.settings-form-grid input[type="number"]')?.value ?? null,
+      fetchButton: Boolean(editor?.querySelector(".ai-model-id-fetch")),
+      fetchDisabled: editor?.querySelector(".ai-model-id-fetch")?.disabled ?? null
+    };
+  });
+  if (editorState.providerValue !== "deepseek" || editorState.contextValue !== "1000000" || !editorState.fetchButton || editorState.fetchDisabled !== true) {
+    throw new Error(`AI model editor should expose provider selection, context window, and a credential-gated fetch action: ${JSON.stringify(editorState)}`);
+  }
   if (await page.getByRole("button", { name: "测试选中模型" }).count() !== 1) {
     throw new Error("AI model connection action should explicitly target the selected model");
   }
@@ -1302,13 +1319,13 @@ async function verifySettingsConfigurationPage(page) {
     const fields = Array.from(document.querySelectorAll(".ai-provider-form-grid input"));
     return {
       name: fields[0]?.value || "",
-      provider: fields[1]?.value || "",
-      providerReadOnly: fields[1]?.readOnly ?? true,
+      provider: document.querySelector('.ai-provider-form-grid [role="combobox"]')?.getAttribute("data-value") || "",
+      providerIsCombobox: Boolean(document.querySelector('.ai-provider-form-grid [role="combobox"]')),
       modelInput: document.querySelector('.ai-provider-model-field input[aria-label="Model ID"]')?.value ?? null,
-      baseUrl: fields[3]?.value || fields[2]?.value || ""
+      baseUrl: fields[2]?.value || ""
     };
   });
-  if (customState.name !== "自定义模型" || customState.provider !== "openai-compatible" || customState.providerReadOnly || customState.modelInput === null || customState.baseUrl !== "") {
+  if (customState.name !== "自定义模型" || customState.provider !== "openai-compatible" || !customState.providerIsCombobox || customState.modelInput === null || customState.baseUrl !== "") {
     throw new Error(`custom AI provider should preserve the manual form: ${JSON.stringify(customState)}`);
   }
   await page.getByRole("button", { name: "取消" }).last().click();
@@ -1391,11 +1408,22 @@ async function verifyTradeTicket(page) {
   if (openState.activeTab !== "开仓") throw new Error(`trade ticket should default to open tab: ${JSON.stringify(openState)}`);
   assertTradeButtons(openState, ["做多", "做空"], ["平多", "平空"]);
 
+  const sizeLabel = () => page.locator(".ticket-size-label-row label").first().textContent();
+  const unitToggle = page.locator(".ticket-size-unit");
+  if (await unitToggle.count() !== 1) throw new Error("trade ticket should expose the size unit toggle in open mode");
+  await unitToggle.locator("button", { hasText: "成本" }).click();
+  await page.waitForTimeout(80);
+  if ((await sizeLabel())?.trim() !== "成本（USDT）") throw new Error(`trade ticket size label did not switch to cost mode: ${await sizeLabel()}`);
+  await unitToggle.locator("button", { hasText: "张" }).click();
+  await page.waitForTimeout(80);
+  if ((await sizeLabel())?.trim() !== "数量（张）") throw new Error(`trade ticket size label did not switch back to contracts: ${await sizeLabel()}`);
+
   await page.locator(".ticket-tabs button", { hasText: "平仓" }).click();
   await page.waitForTimeout(100);
   const closeState = await readTradeTicketState(page);
   if (closeState.activeTab !== "平仓") throw new Error(`trade ticket did not switch to close tab: ${JSON.stringify(closeState)}`);
   assertTradeButtons(closeState, ["平多", "平空"], ["做多", "做空"]);
+  if (await page.locator(".ticket-size-unit").count() !== 0) throw new Error("trade ticket should hide the size unit toggle in close mode");
 
   const layout = await page.evaluate(() => {
     const rect = (selector) => {

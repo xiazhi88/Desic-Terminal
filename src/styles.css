@@ -8955,6 +8955,16 @@ button {
   padding: 0 11px;
 }
 
+.settings-form-grid label > small {
+  color: var(--weak);
+  font-size: 10px;
+  line-height: 1.45;
+}
+
+.settings-form-grid label > small.invalid {
+  color: #ff8397;
+}
+
 .ai-settings-pane {
   display: grid;
   align-content: start;
@@ -11886,6 +11896,24 @@ button {
   color: #fff;
   background: #3b2168;
   box-shadow: inset 0 0 0 1px rgba(185, 140, 255, 0.68), inset 0 1px rgba(255, 255, 255, 0.1), 0 0 14px rgba(149, 92, 255, 0.12);
+}
+
+.ticket-size-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ticket-form .segmented.ticket-size-unit {
+  flex: 0 0 auto;
+}
+
+.ticket-form .segmented.ticket-size-unit button {
+  flex: 0 0 auto;
+  height: 22px;
+  padding: 0 10px;
+  font-size: 11px;
 }
 
 .ticket-form .percent-row {

@@ -120,6 +120,7 @@ import type {
 } from "../types";
 import {
   listenAiEvents,
+  listAiModels,
   loadAiConfigSummary,
   loadAiTokenUsageSummary,
   saveAiConfig,
@@ -257,11 +258,13 @@ import { HelpCenter, type HelpTarget } from "./HelpCenter";
 import {
   AiModelIdControl,
   AiProviderGuide,
+  AiProviderIdControl,
   AiProviderSetupFlow,
   aiProviderUsesLocalCli,
   findAiProviderTemplate,
   type AiProviderSetupValue,
 } from "./AiProviderSetupFlow";
+import { isBuiltInProviderId } from "../lib/aiProviderCatalog";
 import { TerminalSelect } from "./TerminalSelect";
 import { useModalFocus } from "./useModalFocus";
 import {
@@ -6576,7 +6579,8 @@ function createAiModelDraft(seed: AiProviderSetupValue): AiModelDraft {
     baseUrl: seed.baseUrl,
     apiKey: seed.apiKey,
     permissionMode: "advisor",
-    reasoningDepth: "medium"
+    reasoningDepth: "medium",
+    contextWindow: seed.contextWindow
   };
 }
 
@@ -6607,7 +6611,8 @@ function AiSettingsPane({
       baseUrl: item.baseUrl,
       apiKey: "",
       permissionMode: normalizeAiPermissionMode(item.permissionMode),
-      reasoningDepth: item.reasoningDepth ?? "medium"
+      reasoningDepth: item.reasoningDepth ?? "medium",
+      contextWindow: item.contextWindow
     }));
     const nextModels = configuredModels;
     setSummary(config);
@@ -6644,6 +6649,9 @@ function AiSettingsPane({
 
   const selectedModel = models.find((item) => item.id === selectedModelId) ?? models[0] ?? null;
   const selectedTemplate = selectedModel ? findAiProviderTemplate(selectedModel.provider) : null;
+  const selectedModelDefaultContextWindow = selectedModel && selectedModel.contextWindow == null
+    ? selectedTemplate?.modelOptions.find((option) => option.value === selectedModel.model)?.contextWindow
+    : undefined;
   const selectedUsesLocalCli = Boolean(selectedModel && aiProviderUsesLocalCli(selectedModel.provider));
   const selectedSavedModel = selectedModel ? summary?.models.find((item) => item.id === selectedModel.id) : null;
   const canTestSelectedModel = Boolean(
@@ -6658,6 +6666,53 @@ function AiSettingsPane({
   const updateSelectedModel = useCallback((patch: Partial<AiModelDraft>) => {
     setModels((current) => current.map((item) => item.id === selectedModelId ? { ...item, ...patch } : item));
   }, [selectedModelId]);
+
+  const [fetchedModels, setFetchedModels] = useState<string[]>([]);
+  const [modelsFetch, setModelsFetch] = useState<{ state: "idle" | "fetching" | "done" | "error"; message: string }>({ state: "idle", message: "" });
+  const clearFetchedModels = useCallback(() => {
+    setFetchedModels([]);
+    setModelsFetch({ state: "idle", message: "" });
+  }, []);
+  // A fetched list only describes the endpoint it came from; switching the
+  // edited model or its connection fields invalidates it.
+  useEffect(() => {
+    clearFetchedModels();
+  }, [clearFetchedModels, selectedModelId]);
+
+  const canFetchSelectedModels = Boolean(
+    selectedModel
+    && !selectedUsesLocalCli
+    && selectedModel.baseUrl.trim()
+    && (selectedModel.apiKey.trim() || selectedSavedModel?.configured)
+  );
+
+  const fetchSelectedModels = useCallback(async () => {
+    if (!selectedModel) return;
+    setModelsFetch({ state: "fetching", message: "" });
+    try {
+      const list = await listAiModels({ ...selectedModel, apiKey: selectedModel.apiKey.trim() || undefined });
+      if (!list) {
+        setModelsFetch({ state: "error", message: t("settings:fetchModelsDesktopOnly") });
+        return;
+      }
+      setFetchedModels(list);
+      setModelsFetch({ state: "done", message: t("settings:modelsFetchedCount", { count: list.length }) });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      logger.error("ai model list fetch failed", error);
+      setModelsFetch({ state: "error", message });
+    }
+  }, [selectedModel, t]);
+
+  const changeSelectedProvider = useCallback((provider: string) => {
+    if (!selectedModel) return;
+    const patch: Partial<AiModelDraft> = { provider };
+    if (provider === "openai-codex-cli") patch.baseUrl = "local://codex-cli";
+    else if (provider === "claude-code") patch.baseUrl = "local://claude-code";
+    else if (aiProviderUsesLocalCli(selectedModel.provider) && selectedModel.baseUrl.startsWith("local://")) patch.baseUrl = "";
+    updateSelectedModel(patch);
+    clearFetchedModels();
+  }, [clearFetchedModels, selectedModel, updateSelectedModel]);
 
   const addModel = useCallback((seed: AiProviderSetupValue) => {
     const next = createAiModelDraft(seed);
@@ -6847,13 +6902,52 @@ function AiSettingsPane({
             {selectedTemplate ? <AiProviderGuide template={selectedTemplate} local={selectedUsesLocalCli} /> : null}
             <div className="settings-form-grid">
               <label><span>{t("settings:customName")}</span><input value={selectedModel.name} onChange={(event) => updateSelectedModel({ name: event.target.value })} /></label>
-              <label><span>Provider</span><input value={selectedModel.provider} readOnly={Boolean(selectedTemplate)} onChange={(event) => updateSelectedModel({ provider: event.target.value })} /></label>
-              <label className="wide ai-settings-model-id-field"><span>Model ID</span><AiModelIdControl key={`${selectedModel.id}-${selectedTemplate?.id ?? "custom"}`} template={selectedTemplate} value={selectedModel.model} onChange={(model) => updateSelectedModel({ model })} ariaLabel={`${selectedModel.name || t("settings:aiModel")} Model ID`} /></label>
-              <label className="wide"><span>Base URL</span><input value={selectedModel.baseUrl} readOnly={selectedUsesLocalCli} onChange={(event) => updateSelectedModel({ baseUrl: event.target.value })} /></label>
+              <label>
+                <span>Provider</span>
+                <AiProviderIdControl key={selectedModel.id} value={selectedModel.provider} onChange={changeSelectedProvider} />
+                <small>{t("settings:customProviderHelp")}</small>
+              </label>
+              <label className="wide ai-settings-model-id-field">
+                <span>Model ID</span>
+                <AiModelIdControl
+                  key={`${selectedModel.id}-${selectedTemplate?.id ?? "custom"}-${selectedModel.provider}`}
+                  template={selectedTemplate}
+                  value={selectedModel.model}
+                  onChange={(model) => updateSelectedModel({ model })}
+                  ariaLabel={`${selectedModel.name || t("settings:aiModel")} Model ID`}
+                  fetchedOptions={fetchedModels}
+                  onFetchModels={fetchSelectedModels}
+                  fetching={modelsFetch.state === "fetching"}
+                  fetchDisabledReason={canFetchSelectedModels ? undefined : t("settings:fetchModelsNeedCredentials")}
+                  onModelOptionPicked={(contextWindow) => {
+                    if (selectedModel.contextWindow == null && contextWindow != null) updateSelectedModel({ contextWindow });
+                  }}
+                />
+                <small className={clsx(modelsFetch.state === "error" && "invalid")}>{modelsFetch.message || t("settings:modelSelectionHelp")}</small>
+              </label>
+              <label>
+                <span>{t("settings:contextWindowLabel")}</span>
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  value={selectedModel.contextWindow ?? ""}
+                  placeholder={selectedModelDefaultContextWindow != null
+                    ? t("settings:contextWindowDefaultPlaceholder", { count: selectedModelDefaultContextWindow })
+                    : t("settings:contextWindowPlaceholder")}
+                  onChange={(event) => {
+                    const value = event.target.value.trim();
+                    const parsed = Number(value);
+                    updateSelectedModel({ contextWindow: value && Number.isSafeInteger(parsed) && parsed > 0 ? parsed : undefined });
+                  }}
+                />
+                <small>{t(isBuiltInProviderId(selectedModel.provider) ? "settings:contextWindowHelpCatalog" : "settings:contextWindowHelpCustom")}</small>
+              </label>
+              <label className="wide"><span>Base URL</span><input value={selectedModel.baseUrl} readOnly={selectedUsesLocalCli} onChange={(event) => { updateSelectedModel({ baseUrl: event.target.value }); clearFetchedModels(); }} /></label>
               {selectedUsesLocalCli ? (
                 <div className="ai-provider-local-auth wide"><CircleCheck size={16} /><div><strong>{t("settings:useLocalLogin")}</strong><span>{t("settings:localLoginHelp")}</span></div><code>{selectedModel.provider === "claude-code" ? "claude auth status" : "codex login status"}</code></div>
               ) : (
-                <label className="wide"><span>API Key</span><input type="password" autoComplete="off" data-onboarding-focus value={selectedModel.apiKey} placeholder={summary?.models.find((item) => item.id === selectedModel.id)?.apiKeyMasked || t("settings:enterNewApiKey")} onChange={(event) => updateSelectedModel({ apiKey: event.target.value })} /></label>
+                <label className="wide"><span>API Key</span><input type="password" autoComplete="off" data-onboarding-focus value={selectedModel.apiKey} placeholder={summary?.models.find((item) => item.id === selectedModel.id)?.apiKeyMasked || t("settings:enterNewApiKey")} onChange={(event) => { updateSelectedModel({ apiKey: event.target.value }); clearFetchedModels(); }} /></label>
               )}
             </div>
           </section>
@@ -10592,6 +10686,14 @@ function normalizeTradeSizeInput(value: string, instrument?: { minSz?: string; l
   return formatTradeStepValue(roundedDown, instrument);
 }
 
+function normalizeTradeCostInput(value: string, options: { max?: number } = {}) {
+  const numeric = Number(value);
+  if (!Number.isFinite(numeric) || numeric <= 0) return value;
+  const max = Number(options.max);
+  const capped = Number.isFinite(max) && max > 0 ? Math.min(numeric, max) : numeric;
+  return trimFloat(capped);
+}
+
 function formatTradeStepValue(value: number, instrument?: { minSz?: string; lotSz?: string } | null) {
   const decimals = Math.max(decimalPlacesFromStep(instrument?.lotSz), decimalPlacesFromStep(instrument?.minSz));
   return value.toFixed(decimals).replace(/0+$/, "").replace(/\.$/, "");
@@ -11712,6 +11814,7 @@ function OrderTicket({
   const [orderType, setOrderType] = useState<OrderSpecV2OrderType>("limit");
   const [priceInput, setPriceInput] = useState("");
   const [sizeInput, setSizeInput] = useState("");
+  const [sizeUnit, setSizeUnit] = useState<"contracts" | "cost">("contracts");
   const [triggerSource, setTriggerSource] = useState<OrderSpecV2TriggerSource>("last");
   const [triggerExecution, setTriggerExecution] = useState<"market" | "limit">("market");
   const [triggerOrderPrice, setTriggerOrderPrice] = useState("");
@@ -11894,7 +11997,19 @@ function OrderTicket({
   const orderEntryPrice = orderType === "trigger" && triggerExecution === "limit"
     ? triggerOrderPrice
     : effectiveOrderPrice;
-  const effectiveSizeInput = sizeInput;
+  const sizeUnitIsCost = ticketMode === "open" && sizeUnit === "cost";
+  const orderFeeRate = ["market", "ioc", "fok"].includes(orderType) ? 0.0005 : 0.0002;
+  const effectiveSizeInput = useMemo(() => {
+    if (!sizeUnitIsCost) return sizeInput;
+    const cost = Number(sizeInput);
+    const price = Number(orderEntryPrice || effectiveOrderPrice);
+    const lever = Number(leverage);
+    const ctVal = Number(instrument?.ctVal);
+    if (!sizeInput || !Number.isFinite(cost) || cost <= 0) return "";
+    if (!Number.isFinite(price) || price <= 0 || !Number.isFinite(lever) || lever <= 0 || !Number.isFinite(ctVal) || ctVal <= 0) return "";
+    // 成本 = 保证金 + 手续费 = 名义价值 * (1/杠杆 + 费率)，反解张数后按步进向下取整
+    return normalizeTradeSizeInput(String(cost / (price * ctVal * (1 / lever + orderFeeRate))), instrument, { enforceMin: false });
+  }, [sizeUnitIsCost, sizeInput, orderEntryPrice, effectiveOrderPrice, leverage, instrument, orderFeeRate]);
   const precheck = useMemo(
     () =>
       buildTradePrecheck({
@@ -12064,6 +12179,9 @@ function OrderTicket({
     ? (tradePrice * tradeSize * contractValue) / tradeLever
     : undefined;
   const estimatedMargin = localEstimatedMargin;
+  const estimatedCost = estimatedMargin !== undefined && Number.isFinite(tradePrice) && Number.isFinite(tradeSize) && tradeSize > 0 && Number.isFinite(contractValue) && Number.isFinite(tradeLever) && tradeLever > 0
+    ? tradePrice * tradeSize * contractValue * (1 / tradeLever + orderFeeRate)
+    : undefined;
   const rawMaxOpenSize = Number.isFinite(availableUsdt) && Number.isFinite(tradePrice) && Number.isFinite(tradeLever) && Number.isFinite(contractValue) && availableUsdt > 0 && tradePrice > 0 && tradeLever > 0 && contractValue > 0
     ? (availableUsdt * tradeLever) / (tradePrice * contractValue)
     : undefined;
@@ -12093,8 +12211,17 @@ function OrderTicket({
       if (!Number.isFinite(base) || !base || base <= 0) return "";
       return normalizeTradeSizeInput(String((base * percent) / 100), instrument, { max: base, enforceMin: false });
     }
+    if (sizeUnitIsCost) {
+      if (!Number.isFinite(availableUsdt) || availableUsdt <= 0) return "";
+      return trimFloat((availableUsdt * percent) / 100);
+    }
     return normalizeTradeSizeInput(precheck.percentSizes[percent] ?? "", instrument, { max: maxOpenSize });
-  }, [closePercentSide, closeSizeForSide, instrument, maxOpenSize, precheck.percentSizes, ticketMode]);
+  }, [availableUsdt, closePercentSide, closeSizeForSide, instrument, maxOpenSize, precheck.percentSizes, sizeUnitIsCost, ticketMode]);
+  const switchSizeUnit = useCallback((nextUnit: "contracts" | "cost") => {
+    if (nextUnit === sizeUnit) return;
+    setSizeUnit(nextUnit);
+    setSizeInput("");
+  }, [sizeUnit]);
   const tradeActions =
     ticketMode === "open"
       ? [
@@ -12108,6 +12235,7 @@ function OrderTicket({
   const switchTicketMode = useCallback((nextMode: "open" | "close") => {
     if (nextMode === ticketMode) return;
     setTicketMode(nextMode);
+    setSizeUnit("contracts");
     setSizeInput("");
     setAttachedExitsEnabled(false);
     setTakeProfitPrice("");
@@ -12701,6 +12829,24 @@ function OrderTicket({
   ).join(" · ");
   const priceFieldError = orderType === "market" ? "" : [...advancedBlockers, ...precheck.reasons].find((reason) => /价格|触发价|档位|激活/.test(reason)) ?? "";
   const sizeFieldError = precheck.reasons.find((reason) => /张数|数量|最小下单|单笔最大|步进/.test(reason)) ?? "";
+  let sizeHelpText: string;
+  let sizeHelpIsError = Boolean(sizeFieldError);
+  if (sizeUnitIsCost) {
+    if (!sizeInput) {
+      sizeHelpText = t("trading:costInputHelp");
+      sizeHelpIsError = false;
+    } else if (!effectiveSizeInput) {
+      sizeHelpText = t("trading:costBelowMinimum", { min: instrument?.minSz || "--" });
+      sizeHelpIsError = true;
+    } else if (sizeFieldError) {
+      sizeHelpText = sizeFieldError;
+    } else {
+      sizeHelpText = t("trading:costConvertsToContracts", { size: effectiveSizeInput });
+      sizeHelpIsError = false;
+    }
+  } else {
+    sizeHelpText = sizeFieldError || (instrument ? t("trading:sizeMinStep", { min: instrument.minSz, step: instrument.lotSz }) : t("trading:waitingContractRules"));
+  }
 
   useEffect(() => {
     const handleTicketHotkey = (event: KeyboardEvent) => {
@@ -12906,7 +13052,15 @@ function OrderTicket({
         )}
         </section>
         <section className="ticket-section ticket-section--sizing">
-        <label htmlFor={sizeFieldId}>{t("trading:quantityContracts")}</label>
+        <div className="ticket-size-label-row">
+          <label htmlFor={sizeFieldId}>{sizeUnitIsCost ? t("trading:quantityCost") : t("trading:quantityContracts")}</label>
+          {ticketMode === "open" && (
+            <div className="segmented ticket-size-unit" role="group" aria-label={t("trading:sizeUnitLabel")}>
+              <button type="button" className={sizeUnit === "contracts" ? "active" : ""} aria-pressed={sizeUnit === "contracts"} onClick={() => switchSizeUnit("contracts")}>{t("trading:sizeUnitContracts")}</button>
+              <button type="button" className={sizeUnit === "cost" ? "active" : ""} aria-pressed={sizeUnit === "cost"} onClick={() => switchSizeUnit("cost")}>{t("trading:sizeUnitCost")}</button>
+            </div>
+          )}
+        </div>
         {ticketMode === "close" && (
           <div className="close-size-summary">
             <button type="button" className={closePercentSide === "close-long" ? "active" : ""} disabled={longClosable <= 0} onClick={() => { setClosePercentSide("close-long"); setSizeInput(""); }}>
@@ -12921,15 +13075,15 @@ function OrderTicket({
           id={sizeFieldId}
           ref={sizeInputRef}
           data-trade-hotkey-input="size"
-          value={effectiveSizeInput}
-          aria-invalid={Boolean(sizeFieldError) || undefined}
+          value={sizeInput}
+          aria-invalid={Boolean(sizeFieldError) || (sizeUnitIsCost && Boolean(sizeInput) && !effectiveSizeInput) || undefined}
           aria-describedby={sizeHelpId}
           data-onboarding-focus
-          placeholder={instrument ? t("trading:sizeMinStepCompact", { min: instrument.minSz, step: instrument.lotSz }) : t("trading:enterOkxContractQuantity")}
+          placeholder={sizeUnitIsCost ? t("trading:enterOrderCost") : instrument ? t("trading:sizeMinStepCompact", { min: instrument.minSz, step: instrument.lotSz }) : t("trading:enterOkxContractQuantity")}
           onChange={(event) => setSizeInput(event.target.value)}
-          onBlur={() => setSizeInput((value) => normalizeTradeSizeInput(value, instrument, ticketMode === "open" ? { max: maxOpenSize } : {}))}
+          onBlur={() => setSizeInput((value) => sizeUnitIsCost ? normalizeTradeCostInput(value, { max: availableUsdt }) : normalizeTradeSizeInput(value, instrument, ticketMode === "open" ? { max: maxOpenSize } : {}))}
         />
-        <span id={sizeHelpId} className={clsx("ticket-field-help", sizeFieldError && "error")}>{sizeFieldError || (instrument ? t("trading:sizeMinStep", { min: instrument.minSz, step: instrument.lotSz }) : t("trading:waitingContractRules"))}</span>
+        <span id={sizeHelpId} className={clsx("ticket-field-help", sizeHelpIsError && "error")}>{sizeHelpText}</span>
         <div className="percent-row">
           {[25, 50, 75, 100].map((percent) => (
             <button
@@ -12994,7 +13148,9 @@ function OrderTicket({
         {account && ticketMode === "open" && (
           <div className="order-estimates">
             <span>{t("trading:availableBalance")} <b>{Number.isFinite(availableUsdt) ? formatUsdt(availableUsdt) : "--"}</b></span>
-            <span>{t("trading:estimatedMargin")} <b>{estimatedMargin === undefined ? "--" : formatUsdt(estimatedMargin)}</b></span>
+            {sizeUnitIsCost
+              ? <span>{t("trading:estimatedCostWithFee")} <b>{estimatedCost === undefined ? "--" : formatUsdt(estimatedCost)}</b></span>
+              : <span>{t("trading:estimatedMargin")} <b>{estimatedMargin === undefined ? "--" : formatUsdt(estimatedMargin)}</b></span>}
             <span>{t("trading:maxOpen")} <b>{maxOpenSize || "--"} {t("trading:contracts")}</b></span>
           </div>
         )}

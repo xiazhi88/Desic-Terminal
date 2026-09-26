@@ -177,7 +177,7 @@ const HELP_QUESTIONS_ZH: HelpQuestion[] = [
     id: "contract-size",
     category: "trade",
     title: "下单数量为什么使用“张”？",
-    paragraphs: ["OKX 永续合约的数量单位是张，不是 BTC、ETH 等币数量。终端按合约面值计算对应币数量、名义价值、保证金和手续费。", "输入值会按该合约的最小数量与步进自动规范化。提交前请同时核对“张数”和估算的币数量或 USDT 名义价值。"],
+    paragraphs: ["OKX 永续合约的数量单位是张，不是 BTC、ETH 等币数量。终端按合约面值计算对应币数量、名义价值、保证金和手续费。", "开仓面板支持切换“张 / 成本”两种输入方式：按成本（USDT）输入时，终端按当前价格、杠杆和手续费估算自动换算为张数，换算结果实时显示在输入框下方。", "输入值会按该合约的最小数量与步进自动规范化。提交前请同时核对“张数”和估算的币数量或 USDT 名义价值。"],
     keywords: ["张", "币数量", "合约面值", "ctVal", "数量"],
     action: { label: "返回下单面板", target: { kind: "workspace", section: "terminal" } }
   },
