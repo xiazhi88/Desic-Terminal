@@ -25704,13 +25704,27 @@ fn data_root_bootstrap_state(app: tauri::AppHandle) -> Result<DataRootBootstrapS
     let migration_pending = crate::data_root_migration::read_pending_migration(&app);
     // 已有数据（自定义根或默认位置）→ 老用户，跳过选择，零打扰；待迁移时也不显示选择卡。
     // 自定义数据目录仅 Windows 支持，其它平台永不出现选择卡。
+    // 「启动完成标记」是显式依据（老用户即使丢失 data-dir.json / 配置目录被清也不会被误判为首次），
+    // 标记缺失时仍以既有数据兜底。
     let supported = cfg!(windows);
-    let needs_choice = supported
-        && migration_pending.is_none()
-        && custom_root.is_none()
-        && !database_exists
-        && !default_database_exists
-        && !default_config_exists;
+    let bootstrap_done = crate::storage_config::bootstrap_done_marker_exists(&app);
+    let existing_data_present = database_exists || default_database_exists || default_config_exists;
+    let needs_choice =
+        crate::storage_config::needs_data_root_choice(crate::storage_config::DataRootChoiceSignals {
+            supported,
+            migration_pending: migration_pending.is_some(),
+            custom_root_present: custom_root.is_some(),
+            bootstrap_done,
+            existing_data_present,
+        });
+    // 老用户（有既有数据但缺完成标记）尽力补写标记：只影响后续启动，写失败不改变本次判定。
+    if supported && !bootstrap_done && existing_data_present {
+        if let Err(error) = crate::storage_config::write_bootstrap_done_marker(&app) {
+            boot_log(&format!(
+                "bootstrap: bootstrap-done marker backfill failed: {error}"
+            ));
+        }
+    }
     Ok(DataRootBootstrapState {
         needs_choice,
         custom_root: custom_root.map(|path| path.to_string_lossy().into_owned()),
@@ -25772,6 +25786,13 @@ async fn finalize_data_root_bootstrap(
     boot_log("bootstrap: runtime paths ready");
     let database_ready = ensure_database_and_workers(&app).await;
     let data_dir = crate::storage_config::runtime_data_dir(&app)?;
+    // 用户已就数据存放位置做出选择（默认或自定义）：写下完成标记，之后启动不再出现选择卡。
+    // 标记只影响后续启动的判定，写失败仅记录日志，不让启动失败。
+    if let Err(error) = crate::storage_config::write_bootstrap_done_marker(&app) {
+        boot_log(&format!(
+            "bootstrap: bootstrap-done marker write failed: {error}"
+        ));
+    }
     Ok(DataRootBootstrapOutcome {
         data_dir: data_dir.to_string_lossy().into_owned(),
         custom_root: custom_root.map(|path| path.to_string_lossy().into_owned()),

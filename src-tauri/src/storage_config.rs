@@ -93,6 +93,83 @@ pub(crate) fn write_custom_data_root(
     write_file_atomically(&marker, content.as_bytes())
 }
 
+/// 启动完成标记：显式记录「这台机器上已经走过一次数据位置引导」。
+/// 与 `data-dir.json` 同在默认配置目录，同样**不随数据迁移**：它表达的是引导已完成，
+/// 而不是数据在哪。缺少它时仍以「是否已有既有数据」兜底，避免老用户被误判为首次启动。
+const BOOTSTRAP_DONE_MARKER_FILE: &str = "bootstrap-done.json";
+
+fn bootstrap_done_marker_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
+    Ok(app
+        .path()
+        .app_config_dir()
+        .map_err(|err| format!("解析应用配置目录失败: {err}"))?
+        .join(BOOTSTRAP_DONE_MARKER_FILE))
+}
+
+/// 解析启动完成标记内容，返回写入时间戳；内容非法一律视为未写入。
+fn bootstrap_done_completed_at(content: &str) -> Option<i64> {
+    let parsed: serde_json::Value = serde_json::from_str(content).ok()?;
+    parsed.get("completedAt")?.as_i64()
+}
+
+/// 读取启动完成标记（返回完成时间戳）。未写入 / 内容非法 / 非 Windows 时返回 None。
+/// **仅 Windows 有意义**：选择卡只在 Windows 出现，其它平台不读也不写该标记。
+pub(crate) fn read_bootstrap_done_marker(app: &tauri::AppHandle) -> Option<i64> {
+    if !cfg!(windows) {
+        return None;
+    }
+    let marker = bootstrap_done_marker_path(app).ok()?;
+    bootstrap_done_completed_at(&fs::read_to_string(marker).ok()?)
+}
+
+/// 启动引导是否已完成过（存在性判断）。
+pub(crate) fn bootstrap_done_marker_exists(app: &tauri::AppHandle) -> bool {
+    read_bootstrap_done_marker(app).is_some()
+}
+
+/// 写入启动完成标记（原子写）。**仅 Windows 写入**，避免在其它平台留下会被忽略的标记文件。
+pub(crate) fn write_bootstrap_done_marker(app: &tauri::AppHandle) -> Result<(), String> {
+    if !cfg!(windows) {
+        return Ok(());
+    }
+    let marker = bootstrap_done_marker_path(app)?;
+    if let Some(parent) = marker.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|err| format!("创建配置目录 {} 失败: {err}", parent.display()))?;
+    }
+    let payload = serde_json::json!({
+        "completedAt": now_ms(),
+    });
+    let content = serde_json::to_string_pretty(&payload).map_err(|err| err.to_string())?;
+    write_file_atomically(&marker, content.as_bytes())
+}
+
+/// 「是否需要让用户选择数据存放位置」的全部输入（纯数据，便于单测）
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct DataRootChoiceSignals {
+    /// 当前平台是否支持自定义数据目录（仅 Windows）
+    pub(crate) supported: bool,
+    /// 是否存在待执行的迁移登记
+    pub(crate) migration_pending: bool,
+    /// 是否已持久化自定义数据根
+    pub(crate) custom_root_present: bool,
+    /// 启动完成标记是否已写入
+    pub(crate) bootstrap_done: bool,
+    /// 是否已存在既有数据（数据库或配置文件）
+    pub(crate) existing_data_present: bool,
+}
+
+/// 是否需要弹出「选择数据存放位置」。
+/// 只在真正首次启动为 true：支持自定义目录 + 无待迁移 + 无自定义根 + 无完成标记 + 无任何既有数据。
+/// 任何一处发现既有痕迹（含老用户丢失完成标记的情况）都判为老用户，绝不打扰。
+pub(crate) fn needs_data_root_choice(signals: DataRootChoiceSignals) -> bool {
+    signals.supported
+        && !signals.migration_pending
+        && !signals.custom_root_present
+        && !signals.bootstrap_done
+        && !signals.existing_data_present
+}
+
 /// 数据根下的目录布局（与默认布局一致：config / cache / logs / data）
 pub(crate) fn runtime_paths_under(root: &std::path::Path) -> RuntimePaths {
     let data_dir = root.join("data");
@@ -7364,5 +7441,81 @@ VI. Review and evolve
             "no file may escape the staging directory"
         );
         fs::remove_dir_all(&root).expect("remove escape test directory");
+    }
+
+    /// 全新 Windows 安装：没有任何既有痕迹
+    fn first_launch_signals() -> DataRootChoiceSignals {
+        DataRootChoiceSignals {
+            supported: true,
+            migration_pending: false,
+            custom_root_present: false,
+            bootstrap_done: false,
+            existing_data_present: false,
+        }
+    }
+
+    #[test]
+    fn a_clean_windows_first_launch_asks_for_the_data_location() {
+        assert!(needs_data_root_choice(first_launch_signals()));
+    }
+
+    #[test]
+    fn non_windows_never_asks_for_the_data_location() {
+        let signals = DataRootChoiceSignals {
+            supported: false,
+            ..first_launch_signals()
+        };
+        assert!(!needs_data_root_choice(signals));
+    }
+
+    #[test]
+    fn the_bootstrap_done_marker_suppresses_the_data_location_choice() {
+        // 标记存在即视为引导已走过，哪怕数据目录被清空（用户选过默认位置后删数据）。
+        let signals = DataRootChoiceSignals {
+            bootstrap_done: true,
+            ..first_launch_signals()
+        };
+        assert!(!needs_data_root_choice(signals));
+    }
+
+    #[test]
+    fn existing_traces_without_the_marker_are_an_upgrade_not_a_first_launch() {
+        // 老用户升级：完成标记还不存在（旧版本从未写过），必须靠既有数据兜底免打扰。
+        for signals in [
+            DataRootChoiceSignals {
+                existing_data_present: true,
+                ..first_launch_signals()
+            },
+            DataRootChoiceSignals {
+                custom_root_present: true,
+                ..first_launch_signals()
+            },
+            DataRootChoiceSignals {
+                migration_pending: true,
+                ..first_launch_signals()
+            },
+        ] {
+            assert!(!needs_data_root_choice(signals), "{signals:?}");
+        }
+    }
+
+    #[test]
+    fn a_bootstrap_done_marker_needs_a_completed_at_timestamp() {
+        assert_eq!(
+            bootstrap_done_completed_at("{\n  \"completedAt\": 1727400000000\n}"),
+            Some(1727400000000)
+        );
+        for invalid in [
+            "",
+            "not json",
+            "{}",
+            "[]",
+            "{\"completedAt\": \"2026-09-27\"}",
+        ] {
+            assert!(
+                bootstrap_done_completed_at(invalid).is_none(),
+                "accepted invalid marker {invalid}"
+            );
+        }
     }
 }
