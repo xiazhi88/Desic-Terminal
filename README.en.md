@@ -20,7 +20,7 @@
     <img alt="Rust 2021" src="https://img.shields.io/badge/Rust-2021-000000?logo=rust" />
     <img alt="TypeScript 6" src="https://img.shields.io/badge/TypeScript-6-3178C6?logo=typescript&logoColor=white" />
     <img alt="OKX USDT perpetual" src="https://img.shields.io/badge/OKX-USDT%20Perpetual-111111" />
-    <img alt="Windows, macOS and Linux" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS%20%7C%20Linux-6D5DFB" />
+    <img alt="Windows, macOS and Linux (source build)" src="https://img.shields.io/badge/Desktop-Windows%20%7C%20macOS%20%7C%20Linux%20(source%20build)-6D5DFB" />
   </p>
 
   <p>
