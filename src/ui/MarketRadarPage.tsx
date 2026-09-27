@@ -1,10 +1,12 @@
-import { lazy, Suspense, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   Activity,
   ArrowUpRight,
   BarChart3,
   Bell,
+  ChartScatter,
+  Table2,
   Bookmark,
   GitCompareArrows,
   ListFilter,
@@ -53,13 +55,13 @@ import {
   loadMarketRadarResearchScores,
   loadMarketRadarSavedFilters,
   loadMarketRadarValidationReport,
-  recordMarketRadarSnapshot,
   saveMarketRadarAlertRule,
   saveMarketRadarFilter,
   startMarketRadarHistory,
 } from "../lib/okx";
 import { SymbolIcon } from "./SymbolIcon";
 import { WorkspaceFrame } from "./WorkspaceFrame";
+import { RadarConstellation } from "./radar/RadarConstellation";
 import "./MarketRadarPage.css";
 
 type RadarView = "overview" | "strong" | "movers" | "active" | "stable" | "new" | "stocks" | "expert";
@@ -76,6 +78,8 @@ type Props = Readonly<{
   watchlist: string[];
   cacheDir?: string;
   desktop: boolean;
+  /** 最近一次应用级小时快照得出的 1h / 1d / 7d 排名变化。 */
+  rankChanges: MarketRadarRankChange[];
   onNotify: (notification: { kind: "success" | "info" | "warning" | "error"; title: string; message: string }) => void;
   onRefresh: () => void;
   onOpenSymbol: (instId: string) => void;
@@ -93,6 +97,7 @@ export function MarketRadarPage({
   watchlist,
   cacheDir,
   desktop,
+  rankChanges,
   onNotify,
   onRefresh,
   onOpenSymbol,
@@ -119,10 +124,14 @@ export function MarketRadarPage({
   const [alertRules, setAlertRules] = useState<MarketRadarSavedItem[]>([]);
   const [filterName, setFilterName] = useState("");
   const [compareIds, setCompareIds] = useState<string[]>([]);
-  const [rankChanges, setRankChanges] = useState<MarketRadarRankChange[]>([]);
   const [validationReport, setValidationReport] = useState<MarketRadarValidationReport | null>(null);
   const [validationLoading, setValidationLoading] = useState(false);
-  const recordedSnapshotKey = useRef("");
+  // 表格 / 星图：星图是同一份排行数据的空间视图，外加历史快照回放。
+  const [presentation, setPresentation] = useState<"table" | "constellation">(() => window.localStorage.getItem("desic.radar.presentation.v1") === "constellation" ? "constellation" : "table");
+  const switchPresentation = (next: "table" | "constellation") => {
+    setPresentation(next);
+    window.localStorage.setItem("desic.radar.presentation.v1", next);
+  };
   const validationRequested = useRef(false);
 
   useEffect(() => {
@@ -172,55 +181,6 @@ export function MarketRadarPage({
   }, []);
 
   useEffect(() => {
-    if (!desktop || !fetchedAt || rows.length === 0) return;
-    const bucket = Math.floor(fetchedAt / 3_600_000);
-    const key = `${bucket}:${researchScores.length}`;
-    if (recordedSnapshotKey.current === key) return;
-    recordedSnapshotKey.current = key;
-    let active = true;
-    const modelVersion = `market-radar-composite-v1:${researchScores[0]?.modelVersion ?? "snapshot-v1"}`;
-    void recordMarketRadarSnapshot({
-      fetchedAt,
-      modelVersion,
-      rows: rows.map((row) => ({
-        instId: row.instrument.instId,
-        category: row.instrument.instCategory,
-        listTime: Number(row.instrument.listTime || 0) || undefined,
-        rank: row.rank,
-        compositeScore: row.compositeScore,
-        strengthScore: row.research
-          ? row.research.strengthScore * 0.315 + row.strengthScore * 0.12
-          : row.strengthScore * 0.40,
-        lowVolatilityScore: row.research ? row.research.lowVolatilityScore * 0.14 : 0,
-        activityScore: row.research
-          ? row.research.activityScore * 0.14 + row.activityScore * 0.105
-          : row.activityScore * 0.35,
-        rawActivityScore: row.research?.activityScore ?? row.activityScore,
-        trendQualityScore: row.research ? row.research.trendQualityScore * 0.105 : 0,
-        rawTrendQualityScore: row.research?.trendQualityScore,
-        volatility20dPct: row.research?.volatility20dPct,
-        liquidityScore: row.liquidityScore * (row.research ? 0.075 : 0.25),
-        change24hPct: row.change24hPct,
-        turnover24h: row.turnover24h,
-        lastPrice: row.last,
-        spreadBps: row.spreadBps ?? undefined,
-        historyReady: Boolean(row.research),
-      })),
-    }).then((result) => {
-      if (!active || !result) return;
-      setRankChanges(result.changes);
-      for (const alert of result.alerts) {
-        onNotify({
-          kind: alert.kind === "spreadAbove" ? "warning" : "info",
-          title: alert.ruleName,
-          message: radarAlertMessage(alert, chinese),
-        });
-      }
-    });
-    return () => { active = false; };
-  }, [chinese, desktop, fetchedAt, onNotify, researchScores, rows]);
-
-  useEffect(() => {
     if (toolMode !== "validation" || validationRequested.current) return;
     let active = true;
     validationRequested.current = true;
@@ -264,7 +224,10 @@ export function MarketRadarPage({
     }
   }, [selectedId, visibleRows]);
 
-  const selected = visibleRows.find((row) => row.instrument.instId === selectedId) ?? visibleRows[0] ?? null;
+  const selected = (presentation === "constellation" ? rows : visibleRows).find((row) => row.instrument.instId === selectedId) ?? visibleRows[0] ?? null;
+  // 星图里当前标签页 / 搜索 / 筛选命中的合约保持高亮，其余淡化（不隐藏，保留全市场语境）。
+  const constellationFocus = useMemo(() => (visibleRows.length === rows.length ? null : new Set(visibleRows.map((row) => row.instrument.instId))), [rows.length, visibleRows]);
+  const constellationCategoryName = useCallback((category: string) => categoryLabel(category === "other" ? undefined : category, chinese), [chinese]);
   const rankChangeMap = useMemo(() => new Map(rankChanges.map((change) => [change.instId, change])), [rankChanges]);
   const breadth = useMemo(() => buildMarketBreadth(rows), [rows]);
   const compareRows = compareIds.flatMap((instId) => rows.find((row) => row.instrument.instId === instId) ?? []);
@@ -349,6 +312,12 @@ export function MarketRadarPage({
           </label>
         ) : null}
         {view !== "expert" ? (
+          <div className="market-radar-page__view-toggle" role="radiogroup" aria-label={text("呈现方式", "Presentation")}>
+            <button type="button" aria-pressed={presentation === "table"} onClick={() => switchPresentation("table")}><Table2 size={13} />{text("表格", "Table")}</button>
+            <button type="button" aria-pressed={presentation === "constellation"} onClick={() => switchPresentation("constellation")}><ChartScatter size={13} />{text("星图", "Constellation")}</button>
+          </div>
+        ) : null}
+        {view !== "expert" ? (
           <div className="market-radar-page__tools" aria-label={text("研究工具", "Research tools")}>
             <button type="button" className={clsx(toolMode === "filters" && "is-active")} onClick={() => setToolMode(toolMode === "filters" ? null : "filters")} title={text("筛选方案", "Filters")}>
               <ListFilter size={13} /><span>{text("筛选", "Filter")}</span>{filterActiveCount ? <b>{filterActiveCount}</b> : null}
@@ -431,7 +400,25 @@ export function MarketRadarPage({
           </Suspense>
         </div>
       ) : (
-      <div className="market-radar-page__body">
+      <div className={clsx("market-radar-page__body", presentation === "constellation" && "is-constellation")}>
+        {presentation === "constellation" ? (
+          <RadarConstellation
+            rows={rows}
+            researchScores={researchScores}
+            fetchedAt={fetchedAt}
+            focusIds={constellationFocus}
+            selectedId={selected?.instrument.instId ?? null}
+            compareIds={compareIds}
+            desktop={desktop}
+            text={text}
+            categoryName={constellationCategoryName}
+            onSelect={setSelectedId}
+            onCompare={(instIds) => {
+              setCompareIds(instIds);
+              if (instIds.length > 0) setToolMode("compare");
+            }}
+          />
+        ) : (
         <section className="market-radar-table" aria-label={text("市场排行", "Market ranking")}>
           <div className="market-radar-table__head" role="row">
             <span>{text("排名", "Rank")}</span>
@@ -492,6 +479,7 @@ export function MarketRadarPage({
             )}
           </div>
         </section>
+        )}
 
         <aside className="market-radar-detail" aria-label={text("评分说明", "Score explanation")}>
           {selected ? <RadarDetail
@@ -865,18 +853,6 @@ function alertRuleLabel(definition: Record<string, unknown>, chinese: boolean) {
     historyReady: ["研究历史首次就绪", "Research history becomes ready"],
   };
   return (labels[kind] ?? [kind, kind])[chinese ? 0 : 1];
-}
-
-function radarAlertMessage(alert: { kind: string; instId: string; currentValue: number; threshold: number }, chinese: boolean) {
-  const labels: Record<string, [string, string]> = {
-    enterTop: [`${alert.instId} 首次进入 Top ${alert.threshold}`, `${alert.instId} entered Top ${alert.threshold}`],
-    rankRise: [`${alert.instId} 一小时上升 ${alert.currentValue.toFixed(0)} 名`, `${alert.instId} rose ${alert.currentValue.toFixed(0)} ranks in one hour`],
-    activityAbove: [`${alert.instId} 活跃度升至 ${alert.currentValue.toFixed(0)}`, `${alert.instId} activity rose to ${alert.currentValue.toFixed(0)}`],
-    spreadAbove: [`${alert.instId} 点差扩大至 ${alert.currentValue.toFixed(1)} bp`, `${alert.instId} spread widened to ${alert.currentValue.toFixed(1)} bp`],
-    newListing: [`发现新标的 ${alert.instId}`, `New market detected: ${alert.instId}`],
-    historyReady: [`${alert.instId} 研究历史已就绪`, `${alert.instId} research history is ready`],
-  };
-  return (labels[alert.kind] ?? [alert.instId, alert.instId])[chinese ? 0 : 1];
 }
 
 function rankDeltaLabel(value: number | null | undefined, chinese: boolean) {

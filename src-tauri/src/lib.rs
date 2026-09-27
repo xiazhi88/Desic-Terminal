@@ -114,7 +114,7 @@ use crate::market_radar::{
 use crate::market_radar_workspace::{
     market_radar_alert_rules, market_radar_delete_alert_rule, market_radar_delete_filter,
     market_radar_record_snapshot, market_radar_save_alert_rule, market_radar_save_filter,
-    market_radar_saved_filters, market_radar_validation_report,
+    market_radar_saved_filters, market_radar_snapshot_frames, market_radar_validation_report,
 };
 use crate::market_ws::{
     connect_okx_ws, filter_cancelled_pending_orders, market_health_blockers,
@@ -26120,6 +26120,7 @@ pub fn run() {
             market_radar_save_alert_rule,
             market_radar_delete_alert_rule,
             market_radar_validation_report,
+            market_radar_snapshot_frames,
             okx_candles,
             okx_funding_rate,
             init_local_storage,

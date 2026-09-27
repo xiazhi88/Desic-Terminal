@@ -43,7 +43,7 @@ import type {
   MarketRadarHistoryStatus,
   MarketRadarResearchScore,
   MarketRadarSavedItem,
-  MarketRadarSnapshotResult,
+  MarketRadarSnapshotFrames, MarketRadarSnapshotResult,
   MarketRadarValidationReport,
   MarketSnapshot,
   ClosePositionRequest,
@@ -896,6 +896,10 @@ export async function recordMarketRadarSnapshot(input: {
   }>;
 }): Promise<MarketRadarSnapshotResult | null> {
   return invokeOptional<MarketRadarSnapshotResult>("market_radar_record_snapshot", { input });
+}
+
+export async function loadMarketRadarSnapshotFrames(request: { fromMs: number; toMs: number; stepHours?: number; maxFrames?: number }): Promise<MarketRadarSnapshotFrames | null> {
+  return invokeOptional<MarketRadarSnapshotFrames>("market_radar_snapshot_frames", { request });
 }
 
 export async function loadMarketRadarSavedFilters(): Promise<MarketRadarSavedItem[]> {

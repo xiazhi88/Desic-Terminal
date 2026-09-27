@@ -54,6 +54,7 @@ import { CommandPalette, type PaletteItem } from "./shell/CommandPalette";
 import { OverviewSparkline, WorkspaceOverview, type OverviewTile } from "./shell/WorkspaceOverview";
 import { MarketHeartbeat } from "./shell/MarketHeartbeat";
 import { requestAiResearchPrompt } from "../lib/shellEvents";
+import { useRadarSnapshotRecorder } from "../lib/useRadarSnapshotRecorder";
 import { detectDesktopPlatform } from "../lib/platform";
 import { readVisualPreference, saveVisualPreference, subscribeVisualPreference, type VisualPreference } from "../lib/visualPreference";
 import clsx from "clsx";
@@ -4651,6 +4652,16 @@ function TradingTerminal({
     return () => window.cancelAnimationFrame(frame);
   }, [applyChartAdjacentSize, chartResizeBounds, mainSection]);
 
+  // 雷达小时快照在应用级记录，不依赖雷达页是否打开。
+  const radarRankChanges = useRadarSnapshotRecorder({
+    enabled: isTauriRuntime(),
+    marketAssets: enrichedMarketAssets,
+    tickers: marketTickers,
+    fetchedAt: marketTickersFetchedAt,
+    chinese: chineseUi,
+    onNotify: pushNotification
+  });
+
   // —— 外壳：命令面板、工作区总览、心跳线 ——
   const shortcutModifier = detectDesktopPlatform() === "macos" ? "⌘" : "Ctrl+";
   const heartbeatLabel = useCallback((health: "live" | "stale" | "down", ageMs: number | null) => {
@@ -5054,6 +5065,7 @@ function TradingTerminal({
                 watchlist={watchlist}
                 cacheDir={marketAssetCacheDir}
                 desktop={isTauriRuntime()}
+                rankChanges={radarRankChanges}
                 onNotify={pushNotification}
                 onRefresh={() => void refreshMarketTickerSnapshot()}
                 onOpenSymbol={(instId) => {
