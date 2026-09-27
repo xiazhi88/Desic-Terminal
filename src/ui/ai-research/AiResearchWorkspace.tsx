@@ -56,6 +56,7 @@ import {
 import { logger } from "../../lib/logger";
 import { createDeferredCleanupSlot } from "../../lib/deferredCleanup";
 import { isTauriRuntime } from "../../lib/tauri";
+import { AI_RESEARCH_PROMPT_EVENT } from "../../lib/shellEvents";
 import {
   AiEvidenceReferences,
   AiInlineEvidenceCards,
@@ -1073,6 +1074,13 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     setSkillMenuOpen(false);
     window.requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
+
+  // 命令面板「问 AI」：只把问题填入输入框并聚焦，由用户确认后发送。
+  useEffect(() => {
+    const handlePrompt = (event: Event) => insertResearchPrompt(String((event as CustomEvent<string>).detail ?? ""));
+    window.addEventListener(AI_RESEARCH_PROMPT_EVENT, handlePrompt);
+    return () => window.removeEventListener(AI_RESEARCH_PROMPT_EVENT, handlePrompt);
+  }, [insertResearchPrompt]);
 
   const openAiMessageById = useCallback((messageId: string) => {
     const host = scrollRef.current;

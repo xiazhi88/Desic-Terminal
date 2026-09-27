@@ -6,10 +6,15 @@ import "./theme/atmosphere.css";
 import "./theme/data-voice.css";
 import "./theme/motion.css";
 import "./theme/signature.css";
+import "./ui/shell/shell.css";
+import "./theme/phosphor.css";
 import { i18n, initializeI18n } from "./i18n/runtime";
 import { applyPlatformAttribute } from "./lib/platform";
+import { applyVisualPreference } from "./lib/visualPreference";
 
 applyPlatformAttribute();
+// 首帧之前写入外观属性，避免从经典外观闪到磷光外观。
+applyVisualPreference();
 
 const searchParams = new URLSearchParams(window.location.search);
 const isMascotPreview =
@@ -26,6 +31,8 @@ const isAiPreview =
   || searchParams.get("preview") === "ai-research";
 const isAutomationPreview =
   window.location.pathname === "/automation-preview" || searchParams.get("preview") === "automation";
+const isDesignSystemPreview =
+  window.location.pathname === "/design-system-preview" || searchParams.get("preview") === "design-system";
 const isTerminalPreview =
   window.location.pathname === "/terminal-preview" || searchParams.get("preview") === "terminal";
 
@@ -55,6 +62,11 @@ const render = async () => {
   if (isStartupPreview) {
     const { StartupPreview } = await import("./ui/App");
     renderApp(<StartupPreview />);
+    return;
+  }
+  if (isDesignSystemPreview) {
+    const { DesignSystemPreview } = await import("./ui/shell/DesignSystemPreview");
+    renderApp(<DesignSystemPreview />);
     return;
   }
   if (isChartPreview) {

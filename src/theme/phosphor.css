@@ -1,0 +1,271 @@
+/*
+ * theme/phosphor.css — 「磷光」视觉语言（默认外观）
+ * ------------------------------------------------------------------
+ * 三条纪律：
+ *   1. 颜色只表达信息：涨跌、买卖、状态；紫色只留给 AI（主体、运行、证据）。
+ *   2. 光只属于活数据：发光 = 实时、正在变化、需要注意；静态装饰一律不发光。
+ *   3. 动效只解释变化：120–420ms，只动 transform / opacity，全部有减弱动效回退。
+ *
+ * 作用域：全部规则挂在 :root[data-visual="phosphor"] 下；经典外观（data-visual="classic"）
+ * 不受影响，作为一个版本的过渡回退。本文件在所有样式之后导入。
+ *
+ * 做法：先把 styles.css 的现有 token 重映射（约 1000 处 var() 引用随之生效），
+ * 再对外壳上仍写死紫色的少数高频选择器定向覆盖；AI 工作区内部把强调色还原为 AI 紫。
+ * 色彩用 OKLCH 定义，支持 Display-P3 的屏幕获得更纯的涨跌色，hex 为回退。
+ */
+
+:root[data-visual="phosphor"] {
+  --bg: #05060b;
+  --panel: #0a0b12;
+  --panel-2: #10111a;
+  --surface-raised: #0d0e15;
+  --line: rgba(200, 200, 230, 0.12);
+  --line-soft: rgba(200, 200, 230, 0.07);
+  --text: #f4f4fa;
+  --muted: #b3b5c6;
+  --weak: #6e7187;
+  --up: #ff4d6a;
+  --down: #19d99a;
+  --ai: #9a63ff;
+  --ai-bright: #c3a5ff;
+  --ai-soft: rgba(154, 99, 255, 0.14);
+  --live: #5fd4e0;
+  /* 通用强调色回到中性：选中、焦点、描边不再借用品牌紫。 */
+  --accent: #c9cad8;
+  --accent-bright: #eeeef6;
+  --accent-dim: rgba(200, 200, 230, 0.34);
+  --focus: #dcdde8;
+  --surface-selected: rgba(200, 200, 230, 0.075);
+  --line-tinted: rgba(200, 200, 230, 0.12);
+  --line-tinted-strong: rgba(200, 200, 230, 0.22);
+  --panel-grad: linear-gradient(var(--panel), var(--panel));
+  --panel-grad-soft: linear-gradient(var(--panel), var(--panel));
+  --glow-accent: 0 0 0 transparent;
+  --glow-accent-soft: 0 0 0 transparent;
+  --atmosphere: none;
+  --vignette: none;
+  --ease-spring: cubic-bezier(0.34, 1.4, 0.64, 1);
+  --font-number: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+}
+
+@supports (color: oklch(0.5 0.1 200)) {
+  :root[data-visual="phosphor"] {
+    --bg: oklch(0.115 0.009 282);
+    --panel: oklch(0.145 0.011 283);
+    --panel-2: oklch(0.175 0.013 284);
+    --surface-raised: oklch(0.16 0.012 284);
+    --line: oklch(0.88 0.02 285 / 0.12);
+    --line-soft: oklch(0.88 0.02 285 / 0.07);
+    --text: oklch(0.97 0.006 285);
+    --muted: oklch(0.8 0.014 285);
+    --weak: oklch(0.56 0.018 285);
+    --up: oklch(0.67 0.22 14);
+    --down: oklch(0.79 0.18 162);
+    --ai: oklch(0.63 0.22 296);
+    --ai-bright: oklch(0.8 0.12 296);
+    --ai-soft: oklch(0.63 0.22 296 / 0.14);
+    --live: oklch(0.82 0.1 205);
+  }
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root[data-visual="phosphor"] {
+    /* 略欠阻尼的弹簧：一次轻微过冲后停稳，只用于“落定”类动效。 */
+    --ease-spring: linear(0, 0.009, 0.035 2.1%, 0.141 4.4%, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017 19.4%, 1.077 22.4%, 1.101 25.5%, 1.099 28.6%, 1.071 33.1%, 1.017 40.7%, 0.997 47%, 0.994 54.1%, 1.001 70.4%, 1);
+  }
+}
+
+/* AI 工作区内部：强调色还原为 AI 紫（AI 研究、AI 自动化、Agent 库）。 */
+:root[data-visual="phosphor"] :is(.ai-research-shell, .automation-workspace, .agent-library) {
+  --accent: var(--ai);
+  --accent-bright: var(--ai-bright);
+  --accent-dim: color-mix(in oklab, var(--ai) 55%, transparent);
+  --focus: var(--ai-bright);
+  --surface-selected: var(--ai-soft);
+  --line-tinted: color-mix(in oklab, var(--ai) 22%, transparent);
+  --line-tinted-strong: color-mix(in oklab, var(--ai) 38%, transparent);
+}
+
+/* ============================================================
+ * 1. 页面底色：平涂，不再叠加紫色光晕与暗角
+ * ============================================================ */
+:root[data-visual="phosphor"] body:not(:has(.startup-shell)):not(:has(.coin-preview)) {
+  background-color: var(--bg);
+  background-image: none;
+}
+
+:root[data-visual="phosphor"] ::selection {
+  background: rgba(200, 200, 230, 0.2);
+}
+
+:root[data-visual="phosphor"] * {
+  scrollbar-color: rgba(200, 200, 230, 0.18) transparent;
+}
+
+:root[data-visual="phosphor"] *::-webkit-scrollbar-thumb {
+  background: rgba(200, 200, 230, 0.16);
+}
+
+:root[data-visual="phosphor"] *::-webkit-scrollbar-thumb:hover {
+  background: rgba(200, 200, 230, 0.3);
+}
+
+:root[data-visual="phosphor"] :is(button, [role="button"], input, select, textarea, a, [tabindex]):focus-visible {
+  box-shadow: 0 0 0 2px rgba(220, 221, 232, 0.35);
+}
+
+/* ============================================================
+ * 2. 外壳：中性选中态；只有 AI 入口保留紫色
+ * ============================================================ */
+:root[data-visual="phosphor"] .rail-item.active {
+  color: var(--text);
+  background: rgba(200, 200, 230, 0.09);
+  box-shadow: inset 0 0 0 1px rgba(200, 200, 230, 0.1);
+}
+
+:root[data-visual="phosphor"] .rail-item[data-workspace="ai"].active {
+  color: var(--ai-bright);
+  background: var(--ai-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--ai) 30%, transparent);
+}
+
+:root[data-visual="phosphor"] .rail-item.active::before {
+  background: var(--text);
+}
+
+:root[data-visual="phosphor"] .rail-item[data-workspace="ai"].active::before {
+  background: var(--ai);
+}
+
+/* AI 入口不再常驻旋转光环：AI 是否在工作由 .rail-ai-status 运行点表达。 */
+:root[data-visual="phosphor"] .rail-item[data-workspace="ai"]::after {
+  display: none;
+}
+
+:root[data-visual="phosphor"] .periods .active {
+  color: var(--text);
+  background: rgba(200, 200, 230, 0.12);
+  box-shadow: inset 0 0 0 1px rgba(200, 200, 230, 0.16);
+}
+
+:root[data-visual="phosphor"] .chart-toolbar {
+  box-shadow: inset 0 -1px var(--line-soft);
+}
+
+:root[data-visual="phosphor"] .ticket-form .segmented .active {
+  color: var(--text);
+  background: rgba(200, 200, 230, 0.1);
+  box-shadow: inset 0 0 0 1px rgba(200, 200, 230, 0.22);
+}
+
+:root[data-visual="phosphor"] .bottom-tabs .active {
+  color: var(--text);
+  box-shadow: inset 0 -2px var(--text);
+}
+
+:root[data-visual="phosphor"] .bottom-panel {
+  border-top-color: var(--line);
+}
+
+:root[data-visual="phosphor"] .ticket {
+  background: var(--panel);
+}
+
+:root[data-visual="phosphor"] .mid-price {
+  box-shadow: none;
+}
+
+:root[data-visual="phosphor"] .price-strip:focus-visible {
+  outline-color: rgba(220, 221, 232, 0.6);
+}
+
+/* 合约铭牌：中性底板，不再用紫色渐变与光晕。 */
+:root[data-visual="phosphor"] .market-title {
+  border: 1px solid var(--line);
+  border-left: 1px solid var(--line);
+  background: var(--panel-2);
+  box-shadow: none;
+}
+
+/* 顶栏大价格：静态时不发光，只有数字变化时由里程表短暂闪亮。 */
+:root[data-visual="phosphor"] .price-strip-values > strong {
+  text-shadow: none;
+  font-weight: 700;
+}
+
+:root[data-visual="phosphor"] .ticket-tabs .active {
+  color: var(--text);
+  border-bottom-color: var(--text);
+  box-shadow: inset 0 -2px var(--text);
+}
+
+/* 四角括号是装饰：磷光外观下关闭。 */
+:root[data-visual="phosphor"] :is(.corners, .market-radar-page, .market-radar-table)::before {
+  background: none;
+}
+
+/* ============================================================
+ * 3. 数字：等宽表格数字；价格只滚动变化的那一位（里程表）
+ *    真实字符保留为文本（textContent、复制、读屏都正确），滚动列由伪元素绘制。
+ * ============================================================ */
+:root[data-visual="phosphor"] :is(.price-strip strong, .mid-price .mid-price__value) {
+  font-variant-numeric: tabular-nums;
+}
+
+.odometer {
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* 数字位：自身文字只占位不显示；伪元素是 0-9 竖列，按 --digit 平移，颜色继承父元素的涨跌色。 */
+.odometer__digit {
+  position: relative;
+  display: inline-block;
+  overflow: hidden;
+  height: 1.15em;
+  line-height: 1.15em;
+  vertical-align: bottom;
+  -webkit-text-fill-color: transparent;
+}
+
+.odometer__digit::after {
+  content: "0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  text-align: center;
+  white-space: pre;
+  -webkit-text-fill-color: currentColor;
+  transform: translateY(calc(var(--digit, 0) * -1.15em));
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.odometer__digit.is-changed-up::after {
+  animation: odometer-flash-up 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.odometer__digit.is-changed-down::after {
+  animation: odometer-flash-down 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes odometer-flash-up {
+  from { text-shadow: 0 0 10px var(--up); }
+}
+
+@keyframes odometer-flash-down {
+  from { text-shadow: 0 0 10px var(--down); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .odometer__digit::after {
+    transition: none;
+  }
+
+  .odometer__digit.is-changed-up::after,
+  .odometer__digit.is-changed-down::after {
+    animation: none;
+  }
+}

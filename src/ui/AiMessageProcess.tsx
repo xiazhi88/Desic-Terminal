@@ -776,7 +776,7 @@ function strategySourceBlock(tool: AiToolRun) {
 function AiToolFactRows({ tool }: { tool: AiToolRun }) {
   const rows = readableToolFactRows(tool);
   if (rows.length === 0) return null;
-  return <dl className="ai-tool-facts">{rows.map(([key, value]) => <div key={`${key}:${value}`}><dt>{key}</dt><dd title={value}>{value}</dd></div>)}</dl>;
+  return <dl className="ai-tool-facts">{rows.map(([key, value]) => <div key={`${key}:${value}`}><dt>{key}</dt><dd title={value} data-i18n-skip>{value}</dd></div>)}</dl>;
 }
 
 function AiToolDomainDetails({ tool, onOpenArtifact }: { tool: AiToolRun; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {

@@ -20,6 +20,7 @@ import {
   History,
   KeyRound,
   LayoutDashboard,
+  LayoutGrid,
   Layers3,
   Loader2,
   Flame,
@@ -47,6 +48,14 @@ import {
 } from "lucide-react";
 import { ingestLiquidityBook, ingestLiquidityTrades } from "../lib/liquidityHistory";
 import { DepthProfile } from "./chart/DepthProfile";
+import { writeOdometer } from "./shell/priceOdometer";
+import { runWorkspaceTransition } from "./shell/workspaceTransition";
+import { CommandPalette, type PaletteItem } from "./shell/CommandPalette";
+import { OverviewSparkline, WorkspaceOverview, type OverviewTile } from "./shell/WorkspaceOverview";
+import { MarketHeartbeat } from "./shell/MarketHeartbeat";
+import { requestAiResearchPrompt } from "../lib/shellEvents";
+import { detectDesktopPlatform } from "../lib/platform";
+import { readVisualPreference, saveVisualPreference, subscribeVisualPreference, type VisualPreference } from "../lib/visualPreference";
 import clsx from "clsx";
 import type { TFunction } from "i18next";
 import defaultAiConfig from "../../shared/default-ai-config.json";
@@ -1408,6 +1417,7 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
   const fundingCountdownRef = useRef<HTMLElement | null>(null);
   const tickerSignatureRef = useRef("");
   const fundingSignatureRef = useRef("");
+  const previousLastRef = useRef<number | null>(null);
   const update = useCallback(() => {
     const { ticker, fundingRate } = getMarketHotState();
     const change = calcChange(ticker?.last, ticker?.open24h);
@@ -1415,8 +1425,11 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
     if (tickerSignatureRef.current !== tickerSignature) {
       tickerSignatureRef.current = tickerSignature;
       if (lastRef.current) {
-        lastRef.current.textContent = fmtPrice(ticker?.last);
-        lastRef.current.className = change >= 0 ? "up" : "down";
+        const last = Number(ticker?.last);
+        const previous = previousLastRef.current;
+        writeOdometer(lastRef.current, fmtPrice(ticker?.last), Number.isFinite(last) && previous !== null ? Math.sign(last - previous) : 0);
+        previousLastRef.current = Number.isFinite(last) ? last : null;
+        lastRef.current.className = clsx(change >= 0 ? "up" : "down", lastRef.current.classList.contains("odometer") && "odometer");
       }
       if (markRef.current) markRef.current.textContent = `${t("trading:markPrice")} ${fmtPrice(ticker?.last)}`;
       if (changeRef.current) changeRef.current.textContent = `24H ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
@@ -1700,7 +1713,8 @@ function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSel
         row.style.setProperty("--depth-fill", `${level ? Math.max(4, Math.min(100, (Number(level.sz) / maxVisibleSize) * 100)) : 0}%`);
       });
       const mid = root.querySelector<HTMLElement>(".mid-price");
-      if (mid) {
+      const midValue = mid?.querySelector<HTMLElement>(".mid-price__value");
+      if (mid && midValue) {
         const value = ticker?.last
           ? formatOrderBookPrice(ticker.last)
           : trades[0]?.px
@@ -1708,7 +1722,9 @@ function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSel
             : visibleBids[0]
               ? formatOrderBookPrice(visibleBids[0].px)
               : "--";
-        mid.firstChild!.textContent = `${value} `;
+        const previous = Number((mid.dataset.marketPrice ?? "").replaceAll(",", ""));
+        const next = Number(value.replaceAll(",", ""));
+        writeOdometer(midValue, value, Number.isFinite(previous) && Number.isFinite(next) ? Math.sign(next - previous) : 0);
         mid.dataset.marketPrice = value;
       }
       const bidSize = sumLevels(book?.bids ?? []);
@@ -1780,7 +1796,7 @@ function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSel
       {liquidityProfile ?? <div className="orderbook">
         <div className="depth-head"><span>{t("trading:priceUsdt")}</span><span>{t("trading:quantityContracts")}</span></div>
         {Array.from({ length: 5 }, (_, index) => <DepthRow key={`a-${index}`} level={null} side="ask" />)}
-        <div className="mid-price">-- <span>{t("trading:liveOrderBook")}</span></div>
+        <div className="mid-price"><b className="mid-price__value">--</b> <span>{t("trading:liveOrderBook")}</span></div>
         {Array.from({ length: 5 }, (_, index) => <DepthRow key={`b-${index}`} level={null} side="bid" />)}
       </div>}
       <div className="pressure-panel pressure-bid">
@@ -1918,7 +1934,14 @@ function TradingTerminal({
   const contentGridRef = useRef<HTMLDivElement | null>(null);
   const centerPanelRef = useRef<HTMLElement | null>(null);
   const chartResizeGestureRef = useRef<ChartResizeGesture | null>(null);
-  const [mainSection, setMainSection] = useState<"ai" | "terminal" | "radar" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config">("ai");
+  const [mainSection, setMainSectionState] = useState<MainSection>("ai");
+  const mainSectionRef = useRef<MainSection>("ai");
+  mainSectionRef.current = mainSection;
+  // 所有工作区切换都经过这里：同一工作区不重复过渡，其余交给 View Transition（不支持时直接切换）。
+  const setMainSection = useCallback((next: MainSection) => {
+    if (next === mainSectionRef.current) return;
+    runWorkspaceTransition(() => setMainSectionState(next));
+  }, []);
   const [aiWorkspaceSignal, setAiWorkspaceSignal] = useState({ status: "idle", unread: false });
   const [pendingAiStrategyOpen, setPendingAiStrategyOpen] = useState<{ strategyId: string; runId?: string; optimizationId?: string } | null>(null);
   const [systematicLoading, setSystematicLoading] = useState(false);
@@ -2017,6 +2040,10 @@ function TradingTerminal({
   const [notificationHistory, setNotificationHistory] = useState<AppNotification[]>(() => loadNotificationHistory());
   const [notificationCenterOpen, setNotificationCenterOpen] = useState(false);
   const [helpCenterOpen, setHelpCenterOpen] = useState(false);
+  const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
+  const [workspaceOverviewOpen, setWorkspaceOverviewOpen] = useState(false);
+  const [visualPreference, setVisualPreferenceState] = useState<VisualPreference>(() => readVisualPreference());
+  useEffect(() => subscribeVisualPreference(setVisualPreferenceState), []);
   const helpSearchRef = useRef<HTMLInputElement | null>(null);
   const [chartPresentation, setChartPresentation] = useState<"chart" | "table">("chart");
   // 流动性模式：K 线下叠加盘口热力图（仅 1m / 3m / 5m 有意义，更大周期按钮禁用并说明原因）。
@@ -4624,6 +4651,167 @@ function TradingTerminal({
     return () => window.cancelAnimationFrame(frame);
   }, [applyChartAdjacentSize, chartResizeBounds, mainSection]);
 
+  // —— 外壳：命令面板、工作区总览、心跳线 ——
+  const shortcutModifier = detectDesktopPlatform() === "macos" ? "⌘" : "Ctrl+";
+  const heartbeatLabel = useCallback((health: "live" | "stale" | "down", ageMs: number | null) => {
+    const age = ageMs === null ? "--" : `${Math.round(ageMs / 1000)}s`;
+    if (health === "live") return uiText(`行情实时 · 最新行情 ${age} 前`, `Market live · last tick ${age} ago`);
+    if (health === "stale") return uiText(`行情延迟 · 最新行情 ${age} 前`, `Market delayed · last tick ${age} ago`);
+    return uiText("行情中断 · 暂无最新行情", "Market interrupted · no recent tick");
+  }, [uiText]);
+
+  useEffect(() => {
+    const handleShortcut = (event: KeyboardEvent) => {
+      if (!(event.metaKey || event.ctrlKey) || event.altKey || event.shiftKey) return;
+      const target = event.target instanceof Element ? event.target : null;
+      // 代码编辑器内的修饰键组合交给编辑器自己处理。
+      if (target?.closest(".cm-editor")) return;
+      const key = event.key.toLowerCase();
+      if (key === "k") {
+        event.preventDefault();
+        setWorkspaceOverviewOpen(false);
+        setCommandPaletteOpen((open) => !open);
+      } else if (key === ".") {
+        event.preventDefault();
+        setCommandPaletteOpen(false);
+        setWorkspaceOverviewOpen((open) => !open);
+      }
+    };
+    window.addEventListener("keydown", handleShortcut);
+    return () => window.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  const paletteItems = useMemo<PaletteItem[]>(() => {
+    const workspaceGroup = uiText("工作区", "Workspaces");
+    const items: PaletteItem[] = navItems.map(({ id, labelKey, Icon }, index) => ({
+      id: `workspace:${id}`,
+      group: workspaceGroup,
+      label: t(labelKey),
+      keywords: id,
+      icon: <Icon size={14} />,
+      shortcut: String(index + 1),
+      run: () => setMainSection(id === "settings" ? "config" : id)
+    }));
+    items.push({
+      id: "workspace:overview",
+      group: workspaceGroup,
+      label: uiText("工作区总览", "Workspace overview"),
+      keywords: "overview mission",
+      icon: <LayoutGrid size={14} />,
+      shortcut: `${shortcutModifier}.`,
+      run: () => setWorkspaceOverviewOpen(true)
+    });
+    const formatQuote = (instId: string) => {
+      const ticker = marketTickerMap.get(instId);
+      if (!ticker) return undefined;
+      const change = calcChange(ticker.last, ticker.open24h);
+      return `${fmtPrice(ticker.last)}  ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+    };
+    const selectInstrument = (instId: string) => {
+      setSymbol(instId);
+      setMainSection("terminal");
+    };
+    const watchGroup = uiText("自选合约", "Watchlist");
+    for (const instId of watchlist) {
+      items.push({ id: `watch:${instId}`, group: watchGroup, label: instId, hint: formatQuote(instId), keywords: instId.split("-")[0], icon: <TrendingUp size={14} />, run: () => selectInstrument(instId) });
+    }
+    const watched = new Set(watchlist);
+    const allGroup = uiText("全部永续合约", "All perpetuals");
+    for (const instrument of marketAssets?.instruments ?? []) {
+      if (watched.has(instrument.instId) || !instrument.instId.endsWith("-USDT-SWAP") || instrument.state !== "live") continue;
+      items.push({ id: `inst:${instrument.instId}`, group: allGroup, label: instrument.instId, hint: formatQuote(instrument.instId), keywords: `${instrument.baseCcy ?? ""} ${instrument.localizedSecurityName ?? ""}`, run: () => selectInstrument(instrument.instId) });
+    }
+    const actionGroup = uiText("操作", "Actions");
+    items.push(
+      { id: "action:notifications", group: actionGroup, label: uiText("打开通知中心", "Open notification center"), keywords: "notification", icon: <Bell size={14} />, run: () => setNotificationCenterOpen(true) },
+      { id: "action:help", group: actionGroup, label: uiText("打开帮助中心", "Open help center"), keywords: "help", icon: <CircleHelp size={14} />, run: () => setHelpCenterOpen(true) },
+      {
+        id: "action:visual",
+        group: actionGroup,
+        label: visualPreference === "phosphor" ? uiText("切换为经典外观", "Switch to classic appearance") : uiText("切换为磷光外观", "Switch to Phosphor appearance"),
+        keywords: "appearance theme visual phosphor classic",
+        icon: <Settings size={14} />,
+        run: () => saveVisualPreference(visualPreference === "phosphor" ? "classic" : "phosphor")
+      },
+      { id: "action:popout", group: actionGroup, label: t("chart:detachedChartWindow"), keywords: "chart window popout", icon: <Maximize2 size={14} />, run: openDetachedChart },
+      {
+        id: "action:liquidity",
+        group: actionGroup,
+        label: chartLiquidityMode ? uiText("关闭流动性模式", "Turn off liquidity mode") : uiText("开启流动性模式", "Turn on liquidity mode"),
+        hint: liquidityTimeframeSupported ? undefined : uiText("仅 1m / 3m / 5m", "1m / 3m / 5m only"),
+        keywords: "liquidity heatmap depth",
+        icon: <Flame size={14} />,
+        run: () => {
+          setMainSection("terminal");
+          setChartLiquidityMode((current) => {
+            window.localStorage.setItem("desic.chart.liquidity-mode.v1", current ? "0" : "1");
+            return !current;
+          });
+        }
+      }
+    );
+    return items;
+  }, [chartLiquidityMode, liquidityTimeframeSupported, marketAssets?.instruments, marketTickerMap, openDetachedChart, setMainSection, shortcutModifier, t, uiText, visualPreference, watchlist]);
+
+  const overviewTiles = useMemo<OverviewTile[]>(() => {
+    const iconFor = (id: string) => {
+      const item = navItems.find((entry) => entry.id === id);
+      return item ? <item.Icon size={15} /> : null;
+    };
+    const aiRunning = ["running", "streaming", "connecting", "tooling", "retrying"].includes(aiWorkspaceSignal.status);
+    const movers = watchlist
+      .map((instId) => ({ instId, ticker: marketTickerMap.get(instId) }))
+      .filter((entry): entry is { instId: string; ticker: Ticker } => Boolean(entry.ticker))
+      .map((entry) => ({ ...entry, change: calcChange(entry.ticker.last, entry.ticker.open24h) }))
+      .sort((left, right) => Math.abs(right.change) - Math.abs(left.change))
+      .slice(0, 4);
+    const describe = (text: string) => <span className="workspace-overview__muted">{text}</span>;
+    return navItems.map(({ id, labelKey }) => {
+      const base = { id, title: t(labelKey), icon: iconFor(id) };
+      switch (id) {
+        case "ai":
+          return {
+            ...base,
+            status: aiRunning ? uiText("运行中", "Running") : aiWorkspaceSignal.unread ? uiText("有未读输出", "Unread output") : uiText("空闲", "Idle"),
+            statusTone: aiRunning || aiWorkspaceSignal.unread ? "ai" as const : "muted" as const,
+            body: describe(uiText("研究会话、证据天平与协作轨道。", "Research sessions, evidence balance, and collaboration orbit."))
+          };
+        case "terminal":
+          return { ...base, status: symbol, statusTone: "live" as const, body: <OverviewSparkline symbol={symbol} /> };
+        case "radar":
+          return {
+            ...base,
+            body: movers.length > 0
+              ? <span className="workspace-overview__rows">{movers.map((entry) => <span key={entry.instId}><b>{entry.instId.replace("-USDT-SWAP", "")}</b><em className={entry.change >= 0 ? "up" : "down"}>{entry.change >= 0 ? "+" : ""}{entry.change.toFixed(2)}%</em></span>)}</span>
+              : describe(uiText("全市场相对强弱与轮动。", "Cross-market relative strength and rotation."))
+          };
+        case "intelligence":
+          return {
+            ...base,
+            status: newsUnreadCount > 0 ? uiText(`${newsUnreadCount} 条未读`, `${newsUnreadCount} unread`) : undefined,
+            statusTone: newsUnreadCount > 0 ? "warn" as const : undefined,
+            body: describe(uiText("新闻、事件、情绪、衍生品与 Smart Money。", "News, events, sentiment, derivatives, and Smart Money."))
+          };
+        case "settings":
+          return {
+            ...base,
+            body: <span className="workspace-overview__rows">
+              <span><b>{uiText("账户", "Account")}</b><em>{account ? `${account.name} · ${account.environment === "live" ? t("common:live") : t("common:demo")}` : t("common:unconfiguredAccount")}</em></span>
+              <span><b>{uiText("外观", "Appearance")}</b><em>{visualPreference === "phosphor" ? uiText("磷光", "Phosphor") : uiText("经典", "Classic")}</em></span>
+            </span>
+          };
+        case "opportunities":
+          return { ...base, body: describe(uiText("AI 提出的交易机会与确认流程。", "AI-proposed trade opportunities and confirmation.")) };
+        case "automation":
+          return { ...base, body: describe(uiText("后台 Profile、运行记录与唤醒计划。", "Background Profiles, runs, and wake plans.")) };
+        case "systematic":
+          return { ...base, body: describe(uiText("Python 策略、回测与参数研究。", "Python strategies, backtests, and parameter research.")) };
+        default:
+          return { ...base, body: describe(uiText("本地历史数据与同步状态。", "Local history data and sync status.")) };
+      }
+    });
+  }, [account, aiWorkspaceSignal, marketTickerMap, newsUnreadCount, symbol, t, uiText, visualPreference, watchlist]);
+
   return (
     <main className={clsx(
       "terminal",
@@ -4721,6 +4909,7 @@ function TradingTerminal({
 
       <section className="workspace">
         <header className="topbar" data-tauri-drag-region>
+          <MarketHeartbeat symbol={symbol} label={heartbeatLabel} />
           {/* The market name is the entry point to the watchlist. Users reach for
               "what am I looking at" when they want to switch, so the list hangs
               off it instead of a separate control floating over the chart. */}
@@ -4763,6 +4952,22 @@ function TradingTerminal({
               {account ? account.name : t("common:unconfiguredAccount")}
               <span>{account ? t(account.environment === "live" ? "common:live" : "common:demo") : t("common:readOnlyMarket")}</span>
               <ChevronDown size={14} />
+            </button>
+            <button
+              className={clsx("icon-button command-palette-button", commandPaletteOpen && "active")}
+              onClick={() => setCommandPaletteOpen(true)}
+              title={uiText(`命令面板 ${shortcutModifier}K`, `Command palette ${shortcutModifier}K`)}
+              aria-label={uiText("打开命令面板", "Open command palette")}
+            >
+              <Search size={17} />
+            </button>
+            <button
+              className={clsx("icon-button workspace-overview-button", workspaceOverviewOpen && "active")}
+              onClick={() => setWorkspaceOverviewOpen(true)}
+              title={uiText(`工作区总览 ${shortcutModifier}.`, `Workspace overview ${shortcutModifier}.`)}
+              aria-label={uiText("打开工作区总览", "Open workspace overview")}
+            >
+              <LayoutGrid size={17} />
             </button>
             <button
               className={clsx("icon-button", historyStatusWarn && "warn", historyStatusRunning && "active")}
@@ -5433,6 +5638,31 @@ function TradingTerminal({
         onDismiss={(id) => setNotifications((items) => items.filter((item) => item.id !== id))}
         onAction={openNotificationTarget}
       />
+      <CommandPalette
+        open={commandPaletteOpen}
+        items={paletteItems}
+        placeholder={uiText("搜索工作区、合约或操作；也可以直接向 AI 提问", "Search workspaces, instruments, or actions, or ask AI")}
+        emptyLabel={uiText("没有匹配项", "No matches")}
+        askAiGroup={uiText("问 AI", "Ask AI")}
+        askAiLabel={(query) => uiText(`在 AI 研究中提问：${query}`, `Ask in AI Research: ${query}`)}
+        onAskAi={(query) => {
+          setMainSection("ai");
+          window.setTimeout(() => requestAiResearchPrompt(query), 0);
+        }}
+        onClose={() => setCommandPaletteOpen(false)}
+      />
+      <WorkspaceOverview
+        open={workspaceOverviewOpen}
+        current={mainSection === "config" ? "settings" : mainSection}
+        tiles={overviewTiles}
+        title={uiText("工作区总览", "Workspace overview")}
+        hint={uiText("方向键选择 · 回车进入 · 1–9 直达 · Esc 返回", "Arrows to move · Enter to open · 1–9 to jump · Esc to close")}
+        onSelect={(id) => {
+          setWorkspaceOverviewOpen(false);
+          setMainSection(id === "settings" ? "config" : id as MainSection);
+        }}
+        onClose={() => setWorkspaceOverviewOpen(false)}
+      />
       {notificationCenterOpen && (
         <NotificationCenter
           notifications={notificationHistory}
@@ -5762,6 +5992,8 @@ function StartupOrbitalCanvas() {
 
   return <canvas id="orbital-canvas" ref={canvasRef} width={900} height={700} />;
 }
+
+type MainSection = "ai" | "terminal" | "radar" | "opportunities" | "automation" | "intelligence" | "systematic" | "data" | "config";
 
 type AppNotification = {
   id: string;
@@ -6283,6 +6515,13 @@ function NotificationStack({
   );
 }
 
+// 通知时间线分段：最近一小时 / 今天 / 更早（列表本身已按时间倒序）。
+function notificationTimeGroup(createdAt: number): "hour" | "today" | "earlier" {
+  const now = Date.now();
+  if (now - createdAt < 60 * 60_000) return "hour";
+  return new Date(createdAt).toDateString() === new Date(now).toDateString() ? "today" : "earlier";
+}
+
 function NotificationCenter({
   notifications,
   onClose,
@@ -6369,7 +6608,12 @@ function NotificationCenter({
         {filtered.length === 0 ? (
           <div className="notification-empty">{t("noNotifications")}</div>
         ) : (
-          filtered.map((notification) => (
+          filtered.map((notification, index) => {
+            const group = notificationTimeGroup(notification.createdAt);
+            const heading = index === 0 || notificationTimeGroup(filtered[index - 1]!.createdAt) !== group
+              ? <div className="notification-time-group" key={`group:${group}:${notification.id}`}>{group === "hour" ? t("notificationLastHour") : group === "today" ? t("today") : t("notificationEarlier")}</div>
+              : null;
+            return [heading,
             <article
               className={clsx("notification-history-item", notification.kind, notification.action && "clickable")}
               key={notification.id}
@@ -6386,8 +6630,8 @@ function NotificationCenter({
                 <strong>{notification.title}</strong>
                 <p>{notification.message}</p>
               </div>
-            </article>
-          ))
+            </article>];
+          })
         )}
       </div>
     </aside>
@@ -8599,6 +8843,35 @@ function OpenSourceLicensesModal({ onClose }: { onClose: () => void }) {
   );
 }
 
+function AppearanceSettings() {
+  const { t } = useTranslation("settings");
+  const [visual, setVisual] = useState<VisualPreference>(() => readVisualPreference());
+  useEffect(() => subscribeVisualPreference(setVisual), []);
+  const options: Array<[VisualPreference, string, string]> = [
+    ["phosphor", t("settings:appearancePhosphor"), t("settings:appearancePhosphorDescription")],
+    ["classic", t("settings:appearanceClassic"), t("settings:appearanceClassicDescription")]
+  ];
+  return (
+    <>
+      <section className="settings-section">
+        <div>
+          <strong>{t("settings:appearanceTitle")}</strong>
+          <span>{t("settings:appearanceDescription")}</span>
+        </div>
+      </section>
+      <div className="appearance-preference-grid" role="radiogroup" aria-label={t("settings:appearanceTitle")}>
+        {options.map(([value, label, description]) => (
+          <label className={clsx("appearance-option", visual === value && "active")} key={value}>
+            <input type="radio" name="desic-appearance" value={value} checked={visual === value} onChange={() => saveVisualPreference(value)} />
+            <span className="appearance-option-copy"><strong>{label}</strong><small>{description}</small></span>
+            <span className="appearance-option-check" aria-hidden="true">{visual === value ? "✓" : ""}</span>
+          </label>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function GeneralSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNotification, "id" | "createdAt">) => void }) {
   const { t, i18n } = useTranslation(["settings", "common"]);
   const [preference, setPreference] = useState<LanguagePreference>(() => languagePreference());
@@ -8661,6 +8934,7 @@ function GeneralSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNo
         <span>{selected.value === "system" ? t("settings:followSystem") : selected.nativeLabel} · {resolvedLocale()}</span>
         <small>{t("settings:fallbackNotice")}</small>
       </div>
+      <AppearanceSettings />
       <section className="settings-section">
         <div>
           <strong>{t("settings:about")}</strong>
