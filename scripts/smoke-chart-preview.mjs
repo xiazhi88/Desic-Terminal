@@ -1007,6 +1007,36 @@ async function main() {
     throw new Error(`zoomed chart should expand recent marker labels: ${JSON.stringify(expandedMarkerState)}`);
   }
 
+  // 流动性模式：合成盘口 / 成交驱动；热力层必须真实画进图表画布，深度剖面与图例同时出现。
+  const liquidityUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}liquidity=1`;
+  await page.goto(liquidityUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.waitForSelector(".chart-liquidity-legend", { timeout: 30_000 });
+  await page.waitForTimeout(2_500);
+  const liquidityState = await page.evaluate(() => {
+    let heatPixels = 0;
+    for (const canvas of document.querySelectorAll(".chart-canvas canvas")) {
+      if (!(canvas instanceof HTMLCanvasElement) || canvas.width < 200) continue;
+      const copy = document.createElement("canvas");
+      copy.width = canvas.width;
+      copy.height = canvas.height;
+      const context = copy.getContext("2d");
+      context.drawImage(canvas, 0, 0);
+      const data = context.getImageData(0, 0, copy.width, copy.height).data;
+      for (let index = 0; index < data.length; index += 16) {
+        const [r, g, b] = [data[index], data[index + 1], data[index + 2]];
+        if (r > 60 && b > 45 && g < r * 0.6) heatPixels += 1;
+      }
+    }
+    return {
+      heatPixels,
+      profile: Boolean(document.querySelector(".depth-profile canvas")),
+      notice: document.querySelector(".chart-liquidity-legend__notice")?.textContent || ""
+    };
+  });
+  if (!liquidityState.profile) throw new Error(`liquidity preview should render the depth profile: ${JSON.stringify(liquidityState)}`);
+  if (!liquidityState.notice && liquidityState.heatPixels < 2_000) throw new Error(`liquidity heatmap should paint under the candles: ${JSON.stringify(liquidityState)}`);
+  if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-liquidity.png`, fullPage: false });
+
   const actionableConsoleErrors = consoleErrors.filter((text) => !/ResizeObserver loop|WebSocket|ERR_|Failed to load resource/i.test(text));
   if (pageErrors.length > 0 || actionableConsoleErrors.length > 0) {
     throw new Error(`chart preview errors: ${JSON.stringify({ pageErrors, consoleErrors: actionableConsoleErrors })}`);

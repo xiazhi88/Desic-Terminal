@@ -8,6 +8,7 @@ import {
   LineSeries,
   type ISeriesApi,
   type ISeriesMarkersPluginApi,
+  type ISeriesPrimitive,
   type LogicalRange,
   type SeriesMarker,
   type SeriesMarkerBarPosition,
@@ -165,6 +166,9 @@ export type TradingChartHandle = {
   /// `maxBarSpacing: 0` the library allows up to half the chart per bar, which
   /// renders a handful of giant candles against the right edge.
   setBarSpacing: (spacing: number) => void;
+  /** 在 K 线序列上挂载自绘图元（与价格轴、时间轴同一坐标系，拖动价格轴也保持同步）。 */
+  attachCandlePrimitive: (primitive: ISeriesPrimitive<Time>) => void;
+  detachCandlePrimitive: (primitive: ISeriesPrimitive<Time>) => void;
   destroy: () => void;
 };
 
@@ -716,6 +720,8 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
         /* the next data update re-derives the visible range */
       }
     },
+    attachCandlePrimitive: (primitive) => candleSeries.attachPrimitive(primitive),
+    detachCandlePrimitive: (primitive) => candleSeries.detachPrimitive(primitive),
     destroy: () => chart.remove()
   };
 }

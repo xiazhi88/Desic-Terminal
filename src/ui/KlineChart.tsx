@@ -62,6 +62,7 @@ import {
 import { ChartIndicatorCenter, indicatorColor } from "./ChartIndicatorCenter";
 import { TerminalSelect } from "./TerminalSelect";
 import { useDraggableSurface } from "./useDraggableSurface";
+import { LiquidityLegend, useLiquidityLayer } from "./chart/LiquidityLayer";
 import {
   chartTradeVisual,
   formatChartAmount,
@@ -92,6 +93,8 @@ export type ChartHistoryLoadOutcome =
 
 type Props = {
   candles: Candle[];
+  /** 流动性模式：在 K 线下方叠加盘口挂单热力图、成交气泡与大单墙事件（仅主图）。 */
+  liquidityMode?: boolean;
   ticker: Ticker | null;
   symbol?: string;
   timeframe?: string;
@@ -449,7 +452,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, liquidityMode = false, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -478,6 +481,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const shouldPersistWorkspace = persistWorkspace ?? !reviewVariant;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<TradingChartHandle | null>(null);
+  // 图表实例重建时递增，供需要在新实例上重新挂载图元的效果使用。
+  const [chartHandleVersion, setChartHandleVersion] = useState(0);
+  const liquidityLayer = useLiquidityLayer(chartRef, chartHandleVersion, liquidityMode, symbol, chartText);
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const candleIndexRef = useRef<Map<number, number>>(new Map());
   const measureModeRef = useRef(false);
@@ -1315,6 +1321,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     resizeObserver.observe(activeContainer);
 
     chartRef.current = chart;
+    setChartHandleVersion((version) => version + 1);
 
     return () => {
       unsubscribeCrosshair();
@@ -3413,6 +3420,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         onPointerUp={(event) => finishOrderLineDrag(event)}
         onPointerCancel={(event) => finishOrderLineDrag(event, true)}
       />
+      <LiquidityLegend layer={liquidityLayer} text={chartText} />
       {cancellableOrderLineOverlays.length > 0 && (
         <div className="chart-order-cancel-layer" aria-label={chartText("Chart order cancellation controls", "图表委托撤单入口")}>
           {cancellableOrderLineOverlays.map(({ line, y }) => (

@@ -22,6 +22,7 @@ import {
   LayoutDashboard,
   Layers3,
   Loader2,
+  Flame,
   Maximize2,
   Minus,
   Newspaper,
@@ -44,6 +45,8 @@ import {
   XCircle,
   Trash2
 } from "lucide-react";
+import { ingestLiquidityBook, ingestLiquidityTrades } from "../lib/liquidityHistory";
+import { DepthProfile } from "./chart/DepthProfile";
 import clsx from "clsx";
 import type { TFunction } from "i18next";
 import defaultAiConfig from "../../shared/default-ai-config.json";
@@ -337,6 +340,7 @@ const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
 const EQUITY_METADATA_REFRESH_MS = 24 * 60 * 60 * 1_000;
 type MarketPickerCategory = "watchlist" | "popular" | "gainers" | "losers" | "new";
 const PRIMARY_CHART_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m"] as const;
+const LIQUIDITY_TIMEFRAMES = new Set<string>(["1m", "3m", "5m"]);
 const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as const;
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
 const WATCHLIST_STORAGE_KEY = "desictrade.watchlist.v1";
@@ -1659,7 +1663,7 @@ function HotChartDataTable(props: Omit<Parameters<typeof ChartDataTable>[0], "ca
   return <ChartDataTable {...props} candles={candles} />;
 }
 
-function HotMarketDepth({ onPriceSelect }: { onPriceSelect?: (price: string) => void }) {
+function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSelect?: (price: string) => void; liquidityProfile?: ReactNode }) {
   const { t } = useTranslation(["trading", "common"]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const signatureRef = useRef("");
@@ -1773,12 +1777,12 @@ function HotMarketDepth({ onPriceSelect }: { onPriceSelect?: (price: string) => 
         onPriceSelect?.(row.dataset.price);
       }}
     >
-      <div className="orderbook">
+      {liquidityProfile ?? <div className="orderbook">
         <div className="depth-head"><span>{t("trading:priceUsdt")}</span><span>{t("trading:quantityContracts")}</span></div>
         {Array.from({ length: 5 }, (_, index) => <DepthRow key={`a-${index}`} level={null} side="ask" />)}
         <div className="mid-price">-- <span>{t("trading:liveOrderBook")}</span></div>
         {Array.from({ length: 5 }, (_, index) => <DepthRow key={`b-${index}`} level={null} side="bid" />)}
-      </div>
+      </div>}
       <div className="pressure-panel pressure-bid">
         <div className="pressure-head"><span>{t("trading:marketPressure")}</span><strong>{t("trading:waitingOrderBook")} +0</strong></div>
         <div className="pressure-battle" aria-label={t("trading:marketPressure")}><div className="pressure-side bid" /><div className="pressure-side ask" /><div className="pressure-flow" aria-hidden="true">{Array.from({ length: 7 }, (_, index) => <i key={index} style={{ "--pulse-index": index } as CSSProperties} />)}</div><span className="pressure-midline" /><span className="pressure-balance-dot" /></div>
@@ -2015,6 +2019,10 @@ function TradingTerminal({
   const [helpCenterOpen, setHelpCenterOpen] = useState(false);
   const helpSearchRef = useRef<HTMLInputElement | null>(null);
   const [chartPresentation, setChartPresentation] = useState<"chart" | "table">("chart");
+  // 流动性模式：K 线下叠加盘口热力图（仅 1m / 3m / 5m 有意义，更大周期按钮禁用并说明原因）。
+  const [chartLiquidityMode, setChartLiquidityMode] = useState(() => window.localStorage.getItem("desic.chart.liquidity-mode.v1") === "1");
+  const liquidityTimeframeSupported = LIQUIDITY_TIMEFRAMES.has(bar);
+  const liquidityModeActive = chartLiquidityMode && liquidityTimeframeSupported && chartPresentation === "chart";
   const [chartUtilitiesOpen, setChartUtilitiesOpen] = useState(false);
   const chartUtilitiesRef = useRef<HTMLDivElement | null>(null);
   const [pendingOrderLineEdit, setPendingOrderLineEdit] = useState<ChartOrderLineEdit | null>(null);
@@ -3105,14 +3113,18 @@ function TradingTerminal({
       },
       onOrderBook: (item) => {
         countRendererEvent(marketEventCountersRef, "orderBook");
+        // 采集器在盘口被截到 40 档之前旁路完整 400 档，只保留当前交易对。
+        ingestLiquidityBook(symbol, item);
         queueOrderBook(item);
       },
       onTrade: (trade) => {
         countRendererEvent(marketEventCountersRef, "trade");
+        ingestLiquidityTrades(symbol, [trade]);
         queueTrade(trade);
       },
       onTrades: (trades) => {
         marketEventCountersRef.current.trade = (marketEventCountersRef.current.trade ?? 0) + trades.length;
+        ingestLiquidityTrades(symbol, trades);
         queueTrades(trades);
       },
       onFundingRate: (item) => {
@@ -5029,6 +5041,31 @@ function TradingTerminal({
                   </button>
                   <button
                     type="button"
+                    className={clsx("chart-liquidity-toggle", liquidityModeActive && "active")}
+                    onClick={() =>
+                      setChartLiquidityMode((current) => {
+                        window.localStorage.setItem("desic.chart.liquidity-mode.v1", current ? "0" : "1");
+                        return !current;
+                      })
+                    }
+                    disabled={!liquidityTimeframeSupported || chartPresentation !== "chart"}
+                    aria-pressed={liquidityModeActive}
+                    title={
+                      liquidityTimeframeSupported
+                        ? uiText(
+                            "在 K 线下叠加盘口挂单热力图、主动成交气泡与大单墙事件",
+                            "Overlay resting-liquidity heatmap, aggressive trade bubbles, and wall events under the candles",
+                          )
+                        : uiText(
+                            "流动性模式只在 1m / 3m / 5m 周期可用：本地仅保留最近 2 小时的逐秒盘口",
+                            "Liquidity mode is available on 1m / 3m / 5m only: the terminal keeps the last 2 hours of per-second depth",
+                          )
+                    }
+                  >
+                    <Flame size={15} /> {uiText("流动性", "Liquidity")}
+                  </button>
+                  <button
+                    type="button"
                     onClick={() =>
                       setChartPresentation((current) =>
                         current === "chart" ? "table" : "chart",
@@ -5061,6 +5098,7 @@ function TradingTerminal({
                 >
                   <ErrorBoundary label={t("chart:chart")}>
                     <HotKlineChart
+                      liquidityMode={liquidityModeActive}
                       tradeSources={chartTradeSources}
                       symbol={symbol}
                       timeframe={bar}
@@ -5346,6 +5384,7 @@ function TradingTerminal({
                 </button>
               </div>
               <HotMarketDepth
+                liquidityProfile={liquidityModeActive ? <DepthProfile instId={symbol} text={(english, chinese) => uiText(chinese, english)} /> : null}
                 onPriceSelect={(price) =>
                   setTicketPriceFill({ symbol, price, nonce: Date.now() })
                 }
