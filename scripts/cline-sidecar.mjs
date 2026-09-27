@@ -1009,9 +1009,13 @@ function buildSystemPrompt(config, permissionMode) {
   const selfAnalysisRule = leadDispatchActive && boolConfig(config.backgroundRun, false)
     ? "【收尾硬性要求】本轮已启用专家协作：若你在试判升级后未派任何专家就收尾，必须在 background.finishRun 里填一句 selfAnalysisReason 说明原因（否则审计会标记“未说明理由”）。Expert collaboration is enabled this run: if you escalated to the deep stage and finish without dispatching any expert, you must pass a one-line selfAnalysisReason in background.finishRun (otherwise the audit flags it as unjustified)."
     : "";
+  const researchLedgerRule = describeToolPolicy("research.recordEvidence", { ...config, permissionMode, agentRole: "main" }).allowed
+    ? "证据账本：本会话的工具结果带有 evidenceRef（如 E3）。凡是给出交易方向判断的回合，在下结论前用 research.recordEvidence 记录关键证据：claim 写一句可核对的事实，stance 取 bull/bear/neutral/constraint，weight 0–3 表示你赋予的重要程度，sourceRefs 只能引用本轮真实出现过的 evidenceRef。反方审查或新证据改变判断时，用相同 id 重新记录并写 revisionNote。最后用 research.recordDecision 记录 outcome（long/short/abstain/hold）、理由和唤醒条件；不交易也是有效决策。账本只用于界面展示与复盘，不会下单、不会安排唤醒。纯问答或不涉及方向判断的回合不需要记录。"
+    : "";
   const runRules = [
     modeRule,
     marketRadarRoutingRule,
+    researchLedgerRule,
     "后台 Run 只有形成字段完整、准备通过 tradeOpportunity.create 提交的可执行候选时，主 Agent 才调用 market.readDecisionContext 获取当场行情、账户状态、预检和相对本轮初始快照的客观差异。若结论是 wait 或 abandon 且本轮没有新交易候选，不调用 market.readDecisionContext，直接通过 background.finishRun 结束；不得使用 size=0、缺失 price 或其它占位参数伪造候选。open/close 的 size 必须大于 0，limit/trigger 必须提供 price。上下文 60 秒有效且不可跨 Run、账户、环境、标的或候选参数复用；revise 后必须使用修改后的完整候选参数重新调用。",
     "tradeOpportunity.create 在 copilot 中只保存交易机会；advisor 不能创建机会；limited_auto 由后端按 Profile 权限自动批准并执行。后台运行采用两阶段事务：先把完整候选提交给 market.readDecisionContext；确认复核结果后，只调用 tradeOpportunity.create 提交系统冻结的最后一份候选，不要再次抄写候选参数或 decisionContextId。开仓/平仓 orderType=limit 或 trigger 必须在复核候选中提供 price；撤单/改单使用 intent=cancel/amend 并提供目标订单 ID。",
     "后台 Run 不调用 tradeOpportunity.reuse 或 tradeOpportunity.revise。遇到重复机会时仍调用 tradeOpportunity.create，并只提交 conflict.existingOpportunityId、duplicateResolution 和 duplicateResolutionReason。exact 冲突可直接 reuse；similar 冲突若要 reuse，必须先读取原机会，再用原机会的完整参数重新调用 market.readDecisionContext。若要 revise，则用修改后的完整候选重新复核后提交 duplicateResolution=revise。",
@@ -2319,6 +2323,77 @@ const JOURNAL_NOTE_SCHEMA = {
   }
 };
 
+// 证据账本（AI 研究交互会话专用，回显型工具，见 cline-tool-policy RESEARCH_LEDGER_TOOLS）。
+// sourceRefs 引用本轮工具结果上的 evidenceRef（E1、E2…），由侧车分配，模型不得虚构。
+const RESEARCH_RECORD_EVIDENCE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["items"],
+  properties: {
+    instId: { type: "string", description: "Instrument the evidence is about, e.g. BTC-USDT-SWAP." },
+    items: {
+      type: "array",
+      minItems: 1,
+      maxItems: 24,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "claim", "stance", "weight", "sourceRefs"],
+        properties: {
+          id: { type: "string", minLength: 1, maxLength: 64, description: "Stable id within this turn, e.g. b1 or trend-4h. Re-record the same id to revise it." },
+          claim: { type: "string", minLength: 1, maxLength: 400, description: "One factual sentence stating what the cited data shows." },
+          stance: { type: "string", enum: ["bull", "bear", "neutral", "constraint"], description: "bull/bear = supports long/short; neutral = informative without direction; constraint = account or execution limit." },
+          weight: { type: "number", minimum: 0, maximum: 3, description: "Importance you assign, 0-3. neutral and constraint items should normally use 0." },
+          sourceRefs: { type: "array", minItems: 1, maxItems: 8, items: { type: "string", minLength: 1, maxLength: 32 }, description: "evidenceRef values (e.g. E3) printed on earlier tool results in this turn." },
+          revisionNote: { type: "string", maxLength: 200, description: "Why this item was revised, when re-recording an existing id." }
+        }
+      }
+    }
+  }
+};
+
+const RESEARCH_RECORD_DECISION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["outcome", "reason"],
+  properties: {
+    instId: { type: "string" },
+    outcome: { type: "string", enum: ["long", "short", "abstain", "hold"], description: "long/short = directional candidate; abstain = no trade this turn; hold = keep existing position unchanged." },
+    reason: { type: "string", minLength: 1, maxLength: 600 },
+    wakeConditions: {
+      type: "array",
+      maxItems: 6,
+      items: {
+        type: "object",
+        additionalProperties: false,
+        required: ["kind"],
+        properties: {
+          kind: { type: "string", enum: ["price_above", "price_below", "time"] },
+          price: { type: "number", exclusiveMinimum: 0, description: "Required for price_above / price_below." },
+          afterMinutes: { type: "integer", minimum: 1, maximum: 10080, description: "Required for time." },
+          note: { type: "string", maxLength: 200 }
+        }
+      }
+    }
+  }
+};
+
+function createEvidenceRefAllocator() {
+  let next = 0;
+  return () => {
+    next += 1;
+    return `E${next}`;
+  };
+}
+
+// 只给成功的对象型结果编号；失败结果与账本自身不参与引用。
+function attachEvidenceRef(result, allocate) {
+  if (typeof allocate !== "function") return result;
+  if (!result || typeof result !== "object" || Array.isArray(result)) return result;
+  if (result.ok === false || result.errorCode) return result;
+  return { ...result, evidenceRef: allocate() };
+}
+
 // C19.2：试判结论。形状冻结：{ escalate, reasons, evidence, nextWakePlan }。
 const REPORT_TRIAGE_SCHEMA = {
   type: "object",
@@ -2583,6 +2658,9 @@ function createDesicTools(sessionId, options = {}) {
         } else if (backgroundOpportunityCommit) {
           rememberBackgroundOpportunityCommitResult(decisionWorkflow, scopedInput, result);
         }
+        if (!name.startsWith("research.record")) {
+          return toProviderToolReferenceValue(attachEvidenceRef(result, policyConfig.allocateEvidenceRef));
+        }
         return toProviderToolReferenceValue(result);
       },
       timeoutMs: 120000,
@@ -2666,6 +2744,8 @@ function createDesicTools(sessionId, options = {}) {
     intelligenceEnabled ? tool("intelligence.smartMoney.readPositionChanges", "Read historical open-interest and price changes for positioning analysis.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     intelligenceEnabled ? tool("intelligence.smartMoney.readConsensusDivergence", "Read divergence between ordinary account count, top-trader account count and top-trader position value. Use accountBias/topAccountBias/topPositionBias and eliteInternalDivergence from the response; topPositionRatio is long / short position value, not position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     tool("journal.createNote", "Create a conversation-scoped trading journal note from analysis or execution results.", JOURNAL_NOTE_SCHEMA),
+    tool("research.recordEvidence", "Record this research turn's evidence ledger. Each item is one factual claim with your stance (bull/bear/neutral/constraint), a 0-3 weight and the evidenceRef values (e.g. E3) printed on earlier tool results that support it; never invent refs. Re-record an existing id to revise its stance or weight, e.g. after a contrarian review. Display and review only: it never submits orders or schedules anything.", RESEARCH_RECORD_EVIDENCE_SCHEMA),
+    tool("research.recordDecision", "Record this research turn's final decision: outcome long/short/abstain/hold, a concise reason, and optional wake conditions (price_above, price_below, or time after N minutes). Not trading is a valid decision. Display and review only: interactive research wake conditions are shown to the user but never schedule a run, and this never submits orders.", RESEARCH_RECORD_DECISION_SCHEMA),
     tool("tradeOpportunity.list", "List saved trade opportunities. This never submits an order.", TRADE_OPPORTUNITY_LIST_SCHEMA),
     tool("tradeOpportunity.get", "Read one saved trade opportunity by id. This never submits an order.", TRADE_OPPORTUNITY_GET_SCHEMA),
     tool("tradeOpportunity.create", boolConfig(policyConfig.backgroundRun, false)
@@ -4506,7 +4586,7 @@ function createLeadDispatchController({
 // .allowed（即 Profile 勾选名单非空）时由主流程推入主 Agent 工具清单；专家白名单零放松
 // （consult_expert / follow_up 是主 Agent 侧编排工具，不进入
 // profileAgentToolAllowlist(grantedScopes)）。交互式 AI 研究与后台 Run 共用同一套工具。
-function createDesicLeadDispatchTools(sessionId, command, state, runtimeSessionId, prompt) {
+function createDesicLeadDispatchTools(sessionId, command, state, runtimeSessionId, prompt, allocateEvidenceRef = null) {
   const controller = createLeadDispatchController({
     config: command.config,
     prompt,
@@ -4525,7 +4605,7 @@ function createDesicLeadDispatchTools(sessionId, command, state, runtimeSessionI
         if (!validation.valid) {
           return toProviderToolReferenceValue(invalidToolArgumentsResult(name, validation.issues));
         }
-        return toProviderToolReferenceValue(await execute(input));
+        return toProviderToolReferenceValue(attachEvidenceRef(await execute(input), allocateEvidenceRef));
       },
       // v3 指令 1：不再有任何墙钟总时限（原 600s + 30s 包裹已删除）。
       retryable: false
@@ -5660,6 +5740,11 @@ async function sendMessage(cline, input) {
       )
     };
     const mainPolicyConfig = { ...baseMainPolicyConfig, triageStage, selfAnalysisFallback };
+    // 证据账本可用时，主 Agent 的工具结果（含专家咨询结果）按本轮顺序编号 E1、E2…
+    const allocateEvidenceRef = describeToolPolicy("research.recordEvidence", baseMainPolicyConfig).allowed
+      ? createEvidenceRefAllocator()
+      : null;
+    mainPolicyConfig.allocateEvidenceRef = allocateEvidenceRef;
     // Read-only expert work is always initiated by the coordinator itself; a
     // connection failure is safe to retry inside the same run.
     state.hasProviderProgress = false;
@@ -5671,7 +5756,7 @@ async function sendMessage(cline, input) {
     // `describeToolPolicy("consult_expert")` — enabled whenever the Profile
     // selection is non-empty (interactive research and background runs alike).
     if (describeToolPolicy("consult_expert", mainPolicyConfig).allowed) {
-      mainTools.push(...createDesicLeadDispatchTools(sessionId, coordinatorCommand, state, runtimeSessionId, prompt));
+      mainTools.push(...createDesicLeadDispatchTools(sessionId, coordinatorCommand, state, runtimeSessionId, prompt, allocateEvidenceRef));
     }
     if (describeToolPolicy("team_status", mainPolicyConfig).allowed) {
       mainTools.push(...createDesicTeamTools(sessionId, coordinatorCommand, state, runtimeSessionId));
@@ -6009,6 +6094,8 @@ if (isDirectRun) {
 export {
   PERPETUAL_ACCOUNT_RISK_RULE,
   aiRequestIdleTimeoutMs,
+  attachEvidenceRef,
+  createEvidenceRefAllocator,
   bindConfiguredAgentToolEvent,
   bindProfileAccountInput,
   buildSystemPrompt,

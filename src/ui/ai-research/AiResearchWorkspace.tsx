@@ -22,6 +22,7 @@ import {
   PinOff,
   Plus,
   Radar,
+  Scale,
   RefreshCw,
   RotateCcw,
   Send,
@@ -70,7 +71,8 @@ import {
 import { AiCommandPalette } from "../AiCommandPalette";
 import { AiContextMeter } from "../AiContextMeter";
 import { AiResearchWelcome } from "../AiResearchWelcome";
-import { AiResearchInspector } from "../AiResearchInspector";
+import { AiResearchInspector, type InspectorSection } from "../AiResearchInspector";
+import { AiEvidenceSummaryStrip } from "./AiEvidenceBoard";
 import { AI_RESEARCH_COMMANDS, expandAiSlashInput, filterAiSlashEntries, type AiSlashEntry } from "../aiResearchCommands";
 import { TerminalSelect } from "../TerminalSelect";
 import { useConfirmPrompt } from "../ConfirmPrompt";
@@ -200,8 +202,21 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() => preview || window.localStorage.getItem("desic.ai-research.inspector-open") !== "false");
-  const [inspectorSection, setInspectorSection] = useState<"artifacts" | "intelligence" | "radar">("artifacts");
+  const [inspectorSection, setInspectorSection] = useState<InspectorSection>("artifacts");
   const [inspectorArtifact, setInspectorArtifact] = useState<AiResearchArtifact | null>(null);
+  // 证据分区跟随的研究回合；null = 最近一条助手回答（流式时实时更新）。
+  const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null);
+  const evidenceMessage = useMemo(() => {
+    if (evidenceMessageId) {
+      const selected = messages.find((message) => message.id === evidenceMessageId);
+      if (selected) return selected;
+    }
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message && message.role === "assistant" && message.id !== "welcome") return message;
+    }
+    return null;
+  }, [evidenceMessageId, messages]);
   // 聚焦模式：会话级状态，不持久化；仅通过 CSS 类收起周边列，不改默认网格。
   const [focusMode, setFocusMode] = useState(false);
   const [columnWidths, setColumnWidths] = useState(() => readAiResearchColumnWidths());
@@ -1112,7 +1127,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     }
   }, [clearAiTimers, invalidatePendingRefresh, markSessionUnread, preview, uiText]);
 
-  const openInspectorSection = (section: "artifacts" | "intelligence" | "radar") => {
+  const openInspectorSection = (section: InspectorSection) => {
     setInspectorSection(section);
     setInspectorOpen(true);
   };
@@ -1429,6 +1444,16 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                >
                  <Radar size={13} />
                </button>
+               <button
+                 type="button"
+                 className={clsx("window-button ai-inspector-shortcut", "shortcut-evidence", inspectorOpen && inspectorSection === "evidence" && "active")}
+                 onClick={() => { setEvidenceMessageId(null); openInspectorSection("evidence"); }}
+                 title={uiText("证据天平", "Evidence balance")}
+                 aria-label={uiText("证据天平", "Evidence balance")}
+                 aria-pressed={inspectorOpen && inspectorSection === "evidence"}
+               >
+                 <Scale size={13} />
+               </button>
              </nav>
              <div className="ai-provider">
             <span>{config?.baseUrl ?? t("automation:modelServiceDisconnected")}</span>
@@ -1478,6 +1503,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                 )}
                 {/* B2：简单工具（readTicker/readFundingRate/readInstrument）完成后在 footer 上方落地内联证据卡 */}
                 {message.role === "assistant" ? <AiInlineEvidenceCards message={message} /> : null}
+                {message.role === "assistant" ? <AiEvidenceSummaryStrip message={message} uiText={uiText} onOpen={() => { setEvidenceMessageId(message.id); openInspectorSection("evidence"); }} /> : null}
                 {message.role === "assistant" ? <AiEvidenceReferences message={message} onOpenArtifact={(artifact) => { setInspectorArtifact(artifact); openInspectorSection("artifacts"); }} onOpenMessage={openAiMessageById} uiText={uiText} /> : null}
                 {(message.createdAt || message.text || message.status || (message.role === "assistant" && Boolean(message.usage))) && (
                   <footer className={clsx("ai-message-actions", "ai-message-footer", copiedMessageId === message.id && "is-copied")}>
@@ -1544,7 +1570,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
             {showWelcomeDeck ? null : composerNode}
           </div>
           {inspectorOpen ? <button type="button" className="ai-column-resize ai-column-resize-inspector" aria-label={uiText("调整研究栏宽度", "Resize research panel")} title={uiText("拖动调整研究栏宽度", "Drag to resize research panel")} onPointerDown={(event) => beginColumnResize("inspector", event)}><GripVertical size={14} /></button> : null}
-          <AiResearchInspector sessionId={sessionId} artifact={inspectorArtifact} selectedSymbol={selectedSymbol} accountId={accountId} accountLabel={accountLabel} skillDefinitions={skillOptions} open={inspectorOpen} section={inspectorSection} onSectionChange={setInspectorSection} onClose={() => setInspectorOpen(false)} onOpenStrategy={onOpenStrategy} onOpenIntelligence={onOpenIntelligence} onOpenTrading={onOpenTrading} onResearchPrompt={insertResearchPrompt} onOpenMessage={openAiMessageById} marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} uiText={uiText} />
+          <AiResearchInspector sessionId={sessionId} artifact={inspectorArtifact} selectedSymbol={selectedSymbol} accountId={accountId} accountLabel={accountLabel} skillDefinitions={skillOptions} open={inspectorOpen} section={inspectorSection} onSectionChange={setInspectorSection} onClose={() => setInspectorOpen(false)} onOpenStrategy={onOpenStrategy} onOpenIntelligence={onOpenIntelligence} onOpenTrading={onOpenTrading} onResearchPrompt={insertResearchPrompt} onOpenMessage={openAiMessageById} evidenceMessage={evidenceMessage} onOpenEvidenceArtifact={(artifact) => { setInspectorArtifact(artifact); openInspectorSection("artifacts"); }} marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} uiText={uiText} />
 
         </section>
       {forkPrompt.element}

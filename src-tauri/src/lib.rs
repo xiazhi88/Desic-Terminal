@@ -36,6 +36,7 @@ use tokio::{
 use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 mod agent_library;
 mod ai_automation;
+mod ai_research_ledger;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
 mod ai_triage;
@@ -16809,6 +16810,14 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
         }
         return Ok(());
     }
+    if canonical.starts_with("research.record") {
+        return ai_research_ledger::authorize(
+            canonical,
+            is_main,
+            context.run_context.is_some(),
+            &context.strategy_session_kind,
+        );
+    }
     // C19 试判阶段门（授权层强制，不能只写在提示词里）：
     // - 试判阶段只放行配置允许的只读域（market / account / intelligence / radar）+
     //   `background.reportTriage`；verdict 前 `consult_expert(s)` / `follow_up` 一律拒绝；
@@ -17897,6 +17906,9 @@ async fn execute_ai_tool(
     }
     // 契约 C6 / C10-3：agent 库工具。四个名字必须有显式分支——文件末尾的
     // `_ => Err("未知 AI 工具")` 会兜住漏登记。校验与落盘全部复用 crate 的
+    if ai_research_ledger::is_ledger_tool(canonical_name) {
+        return ai_research_ledger::execute(canonical_name, input, session_id, now_ms());
+    }
     // Agent 库函数（`crate::agent_library`），lib.rs 里不再重复实现。
     if canonical_name.starts_with("agent.") {
         ensure_ai_run_is_active(&app, context).await?;

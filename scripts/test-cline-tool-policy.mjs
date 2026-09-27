@@ -10,7 +10,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
-import { buildSystemPrompt, canRehydrateClineConversation, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, normalizeProviderToolInput, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { attachEvidenceRef, buildSystemPrompt, canRehydrateClineConversation, createDesicTools, createEvidenceRefAllocator, loadClineSdk, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, normalizeProviderToolInput, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -382,6 +382,43 @@ for (const tool of ["agent.list", "agent.read", "agent.create", "agent.update"])
     failures.push(`${tool} 后台 Run 必须以 disabled:agent-authoring-interactive-only 拒绝，实际 ${backgroundDenied.policy}`);
   }
 }
+// 证据账本：只对显式主 Agent 的交互式 AI 研究会话开放；后台 / 复盘 Run、其它会话类型、
+// 委派角色与缺省角色一律拒绝，且拒绝原因是语义明确的冻结策略名。
+const researchMain = { permissionMode: "advisor", agentRole: "main", strategySessionKind: "trading-research" };
+for (const tool of ["research.recordEvidence", "research.recordDecision"]) {
+  expectPolicy(researchMain, tool, enabled);
+  expectPolicy({ ...researchMain, permissionMode: "limited_auto" }, tool, enabled);
+  expectPolicy({ ...researchMain, backgroundRun: true }, tool, disabled);
+  expectPolicy({ ...researchMain, reviewRun: true }, tool, disabled);
+  expectPolicy({ ...researchMain, strategySessionKind: "editor" }, tool, disabled);
+  expectPolicy({ permissionMode: "advisor", agentRole: "main" }, tool, disabled);
+  expectPolicy({ ...researchMain, toolAllowlist: ["script.createOrUpdate"] }, tool, disabled);
+  for (const agentRole of ["subagent", "team"]) expectPolicy({ ...researchMain, agentRole }, tool, disabled);
+  const missingRole = describeToolPolicy(tool, { permissionMode: "advisor", strategySessionKind: "trading-research" });
+  if (missingRole.policy !== "disabled:research-ledger-main-only") {
+    failures.push(`${tool} 缺省角色必须以 disabled:research-ledger-main-only 拒绝，实际 ${missingRole.policy}`);
+  }
+  const background = describeToolPolicy(tool, { ...researchMain, backgroundRun: true });
+  if (background.policy !== "disabled:research-ledger-interactive-only") {
+    failures.push(`${tool} 后台 Run 必须以 disabled:research-ledger-interactive-only 拒绝，实际 ${background.policy}`);
+  }
+}
+await loadClineSdk();
+const researchToolNames = createDesicTools("policy-test", researchMain).map((tool) => tool.name);
+expectTrue("research session exposes ledger tools", researchToolNames.includes("research_recordEvidence") && researchToolNames.includes("research_recordDecision"));
+const backgroundToolNames = createDesicTools("policy-test", { ...researchMain, backgroundRun: true }).map((tool) => tool.name);
+expectTrue("background run hides ledger tools", !backgroundToolNames.some((name) => name.startsWith("research_record")));
+const researchPrompt = buildSystemPrompt({ systemPrompt: "test", strategySessionKind: "trading-research" }, "advisor");
+expectTrue("research prompt carries ledger rule", researchPrompt.includes("research_recordEvidence") && researchPrompt.includes("evidenceRef"));
+const editorPrompt = buildSystemPrompt({ systemPrompt: "test", strategySessionKind: "editor" }, "advisor");
+expectTrue("non-research prompt omits ledger rule", !editorPrompt.includes("research_recordEvidence"));
+const allocate = createEvidenceRefAllocator();
+expectEqual("first evidence ref", attachEvidenceRef({ ok: true }, allocate).evidenceRef, "E1");
+expectEqual("failed results are not numbered", attachEvidenceRef({ ok: false, error: "x" }, allocate).evidenceRef, undefined);
+expectEqual("second evidence ref skips failures", attachEvidenceRef({ value: 1 }, allocate).evidenceRef, "E2");
+expectEqual("array results stay untouched", Array.isArray(attachEvidenceRef([1], allocate)), true);
+expectEqual("no allocator leaves results untouched", attachEvidenceRef({ ok: true }, null).evidenceRef, undefined);
+
 // 工具白名单仍然是否决性的：scoped 会话（如策略编辑器）拿不到 agent.*。
 expectPolicy(
   { permissionMode: "advisor", agentRole: "main", toolAllowlist: ["market.readTicker"] },

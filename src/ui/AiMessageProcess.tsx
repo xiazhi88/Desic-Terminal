@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, type Dispatch, type SetStateAction } from "re
 import { CheckCircle2, CircleAlert, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { getAiAgentFailure } from "../lib/aiAgentTrace";
+import { agentUsageTokens } from "../lib/aiEvidenceLedger";
 import { expertGrantLabel } from "../lib/aiExpertGrant";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { logger } from "../lib/logger";
@@ -937,11 +938,12 @@ function AiAgentCard({ agent, now }: { agent: AiAgentRun; now: number }) {
   const duration = formatDuration(agent.startedAt, agent.endedAt ?? (agent.status === "running" ? now : undefined));
   const failure = getAiAgentFailure(agent.result, agent.error, agent.status);
   const modelError = failure?.kind === "model";
+  const tokens = agentUsageTokens(agent.result);
   return (
     <details className={clsx("ai-agent-run", `agent-${agent.status}`, modelError && "agent-model-error")} open={modelError || undefined}>
       <summary>
         <span>{modelError && <CircleAlert size={14} aria-hidden="true" />}{processText("subtask", "Subtask", "子任务")} · <span data-i18n-skip>{agent.title}</span></span>
-        <strong>{modelError ? processText("modelError", "Model error", "模型错误") : agentStatusLabel(agent.status)}{duration ? ` · ${duration}` : ""}</strong>
+        <strong>{modelError ? processText("modelError", "Model error", "模型错误") : agentStatusLabel(agent.status)}{duration ? ` · ${duration}` : ""}{tokens !== null ? ` · ${formatLocalizedNumber(tokens)} tok` : ""}</strong>
       </summary>
       {agent.task && <p data-i18n-skip>{agent.task}</p>}
       {agent.progressNotice && agent.status === "running" ? (

@@ -97,7 +97,7 @@ function assertLayout(layout) {
   if (layout.floatCount || layout.nativeSelectCount || layout.taskDockCount !== 1 || layout.queueDockCount !== 1) {
     throw new Error(`AI Research controls are incomplete: ${JSON.stringify(layout)}`);
   }
-  const expectedInspectorShortcuts = layout.viewport.width <= 660 ? 0 : 3;
+  const expectedInspectorShortcuts = layout.viewport.width <= 660 ? 0 : 4;
   if (layout.stopButtonCount !== 1 || layout.sendButtonCount !== 1 || layout.inspectorShortcutCount !== expectedInspectorShortcuts || layout.composerControlCount !== 1 || layout.legacyComposerActionCount !== 0) {
     throw new Error(`Streaming composer and right-panel shortcuts are incomplete: ${JSON.stringify(layout)}`);
   }
@@ -131,13 +131,15 @@ async function main() {
     const page = await browser.newPage({ viewport: { width: 1280, height: 760 }, deviceScaleFactor: 1 });
     await page.addInitScript(() => localStorage.setItem("desic.ui.language.v1", "zh-CN"));
     await page.goto(baseUrl, { waitUntil: "networkidle", timeout: 60_000 });
-    const process = page.locator(".ai-process").first();
+    // 预览里还有一轮更早的证据账本回答；以下过程组断言针对原来的流式预览回答。
+    const previewAnswer = page.locator("[data-ai-message-id='preview-ai']");
+    const process = previewAnswer.locator(".ai-process").first();
     const processSummary = process.locator(":scope > summary");
     if (await process.getAttribute("open") === null) await processSummary.click();
-    const toolGroup = page.locator(".ai-tool-group").first();
+    const toolGroup = previewAnswer.locator(".ai-tool-group").first();
     if (await toolGroup.count() !== 1) throw new Error("Preview should include a grouped tool trace");
     if (await toolGroup.getAttribute("open") === null) await toolGroup.locator(":scope > summary").click();
-    const directMarketTool = page.locator(".ai-tool-direct-artifact").first();
+    const directMarketTool = previewAnswer.locator(".ai-tool-direct-artifact").first();
     if (await directMarketTool.count() !== 1) throw new Error("A completed market tool should directly open its market workspace");
     await directMarketTool.click();
     if (await page.locator(".ai-research-inspector").count() !== 1 || await page.locator(".ai-inspector-tabs [role=tab]").count() < 2 || await page.locator(".ai-market-kline-canvas").count() !== 1) {
@@ -198,6 +200,28 @@ async function main() {
      await radarShortcut.click();
      if (await page.locator(".ai-radar-panel").count() !== 1 || await page.locator(".ai-radar-tabs button").count() !== 5) throw new Error("Center rail Market Radar shortcut should open five compact radar tabs");
      if (await page.locator(".ai-inspector-sections").count() !== 0) throw new Error("The inspector must not duplicate center-rail section controls");
+     // 证据账本：只由 research.recordEvidence / recordDecision 的结构化结果驱动。
+     const evidenceStrip = page.locator(".ai-evidence-strip");
+     if (await evidenceStrip.count() !== 1) throw new Error("Only the evidence-ledger answer should show a balance summary strip");
+     await evidenceStrip.click();
+     await page.waitForSelector(".ai-evidence-board .ai-evidence-balance", { timeout: 10_000 });
+     const evidence = await page.evaluate(() => ({
+       bear: document.querySelectorAll(".ai-evidence-column.is-bear .ai-evidence-card").length,
+       bull: document.querySelectorAll(".ai-evidence-column.is-bull .ai-evidence-card").length,
+       context: document.querySelectorAll(".ai-evidence-context .ai-evidence-card").length,
+       active: document.querySelector(".ai-evidence-slot.is-active")?.textContent || "",
+       revised: document.querySelectorAll(".ai-evidence-revision").length,
+       wake: document.querySelectorAll(".ai-evidence-wake-row").length,
+       stats: document.querySelector(".ai-evidence-balance-stats")?.textContent || ""
+     }));
+     if (evidence.bear !== 4 || evidence.bull !== 4 || evidence.context !== 3) throw new Error(`Evidence columns do not match the ledger: ${JSON.stringify(evidence)}`);
+     if (!evidence.active.includes("放弃") || evidence.revised !== 1 || evidence.wake !== 3 || !/冲突度 97%/.test(evidence.stats)) throw new Error(`Evidence decision, revision or wake panel is wrong: ${JSON.stringify(evidence)}`);
+     await page.screenshot({ path: path.join(artifactDir, "ai-research-evidence.png"), fullPage: false });
+     await page.locator(".ai-evidence-view-switch button").nth(1).click();
+     if (await page.locator(".ai-orbit-node").count() !== 3 || await page.locator(".ai-orbit-lane").count() !== 3) throw new Error("Collaboration orbit should show the three consulted experts");
+     await page.screenshot({ path: path.join(artifactDir, "ai-research-orbit.png"), fullPage: false });
+     await page.locator(".ai-inspector-shortcut[aria-label*='证据天平']").click();
+     if (await page.locator(".ai-evidence-note").count() !== 1 || await page.locator(".ai-evidence-balance").count() !== 0) throw new Error("A turn without a ledger must explain it instead of drawing a balance");
      await intelligenceShortcut.click();
       const expandIntelligence = page.locator(".ai-intelligence-expand");
     if (await expandIntelligence.count() !== 1 || await expandIntelligence.isDisabled()) throw new Error("Full Market Intelligence action is missing");
