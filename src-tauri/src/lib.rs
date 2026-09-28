@@ -53,6 +53,7 @@ mod intelligence;
 mod main_thread_watchdog;
 mod market_radar;
 mod blocking_work;
+mod order_flow;
 mod market_radar_workspace;
 mod market_ws;
 mod okx_rate_limit;
@@ -26392,6 +26393,7 @@ pub fn run() {
             market_radar_delete_alert_rule,
             market_radar_validation_report,
             market_radar_snapshot_frames,
+            crate::order_flow::order_flow_volume_profile,
             okx_candles,
             okx_funding_rate,
             init_local_storage,

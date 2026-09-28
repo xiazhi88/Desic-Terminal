@@ -23,7 +23,7 @@ import {
   LayoutGrid,
   Layers3,
   Loader2,
-  Flame,
+  Waves,
   Maximize2,
   Minus,
   Newspaper,
@@ -46,7 +46,7 @@ import {
   XCircle,
   Trash2
 } from "lucide-react";
-import { ingestLiquidityBook, ingestLiquidityTrades } from "../lib/liquidityHistory";
+import { ingestOrderBookForWalls } from "../lib/orderBookWalls";
 import { DepthProfile } from "./chart/DepthProfile";
 import { writeOdometer } from "./shell/priceOdometer";
 import { runWorkspaceTransition } from "./shell/workspaceTransition";
@@ -237,6 +237,7 @@ import {
   getMarketHotState,
   hydrateMarketHotState,
   mergeIntoMarketCandles,
+  pendingCandleFor,
   queueCandle,
   queueBusinessMessageAt,
   queueFundingRate,
@@ -299,6 +300,7 @@ import {
 } from "./FirstLaunchOnboarding";
 import { MemoAiResearchWorkspace } from "./ai-research/AiResearchWorkspace";
 import type { AiUiMessage } from "./AiMessageProcess";
+
 export { AiPreview } from "./ai-research/AiPreview";
 
 const loadAiAutomationModule = () => import("./AiAutomationPanel");
@@ -350,7 +352,6 @@ const DEFAULT_SYMBOL = "BTC-USDT-SWAP";
 const EQUITY_METADATA_REFRESH_MS = 24 * 60 * 60 * 1_000;
 type MarketPickerCategory = "watchlist" | "popular" | "gainers" | "losers" | "new";
 const PRIMARY_CHART_TIMEFRAMES = ["1m", "3m", "5m", "15m", "30m"] as const;
-const LIQUIDITY_TIMEFRAMES = new Set<string>(["1m", "3m", "5m"]);
 const SECONDARY_CHART_TIMEFRAMES = ["1H", "2H", "4H", "6H", "12H", "1D"] as const;
 const NOTIFICATION_HISTORY_KEY = "desictrade.notificationHistory.v1";
 const WATCHLIST_STORAGE_KEY = "desictrade.watchlist.v1";
@@ -443,6 +444,50 @@ function playNotificationSound(kind: AppNotification["kind"]) {
   } catch {
     // Audio playback must never affect notification delivery or trading flows.
   }
+}
+
+const TIMEFRAME_UNIT_SECONDS: Record<string, number> = { m: 60, H: 3_600, D: 86_400, W: 604_800 };
+
+function timeframeStepSeconds(timeframe: string) {
+  const match = /^(\d+)([mHDW])/.exec(timeframe);
+  return match ? Number(match[1]) * TIMEFRAME_UNIT_SECONDS[match[2]!]! : null;
+}
+
+// 1m 推送里同一分钟的成交量是累计值：记下每分钟上次看到的量，只把增量加到高周期当根上。
+const formingMinuteVolume = { key: "", minute: 0, volume: 0 };
+
+/**
+ * 用 1m 推送更新高周期里正在形成的那根 K 线；返回 false 表示需要回库重算
+ * （1m 已收盘、跨入新的高周期桶、或内存里还没有对应的那根）。
+ */
+function patchFormingDerivedCandle(candle: Candle, bar: string, seriesKey: string) {
+  const step = timeframeStepSeconds(bar);
+  if (!step || candle.confirm) return false;
+  const hot = getMarketHotState();
+  if (hot.candleSeriesKey !== seriesKey) return false;
+  const bucketStart = Math.floor(candle.time / step) * step;
+  // 同一帧内的多次补丁叠加在待发布的那根上：断流恢复时积压的推送会在一个任务里连续到达，
+  // 逐条同步写 store 会触发 React 的嵌套更新上限（Maximum update depth exceeded）。
+  const pending = pendingCandleFor(seriesKey);
+  const last = pending && pending.time === bucketStart ? pending : hot.candles.at(-1);
+  if (!last || last.time !== bucketStart) return false;
+  const tracker = formingMinuteVolume;
+  const known = tracker.key === seriesKey && tracker.minute === candle.time ? tracker.volume : 0;
+  // 首次见到这一分钟时不知道回库结果里已含多少该分钟成交量：只记录基准，不加量，避免重复计入。
+  const firstSight = !(tracker.key === seriesKey && tracker.minute === candle.time);
+  tracker.key = seriesKey;
+  tracker.minute = candle.time;
+  tracker.volume = candle.volume;
+  const volumeDelta = firstSight ? 0 : Math.max(0, candle.volume - known);
+  queueCandle({
+    ...last,
+    high: Math.max(last.high, candle.high),
+    low: Math.min(last.low, candle.low),
+    close: candle.close,
+    volume: last.volume + volumeDelta,
+    confirm: false
+  }, seriesKey);
+  return true;
 }
 
 function buildTerminalPreviewCandles(symbol: string, timeframe: string): Candle[] {
@@ -1400,11 +1445,11 @@ function useClockTick() {
 function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
   const { t } = useTranslation(["trading", "common"]);
   const lastRef = useRef<HTMLElement | null>(null);
-  const markRef = useRef<HTMLSpanElement | null>(null);
-  const changeRef = useRef<HTMLSpanElement | null>(null);
-  const highRef = useRef<HTMLSpanElement | null>(null);
-  const lowRef = useRef<HTMLSpanElement | null>(null);
-  const volumeRef = useRef<HTMLSpanElement | null>(null);
+  const markRef = useRef<HTMLElement | null>(null);
+  const changeRef = useRef<HTMLElement | null>(null);
+  const highRef = useRef<HTMLElement | null>(null);
+  const lowRef = useRef<HTMLElement | null>(null);
+  const volumeRef = useRef<HTMLElement | null>(null);
   const detailLastRef = useRef<HTMLElement | null>(null);
   const detailChangeRef = useRef<HTMLElement | null>(null);
   const detailHighRef = useRef<HTMLElement | null>(null);
@@ -1432,11 +1477,16 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
         previousLastRef.current = Number.isFinite(last) ? last : null;
         lastRef.current.className = clsx(change >= 0 ? "up" : "down", lastRef.current.classList.contains("odometer") && "odometer");
       }
-      if (markRef.current) markRef.current.textContent = `${t("trading:markPrice")} ${fmtPrice(ticker?.last)}`;
-      if (changeRef.current) changeRef.current.textContent = `24H ${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
-      if (highRef.current) highRef.current.textContent = `${t("trading:high")} ${fmtPrice(ticker?.high24h)}`;
-      if (lowRef.current) lowRef.current.textContent = `${t("trading:low")} ${fmtPrice(ticker?.low24h)}`;
-      if (volumeRef.current) volumeRef.current.textContent = `${t("trading:volume")} ${fmtCompact(ticker?.volCcy24h)} USDT`;
+      // 标签与数值分开：命令式更新只改数值，磷光外观据此把标签叠在数值上方。
+      if (markRef.current) markRef.current.textContent = fmtPrice(ticker?.last);
+      if (changeRef.current) {
+        changeRef.current.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+        changeRef.current.classList.toggle("up", change >= 0);
+        changeRef.current.classList.toggle("down", change < 0);
+      }
+      if (highRef.current) highRef.current.textContent = fmtPrice(ticker?.high24h);
+      if (lowRef.current) lowRef.current.textContent = fmtPrice(ticker?.low24h);
+      if (volumeRef.current) volumeRef.current.textContent = `${fmtCompact(ticker?.volCcy24h)} USDT`;
       if (detailLastRef.current) detailLastRef.current.textContent = fmtPrice(ticker?.last);
       if (detailChangeRef.current) {
         detailChangeRef.current.textContent = `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
@@ -1460,8 +1510,8 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
         fundingSignatureRef.current = fundingSignature;
         fundingRef.current.hidden = !rate;
         if (detailFundingRef.current) detailFundingRef.current.hidden = !rate;
-        if (fundingRateRef.current) fundingRateRef.current.textContent = rate ? `${t("trading:fundingRate")} ${rate}` : "";
-        if (fundingCountdownRef.current) fundingCountdownRef.current.textContent = rate ? `/ ${formatFundingCountdown(fundingRate?.fundingTime, now)}` : "";
+        if (fundingRateRef.current) fundingRateRef.current.textContent = rate ?? "";
+        if (fundingCountdownRef.current) fundingCountdownRef.current.textContent = rate ? formatFundingCountdown(fundingRate?.fundingTime, now) : "";
         if (detailFundingRateRef.current) detailFundingRateRef.current.textContent = rate || "--";
         if (detailFundingCountdownRef.current) detailFundingCountdownRef.current.textContent = rate ? formatFundingCountdown(fundingRate?.fundingTime, now) : "";
       }
@@ -1479,12 +1529,12 @@ function HotPriceStrip({ timeState }: { timeState: OkxTimeState | null }) {
     <div className="price-strip" tabIndex={0} aria-label={t("trading:marketData")} aria-describedby="market-price-tooltip">
       <div className="price-strip-values">
         <strong ref={lastRef}>--</strong>
-        <span ref={markRef}>{t("trading:markPrice")} --</span>
-        <span ref={changeRef}>24H --</span>
-        <span ref={highRef}>{t("trading:high")} --</span>
-        <span ref={lowRef}>{t("trading:low")} --</span>
-        <span ref={volumeRef}>{t("trading:volume")} -- USDT</span>
-        <span ref={fundingRef} className="funding-chip" hidden><b ref={fundingRateRef} /><em ref={fundingCountdownRef} /></span>
+        <span className="price-stat price-stat--mark"><small>{t("trading:markPrice")}</small><b ref={markRef}>--</b></span>
+        <span className="price-stat price-stat--change"><small>24H</small><b ref={changeRef}>--</b></span>
+        <span className="price-stat price-stat--high"><small>{t("trading:high")}</small><b ref={highRef}>--</b></span>
+        <span className="price-stat price-stat--low"><small>{t("trading:low")}</small><b ref={lowRef}>--</b></span>
+        <span className="price-stat price-stat--volume"><small>{t("trading:volume")}</small><b ref={volumeRef}>-- USDT</b></span>
+        <span ref={fundingRef} className="price-stat price-stat--funding funding-chip" hidden><small>{t("trading:fundingRate")}</small><b ref={fundingRateRef} /><em ref={fundingCountdownRef} /></span>
       </div>
       <div className="price-strip-tooltip" id="market-price-tooltip" role="tooltip">
         <div className="price-strip-tooltip-grid">
@@ -1677,7 +1727,7 @@ function HotChartDataTable(props: Omit<Parameters<typeof ChartDataTable>[0], "ca
   return <ChartDataTable {...props} candles={candles} />;
 }
 
-function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSelect?: (price: string) => void; liquidityProfile?: ReactNode }) {
+function HotMarketDepth({ onPriceSelect, depthProfile = null }: { onPriceSelect?: (price: string) => void; depthProfile?: ReactNode }) {
   const { t } = useTranslation(["trading", "common"]);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const signatureRef = useRef("");
@@ -1794,7 +1844,7 @@ function HotMarketDepth({ onPriceSelect, liquidityProfile = null }: { onPriceSel
         onPriceSelect?.(row.dataset.price);
       }}
     >
-      {liquidityProfile ?? <div className="orderbook">
+      {depthProfile ?? <div className="orderbook">
         <div className="depth-head"><span>{t("trading:priceUsdt")}</span><span>{t("trading:quantityContracts")}</span></div>
         {Array.from({ length: 5 }, (_, index) => <DepthRow key={`a-${index}`} level={null} side="ask" />)}
         <div className="mid-price"><b className="mid-price__value">--</b> <span>{t("trading:liveOrderBook")}</span></div>
@@ -2047,10 +2097,9 @@ function TradingTerminal({
   useEffect(() => subscribeVisualPreference(setVisualPreferenceState), []);
   const helpSearchRef = useRef<HTMLInputElement | null>(null);
   const [chartPresentation, setChartPresentation] = useState<"chart" | "table">("chart");
-  // 流动性模式：K 线下叠加盘口热力图（仅 1m / 3m / 5m 有意义，更大周期按钮禁用并说明原因）。
-  const [chartLiquidityMode, setChartLiquidityMode] = useState(() => window.localStorage.getItem("desic.chart.liquidity-mode.v1") === "1");
-  const liquidityTimeframeSupported = LIQUIDITY_TIMEFRAMES.has(bar);
-  const liquidityModeActive = chartLiquidityMode && liquidityTimeframeSupported && chartPresentation === "chart";
+  // 订单流模式：成交量分布、主动买卖差 / CVD、当前大单墙、清算与背离；任何周期可用（数据不依赖盘口历史）。
+  const [chartOrderFlowMode, setChartOrderFlowMode] = useState(() => window.localStorage.getItem("desic.chart.order-flow.v1") === "1");
+  const orderFlowActive = chartOrderFlowMode && chartPresentation === "chart";
   const [chartUtilitiesOpen, setChartUtilitiesOpen] = useState(false);
   const chartUtilitiesRef = useRef<HTMLDivElement | null>(null);
   const [pendingOrderLineEdit, setPendingOrderLineEdit] = useState<ChartOrderLineEdit | null>(null);
@@ -3141,18 +3190,16 @@ function TradingTerminal({
       },
       onOrderBook: (item) => {
         countRendererEvent(marketEventCountersRef, "orderBook");
-        // 采集器在盘口被截到 40 档之前旁路完整 400 档，只保留当前交易对。
-        ingestLiquidityBook(symbol, item);
+        // 在盘口被截到 40 档之前旁路完整 400 档（当前大单墙与深度剖面），只保留当前交易对。
+        ingestOrderBookForWalls(symbol, item);
         queueOrderBook(item);
       },
       onTrade: (trade) => {
         countRendererEvent(marketEventCountersRef, "trade");
-        ingestLiquidityTrades(symbol, [trade]);
         queueTrade(trade);
       },
       onTrades: (trades) => {
         marketEventCountersRef.current.trade = (marketEventCountersRef.current.trade ?? 0) + trades.length;
-        ingestLiquidityTrades(symbol, trades);
         queueTrades(trades);
       },
       onFundingRate: (item) => {
@@ -3169,6 +3216,10 @@ function TradingTerminal({
           return;
         }
         const requestKey = `${symbol}\u0000${activeBar}`;
+        // 高周期的“正在形成的那根”直接用 1m 推送在内存里更新（最高 / 最低 / 收盘 / 成交量增量）；
+        // 只有 1m 收盘或进入新的高周期桶时才回库重算。此前每 2 秒整窗重读（30m 约 9000 行 1m），
+        // 让数据库一直处于繁忙状态，拖慢其它查询。
+        if (patchFormingDerivedCandle(candle, activeBar, requestKey)) return;
         const pendingRequest = marketCandleRequestRef.current;
         if (pendingRequest?.key === requestKey) {
           pendingRequest.queued = true;
@@ -4746,23 +4797,22 @@ function TradingTerminal({
       },
       { id: "action:popout", group: actionGroup, label: t("chart:detachedChartWindow"), keywords: "chart window popout", icon: <Maximize2 size={14} />, run: openDetachedChart },
       {
-        id: "action:liquidity",
+        id: "action:order-flow",
         group: actionGroup,
-        label: chartLiquidityMode ? uiText("关闭流动性模式", "Turn off liquidity mode") : uiText("开启流动性模式", "Turn on liquidity mode"),
-        hint: liquidityTimeframeSupported ? undefined : uiText("仅 1m / 3m / 5m", "1m / 3m / 5m only"),
-        keywords: "liquidity heatmap depth",
-        icon: <Flame size={14} />,
+        label: orderFlowActive ? uiText("关闭订单流模式", "Turn off order flow") : uiText("开启订单流模式", "Turn on order flow"),
+        keywords: "order flow volume profile cvd delta liquidation wall",
+        icon: <Waves size={14} />,
         run: () => {
           setMainSection("terminal");
-          setChartLiquidityMode((current) => {
-            window.localStorage.setItem("desic.chart.liquidity-mode.v1", current ? "0" : "1");
-            return !current;
-          });
+          const enabling = !orderFlowActive;
+          if (enabling) setChartPresentation("chart");
+          window.localStorage.setItem("desic.chart.order-flow.v1", enabling ? "1" : "0");
+          setChartOrderFlowMode(enabling);
         }
       }
     );
     return items;
-  }, [chartLiquidityMode, liquidityTimeframeSupported, marketAssets?.instruments, marketTickerMap, openDetachedChart, setMainSection, shortcutModifier, t, uiText, visualPreference, watchlist]);
+  }, [orderFlowActive, marketAssets?.instruments, marketTickerMap, openDetachedChart, setMainSection, shortcutModifier, t, uiText, visualPreference, watchlist]);
 
   const overviewTiles = useMemo<OverviewTile[]>(() => {
     const iconFor = (id: string) => {
@@ -4971,6 +5021,8 @@ function TradingTerminal({
               aria-label={uiText("打开命令面板", "Open command palette")}
             >
               <Search size={17} />
+              <span className="command-palette-button__label" aria-hidden="true">{uiText("搜索", "Search")}</span>
+              <kbd className="command-palette-button__kbd" aria-hidden="true">{shortcutModifier}K</kbd>
             </button>
             <button
               className={clsx("icon-button workspace-overview-button", workspaceOverviewOpen && "active")}
@@ -5258,28 +5310,20 @@ function TradingTerminal({
                   </button>
                   <button
                     type="button"
-                    className={clsx("chart-liquidity-toggle", liquidityModeActive && "active")}
-                    onClick={() =>
-                      setChartLiquidityMode((current) => {
-                        window.localStorage.setItem("desic.chart.liquidity-mode.v1", current ? "0" : "1");
-                        return !current;
-                      })
-                    }
-                    disabled={!liquidityTimeframeSupported || chartPresentation !== "chart"}
-                    aria-pressed={liquidityModeActive}
-                    title={
-                      liquidityTimeframeSupported
-                        ? uiText(
-                            "在 K 线下叠加盘口挂单热力图、主动成交气泡与大单墙事件",
-                            "Overlay resting-liquidity heatmap, aggressive trade bubbles, and wall events under the candles",
-                          )
-                        : uiText(
-                            "流动性模式只在 1m / 3m / 5m 周期可用：本地仅保留最近 2 小时的逐秒盘口",
-                            "Liquidity mode is available on 1m / 3m / 5m only: the terminal keeps the last 2 hours of per-second depth",
-                          )
-                    }
+                    className={clsx("chart-orderflow-toggle", orderFlowActive && "active")}
+                    onClick={() => {
+                      const enabling = !orderFlowActive;
+                      if (enabling && chartPresentation !== "chart") setChartPresentation("chart");
+                      window.localStorage.setItem("desic.chart.order-flow.v1", enabling ? "1" : "0");
+                      setChartOrderFlowMode(enabling);
+                    }}
+                    aria-pressed={orderFlowActive}
+                    title={uiText(
+                      "成交量分布（POC / 价值区）、主动买卖差与 CVD、当前大单墙、清算标记与背离",
+                      "Volume profile (POC / value area), taker delta and CVD, current walls, liquidations and divergences",
+                    )}
                   >
-                    <Flame size={15} /> {uiText("流动性", "Liquidity")}
+                    <Waves size={15} /> {uiText("订单流", "Order flow")}
                   </button>
                   <button
                     type="button"
@@ -5315,7 +5359,7 @@ function TradingTerminal({
                 >
                   <ErrorBoundary label={t("chart:chart")}>
                     <HotKlineChart
-                      liquidityMode={liquidityModeActive}
+                      orderFlowMode={orderFlowActive}
                       tradeSources={chartTradeSources}
                       symbol={symbol}
                       timeframe={bar}
@@ -5601,7 +5645,14 @@ function TradingTerminal({
                 </button>
               </div>
               <HotMarketDepth
-                liquidityProfile={liquidityModeActive ? <DepthProfile instId={symbol} text={(english, chinese) => uiText(chinese, english)} /> : null}
+                depthProfile={orderFlowActive ? (
+                  <DepthProfile
+                    instId={symbol}
+                    text={(english, chinese) => uiText(chinese, english)}
+                    contractValue={Number(currentInstrument?.ctVal) || undefined}
+                    onPriceSelect={(price) => setTicketPriceFill({ symbol, price, nonce: Date.now() })}
+                  />
+                ) : null}
                 onPriceSelect={(price) =>
                   setTicketPriceFill({ symbol, price, nonce: Date.now() })
                 }

@@ -1,4 +1,5 @@
 import {
+  BaselineSeries,
   CandlestickSeries,
   ColorType,
   CrosshairMode,
@@ -68,13 +69,16 @@ export type ChartPaneOptions = {
   stretchFactor?: number;
 };
 
-export type ChartIndicatorSeriesType = "line" | "histogram";
+/** baseline：以 0 为基线的双色渐变面积（上方用 color，下方用 negativeColor），数据与 line 相同。 */
+export type ChartIndicatorSeriesType = "line" | "histogram" | "baseline";
 
 export type ChartIndicatorSeriesConfig = {
   key: string;
   paneId: ChartPaneId;
   type?: ChartIndicatorSeriesType;
   color?: string;
+  /** 仅 baseline：基线以下的颜色（rgb 三元组字符串，如 "255, 77, 106"）；color 同样取 rgb 三元组。 */
+  negativeColor?: string;
   lineWidth?: 1 | 2 | 3 | 4;
   visible?: boolean;
   priceScaleId?: string;
@@ -238,7 +242,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
   const lineSeries = new Map<string, ISeriesApi<"Line">>();
   const indicatorSeries = new Map<
     string,
-    { paneId: ChartPaneId; type: ChartIndicatorSeriesType; series: ISeriesApi<"Line"> | ISeriesApi<"Histogram"> }
+    { paneId: ChartPaneId; type: ChartIndicatorSeriesType; series: IndicatorSeriesApi }
   >();
   // lightweight-charts rejects an incremental update whose timestamp precedes
   // the last point. Layout changes can briefly leave late async updates in
@@ -313,9 +317,11 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       priceLineVisible: config.priceLineVisible ?? false,
       ...(config.priceScaleId !== undefined ? { priceScaleId: config.priceScaleId } : {})
     };
-    const series = type === "histogram"
+    const series: IndicatorSeriesApi = type === "histogram"
       ? chart.addSeries(HistogramSeries, options, paneIndex)
-      : chart.addSeries(LineSeries, options, paneIndex);
+      : type === "baseline"
+        ? chart.addSeries(BaselineSeries, { ...withoutColor(options), ...baselineOptions(config) }, paneIndex)
+        : chart.addSeries(LineSeries, options, paneIndex);
     indicatorSeries.set(config.key, { paneId: config.paneId, type, series });
     return series;
   };
@@ -494,7 +500,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       }
       ensurePane({ id: config.paneId });
       const existing = indicatorSeries.get(config.key);
-      let series: ISeriesApi<"Line"> | ISeriesApi<"Histogram">;
+      let series: IndicatorSeriesApi;
       const type = config.type ?? existing?.type ?? "line";
       if (!existing || existing.type !== type) {
         if (existing) chart.removeSeries(existing.series);
@@ -825,9 +831,29 @@ function validatePositiveNumber(value: number, label: string) {
   return value;
 }
 
+type IndicatorSeriesApi = ISeriesApi<"Line"> | ISeriesApi<"Histogram"> | ISeriesApi<"Baseline">;
+
+function withoutColor<T extends { color?: unknown }>({ color: _color, ...rest }: T) {
+  return rest;
+}
+
+function baselineOptions(config: ChartIndicatorSeriesConfig) {
+  const up = config.color ?? "25, 217, 154";
+  const down = config.negativeColor ?? "255, 77, 106";
+  return {
+    baseValue: { type: "price" as const, price: 0 },
+    topLineColor: `rgba(${up}, 0.95)`,
+    topFillColor1: `rgba(${up}, 0.34)`,
+    topFillColor2: `rgba(${up}, 0.02)`,
+    bottomLineColor: `rgba(${down}, 0.95)`,
+    bottomFillColor1: `rgba(${down}, 0.02)`,
+    bottomFillColor2: `rgba(${down}, 0.34)`
+  };
+}
+
 function indicatorOptions(config: ChartIndicatorSeriesConfig) {
   return {
-    ...(config.color !== undefined ? { color: config.color } : {}),
+    ...(config.type === "baseline" ? baselineOptions(config) : config.color !== undefined ? { color: config.color } : {}),
     ...(config.lineWidth !== undefined ? { lineWidth: config.lineWidth } : {}),
     ...(config.visible !== undefined ? { visible: config.visible } : {}),
     ...(config.priceScaleId !== undefined ? { priceScaleId: config.priceScaleId } : {}),

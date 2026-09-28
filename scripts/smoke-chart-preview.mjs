@@ -1007,35 +1007,41 @@ async function main() {
     throw new Error(`zoomed chart should expand recent marker labels: ${JSON.stringify(expandedMarkerState)}`);
   }
 
-  // 流动性模式：合成盘口 / 成交驱动；热力层必须真实画进图表画布，深度剖面与图例同时出现。
-  const liquidityUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}liquidity=1`;
-  await page.goto(liquidityUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
-  await page.waitForSelector(".chart-liquidity-legend", { timeout: 30_000 });
+  // 订单流模式：成交量分布、主动买卖差 / CVD 副图、当前大单墙、清算与背离；深度剖面与图例同时出现。
+  const orderFlowUrl = `${baseUrl}${baseUrl.includes("?") ? "&" : "?"}orderflow=1`;
+  await page.goto(orderFlowUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+  await page.waitForSelector(".chart-orderflow-legend", { timeout: 30_000 });
   await page.waitForTimeout(2_500);
-  const liquidityState = await page.evaluate(() => {
-    let heatPixels = 0;
-    for (const canvas of document.querySelectorAll(".chart-canvas canvas")) {
-      if (!(canvas instanceof HTMLCanvasElement) || canvas.width < 200) continue;
-      const copy = document.createElement("canvas");
-      copy.width = canvas.width;
-      copy.height = canvas.height;
-      const context = copy.getContext("2d");
-      context.drawImage(canvas, 0, 0);
-      const data = context.getImageData(0, 0, copy.width, copy.height).data;
-      for (let index = 0; index < data.length; index += 16) {
-        const [r, g, b] = [data[index], data[index + 1], data[index + 2]];
-        if (r > 60 && b > 45 && g < r * 0.6) heatPixels += 1;
-      }
-    }
+  const orderFlowState = await page.evaluate(() => {
+    const legend = document.querySelector(".chart-orderflow-legend");
     return {
-      heatPixels,
-      profile: Boolean(document.querySelector(".depth-profile canvas")),
-      notice: document.querySelector(".chart-liquidity-legend__notice")?.textContent || ""
+      deltaPoints: Number(legend?.getAttribute("data-delta-points") || 0),
+      walls: Number(legend?.getAttribute("data-walls") || 0),
+      divergences: Number(legend?.getAttribute("data-divergences") || 0),
+      liquidations: Number(legend?.getAttribute("data-liquidations") || 0),
+      profile: Boolean(document.querySelector(".depth-profile canvas"))
     };
   });
-  if (!liquidityState.profile) throw new Error(`liquidity preview should render the depth profile: ${JSON.stringify(liquidityState)}`);
-  if (!liquidityState.notice && liquidityState.heatPixels < 2_000) throw new Error(`liquidity heatmap should paint under the candles: ${JSON.stringify(liquidityState)}`);
-  if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-liquidity.png`, fullPage: false });
+  if (!orderFlowState.profile) throw new Error(`order flow preview should render the depth profile: ${JSON.stringify(orderFlowState)}`);
+  if (orderFlowState.walls < 1 || orderFlowState.deltaPoints < 10 || orderFlowState.liquidations < 1) throw new Error(`order flow layers are incomplete: ${JSON.stringify(orderFlowState)}`);
+  // 深度剖面悬停读数与点击取价：扫描买盘一侧直到命中大单墙，点击后价格应落在读数给出的档位区间内。
+  const depthBox = await page.locator(".depth-profile canvas").boundingBox();
+  let depthHit = null;
+  for (let offset = depthBox.height * 0.52; offset < depthBox.height * 0.99 && !depthHit; offset += 2) {
+    await page.mouse.move(depthBox.x + depthBox.width * 0.5, depthBox.y + offset);
+    const readout = await page.locator(".depth-profile__readout").innerText().catch(() => "");
+    if (/Bid wall|买墙/.test(readout)) depthHit = readout;
+  }
+  if (!depthHit) throw new Error("depth profile hover should reveal the synthetic bid wall readout");
+  await page.mouse.down();
+  await page.mouse.up();
+  const depthPrice = Number(await page.evaluate(() => document.documentElement.getAttribute("data-preview-depth-price")));
+  if (!Number.isFinite(depthPrice) || depthPrice <= 0) throw new Error(`depth profile click should select a price: ${depthPrice}`);
+  await page.mouse.move(depthBox.x - 40, depthBox.y);
+  if (await page.locator(".depth-profile__readout").count() !== 0) throw new Error("depth profile readout should hide on pointer leave");
+  const imbalanceRowHeight = await page.locator(".depth-profile__imbalance > span").evaluate((node) => node.getBoundingClientRect().height);
+  if (imbalanceRowHeight > 18) throw new Error(`depth imbalance row should stay on one line: ${imbalanceRowHeight}`);
+  if (screenshotPrefix) await page.screenshot({ path: `${screenshotPrefix}-orderflow.png`, fullPage: false });
 
   const actionableConsoleErrors = consoleErrors.filter((text) => !/ResizeObserver loop|WebSocket|ERR_|Failed to load resource/i.test(text));
   if (pageErrors.length > 0 || actionableConsoleErrors.length > 0) {
