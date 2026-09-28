@@ -1839,6 +1839,121 @@ async function verifyOptimizationDiff(page, scenario) {
   }
 }
 
+/**
+ * 值守心电图（运行记录 Tab 的时间轴视图）：画布非空且按 DPR 缩放、悬停提示、点击脉冲打开抽屉、
+ * ←/→ 同泳道切换、完整运行详情弹层与抽屉的 Esc 分层、24h/7d 切换、S 显示跳过、滚轮缩放与双击复位、列表视图可达。
+ */
+async function verifyWatchPulse(page, scenario) {
+  const label = `${scenario.label}/watch pulse`;
+  await page.goto(`${baseUrl}?view=pulse`, { waitUntil: "networkidle", timeout: 60_000 });
+  const root = page.locator("[data-watch-pulse]");
+  await root.waitFor({ state: "visible", timeout: 15_000 });
+  await page.waitForFunction(() => document.querySelector("[data-watch-pulse]")?.getAttribute("data-range-loaded") === "true", null, { timeout: 15_000 });
+  await page.waitForTimeout(400);
+  const lanes = await page.locator("[data-pulse-lane]").count();
+  if (lanes !== 4) throw new Error(`${label}: expected 4 Profile lanes, got ${lanes}`);
+  const canvas = await page.evaluate(() => {
+    const base = document.querySelector("[data-pulse-base]");
+    const ctx = base.getContext("2d");
+    const { width, height } = base;
+    const data = ctx.getImageData(0, 0, width, height).data;
+    let painted = 0;
+    let ai = 0;
+    for (let i = 0; i < data.length; i += 4 * 7) {
+      if (data[i + 3] > 20) painted += 1;
+      if (data[i + 3] > 120 && data[i + 2] > 170 && data[i] > 110 && data[i + 1] < 175 && data[i + 2] - data[i + 1] > 45) ai += 1;
+    }
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    return { width, height, cssW: base.clientWidth, cssH: base.clientHeight, dpr, painted, ai };
+  });
+  if (canvas.painted < 500 || canvas.ai < 40) throw new Error(`${label}: pulse canvas looks blank: ${JSON.stringify(canvas)}`);
+  if (Math.abs(canvas.width - Math.round(canvas.cssW * canvas.dpr)) > 1 || Math.abs(canvas.height - Math.round(canvas.cssH * canvas.dpr)) > 1) {
+    throw new Error(`${label}: canvas backing store is not DPR-scaled: ${JSON.stringify(canvas)}`);
+  }
+  // 找一个深度脉冲（AI 紫描边）在 BTC 泳道上的位置并点击。
+  const target = await page.evaluate(() => {
+    const base = document.querySelector("[data-pulse-base]");
+    const plot = base.getBoundingClientRect();
+    const lane = document.querySelector("[data-pulse-lane]").getBoundingClientRect();
+    const dpr = base.width / base.clientWidth;
+    const ctx = base.getContext("2d");
+    const y0 = Math.round((lane.top - plot.top + 8) * dpr);
+    const y1 = Math.round((lane.bottom - plot.top - 20) * dpr);
+    const data = ctx.getImageData(0, y0, base.width, y1 - y0).data;
+    const w = base.width;
+    for (let x = Math.round(w * 0.1); x < Math.round(w * 0.85); x += 1) {
+      for (let y = 0; y < y1 - y0; y += 1) {
+        const i = (y * w + x) * 4;
+        if (data[i + 3] > 200 && data[i + 2] > 190 && data[i] > 150 && data[i + 2] - data[i + 1] > 45) {
+          return { x: plot.left + x / dpr + 1, y: plot.top + (y0 + y) / dpr + 3 };
+        }
+      }
+    }
+    return null;
+  });
+  if (!target) throw new Error(`${label}: no deep pulse found on the first lane`);
+  await page.mouse.move(target.x, target.y);
+  await page.waitForTimeout(250);
+  const tipOn = await page.locator("[data-pulse-tip].is-on").count();
+  if (!tipOn) throw new Error(`${label}: hovering a pulse must show the tooltip`);
+  await page.mouse.click(target.x, target.y);
+  const drawer = page.locator("[data-pulse-drawer]");
+  await drawer.waitFor({ state: "visible", timeout: 5_000 });
+  await page.waitForFunction(() => document.querySelector("[data-pulse-drawer] .evi, [data-pulse-drawer] .gantt, [data-pulse-drawer] .reasons"), null, { timeout: 5_000 });
+  const firstId = await drawer.getAttribute("data-run-id");
+  await page.waitForTimeout(300);
+  await page.screenshot({ path: path.join(artifactDir, `watch-pulse-drawer-${scenario.label}.png`) });
+  await page.keyboard.press("ArrowRight");
+  await page.waitForTimeout(150);
+  const nextId = await drawer.getAttribute("data-run-id");
+  if (!nextId || nextId === firstId) throw new Error(`${label}: → must step to the next run on the lane`);
+  await page.keyboard.press("ArrowLeft");
+  await page.waitForTimeout(150);
+  if ((await drawer.getAttribute("data-run-id")) !== firstId) throw new Error(`${label}: ← must step back`);
+  // 打开完整运行详情 → 现有弹层；Esc 只关弹层，不关抽屉。
+  await page.locator("[data-pulse-open-full]").click();
+  await page.locator(".automation-run-modal").waitFor({ state: "visible", timeout: 5_000 });
+  await page.keyboard.press("Escape");
+  await page.locator(".automation-run-modal").waitFor({ state: "detached", timeout: 5_000 });
+  if (!(await drawer.isVisible())) throw new Error(`${label}: closing the full detail must keep the drawer`);
+  await page.keyboard.press("Escape");
+  await drawer.waitFor({ state: "detached", timeout: 5_000 });
+
+  // 24h / 7d
+  const readSummaryTotal = async () => Number(await page.locator("[data-pulse-run-total]").textContent());
+  const total24 = await readSummaryTotal();
+  await page.locator('[data-pulse-window="7d"]').click();
+  await page.waitForTimeout(250);
+  if ((await root.getAttribute("data-window-pressed")) !== "7d") throw new Error(`${label}: 7d toggle not pressed`);
+  const total7 = await readSummaryTotal();
+  if (!(total7 > total24)) throw new Error(`${label}: 7d window must show more runs than 24h: ${total24} → ${total7}`);
+  await page.screenshot({ path: path.join(artifactDir, `watch-pulse-7d-${scenario.label}.png`) });
+  await page.keyboard.press("1");
+  await page.waitForTimeout(200);
+  if ((await root.getAttribute("data-window-pressed")) !== "24h") throw new Error(`${label}: key 1 must return to 24h`);
+  if ((await readSummaryTotal()) !== total24) throw new Error(`${label}: 24h total changed after round trip`);
+  // S 切换跳过
+  await page.keyboard.press("s");
+  await page.waitForTimeout(120);
+  if ((await root.getAttribute("data-show-skips")) !== "false") throw new Error(`${label}: S must hide skipped runs`);
+  await page.keyboard.press("s");
+  // 滚轮缩放 → 回到现在按钮；双击复位
+  const plotBox = await page.locator("[data-pulse-canvas]").boundingBox();
+  await page.mouse.move(plotBox.x + plotBox.width * 0.4, plotBox.y + plotBox.height * 0.5);
+  await page.mouse.wheel(0, -400);
+  await page.waitForTimeout(150);
+  if ((await root.getAttribute("data-window-pressed")) !== "") throw new Error(`${label}: wheel zoom should leave the preset window`);
+  await page.mouse.dblclick(plotBox.x + plotBox.width * 0.4, plotBox.y + 60);
+  await page.waitForTimeout(150);
+  if ((await root.getAttribute("data-window-pressed")) !== "24h") throw new Error(`${label}: double-click must reset to 24h`);
+  // 列表视图仍然可达
+  await page.locator('[data-runs-view="list"]').click();
+  await page.locator('[data-runs-view-mode="list"]').waitFor({ state: "visible", timeout: 5_000 });
+  await page.locator('[data-runs-view="pulse"]').click();
+  await root.waitFor({ state: "visible", timeout: 5_000 });
+  return { total24, total7 };
+}
+
 async function verifyScenario(browser, scenario) {
   const page = await browser.newPage({
     viewport: { width: scenario.width, height: scenario.height },
@@ -1863,6 +1978,7 @@ async function verifyScenario(browser, scenario) {
   await verifyModelError(page, scenario);
   await verifyRunRefresh(page, scenario);
   await verifyOptimizationDiff(page, scenario);
+  await verifyWatchPulse(page, scenario);
 
   // 浏览器预览没有 Tauri 命令通道：Agent 库的正文读取按设计抛 AGENT_LIBRARY_DESKTOP_ONLY，
   // 编辑器于是渲染错误态（预览的既定行为，不是缺陷）。这类日志与网络噪声一起排除。

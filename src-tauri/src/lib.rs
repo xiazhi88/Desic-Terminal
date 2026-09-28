@@ -26244,6 +26244,7 @@ pub fn run() {
             ai_token_usage_summary,
             ai_automation_run_statuses,
             ai_automation_run_detail,
+            crate::ai_automation::ai_automation_runs_in_range,
             ai_automation_save_master_enabled,
             ai_agent_profile_save,
             ai_agent_profile_systematic_conflicts,

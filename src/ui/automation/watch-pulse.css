@@ -1,0 +1,352 @@
+/*
+ * 值守心电图（移植自 viz/prototypes/watch-pulse.html）。
+ * 只用应用 token：磷光外观下取 phosphor.css 的表面 / 墨色 / AI 紫；经典外观回退到 styles.css 的同名变量。
+ * AI 自动化属于 AI 作用域，紫色在这里是语义色（深度分析、运行中），不是强调色。
+ */
+.watch-pulse {
+  --wp-bg: var(--bg, #05060b);
+  --wp-s1: var(--panel, #0a0b12);
+  --wp-s2: var(--panel-2, #10111a);
+  --wp-s3: color-mix(in oklab, var(--panel-2, #10111a) 88%, var(--text, #f4f4fa) 7%);
+  --wp-hair: color-mix(in oklab, var(--text, #f4f4fa) 8%, transparent);
+  --wp-hair-2: color-mix(in oklab, var(--text, #f4f4fa) 13%, transparent);
+  --wp-hair-3: color-mix(in oklab, var(--text, #f4f4fa) 22%, transparent);
+  --wp-ink: var(--text, #f4f4fa);
+  --wp-ink-2: var(--muted, #b9bacb);
+  --wp-ink-3: color-mix(in oklab, var(--muted, #b9bacb) 30%, var(--weak, #6e7187));
+  --wp-ink-4: color-mix(in oklab, var(--weak, #6e7187) 72%, var(--bg, #05060b));
+  --wp-ai: var(--ai, #9a63ff);
+  --wp-ai-hi: var(--ai-bright, #c3a5ff);
+  --wp-ai-lo: var(--ai-soft, rgba(154, 99, 255, 0.14));
+  --wp-ai-fill: color-mix(in oklab, var(--wp-ai) 30%, transparent);
+  --wp-warn: var(--warn, #f3b23c);
+  --wp-warn-fill: color-mix(in oklab, var(--wp-warn) 22%, transparent);
+  --wp-glow-ai: 0 0 18px color-mix(in oklab, var(--wp-ai) 45%, transparent);
+  --wp-font-num: var(--font-number, ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace);
+  --wp-r1: 3px;
+  --wp-r2: 6px;
+  --wp-t1: 120ms;
+  --wp-t2: 220ms;
+  --wp-ease: cubic-bezier(0.2, 0.8, 0.2, 1);
+
+  position: relative;
+  display: grid;
+  grid-template-rows: 40px 60px minmax(0, 1fr);
+  flex: 1 1 auto;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: var(--wp-bg);
+  color: var(--wp-ink);
+  font-size: 13px;
+  line-height: 1.45;
+  border: 1px solid var(--wp-hair);
+  border-radius: var(--wp-r2);
+}
+
+.watch-pulse * { box-sizing: border-box; }
+
+/* ── 原子 ── */
+.watch-pulse .wp-num {
+  font-family: var(--wp-font-num);
+  font-variant-numeric: tabular-nums slashed-zero;
+  letter-spacing: -0.01em;
+}
+.watch-pulse .wp-micro {
+  font-size: 10px;
+  line-height: 1;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--wp-ink-3);
+  font-weight: 600;
+}
+.watch-pulse .wp-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: var(--wp-r1);
+  border: 1px solid var(--wp-hair-2);
+  background: var(--wp-s2);
+  color: var(--wp-ink-2);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background var(--wp-t1) var(--wp-ease), border-color var(--wp-t1) var(--wp-ease), color var(--wp-t1) var(--wp-ease);
+}
+.watch-pulse .wp-btn:hover:not(:disabled) { background: var(--wp-s3); color: var(--wp-ink); border-color: var(--wp-hair-3); }
+.watch-pulse .wp-btn:disabled { opacity: 0.4; cursor: default; }
+.watch-pulse .wp-btn[aria-pressed="true"] { color: var(--wp-ink); border-color: var(--wp-hair-3); background: var(--wp-s3); }
+.watch-pulse .wp-btn--ghost { background: transparent; border-color: transparent; }
+.watch-pulse .wp-btn--ai { color: var(--wp-ai-hi); border-color: color-mix(in oklab, var(--wp-ai) 40%, transparent); background: var(--wp-ai-lo); }
+.watch-pulse .wp-btn--ai:hover:not(:disabled) { color: var(--wp-ink); background: color-mix(in oklab, var(--wp-ai) 24%, transparent); border-color: color-mix(in oklab, var(--wp-ai) 55%, transparent); }
+.watch-pulse .wp-btn--inline { height: 20px; padding: 0 7px; margin-left: 6px; font-size: 11px; }
+.watch-pulse .wp-seg {
+  display: inline-flex;
+  padding: 2px;
+  gap: 2px;
+  border-radius: calc(var(--wp-r1) + 2px);
+  background: var(--wp-s1);
+  border: 1px solid var(--wp-hair);
+}
+.watch-pulse .wp-seg > button {
+  height: 22px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: var(--wp-r1);
+  background: transparent;
+  color: var(--wp-ink-3);
+  font: inherit;
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color var(--wp-t1) var(--wp-ease), background var(--wp-t1) var(--wp-ease);
+}
+.watch-pulse .wp-seg > button:hover { color: var(--wp-ink-2); }
+.watch-pulse .wp-seg > button[aria-pressed="true"] { color: var(--wp-ink); background: var(--wp-s3); box-shadow: inset 0 0 0 1px var(--wp-hair-2); }
+.watch-pulse .wp-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 20px;
+  padding: 0 7px;
+  border-radius: 999px;
+  border: 1px solid var(--wp-hair-2);
+  color: var(--wp-ink-2);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.watch-pulse :is(button, [tabindex]):focus-visible { outline: 1.5px solid var(--wp-ai-hi); outline-offset: 2px; box-shadow: none; }
+
+/* 活数据点：唯一允许常驻呼吸的元素（AI 运行中） */
+.watch-pulse .wp-live {
+  position: relative;
+  display: inline-block;
+  flex: none;
+  width: 6px;
+  height: 6px;
+  margin: 0 2px;
+  border-radius: 50%;
+  background: var(--wp-ai);
+  box-shadow: var(--wp-glow-ai);
+}
+.watch-pulse .wp-live::after {
+  content: "";
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  border: 1px solid var(--wp-ai);
+  opacity: 0;
+  animation: wp-ping 2.4s var(--wp-ease) infinite;
+}
+@keyframes wp-ping {
+  0% { transform: scale(0.6); opacity: 0.7; }
+  70%, 100% { transform: scale(1.6); opacity: 0; }
+}
+
+/* ── 工具条（原型 .at 的右半部分；左侧是 心电图 / 列表 切换） ── */
+.watch-pulse .wp-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 12px 0 10px;
+  border-bottom: 1px solid var(--wp-hair);
+  min-width: 0;
+  background: var(--wp-s1);
+}
+.watch-pulse .wp-bar__meta { display: inline-flex; gap: 10px; min-width: 0; overflow: hidden; font-size: 11.5px; color: var(--wp-ink-3); white-space: nowrap; text-overflow: ellipsis; }
+.watch-pulse .wp-warn-text { color: var(--wp-warn); }
+.watch-pulse .wp-spacer { flex: 1; }
+
+/* ── 摘要条 ── */
+.watch-pulse .wp-sum {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.95fr) minmax(0, 1.1fr) minmax(0, 1.25fr) repeat(3, minmax(0, 1fr));
+  border-bottom: 1px solid var(--wp-hair);
+  min-width: 0;
+}
+.watch-pulse .wp-cell { padding: 9px 14px 0 16px; border-right: 1px solid var(--wp-hair); min-width: 0; white-space: nowrap; }
+.watch-pulse .wp-cell:last-child { border-right: 0; }
+.watch-pulse .wp-cell .k { font-size: 11px; color: var(--wp-ink-3); display: flex; align-items: center; gap: 6px; }
+.watch-pulse .wp-cell .v { margin-top: 3px; display: flex; align-items: baseline; gap: 7px; min-width: 0; }
+.watch-pulse .wp-cell .v b { font: 600 16px/1.15 var(--wp-font-num); font-variant-numeric: tabular-nums slashed-zero; letter-spacing: -0.01em; color: var(--wp-ink); }
+.watch-pulse .wp-cell .v > span { font-size: 11px; color: var(--wp-ink-3); overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.watch-pulse .wp-cell .v span .wp-num { color: var(--wp-ink-2); }
+.watch-pulse .wp-cell .v .ai { color: var(--wp-ai-hi); }
+.watch-pulse .wp-cell .v .wn,
+.watch-pulse .wn { color: var(--wp-warn) !important; }
+.watch-pulse .wp-cell.range .v b { font: 500 12.5px/1.3 var(--wp-font-num); color: var(--wp-ink-2); }
+.watch-pulse .wp-cell.range .k .wp-chip { height: 17px; font-size: 10.5px; color: var(--wp-ink-3); }
+.watch-pulse .wp-cell .gl { display: inline-flex; align-items: center; gap: 3px; margin-right: 5px; }
+.watch-pulse .wp-cell .k .wp-num { color: var(--wp-ink-3); font-size: 10.5px; }
+.watch-pulse .rng-inline { display: none; margin-left: 2px; color: var(--wp-ink-4); }
+.watch-pulse .wp-cell .gl svg { width: 8px; height: 8px; }
+
+/* ── 舞台 ── */
+.watch-pulse .wp-stage { display: grid; grid-template-columns: minmax(0, 1fr); min-width: 0; min-height: 0; }
+.watch-pulse .wp-stage.has-drawer { grid-template-columns: minmax(0, 1fr) clamp(340px, 27vw, 384px); }
+
+.watch-pulse .wp-board { display: grid; grid-template-columns: 196px minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) 52px 34px; min-width: 0; min-height: 0; }
+.watch-pulse .wp-labels { position: relative; border-right: 1px solid var(--wp-hair); min-height: 0; overflow: hidden; }
+.watch-pulse .wp-labels .axis-h { position: absolute; left: 0; right: 0; top: 0; height: 26px; display: flex; align-items: center; padding: 0 14px 0 16px; border-bottom: 1px solid var(--wp-hair); }
+.watch-pulse .wp-lane { position: absolute; left: 0; right: 0; padding: 11px 12px 0 16px; border-bottom: 1px solid var(--wp-hair); cursor: default; transition: background var(--wp-t1) var(--wp-ease); overflow: hidden; }
+.watch-pulse .wp-lane.is-hover { background: color-mix(in oklab, var(--wp-s1) 70%, transparent); }
+.watch-pulse .wp-lane .l1 { display: flex; align-items: center; gap: 7px; min-width: 0; }
+.watch-pulse .wp-lane .l1 b { font-size: 12.5px; font-weight: 600; color: var(--wp-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.watch-pulse .wp-lane .env { flex: none; height: 16px; padding: 0 5px; border-radius: 3px; font-size: 10px; line-height: 16px; color: var(--wp-ink-3); box-shadow: inset 0 0 0 1px var(--wp-hair-2); }
+.watch-pulse .wp-lane .env.is-live { color: var(--wp-ink-2); box-shadow: inset 0 0 0 1px var(--wp-hair-3); }
+.watch-pulse .wp-lane .l2 { margin-top: 4px; font-size: 11px; color: var(--wp-ink-3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-lane .l3 { margin-top: 3px; font-size: 11px; color: var(--wp-ink-3); white-space: nowrap; }
+.watch-pulse .wp-lane .l3 .wp-num { color: var(--wp-ink-2); }
+.watch-pulse .wp-lane .l4 { margin-top: 6px; display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--wp-ink-3); white-space: nowrap; }
+.watch-pulse .wp-lane .l4 .wp-num { color: var(--wp-ink-2); }
+.watch-pulse .wp-lane .l4 .ring { width: 8px; height: 8px; border-radius: 50%; box-shadow: inset 0 0 0 1.3px var(--wp-ink-2); flex: none; }
+.watch-pulse .wp-lane .l4.is-running,
+.watch-pulse .wp-lane .l4.is-running .wp-num { color: var(--wp-ai-hi); }
+.watch-pulse .wp-lane .l4.is-running .wp-live { margin: 0; }
+.watch-pulse .wp-lane.is-compact .l3 { display: none; }
+
+.watch-pulse .wp-plot { position: relative; overflow: hidden; min-width: 0; min-height: 0; }
+.watch-pulse .wp-plot canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.watch-pulse .wp-plot [data-pulse-canvas] { cursor: crosshair; touch-action: none; }
+.watch-pulse .wp-plot.is-pulse [data-pulse-canvas] { cursor: pointer; }
+.watch-pulse .wp-plot.is-drag [data-pulse-canvas] { cursor: grabbing; }
+.watch-pulse .wp-empty { position: absolute; inset: 26px 0 0; display: grid; place-items: center; color: var(--wp-ink-3); font-size: 12px; pointer-events: none; }
+
+.watch-pulse .wp-tip { position: absolute; left: 0; top: 0; z-index: 5; width: max-content; min-width: 268px; max-width: 380px; padding: 9px 11px 10px; border-radius: var(--wp-r2); border: 1px solid var(--wp-hair-2); background: var(--wp-s2); box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55); pointer-events: none; opacity: 0; visibility: hidden; transform: translateY(3px); transition: opacity var(--wp-t1) var(--wp-ease), transform var(--wp-t1) var(--wp-ease); font-size: 11.5px; color: var(--wp-ink-2); }
+.watch-pulse .wp-tip.is-on { opacity: 1; visibility: visible; transform: none; }
+.watch-pulse .wp-tip .t1 { display: flex; align-items: center; gap: 7px; }
+.watch-pulse .wp-tip .t1 b { font-size: 12.5px; color: var(--wp-ink); font-weight: 600; white-space: nowrap; }
+.watch-pulse .wp-tip .t1 > span:not(.wp-st) { color: var(--wp-ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.watch-pulse .wp-tip .t1 .wp-st { margin-left: auto; flex: none; }
+.watch-pulse .wp-tip .t2 { margin-top: 3px; color: var(--wp-ink-3); font-size: 11px; }
+.watch-pulse .wp-tip .vd { margin-top: 7px; display: flex; flex-wrap: wrap; gap: 4px; }
+.watch-pulse .wp-tip dl { display: grid; grid-template-columns: auto 1fr; gap: 3px 12px; margin: 8px 0 0; }
+.watch-pulse .wp-tip dt { color: var(--wp-ink-3); white-space: nowrap; }
+.watch-pulse .wp-tip dd { margin: 0; text-align: right; color: var(--wp-ink-2); white-space: nowrap; }
+.watch-pulse .wp-tip dd em { font-style: normal; color: var(--wp-ink-4); }
+.watch-pulse .wp-tip .err { margin-top: 7px; color: var(--wp-warn); line-height: 1.45; }
+.watch-pulse .wp-tip .hint { margin-top: 8px; padding-top: 7px; border-top: 1px solid var(--wp-hair); color: var(--wp-ink-4); font-size: 10.5px; }
+.watch-pulse .wp-tip.is-wake { width: auto; min-width: 190px; }
+.watch-pulse .wp-act-inline { white-space: pre; }
+.watch-pulse .wp-act-inline svg { vertical-align: 0; }
+
+.watch-pulse .wp-tag { display: inline-flex; align-items: center; gap: 4px; height: 18px; padding: 0 6px; border-radius: 3px; font-size: 10.5px; white-space: nowrap; color: var(--wp-ink-2); background: var(--wp-s3); box-shadow: inset 0 0 0 1px var(--wp-hair-2); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-tag.is-deep { color: var(--wp-ai-hi); background: var(--wp-ai-lo); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--wp-ai) 38%, transparent); }
+.watch-pulse .wp-tag.is-forced { color: var(--wp-ink); box-shadow: inset 0 0 0 1px var(--wp-hair-3); }
+.watch-pulse .wp-tag.is-forced .wp-num { font-size: 10px; color: var(--wp-ink-2); overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-st { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; color: var(--wp-ink-3); white-space: nowrap; }
+.watch-pulse .wp-st i { width: 6px; height: 6px; border-radius: 50%; background: var(--wp-ink-4); }
+.watch-pulse .wp-st.is-completed i { background: var(--wp-ink-2); }
+.watch-pulse .wp-st.is-failed { color: var(--wp-warn); }
+.watch-pulse .wp-st.is-failed i { background: var(--wp-warn); }
+.watch-pulse .wp-st.is-running { color: var(--wp-ai-hi); }
+.watch-pulse .wp-st.is-running .wp-live { margin: 0; }
+
+.watch-pulse .wp-ovl { border-top: 1px solid var(--wp-hair); border-right: 1px solid var(--wp-hair); padding: 9px 12px 0 16px; min-width: 0; overflow: hidden; }
+.watch-pulse .wp-ovl b { display: block; font-size: 11.5px; color: var(--wp-ink-2); font-weight: 500; white-space: nowrap; }
+.watch-pulse .wp-ovl span { font-size: 10.5px; color: var(--wp-ink-4); white-space: nowrap; }
+.watch-pulse .wp-ovc { position: relative; border-top: 1px solid var(--wp-hair); min-width: 0; }
+.watch-pulse .wp-ovc canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; touch-action: none; }
+.watch-pulse .wp-ovc canvas.is-edge { cursor: ew-resize; }
+.watch-pulse .wp-ovc canvas.is-drag { cursor: grabbing; }
+
+.watch-pulse .wp-legend { grid-column: 1 / -1; display: flex; align-items: center; gap: 16px; padding: 0 16px; border-top: 1px solid var(--wp-hair); min-width: 0; overflow: hidden; white-space: nowrap; font-size: 11px; color: var(--wp-ink-3); }
+.watch-pulse .wp-legend .it { display: inline-flex; align-items: center; gap: 6px; flex: none; }
+.watch-pulse .wp-legend .glyph-it { display: inline-flex; align-items: center; gap: 4px; margin-right: 4px; }
+.watch-pulse .wp-legend svg { flex: none; overflow: visible; }
+.watch-pulse .wp-legend .sep { width: 1px; height: 14px; background: var(--wp-hair-2); flex: none; }
+.watch-pulse .wp-legend .spacer { flex: 1; min-width: 8px; }
+.watch-pulse .wp-legend .src { color: var(--wp-ink-4); }
+
+/* ── 详情抽屉 ── */
+.watch-pulse .wp-drawer { display: flex; flex-direction: column; min-width: 0; min-height: 0; border-left: 1px solid var(--wp-hair); background: var(--wp-s1); animation: wp-dr-in var(--wp-t2) var(--wp-ease); }
+.watch-pulse .wp-stage.has-drawer .wp-legend .src { display: none; }
+@keyframes wp-dr-in { from { opacity: 0; transform: translateX(10px); } }
+.watch-pulse .wp-drawer .dh { padding: 12px 14px 11px 16px; border-bottom: 1px solid var(--wp-hair); }
+.watch-pulse .wp-drawer .dh .r1 { display: flex; align-items: center; gap: 8px; }
+.watch-pulse .wp-drawer .dh .r1 b { font-size: 13.5px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.watch-pulse .wp-drawer .dh .r1 .x { margin-left: auto; width: 24px; height: 24px; padding: 0; justify-content: center; flex: none; }
+.watch-pulse .wp-drawer .dh .r2 { margin-top: 3px; font-size: 11px; color: var(--wp-ink-3); display: flex; gap: 8px; white-space: nowrap; overflow: hidden; }
+.watch-pulse .wp-drawer .dh .r2 .wp-num { color: var(--wp-ink-3); overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-drawer .dh .r3 { margin-top: 9px; display: flex; flex-wrap: wrap; gap: 4px; }
+.watch-pulse .wp-drawer .dh .r4 { margin-top: 9px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 1px; background: var(--wp-hair); border: 1px solid var(--wp-hair); border-radius: var(--wp-r2); overflow: hidden; }
+.watch-pulse .wp-drawer .dh .r4 div { background: var(--wp-s1); padding: 6px 9px; min-width: 0; }
+.watch-pulse .wp-drawer .dh .r4 span { display: block; font-size: 10.5px; color: var(--wp-ink-4); }
+.watch-pulse .wp-drawer .dh .r4 b { display: block; font: 500 12px/1.35 var(--wp-font-num); color: var(--wp-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-drawer .db { flex: 1; overflow: auto; min-height: 0; padding: 4px 0 12px; }
+.watch-pulse .wp-drawer .sec { padding: 11px 14px 4px 16px; }
+.watch-pulse .wp-drawer .sec + .sec { border-top: 1px solid var(--wp-hair); margin-top: 8px; }
+.watch-pulse .wp-drawer .sec h5 { margin: 0 0 8px; display: flex; align-items: center; gap: 8px; font-size: 11.5px; font-weight: 600; color: var(--wp-ink-2); }
+.watch-pulse .wp-drawer .sec h5 em { font-style: normal; font-weight: 400; color: var(--wp-ink-4); font-size: 11px; margin-left: auto; }
+.watch-pulse .wp-drawer .note { font-size: 11.5px; color: var(--wp-ink-3); line-height: 1.55; margin: 0 0 6px; }
+.watch-pulse .wp-drawer .reasons { margin: 0 0 8px; padding: 0; list-style: none; display: grid; gap: 4px; }
+.watch-pulse .wp-drawer .reasons li { position: relative; padding-left: 12px; font-size: 12px; color: var(--wp-ink-2); line-height: 1.5; }
+.watch-pulse .wp-drawer .reasons li::before { content: ""; position: absolute; left: 2px; top: 8px; width: 4px; height: 1px; background: var(--wp-ink-4); }
+.watch-pulse .wp-drawer .evi { display: grid; gap: 1px; background: var(--wp-hair); border: 1px solid var(--wp-hair); border-radius: var(--wp-r2); overflow: hidden; }
+.watch-pulse .wp-drawer .evi div { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 10px; padding: 6px 9px; background: var(--wp-bg); }
+.watch-pulse .wp-drawer .evi p { margin: 0; grid-column: 1 / -1; font-size: 12px; color: var(--wp-ink); line-height: 1.45; }
+.watch-pulse .wp-drawer .evi code { font: 10.5px var(--wp-font-num); color: var(--wp-ink-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; background: none; padding: 0; }
+.watch-pulse .wp-drawer .evi time { font: 10.5px var(--wp-font-num); color: var(--wp-ink-4); }
+
+.watch-pulse .wp-drawer .gantt { display: grid; gap: 5px; }
+.watch-pulse .wp-drawer .gr { display: grid; grid-template-columns: 62px minmax(0, 1fr) 74px; align-items: center; gap: 8px; font-size: 11.5px; }
+.watch-pulse .wp-drawer .gr .n { color: var(--wp-ink-2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.watch-pulse .wp-drawer .gr .n small { display: block; font-size: 10px; color: var(--wp-ink-4); }
+.watch-pulse .wp-drawer .gr .tr { position: relative; height: 14px; border-radius: 2px; background: repeating-linear-gradient(90deg, transparent 0 calc(25% - 1px), var(--wp-hair) calc(25% - 1px) 25%); }
+.watch-pulse .wp-drawer .gr .tr i { position: absolute; top: 3px; bottom: 3px; min-width: 2px; border-radius: 2px; background: color-mix(in oklab, var(--wp-ai) 55%, transparent); box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--wp-ai-hi) 60%, transparent); }
+.watch-pulse .wp-drawer .gr .tr i.is-live { background: var(--wp-ai); box-shadow: var(--wp-glow-ai); animation: wp-bar-breathe 1.8s cubic-bezier(0.65, 0, 0.35, 1) infinite alternate; }
+.watch-pulse .wp-drawer .gr .tr i.is-whole { background: var(--wp-s3); box-shadow: inset 0 0 0 1px var(--wp-hair-2); }
+@keyframes wp-bar-breathe { to { opacity: 0.62; } }
+.watch-pulse .wp-drawer .gr .m { text-align: right; font: 10.5px var(--wp-font-num); color: var(--wp-ink-3); white-space: nowrap; }
+.watch-pulse .wp-drawer .gaxis { display: grid; grid-template-columns: 62px minmax(0, 1fr) 74px; gap: 8px; margin-top: 3px; font: 10px var(--wp-font-num); color: var(--wp-ink-4); }
+.watch-pulse .wp-drawer .gaxis div { display: flex; justify-content: space-between; }
+
+.watch-pulse .wp-drawer .tok { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.watch-pulse .wp-drawer .tok th { font-weight: 400; color: var(--wp-ink-4); font-size: 10.5px; text-align: right; padding: 0 0 4px; }
+.watch-pulse .wp-drawer .tok th:first-child,
+.watch-pulse .wp-drawer .tok td:first-child { text-align: left; }
+.watch-pulse .wp-drawer .tok td { padding: 4px 0; text-align: right; font-family: var(--wp-font-num); font-variant-numeric: tabular-nums; color: var(--wp-ink-2); border-top: 1px solid var(--wp-hair); }
+.watch-pulse .wp-drawer .tok td:first-child { font-family: inherit; color: var(--wp-ink-3); }
+.watch-pulse .wp-drawer .tok td.na { color: var(--wp-ink-4); }
+
+.watch-pulse .wp-drawer .acts { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1px; background: var(--wp-hair); border: 1px solid var(--wp-hair); border-radius: var(--wp-r2); overflow: hidden; }
+.watch-pulse .wp-drawer .acts div { display: flex; align-items: center; gap: 7px; padding: 6px 9px; background: var(--wp-bg); font-size: 11.5px; color: var(--wp-ink-2); }
+.watch-pulse .wp-drawer .acts div b { margin-left: auto; font: 500 12px var(--wp-font-num); color: var(--wp-ink); }
+.watch-pulse .wp-drawer .acts div.is-zero { color: var(--wp-ink-4); }
+.watch-pulse .wp-drawer .acts div.is-zero b { color: var(--wp-ink-4); font-weight: 400; }
+.watch-pulse .wp-drawer .acts svg { width: 9px; height: 9px; flex: none; }
+.watch-pulse .wp-drawer .summary { margin-top: 8px; padding: 8px 10px; border-radius: var(--wp-r2); background: var(--wp-bg); border: 1px solid var(--wp-hair); font-size: 12px; color: var(--wp-ink-2); line-height: 1.55; overflow-wrap: anywhere; }
+.watch-pulse .wp-drawer .summary.is-err { color: var(--wp-warn); border-color: color-mix(in oklab, var(--wp-warn) 30%, transparent); }
+.watch-pulse .wp-drawer .df { display: flex; align-items: center; gap: 6px; padding: 10px 14px 12px 16px; border-top: 1px solid var(--wp-hair); }
+.watch-pulse .wp-drawer .df .pos { font: 10.5px var(--wp-font-num); color: var(--wp-ink-4); }
+
+.watch-pulse .wp-sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (max-width: 1440px) {
+  .watch-pulse .wp-legend { gap: 12px; }
+  .watch-pulse .wp-legend .src { display: none; }
+  .watch-pulse .wp-sum { grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr) repeat(3, minmax(0, 1fr)); }
+  .watch-pulse .wp-cell.range { display: none; }
+  .watch-pulse .rng-inline { display: inline; }
+  .watch-pulse .opt-c { display: none; }
+}
+@media (max-width: 1320px) {
+  .watch-pulse .wp-legend .opt { display: none; }
+  .watch-pulse .wp-cell { padding-left: 12px; padding-right: 10px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .watch-pulse .wp-live::after,
+  .watch-pulse .wp-drawer .gr .tr i.is-live,
+  .watch-pulse .wp-drawer { animation: none; }
+  .watch-pulse .wp-tip { transition: none; }
+}
+
+/* 运行记录 Tab：心电图为主视图时占满内容区。 */
+.automation-runs-view.automation-runs-view--pulse { display: flex; flex-direction: column; gap: 0; height: 100%; }
+.automation-runs-view-toggle { display: inline-flex; }
+.automation-preview-pulse { height: calc(100vh - 54px - 28px); min-height: 520px; display: flex; flex-direction: column; }

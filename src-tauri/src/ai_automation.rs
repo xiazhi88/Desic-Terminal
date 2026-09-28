@@ -4841,6 +4841,296 @@ fn load_run_statuses(conn: &Connection, ids: &[String]) -> Result<Vec<AiAgentRun
         .collect()
 }
 
+// ── 值守心电图：按时间范围读取的轻量运行记录 ──────────────────────────────
+//
+// 运行记录 Tab 的时间轴视图需要 24 小时 / 7 天窗口内的全部运行，而列表接口只取最近
+// 50 条。这里只返回画脉冲与悬停提示所需的字段（不含试判理由、证据、专家报告与摘要正文），
+// 抽屉需要的完整内容继续走 `ai_automation_run_detail`。
+
+/// 单次返回的运行条数上限（7 天 × 每 15 分钟 × 数个 Profile 仍远低于此值）。
+const AUTOMATION_PULSE_RUN_LIMIT: usize = 5_000;
+/// 悬停提示里的错误文本上限（完整错误在运行详情里）。
+const AUTOMATION_PULSE_ERROR_CHARS: usize = 280;
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAutomationPulseTokens {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub total_tokens: u64,
+}
+
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAutomationPulseTriage {
+    pub mode: Option<String>,
+    pub verdict: Option<String>,
+    pub phase: Option<String>,
+    pub forced: bool,
+    pub forced_by: Vec<String>,
+    pub sampled: bool,
+    pub triage_tokens: Option<u64>,
+    pub deep_tokens: Option<u64>,
+    pub triage_usage: Option<AiAutomationPulseTokens>,
+    pub deep_usage: Option<AiAutomationPulseTokens>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAutomationPulseRun {
+    pub id: String,
+    pub profile_id: String,
+    pub trigger_type: String,
+    pub status: String,
+    pub record_kind: String,
+    pub started_at: i64,
+    pub finished_at: Option<i64>,
+    pub next_wake_at: Option<i64>,
+    pub error: Option<String>,
+    pub action_counts: AiAgentRunActionCounts,
+    pub token_usage: Option<AiAutomationPulseTokens>,
+    pub triage: Option<AiAutomationPulseTriage>,
+    pub expert_count: u32,
+    pub expert_tool_calls: u32,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AiAutomationPulseRange {
+    pub from_ms: i64,
+    pub to_ms: i64,
+    pub runs: Vec<AiAutomationPulseRun>,
+    /// 命中条数超过上限时为 true：保留时间最近的 `AUTOMATION_PULSE_RUN_LIMIT` 条。
+    pub truncated: bool,
+}
+
+#[tauri::command]
+pub(crate) async fn ai_automation_runs_in_range(
+    app: tauri::AppHandle,
+    from_ms: i64,
+    to_ms: i64,
+    profile_id: Option<String>,
+) -> Result<AiAutomationPulseRange, String> {
+    let profile_id = profile_id
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+    crate::blocking_work::run_blocking(move || {
+        let conn = open_read_database(&app)?;
+        load_runs_in_range(
+            &conn,
+            from_ms,
+            to_ms,
+            profile_id.as_deref(),
+            AUTOMATION_PULSE_RUN_LIMIT,
+        )
+    })
+    .await
+}
+
+/// 读 `[from_ms, to_ms]` 内开始的运行，按开始时间升序。
+///
+/// 逐 Profile 查询，保证每次都命中 `idx_ai_agent_runs_profile(profile_id, started_at DESC)`：
+/// 不依赖 `sqlite_stat1` 统计信息触发 skip-scan，也不会退化为整表扫描（该表的
+/// 快照 / 证据 JSON 列很大，扫表需要沿溢出页读取）。
+fn load_runs_in_range(
+    conn: &Connection,
+    from_ms: i64,
+    to_ms: i64,
+    profile_id: Option<&str>,
+    limit: usize,
+) -> Result<AiAutomationPulseRange, String> {
+    if to_ms < from_ms {
+        return Err("时间范围无效：结束时间早于开始时间".to_string());
+    }
+    let limit = limit.max(1);
+    let profile_ids = match profile_id {
+        Some(id) => vec![id.to_string()],
+        None => {
+            let mut stmt = conn
+                .prepare("SELECT DISTINCT profile_id FROM ai_agent_runs")
+                .map_err(|err| err.to_string())?;
+            let ids = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|err| err.to_string())?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| err.to_string())?;
+            ids
+        }
+    };
+    let mut stmt = conn
+        .prepare(
+            "SELECT id,profile_id,trigger_type,status,error,started_at,finished_at,next_wake_at,
+                    action_counts_json,token_usage_json,triage_json,experts_json,record_kind
+             FROM ai_agent_runs
+             WHERE profile_id=?1 AND started_at>=?2 AND started_at<=?3
+             ORDER BY started_at DESC LIMIT ?4",
+        )
+        .map_err(|err| err.to_string())?;
+    let mut runs = Vec::new();
+    // 多取一条用来判断是否被截断。
+    let fetch = (limit + 1) as i64;
+    for id in &profile_ids {
+        let rows = stmt
+            .query_map(params![id, from_ms, to_ms, fetch], pulse_run_from_row)
+            .map_err(|err| err.to_string())?;
+        for row in rows {
+            runs.push(row.map_err(|err| err.to_string())?);
+        }
+    }
+    runs.sort_by(|a, b| b.started_at.cmp(&a.started_at).then_with(|| b.id.cmp(&a.id)));
+    let truncated = runs.len() > limit;
+    runs.truncate(limit);
+    runs.reverse();
+    // 通知计数与列表口径一致：以实际投递记录兜底（索引 idx_ai_notification_deliveries_run）。
+    let ids = runs.iter().map(|run| run.id.clone()).collect::<Vec<_>>();
+    let mut delivery_counts = HashMap::new();
+    for chunk in ids.chunks(400) {
+        delivery_counts.extend(load_run_delivery_counts(conn, chunk)?);
+    }
+    for run in &mut runs {
+        if let Some(count) = delivery_counts.get(&run.id) {
+            run.action_counts.notification = run.action_counts.notification.max(*count);
+        }
+    }
+    Ok(AiAutomationPulseRange {
+        from_ms,
+        to_ms,
+        runs,
+        truncated,
+    })
+}
+
+fn pulse_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAutomationPulseRun> {
+    let parse = |value: Option<String>| {
+        value
+            .as_deref()
+            .and_then(|text| serde_json::from_str::<Value>(text).ok())
+            .filter(|value| !value.is_null())
+    };
+    let action_counts = row
+        .get::<_, Option<String>>(8)?
+        .as_deref()
+        .and_then(|text| serde_json::from_str::<AiAgentRunActionCounts>(text).ok())
+        .unwrap_or_default();
+    let token_usage = parse(row.get(9)?).and_then(|value| pulse_tokens(value.get("usage")));
+    let triage = parse(row.get(10)?).map(|value| pulse_triage(&value));
+    let experts = parse(row.get(11)?);
+    let expert_list = experts.as_ref().and_then(Value::as_array);
+    let expert_count = expert_list.map(|items| items.len() as u32).unwrap_or(0);
+    let expert_tool_calls = expert_list
+        .map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.get("toolCalls").and_then(Value::as_u64))
+                .sum::<u64>() as u32
+        })
+        .unwrap_or(0);
+    let error = row
+        .get::<_, Option<String>>(4)?
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .map(|text| {
+            if text.chars().count() > AUTOMATION_PULSE_ERROR_CHARS {
+                let mut short = text
+                    .chars()
+                    .take(AUTOMATION_PULSE_ERROR_CHARS)
+                    .collect::<String>();
+                short.push('…');
+                short
+            } else {
+                text
+            }
+        });
+    Ok(AiAutomationPulseRun {
+        id: row.get(0)?,
+        profile_id: row.get(1)?,
+        trigger_type: row.get(2)?,
+        status: row.get(3)?,
+        error,
+        started_at: row.get(5)?,
+        finished_at: row.get(6)?,
+        next_wake_at: row.get(7)?,
+        action_counts,
+        token_usage,
+        triage,
+        expert_count,
+        expert_tool_calls,
+        record_kind: normalize_profile_type(&row.get::<_, Option<String>>(12)?.unwrap_or_default()),
+    })
+}
+
+fn pulse_tokens(usage: Option<&Value>) -> Option<AiAutomationPulseTokens> {
+    let usage = usage?.as_object()?;
+    let read = |key: &str| usage.get(key).and_then(Value::as_u64);
+    let input = read("inputTokens").unwrap_or(0);
+    let output = read("outputTokens").unwrap_or(0);
+    Some(AiAutomationPulseTokens {
+        input_tokens: input,
+        output_tokens: output,
+        cache_read_tokens: read("cacheReadTokens").unwrap_or(0),
+        total_tokens: read("totalTokens").unwrap_or(input + output),
+    })
+}
+
+/// 与前端 `readRunTriage` 同口径：字段缺失或类型不符一律忽略。
+fn pulse_triage(value: &Value) -> AiAutomationPulseTriage {
+    let text = |key: &str| {
+        value
+            .get(key)
+            .and_then(Value::as_str)
+            .map(|text| text.trim().to_string())
+            .filter(|text| !text.is_empty())
+    };
+    let verdict = match text("verdict").map(|v| v.to_ascii_lowercase()).as_deref() {
+        Some("skip") => Some("skip".to_string()),
+        Some("escalate") => Some("escalate".to_string()),
+        _ => match value.get("escalate").and_then(Value::as_bool) {
+            Some(true) => Some("escalate".to_string()),
+            Some(false) => Some("skip".to_string()),
+            None => None,
+        },
+    };
+    let mode = text("mode")
+        .map(|mode| mode.to_ascii_lowercase())
+        .filter(|mode| matches!(mode.as_str(), "off" | "shadow" | "enforce"));
+    let forced_by = match value.get("forcedBy") {
+        Some(Value::Array(items)) => items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(|item| item.trim().to_string())
+            .filter(|item| !item.is_empty())
+            .collect(),
+        Some(Value::String(item)) if !item.trim().is_empty() => vec![item.trim().to_string()],
+        _ => Vec::new(),
+    };
+    let sampled = match value.get("sampled") {
+        Some(Value::Bool(flag)) => *flag,
+        Some(Value::String(flag)) => flag.eq_ignore_ascii_case("true"),
+        _ => false,
+    };
+    let triage_usage = pulse_tokens(value.get("triageUsage").and_then(|usage| usage.get("usage")));
+    let deep_usage = pulse_tokens(value.get("deepUsage").and_then(|usage| usage.get("usage")));
+    let tokens = |usage: &Option<AiAutomationPulseTokens>, key: &str| {
+        usage
+            .as_ref()
+            .map(|usage| usage.total_tokens)
+            .or_else(|| value.get(key).and_then(Value::as_u64))
+    };
+    AiAutomationPulseTriage {
+        forced: value.get("forced").and_then(Value::as_bool) == Some(true) || !forced_by.is_empty(),
+        triage_tokens: tokens(&triage_usage, "triageTokens"),
+        deep_tokens: tokens(&deep_usage, "deepTokens"),
+        mode,
+        verdict,
+        phase: text("phase"),
+        forced_by,
+        sampled,
+        triage_usage,
+        deep_usage,
+    }
+}
+
 fn load_run(conn: &Connection, id: &str) -> Result<AiAgentRunSummary, String> {
     conn.query_row(
         "SELECT id,profile_id,trigger_type,status,summary,error,started_at,finished_at,next_wake_at,
@@ -14337,6 +14627,129 @@ mod tests {
         assert_eq!(counts.reviews, 2);
         assert_eq!(counts.pending_optimization_suggestions, 2);
         assert_eq!(counts.notifications, 2);
+    }
+
+    #[test]
+    fn runs_in_range_are_lightweight_ordered_bounded_and_use_the_profile_index() {
+        let conn = Connection::open_in_memory().expect("open pulse range database");
+        conn.execute_batch(
+            "CREATE TABLE ai_agent_runs(
+               id TEXT PRIMARY KEY,profile_id TEXT NOT NULL,trigger_type TEXT NOT NULL,status TEXT NOT NULL,
+               summary TEXT,error TEXT,started_at INTEGER NOT NULL,finished_at INTEGER,next_wake_at INTEGER,
+               created_at INTEGER NOT NULL,action_counts_json TEXT NOT NULL DEFAULT '{}',token_usage_json TEXT,
+               triage_json TEXT,experts_json TEXT,audit_json TEXT,
+               single_agent_mode TEXT NOT NULL DEFAULT 'standard',
+               record_kind TEXT NOT NULL DEFAULT 'ai',fastlane_json TEXT
+             );
+             CREATE INDEX idx_ai_agent_runs_profile ON ai_agent_runs(profile_id, started_at DESC);
+             CREATE TABLE ai_notification_deliveries(id TEXT PRIMARY KEY,run_id TEXT);
+             CREATE INDEX idx_ai_notification_deliveries_run ON ai_notification_deliveries(run_id);",
+        )
+        .expect("create pulse schema");
+        let insert = |id: &str, profile: &str, started: i64, triage: Option<Value>, error: Option<&str>| {
+            conn.execute(
+                "INSERT INTO ai_agent_runs(id,profile_id,trigger_type,status,summary,error,started_at,
+                   finished_at,next_wake_at,created_at,action_counts_json,token_usage_json,triage_json,experts_json)
+                 VALUES(?1,?2,'schedule','completed','long summary text',?3,?4,?5,?6,?4,?7,?8,?9,?10)",
+                params![
+                    id,
+                    profile,
+                    error,
+                    started,
+                    started + 30_000,
+                    started + 900_000,
+                    json!({ "opportunity": 1, "wake": 2, "trade": 0, "notification": 0 }).to_string(),
+                    json!({ "usage": { "inputTokens": 900, "outputTokens": 100, "cacheReadTokens": 600, "totalTokens": 1000 } }).to_string(),
+                    triage.map(|value| value.to_string()),
+                    json!([{ "name": "a", "toolCalls": 2, "report": "x" }, { "name": "b", "toolCalls": 3 }]).to_string(),
+                ],
+            )
+            .expect("insert pulse run");
+        };
+        insert(
+            "run-a2",
+            "profile-a",
+            2_000,
+            Some(json!({
+                "mode": "enforce",
+                "escalate": false,
+                "forcedBy": ["skipStreak(3 >= 3)"],
+                "sampled": "true",
+                "reasons": ["heavy reason text"],
+                "evidence": [{ "fact": "f", "source": "s", "at": "t" }],
+                "triageUsage": { "usage": { "inputTokens": 40, "outputTokens": 10, "cacheReadTokens": 30, "totalTokens": 50 } },
+                "deepTokens": 777
+            })),
+            Some(&"x".repeat(400)),
+        );
+        insert("run-a1", "profile-a", 1_000, None, None);
+        insert("run-b1", "profile-b", 1_500, Some(json!({ "verdict": "SKIP", "mode": "bogus" })), None);
+        insert("run-old", "profile-a", 10, None, None);
+        insert("run-future", "profile-b", 9_000, None, None);
+        conn.execute("INSERT INTO ai_notification_deliveries(id,run_id) VALUES('d1','run-a1'),('d2','run-a1')", [])
+            .expect("insert deliveries");
+
+        let range = load_runs_in_range(&conn, 1_000, 5_000, None, 10).expect("load range");
+        assert!(!range.truncated);
+        assert_eq!(
+            range.runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            vec!["run-a1", "run-b1", "run-a2"],
+            "only runs started inside the range, ascending by start"
+        );
+        let a1 = &range.runs[0];
+        assert!(a1.triage.is_none());
+        assert_eq!(a1.action_counts.notification, 2, "delivery records backfill notifications");
+        assert_eq!(a1.action_counts.opportunity, 1);
+        assert_eq!(a1.token_usage.as_ref().map(|usage| usage.cache_read_tokens), Some(600));
+        assert_eq!((a1.expert_count, a1.expert_tool_calls), (2, 5));
+        assert_eq!(a1.next_wake_at, Some(901_000));
+
+        let b1 = range.runs[1].triage.as_ref().expect("b1 triage");
+        assert_eq!(b1.verdict.as_deref(), Some("skip"));
+        assert_eq!(b1.mode, None, "unknown modes are dropped");
+        assert!(!b1.forced && !b1.sampled);
+
+        let a2 = &range.runs[2];
+        let triage = a2.triage.as_ref().expect("a2 triage");
+        assert_eq!(triage.verdict.as_deref(), Some("skip"), "legacy boolean escalate maps to a verdict");
+        assert!(triage.forced && triage.sampled);
+        assert_eq!(triage.forced_by, vec!["skipStreak(3 >= 3)".to_string()]);
+        assert_eq!(triage.triage_tokens, Some(50));
+        assert_eq!(triage.triage_usage.as_ref().map(|usage| usage.cache_read_tokens), Some(30));
+        assert_eq!(triage.deep_tokens, Some(777), "falls back to the flat token count");
+        assert!(triage.deep_usage.is_none());
+        let error = a2.error.as_deref().expect("error kept");
+        assert_eq!(error.chars().count(), AUTOMATION_PULSE_ERROR_CHARS + 1, "error is truncated with an ellipsis");
+        let payload = serde_json::to_string(&range.runs).expect("serialize pulse runs");
+        assert!(!payload.contains("heavy reason text") && !payload.contains("long summary text") && !payload.contains("\"report\""));
+        assert!(payload.contains("\"startedAt\"") && payload.contains("\"forcedBy\"") && payload.contains("\"cacheReadTokens\""));
+
+        let only_b = load_runs_in_range(&conn, 0, 10_000, Some("profile-b"), 10).expect("profile filter");
+        assert_eq!(only_b.runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(), vec!["run-b1", "run-future"]);
+
+        let capped = load_runs_in_range(&conn, 0, 10_000, None, 2).expect("capped range");
+        assert!(capped.truncated);
+        assert_eq!(
+            capped.runs.iter().map(|run| run.id.as_str()).collect::<Vec<_>>(),
+            vec!["run-a2", "run-future"],
+            "the cap keeps the most recent runs"
+        );
+        assert!(load_runs_in_range(&conn, 5, 1, None, 10).is_err());
+
+        let plan = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id FROM ai_agent_runs
+                 WHERE profile_id=?1 AND started_at>=?2 AND started_at<=?3
+                 ORDER BY started_at DESC LIMIT ?4",
+            )
+            .expect("prepare plan")
+            .query_map(params!["profile-a", 0, 1, 10], |row| row.get::<_, String>(3))
+            .expect("plan rows")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("plan")
+            .join("\n");
+        assert!(plan.contains("idx_ai_agent_runs_profile"), "{plan}");
+        assert!(!plan.contains("TEMP B-TREE"), "{plan}");
     }
 
     #[test]
