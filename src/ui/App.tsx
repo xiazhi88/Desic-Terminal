@@ -822,6 +822,16 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
   // 迁移前的数据根：取消迁移时回退到它继续启动
   const [preMigrationRoot, setPreMigrationRoot] = useState<string | null>(null);
   const [migrationTarget, setMigrationTarget] = useState<string | null>(null);
+  // 本次启动是否真的让用户看过“选择数据存放位置”卡片。老用户（已有数据 / 已完成引导）会直接静默
+  // 进入 finalizing 准备工作目录（打开数据库、启动后台任务，需要数秒）；这段时间不能再弹出选择卡片，
+  // 否则看起来就像每次启动都要重新选择。只有选择过或准备失败后，finalizing 才继续显示卡片与进度。
+  const [dataRootChoicePresented, setDataRootChoicePresented] = useState(false);
+  useEffect(() => {
+    if (bootstrapPhase === "choose" || bootstrapPhase === "failed") setDataRootChoicePresented(true);
+  }, [bootstrapPhase]);
+  const showDataRootCard = bootstrapPhase === "choose"
+    || bootstrapPhase === "failed"
+    || (bootstrapPhase === "finalizing" && dataRootChoicePresented);
 
   const finalizeBootstrap = useCallback(async (dataRoot: string | null) => {
     setBootstrapPhase("finalizing");
@@ -1062,7 +1072,7 @@ function StartupGate({ onEnter, previewFailure }: { onEnter: (assets?: MarketAss
           onUseOldData={() => void resumeWithOldData()}
         />
       ) : null}
-      {bootstrapPhase === "choose" || bootstrapPhase === "finalizing" || bootstrapPhase === "failed" ? (
+      {showDataRootCard ? (
         <div className="startup-data-root" role="dialog" aria-modal="true" aria-label={t("common:startupDataRootTitle")}>
           <div className="startup-data-root-card">
             <h2>{t("common:startupDataRootTitle")}</h2>

@@ -79,6 +79,54 @@ async function main() {
   }
 
   await page.screenshot({ path: "design-qa-startup-preview.png", fullPage: false });
+  // 数据存放位置引导：模拟 Tauri 运行时，finalize 故意耗时。老用户（needsChoice=false）静默准备期间
+  // 不得弹出“选择数据存放位置”卡片（v0.2.4 前端曾在 finalizing 阶段对所有人显示它）；新用户照常选择。
+  const bootstrap = {};
+  for (const needsChoice of [false, true]) {
+    const bootstrapPage = await browser.newPage({ viewport: { width: 1180, height: 580 }, deviceScaleFactor: 1 });
+    await bootstrapPage.addInitScript((needsChoice) => {
+      const state = {
+        needsChoice,
+        customRoot: needsChoice ? null : "D:\\Desic\\data-root",
+        dataDir: "D:\\Desic\\data-root\\data",
+        databaseExists: !needsChoice,
+        migrationPending: false,
+        migrationTarget: null,
+        supported: true
+      };
+      window.__TAURI_INTERNALS__ = {
+        transformCallback: () => 0,
+        invoke: async (command) => {
+          if (command === "data_root_bootstrap_state") return state;
+          if (command === "finalize_data_root_bootstrap") {
+            await new Promise((resolve) => setTimeout(resolve, 2_000));
+            return { dataDir: state.dataDir, customRoot: state.customRoot, databaseReady: true };
+          }
+          throw new Error(`smoke mock: ${command} unavailable`);
+        }
+      };
+    }, needsChoice);
+    await bootstrapPage.goto(baseUrl, { waitUntil: "domcontentloaded", timeout: 60_000 });
+    await bootstrapPage.waitForSelector(".startup-shell", { timeout: 30_000 });
+    const samples = [];
+    for (let index = 0; index < 4; index += 1) {
+      await bootstrapPage.waitForTimeout(300);
+      samples.push(await bootstrapPage.locator(".startup-data-root").count());
+    }
+    if (!needsChoice && samples.some(Boolean)) {
+      throw new Error(`returning users must not see the data-root choice while preparing: ${JSON.stringify(samples)}`);
+    }
+    if (needsChoice) {
+      if (!samples.every(Boolean)) throw new Error(`first launch must show the data-root choice: ${JSON.stringify(samples)}`);
+      await bootstrapPage.locator(".startup-data-root .primary").click();
+      await bootstrapPage.waitForTimeout(200);
+      if (await bootstrapPage.locator(".startup-data-root").count() !== 1) throw new Error("confirmed choice should keep the card while preparing");
+      await bootstrapPage.waitForSelector(".startup-data-root", { state: "detached", timeout: 10_000 });
+    }
+    bootstrap[needsChoice ? "firstLaunch" : "returning"] = samples.join("");
+    await bootstrapPage.close();
+  }
+
   await browser.close();
   process.stdout.write(
     `[smoke] startup preview ok: inline="${failedState.inlineText}", retry=${failedState.retryButtonText}, proxy=${proxyState.type}://${proxyState.host}:${proxyState.port}\n`
