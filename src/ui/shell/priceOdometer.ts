@@ -7,7 +7,34 @@ import { isPhosphorVisual } from "../../lib/visualPreference";
 
 const DIGIT = /\d/;
 
+// 高频行情（BTC 每秒多次）下每次都滚动会让数字列永远停在半途、看起来错位：
+// 同一元素两次滚动至少间隔 MIN_ROLL_INTERVAL_MS，期间只保留最新值，到点再写入（方向取累计方向）。
+const MIN_ROLL_INTERVAL_MS = 350;
+const pending = new WeakMap<HTMLElement, { text: string; direction: number; timer: number | null; lastAt: number }>();
+
 export function writeOdometer(element: HTMLElement, text: string, direction: number) {
+  if (!isPhosphorVisual()) {
+    applyOdometer(element, text, direction);
+    return;
+  }
+  const now = performance.now();
+  const state = pending.get(element) ?? { text, direction: 0, timer: null, lastAt: -Infinity };
+  state.text = text;
+  state.direction = direction || state.direction;
+  pending.set(element, state);
+  if (state.timer !== null) return;
+  const wait = MIN_ROLL_INTERVAL_MS - (now - state.lastAt);
+  const flush = () => {
+    state.timer = null;
+    state.lastAt = performance.now();
+    applyOdometer(element, state.text, state.direction);
+    state.direction = 0;
+  };
+  if (wait <= 0) flush();
+  else state.timer = window.setTimeout(flush, wait);
+}
+
+function applyOdometer(element: HTMLElement, text: string, direction: number) {
   if (!isPhosphorVisual()) {
     if (element.dataset.odometerText !== undefined) {
       delete element.dataset.odometerText;
@@ -35,7 +62,8 @@ export function writeOdometer(element: HTMLElement, text: string, direction: num
     const cell = element.children[index] as HTMLElement;
     cell.textContent = char;
     if (!DIGIT.test(char)) return;
-    cell.style.setProperty("--digit", char);
+    cell.dataset.p = previous![index] ?? char;
+    cell.dataset.d = char;
     cell.classList.remove("is-changed-up", "is-changed-down");
     if (flash) {
       void cell.offsetWidth;
@@ -50,7 +78,8 @@ function createCell(char: string) {
   cell.textContent = char;
   if (DIGIT.test(char)) {
     cell.className = "odometer__digit";
-    cell.style.setProperty("--digit", char);
+    cell.dataset.d = char;
+    cell.dataset.p = char;
   } else {
     cell.className = "odometer__separator";
   }

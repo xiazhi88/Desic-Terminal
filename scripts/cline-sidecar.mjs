@@ -1010,7 +1010,7 @@ function buildSystemPrompt(config, permissionMode) {
     ? "【收尾硬性要求】本轮已启用专家协作：若你在试判升级后未派任何专家就收尾，必须在 background.finishRun 里填一句 selfAnalysisReason 说明原因（否则审计会标记“未说明理由”）。Expert collaboration is enabled this run: if you escalated to the deep stage and finish without dispatching any expert, you must pass a one-line selfAnalysisReason in background.finishRun (otherwise the audit flags it as unjustified)."
     : "";
   const researchLedgerRule = describeToolPolicy("research.recordEvidence", { ...config, permissionMode, agentRole: "main" }).allowed
-    ? "证据账本：本会话的工具结果带有 evidenceRef（如 E3）。凡是给出交易方向判断的回合，在下结论前用 research.recordEvidence 记录关键证据：claim 写一句可核对的事实，stance 取 bull/bear/neutral/constraint，weight 0–3 表示你赋予的重要程度，sourceRefs 只能引用本轮真实出现过的 evidenceRef。反方审查或新证据改变判断时，用相同 id 重新记录并写 revisionNote。最后用 research.recordDecision 记录 outcome（long/short/abstain/hold）、理由和唤醒条件；不交易也是有效决策。账本只用于界面展示与复盘，不会下单、不会安排唤醒。纯问答或不涉及方向判断的回合不需要记录。"
+    ? "证据账本：本会话的工具结果带有 evidenceRef（如 E3）。凡是给出交易方向判断的回合，边取证边用 research.recordEvidence 记录关键证据（每拿到 2–3 条相关结果就记录一次，不要攒到最后一次性记录，界面的证据天平会随之实时变化）：claim 写一句可核对的事实，stance 取 bull/bear/neutral/constraint，weight 0–3 表示你赋予的重要程度，sourceRefs 只能引用本轮真实出现过的 evidenceRef。反方审查或新证据改变判断时，用相同 id 重新记录并写 revisionNote。最后用 research.recordDecision 记录 outcome（long/short/abstain/hold）和理由；不交易也是有效决策。这是用户主动发起的对话，不要设置或输出“唤醒条件”（唤醒只属于后台自动化）。账本只用于界面展示与复盘，不会下单。纯问答或不涉及方向判断的回合不需要记录。"
     : "";
   const runRules = [
     modeRule,
@@ -2359,39 +2359,60 @@ const RESEARCH_RECORD_DECISION_SCHEMA = {
   properties: {
     instId: { type: "string" },
     outcome: { type: "string", enum: ["long", "short", "abstain", "hold"], description: "long/short = directional candidate; abstain = no trade this turn; hold = keep existing position unchanged." },
-    reason: { type: "string", minLength: 1, maxLength: 600 },
-    wakeConditions: {
-      type: "array",
-      maxItems: 6,
-      items: {
-        type: "object",
-        additionalProperties: false,
-        required: ["kind"],
-        properties: {
-          kind: { type: "string", enum: ["price_above", "price_below", "time"] },
-          price: { type: "number", exclusiveMinimum: 0, description: "Required for price_above / price_below." },
-          afterMinutes: { type: "integer", minimum: 1, maximum: 10080, description: "Required for time." },
-          note: { type: "string", maxLength: 200 }
-        }
-      }
-    }
+    reason: { type: "string", minLength: 1, maxLength: 600 }
   }
 };
 
+// 证据编号分配器：每轮（主 Agent 运行）一个。记录哪些编号已被账本引用，用于在工具结果里提醒
+// “边取证边记录”：界面的证据天平随每次 research.recordEvidence 实时更新，而不是等到回合结束。
+const EVIDENCE_LEDGER_REMINDER_TAIL = "涉及方向判断（能否开仓、偏多或偏空、是否交易）时，现在就用 research_recordEvidence 记录它们的立场与权重（可分多次记录，界面会实时显示），再继续取证；最后用 research_recordDecision 记录决策与理由。不涉及方向判断的问答可以忽略。";
+
 function createEvidenceRefAllocator() {
-  let next = 0;
-  return () => {
-    next += 1;
-    return `E${next}`;
+  let count = 0;
+  let lastReminderAt = 0;
+  const cited = new Set();
+  return {
+    next() {
+      count += 1;
+      return `E${count}`;
+    },
+    /** 账本写入成功：refs 为本次 recordEvidence 引用的编号（recordDecision 不带编号）。 */
+    markLedgerRecorded(refs = []) {
+      for (const ref of refs) if (typeof ref === "string") cited.add(ref);
+    },
+    /** 已分配但尚未被账本引用的编号；达到 3 个且距上次提醒至少 2 个结果时返回，否则返回空数组。 */
+    takeReminder() {
+      const pending = [];
+      for (let index = 1; index <= count; index += 1) if (!cited.has(`E${index}`)) pending.push(`E${index}`);
+      if (pending.length < 3 || count - lastReminderAt < 2) return [];
+      lastReminderAt = count;
+      return pending.slice(-6);
+    },
+    get count() {
+      return count;
+    },
+    get ledgerRecorded() {
+      return cited.size > 0;
+    }
   };
 }
 
+function ledgerSourceRefs(input) {
+  const items = Array.isArray(input?.items) ? input.items : [];
+  return items.flatMap((item) => (Array.isArray(item?.sourceRefs) ? item.sourceRefs : []));
+}
+
 // 只给成功的对象型结果编号；失败结果与账本自身不参与引用。
-function attachEvidenceRef(result, allocate) {
-  if (typeof allocate !== "function") return result;
+// 未入账的编号累积到 3 个时附一次提醒（模型读工具结果时必然看到，不插入可见消息）。
+function attachEvidenceRef(result, allocator) {
+  if (!allocator || typeof allocator.next !== "function") return result;
   if (!result || typeof result !== "object" || Array.isArray(result)) return result;
   if (result.ok === false || result.errorCode) return result;
-  return { ...result, evidenceRef: allocate() };
+  const evidenceRef = allocator.next();
+  const pending = typeof allocator.takeReminder === "function" ? allocator.takeReminder() : [];
+  return pending.length > 0
+    ? { ...result, evidenceRef, evidenceLedgerReminder: `${pending.join("、")} 尚未记入证据账本。${EVIDENCE_LEDGER_REMINDER_TAIL}` }
+    : { ...result, evidenceRef };
 }
 
 // C19.2：试判结论。形状冻结：{ escalate, reasons, evidence, nextWakePlan }。
@@ -2661,6 +2682,7 @@ function createDesicTools(sessionId, options = {}) {
         if (!name.startsWith("research.record")) {
           return toProviderToolReferenceValue(attachEvidenceRef(result, policyConfig.allocateEvidenceRef));
         }
+        if (result && result.ok !== false && !result.errorCode) policyConfig.allocateEvidenceRef?.markLedgerRecorded?.(ledgerSourceRefs(scopedInput));
         return toProviderToolReferenceValue(result);
       },
       timeoutMs: 120000,
@@ -2745,7 +2767,7 @@ function createDesicTools(sessionId, options = {}) {
     intelligenceEnabled ? tool("intelligence.smartMoney.readConsensusDivergence", "Read divergence between ordinary account count, top-trader account count and top-trader position value. Use accountBias/topAccountBias/topPositionBias and eliteInternalDivergence from the response; topPositionRatio is long / short position value, not position size relative to ordinary traders.", INTELLIGENCE_DERIVATIVES_SCHEMA) : null,
     tool("journal.createNote", "Create a conversation-scoped trading journal note from analysis or execution results.", JOURNAL_NOTE_SCHEMA),
     tool("research.recordEvidence", "Record this research turn's evidence ledger. Each item is one factual claim with your stance (bull/bear/neutral/constraint), a 0-3 weight and the evidenceRef values (e.g. E3) printed on earlier tool results that support it; never invent refs. Re-record an existing id to revise its stance or weight, e.g. after a contrarian review. Display and review only: it never submits orders or schedules anything.", RESEARCH_RECORD_EVIDENCE_SCHEMA),
-    tool("research.recordDecision", "Record this research turn's final decision: outcome long/short/abstain/hold, a concise reason, and optional wake conditions (price_above, price_below, or time after N minutes). Not trading is a valid decision. Display and review only: interactive research wake conditions are shown to the user but never schedule a run, and this never submits orders.", RESEARCH_RECORD_DECISION_SCHEMA),
+    tool("research.recordDecision", "Record this research turn's final decision: outcome long/short/abstain/hold and a concise reason. Not trading is a valid decision. This is a user-initiated conversation: no wake conditions. Display and review only: it never submits orders or schedules anything.", RESEARCH_RECORD_DECISION_SCHEMA),
     tool("tradeOpportunity.list", "List saved trade opportunities. This never submits an order.", TRADE_OPPORTUNITY_LIST_SCHEMA),
     tool("tradeOpportunity.get", "Read one saved trade opportunity by id. This never submits an order.", TRADE_OPPORTUNITY_GET_SCHEMA),
     tool("tradeOpportunity.create", boolConfig(policyConfig.backgroundRun, false)
@@ -5740,7 +5762,7 @@ async function sendMessage(cline, input) {
       )
     };
     const mainPolicyConfig = { ...baseMainPolicyConfig, triageStage, selfAnalysisFallback };
-    // 证据账本可用时，主 Agent 的工具结果（含专家咨询结果）按本轮顺序编号 E1、E2…
+    // 证据账本可用时，主 Agent 的工具结果（含专家咨询结果）按本轮顺序编号 E1、E2…（createEvidenceRefAllocator 是分配器对象）
     const allocateEvidenceRef = describeToolPolicy("research.recordEvidence", baseMainPolicyConfig).allowed
       ? createEvidenceRefAllocator()
       : null;

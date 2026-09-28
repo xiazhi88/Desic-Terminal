@@ -417,6 +417,14 @@ expectEqual("first evidence ref", attachEvidenceRef({ ok: true }, allocate).evid
 expectEqual("failed results are not numbered", attachEvidenceRef({ ok: false, error: "x" }, allocate).evidenceRef, undefined);
 expectEqual("second evidence ref skips failures", attachEvidenceRef({ value: 1 }, allocate).evidenceRef, "E2");
 expectEqual("array results stay untouched", Array.isArray(attachEvidenceRef([1], allocate)), true);
+const third = attachEvidenceRef({ value: 3 }, allocate);
+expectTrue("third unrecorded result names the pending refs", third.evidenceRef === "E3" && third.evidenceLedgerReminder?.startsWith("E1、E2、E3"));
+expectEqual("reminder is not repeated on the very next result", attachEvidenceRef({ value: 4 }, allocate).evidenceLedgerReminder, undefined);
+allocate.markLedgerRecorded(["E1", "E2", "E3", "E4"]);
+attachEvidenceRef({ value: 5 }, allocate);
+expectEqual("recorded refs no longer count as pending", attachEvidenceRef({ value: 6 }, allocate).evidenceLedgerReminder, undefined);
+const seventh = attachEvidenceRef({ value: 7 }, allocate);
+expectTrue("new unrecorded refs trigger an incremental reminder", seventh.evidenceLedgerReminder?.startsWith("E5、E6、E7"));
 expectEqual("no allocator leaves results untouched", attachEvidenceRef({ ok: true }, null).evidenceRef, undefined);
 
 // 工具白名单仍然是否决性的：scoped 会话（如策略编辑器）拿不到 agent.*。

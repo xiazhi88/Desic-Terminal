@@ -1,0 +1,1061 @@
+/*
+ * phosphor-neutralize.css — 由 scripts/generate-phosphor-neutralize.mjs 生成，请勿手改。
+ * 磷光外观下中和非 AI 区域写死的紫色：发光去掉，其余紫色换成亮度相近的信号色（非 AI 强调色）。
+ * 覆盖 275 条规则、403 处声明；样式改动后重新运行脚本。
+ */
+:root[data-visual="phosphor"] .coin-preview {
+    background: radial-gradient(circle at 50% 58%, rgba(67, 111, 149, 0.16), transparent 34%),
+    transparent
+}
+:root[data-visual="phosphor"] .orbit {
+    border: 1px solid rgba(72, 120, 161, 0.38)
+}
+:root[data-visual="phosphor"] .pulse-core {
+    box-shadow: 0 0 52px transparent
+}
+:root[data-visual="phosphor"] .proxy-prompt button,
+:root[data-visual="phosphor"] .primary-wide,
+:root[data-visual="phosphor"] .empty-account button {
+    background: rgba(54, 90, 121, 0.18)
+}
+:root[data-visual="phosphor"] .proxy-form {
+    border: 1px solid rgba(72, 120, 161, 0.32);
+    background: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .proxy-actions button {
+    background: rgba(54, 90, 121, 0.16)
+}
+:root[data-visual="phosphor"] .terminal::before {
+    background: linear-gradient(100deg, transparent 9%, rgba(53, 88, 118, 0.13) 34%, rgba(101, 183, 215, 0.1) 53%, rgba(97, 162, 217, 0.09) 70%, transparent 91%)
+}
+:root[data-visual="phosphor"] .rail::before {
+    background: linear-gradient(180deg, rgba(59, 99, 132, 0.2), transparent 28%, transparent 72%, rgba(93, 178, 205, 0.1))
+}
+:root[data-visual="phosphor"] .rail-logo {
+    border: 1px solid rgba(102, 169, 227, 0.34)
+}
+:root[data-visual="phosphor"] .app-update-logo-spinner {
+    background: rgb(55, 92, 123)
+}
+:root[data-visual="phosphor"] .app-update-popover {
+    border: 1px solid rgba(102, 169, 227, 0.34);
+    box-shadow: 0 16px 48px rgba(0, 0, 0, 0.55), 0 0 24px transparent
+}
+:root[data-visual="phosphor"] .app-update-check {
+    border: 1px solid rgba(102, 169, 227, 0.34);
+    background: rgba(74, 123, 165, 0.12);
+    color: rgb(115, 192, 255)
+}
+:root[data-visual="phosphor"] .app-update-progress > span {
+    background: rgba(74, 123, 165, 0.28)
+}
+:root[data-visual="phosphor"] .rail-item.active {
+    background: linear-gradient(145deg, rgba(71, 119, 159, 0.5), rgba(31, 51, 68, 0.58));
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.16), 0 8px 19px rgba(0, 0, 0, 0.25), 0 0 18px transparent
+}
+:root[data-visual="phosphor"] .topbar::before {
+    background: linear-gradient(96deg, transparent 5%, rgba(56, 92, 124, 0.34) 30%, rgba(103, 197, 224, 0.22) 52%, rgba(99, 164, 220, 0.24) 74%, transparent 95%)
+}
+:root[data-visual="phosphor"] .market-title {
+    border: 1px solid rgba(109, 182, 243, 0.3);
+    border-left: 3px solid rgb(101, 168, 225);
+    background: linear-gradient(105deg, rgba(45, 75, 101, 0.38), rgba(19, 32, 42, 0.88) 58%, rgba(9, 12, 18, 0.62));
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.1), 0 10px 24px rgba(0, 0, 0, 0.2), 0 0 24px transparent
+}
+:root[data-visual="phosphor"] .price-strip:focus-visible {
+    outline: 1px solid rgba(74, 123, 165, 0.78)
+}
+:root[data-visual="phosphor"] .notification-button.active {
+    border-color: rgba(72, 120, 161, 0.62);
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .icon-button.active {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .search-box.active {
+    border-color: rgba(98, 163, 218, 0.58);
+    background: rgba(72, 120, 161, 0.045);
+    box-shadow: 0 0 0 2px transparent
+}
+:root[data-visual="phosphor"] .recent-trades,
+:root[data-visual="phosphor"] .ticket-form,
+:root[data-visual="phosphor"] .positions-table,
+:root[data-visual="phosphor"] .account-list-panel,
+:root[data-visual="phosphor"] .account-form,
+:root[data-visual="phosphor"] .notification-center-list,
+:root[data-visual="phosphor"] .notification-filters,
+:root[data-visual="phosphor"] .storage-table-list {
+    scrollbar-color: rgba(72, 120, 161, 0.22) transparent
+}
+:root[data-visual="phosphor"] .recent-trades::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .ticket-form::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .positions-table::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .account-list-panel::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .account-form::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .notification-center-list::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .notification-filters::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .storage-table-list::-webkit-scrollbar-thumb {
+    background: rgba(72, 120, 161, 0.2)
+}
+:root[data-visual="phosphor"] .recent-trades::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .ticket-form::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .positions-table::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .account-list-panel::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .account-form::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .notification-center-list::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .notification-filters::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .storage-table-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(72, 120, 161, 0.34)
+}
+:root[data-visual="phosphor"] .symbol-icon {
+    border: 1px solid rgba(72, 120, 161, 0.25);
+    background: radial-gradient(circle at 35% 20%, rgba(255, 255, 255, 0.14), rgba(72, 120, 161, 0.12) 58%, rgba(255, 255, 255, 0.03))
+}
+:root[data-visual="phosphor"] .chart-data-table-header svg {
+    color: rgb(101, 168, 225)
+}
+:root[data-visual="phosphor"] .chart-data-table-header button:hover:not(:disabled) {
+    border-color: rgb(68, 113, 152)
+}
+:root[data-visual="phosphor"] .chart-data-table tbody tr:hover td {
+    background: rgba(79, 131, 176, 0.07)
+}
+:root[data-visual="phosphor"] .chart-data-table-labels span {
+    color: rgb(113, 188, 252)
+}
+:root[data-visual="phosphor"] .chart-resize-handle::after {
+    background: rgba(104, 172, 231, 0)
+}
+:root[data-visual="phosphor"] .chart-resize-handle:hover::after,
+:root[data-visual="phosphor"] .chart-resize-handle:focus-visible::after,
+:root[data-visual="phosphor"] .resizing-chart-width .chart-resize-handle-right::after,
+:root[data-visual="phosphor"] .resizing-chart-height .chart-resize-handle-bottom::after {
+    background: rgba(104, 172, 231, 0.82)
+}
+:root[data-visual="phosphor"] .chart-toolbar {
+    box-shadow: inset 0 -1px transparent
+}
+:root[data-visual="phosphor"] .periods .active {
+    background: rgb(46, 76, 102);
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.16), 0 0 14px transparent
+}
+:root[data-visual="phosphor"] .chart-utilities > button.active,
+:root[data-visual="phosphor"] .chart-utilities > button:hover {
+    border-color: rgba(102, 169, 227, 0.48);
+    background: rgba(52, 86, 115, 0.14)
+}
+:root[data-visual="phosphor"] .chart-timeframe-menu {
+    border: 1px solid rgba(102, 169, 227, 0.34);
+    box-shadow: 0 14px 30px rgba(0, 0, 0, 0.4), 0 0 18px transparent
+}
+:root[data-visual="phosphor"] .chart-timeframe-menu button:hover,
+:root[data-visual="phosphor"] .chart-timeframe-menu button.active {
+    background: rgba(52, 86, 115, 0.32)
+}
+@media (max-width: 1180px) {
+    :root[data-visual="phosphor"] .chart-toolbar::-webkit-scrollbar-thumb {
+        background: rgba(74, 123, 165, 0.32)
+    }
+}
+:root[data-visual="phosphor"] .connection-status:focus-visible {
+    border-color: rgba(72, 120, 161, 0.72)
+}
+:root[data-visual="phosphor"] .chart-alert-trigger:hover,
+:root[data-visual="phosphor"] .chart-alert-trigger.active {
+    border-color: rgba(104, 172, 231, 0.26);
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .chart-alert-trigger strong {
+    background: rgba(72, 120, 161, 0.34)
+}
+:root[data-visual="phosphor"] .chart-alert-trigger:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.72)
+}
+:root[data-visual="phosphor"] .chart-indicators button:hover,
+:root[data-visual="phosphor"] .chart-layer-menu-trigger:hover,
+:root[data-visual="phosphor"] .chart-layer-menu-trigger.active,
+:root[data-visual="phosphor"] .chart-view-actions button:hover,
+:root[data-visual="phosphor"] .chart-indicators button.active,
+:root[data-visual="phosphor"] .chart-view-actions button.active {
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .detached-trade-segmented button.active {
+    border-color: rgba(101, 168, 225, 0.62);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .detached-trade-percent input {
+    accent-color: rgb(84, 140, 187)
+}
+:root[data-visual="phosphor"] .detached-trade-percent output {
+    color: rgb(114, 190, 255)
+}
+:root[data-visual="phosphor"] .chart-indicator-pills button:hover,
+:root[data-visual="phosphor"] .chart-indicator-center-trigger:hover {
+    border-color: rgba(98, 163, 218, 0.55);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .chart-indicator-center-trigger svg {
+    color: rgb(104, 172, 231)
+}
+:root[data-visual="phosphor"] .chart-indicator-center-trigger b {
+    background: rgba(72, 120, 161, 0.23)
+}
+:root[data-visual="phosphor"] .chart-indicator-popover {
+    border: 1px solid rgba(98, 163, 218, 0.34)
+}
+:root[data-visual="phosphor"] .chart-indicator-custom-button,
+:root[data-visual="phosphor"] .chart-indicator-ai-button,
+:root[data-visual="phosphor"] .systematic-lab__ai-button {
+    border: 1px solid rgba(98, 163, 218, 0.34);
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .chart-indicator-custom-button:hover {
+    border-color: rgba(104, 172, 231, 0.62);
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .chart-indicator-add-list button.custom {
+    border-color: rgba(98, 163, 218, 0.16);
+    background: rgba(72, 120, 161, 0.045)
+}
+:root[data-visual="phosphor"] .chart-indicator-kind-tag.custom {
+    border-color: rgba(104, 172, 231, 0.3);
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .chart-indicator-instance-title button:hover,
+:root[data-visual="phosphor"] .chart-indicator-popover .icon-button:hover {
+    border-color: rgba(98, 163, 218, 0.52)
+}
+:root[data-visual="phosphor"] .chart-indicator-ai-panel {
+    background: linear-gradient(180deg, rgba(6, 182, 212, 0.045), rgba(72, 120, 161, 0.035))
+}
+:root[data-visual="phosphor"] .chart-indicator-parameters input:focus {
+    border-color: rgba(98, 163, 218, 0.68)
+}
+:root[data-visual="phosphor"] .chart-layer-menu {
+    border: 1px solid rgba(104, 172, 231, 0.2)
+}
+:root[data-visual="phosphor"] .chart-layer-menu label:hover {
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .chart-layer-menu input {
+    accent-color: rgb(72, 120, 161)
+}
+:root[data-visual="phosphor"] .chart-layer-menu .chart-layer-expander:hover {
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .chart-script-panel {
+    border: 1px solid rgba(104, 172, 231, 0.2);
+    box-shadow: 0 26px 90px rgba(0, 0, 0, 0.48), 0 0 30px transparent
+}
+:root[data-visual="phosphor"] .chart-script-list .chart-script-new {
+    background: rgba(72, 120, 161, 0.15)
+}
+:root[data-visual="phosphor"] .chart-script-list-item.active {
+    border-color: rgba(104, 172, 231, 0.34);
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .chart-dsl-editor-host {
+    border: 1px solid rgba(72, 120, 161, 0.28)
+}
+:root[data-visual="phosphor"] .chart-drawing-toolbar button.active {
+    background: rgba(72, 120, 161, 0.28)
+}
+:root[data-visual="phosphor"] .chart-alert-panel-close:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-active-row > button:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-direction button:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-kind button:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-webhook-method button:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-price-input button:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-create:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-panel input:focus-visible,
+:root[data-visual="phosphor"] .chart-alert-panel .terminal-select-trigger:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.72)
+}
+:root[data-visual="phosphor"] .chart-alert-kind button.active,
+:root[data-visual="phosphor"] .chart-alert-webhook-method button.active {
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .chart-alert-delivery label:has(input:checked) {
+    border-color: rgba(72, 120, 161, 0.38);
+    background: rgba(72, 120, 161, 0.1)
+}
+:root[data-visual="phosphor"] .chart-alert-delivery input {
+    accent-color: rgb(72, 120, 161)
+}
+:root[data-visual="phosphor"] .chart-alert-create {
+    border: 1px solid rgba(72, 120, 161, 0.28);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .chart-alert-create:hover:not(:disabled) {
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .chart-alert-active-heading span {
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .chart-alert-direction-mark.direction-cross {
+    color: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .chart-alert-line-label.script {
+    border-color: rgba(98, 163, 218, 0.48);
+    background: rgba(19, 32, 42, 0.95)
+}
+:root[data-visual="phosphor"] .chart-alert-line-remove:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.72)
+}
+:root[data-visual="phosphor"] .chart-candle-load-error button {
+    border: 1px solid rgba(71, 118, 158, 0.62);
+    background: rgba(71, 118, 158, 0.14)
+}
+:root[data-visual="phosphor"] .chart-candle-load-error button:hover {
+    border-color: rgba(99, 165, 221, 0.9);
+    background: rgba(71, 118, 158, 0.24)
+}
+:root[data-visual="phosphor"] .chart-window-utilities button:hover,
+:root[data-visual="phosphor"] .chart-window-periods button:hover,
+:root[data-visual="phosphor"] .chart-window-periods button.active {
+    border-color: rgba(73, 122, 163, 0.72);
+    background: rgba(31, 52, 69, 0.36)
+}
+:root[data-visual="phosphor"] .chart-window-workspace-grid > div.is-active {
+    border-color: rgba(98, 163, 218, 0.62);
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .chart-order-drag-preview-line {
+    border-top: 1px dashed rgba(104, 172, 231, 0.9);
+    filter: drop-shadow(0 0 5px transparent)
+}
+:root[data-visual="phosphor"] .chart-order-drag-preview-line span {
+    background: rgba(19, 32, 42, 0.92)
+}
+:root[data-visual="phosphor"] .chart-order-drag-readout {
+    border: 1px solid rgba(104, 172, 231, 0.32);
+    box-shadow: 0 0 22px transparent
+}
+:root[data-visual="phosphor"] .chart-fill-hit-target:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.86)
+}
+:root[data-visual="phosphor"] .chart-guide-top {
+    background: repeating-linear-gradient(90deg, rgba(104, 172, 231, 0.24) 0 1px, transparent 1px 18px),
+    linear-gradient(180deg, rgba(104, 172, 231, 0.08), rgba(104, 172, 231, 0.02))
+}
+:root[data-visual="phosphor"] .chart-guide-left {
+    background: repeating-linear-gradient(180deg, rgba(104, 172, 231, 0.24) 0 1px, transparent 1px 18px),
+    linear-gradient(90deg, rgba(104, 172, 231, 0.08), rgba(104, 172, 231, 0.02))
+}
+:root[data-visual="phosphor"] .chart-guide-top::after,
+:root[data-visual="phosphor"] .chart-guide-left::after {
+    background: rgba(104, 172, 231, 0.42);
+    box-shadow: 0 0 14px transparent
+}
+:root[data-visual="phosphor"] .chart-guide-top:hover::after,
+:root[data-visual="phosphor"] .chart-guide-left:hover::after {
+    background: rgba(104, 172, 231, 0.9);
+    box-shadow: 0 0 18px transparent
+}
+:root[data-visual="phosphor"] .chart-guide-top:hover,
+:root[data-visual="phosphor"] .chart-guide-left:hover {
+    background-color: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .chart-position-range.neutral {
+    color: rgba(104, 172, 231, 0.82)
+}
+:root[data-visual="phosphor"] .chart-position-range.neutral .chart-position-range-band {
+    background: rgba(104, 172, 231, 0.28)
+}
+:root[data-visual="phosphor"] .chart-measure-layer line {
+    stroke: rgba(104, 172, 231, 0.86);
+    filter: drop-shadow(0 0 6px transparent)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .selected line:not(.drawing-hit) {
+    filter: drop-shadow(0 0 5px transparent)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .selected rect:not(.drawing-hit) {
+    filter: drop-shadow(0 0 6px transparent)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .selected polygon:not(.drawing-hit) {
+    filter: drop-shadow(0 0 6px transparent)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .preview line:not(.drawing-hit) {
+    stroke: rgba(104, 172, 231, 0.74);
+    filter: drop-shadow(0 0 4px transparent)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .preview rect {
+    fill: rgba(104, 172, 231, 0.06);
+    stroke: rgba(104, 172, 231, 0.58)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .preview polygon {
+    fill: rgba(104, 172, 231, 0.06);
+    stroke: rgba(104, 172, 231, 0.58)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .drawing-horizontal line:not(.drawing-hit) {
+    stroke: rgba(104, 172, 231, 0.78)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .drawing-rect polygon:not(.drawing-hit) {
+    fill: rgba(104, 172, 231, 0.08);
+    stroke: rgba(104, 172, 231, 0.58);
+    filter: drop-shadow(0 0 10px transparent)
+}
+:root[data-visual="phosphor"] .chart-measure-layer circle {
+    stroke: rgb(104, 172, 231)
+}
+:root[data-visual="phosphor"] .chart-drawing-layer .selected circle {
+    stroke: rgb(104, 172, 231)
+}
+:root[data-visual="phosphor"] .chart-measure-readout {
+    border: 1px solid rgba(104, 172, 231, 0.34)
+}
+:root[data-visual="phosphor"] .kline-sync-badge {
+    border: 1px solid rgba(72, 120, 161, 0.42);
+    box-shadow: 0 0 22px transparent
+}
+:root[data-visual="phosphor"] .notification-card {
+    border: 1px solid rgba(72, 120, 161, 0.24);
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.42), 0 0 28px transparent
+}
+:root[data-visual="phosphor"] .notification-card.clickable:hover {
+    border-color: rgba(98, 163, 218, 0.5)
+}
+:root[data-visual="phosphor"] .notification-icon {
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .notification-center {
+    border: 1px solid rgba(72, 120, 161, 0.28);
+    box-shadow: 0 22px 70px rgba(0, 0, 0, 0.54), 0 0 30px transparent
+}
+:root[data-visual="phosphor"] .notification-center-actions > button:not(.window-button) {
+    border: 1px solid rgba(72, 120, 161, 0.28);
+    background: rgba(72, 120, 161, 0.1)
+}
+:root[data-visual="phosphor"] .notification-filters button.active {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .notification-filters button.active b {
+    background: rgba(72, 120, 161, 0.34)
+}
+:root[data-visual="phosphor"] .notification-history-item.clickable:hover {
+    border-color: rgba(72, 120, 161, 0.38);
+    background: rgba(72, 120, 161, 0.07)
+}
+:root[data-visual="phosphor"] .modal-shell {
+    border: 1px solid rgba(72, 120, 161, 0.28);
+    background: radial-gradient(circle at 85% 0%, rgba(72, 120, 161, 0.14), transparent 28%),
+    #09090d;
+    box-shadow: 0 28px 88px rgba(0, 0, 0, 0.7), 0 0 48px transparent
+}
+:root[data-visual="phosphor"] .help-center-modal {
+    border-color: rgba(72, 120, 161, 0.32)
+}
+:root[data-visual="phosphor"] .help-search:focus-within {
+    border-color: rgba(99, 165, 221, 0.68);
+    box-shadow: 0 0 0 2px transparent;
+    color: rgb(114, 190, 255)
+}
+:root[data-visual="phosphor"] .help-quick-actions button:hover,
+:root[data-visual="phosphor"] .help-quick-actions button:focus-visible {
+    border-color: rgba(99, 165, 221, 0.42);
+    background: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .help-category-foot button:hover,
+:root[data-visual="phosphor"] .help-category-foot button:focus-visible {
+    background: rgba(72, 120, 161, 0.09)
+}
+:root[data-visual="phosphor"] .help-question-kicker {
+    color: rgb(99, 165, 221)
+}
+:root[data-visual="phosphor"] .help-shortcut-head small {
+    color: rgb(99, 165, 221)
+}
+:root[data-visual="phosphor"] .help-empty > svg {
+    color: rgb(99, 165, 221)
+}
+:root[data-visual="phosphor"] .help-empty button {
+    border: 1px solid rgba(99, 165, 221, 0.34);
+    background: rgba(72, 120, 161, 0.08);
+    color: rgb(114, 190, 255)
+}
+:root[data-visual="phosphor"] .cell-tone.active {
+    color: rgb(105, 175, 234) !important
+}
+:root[data-visual="phosphor"] .highlight-value {
+    text-shadow: 0 0 18px transparent
+}
+:root[data-visual="phosphor"] .table-row .status-pill.active::before {
+    background: rgb(73, 122, 163);
+    box-shadow: 0 0 12px transparent
+}
+:root[data-visual="phosphor"] .segmented-row button.active {
+    border-color: rgba(72, 120, 161, 0.7);
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .inline-input-action button,
+:root[data-visual="phosphor"] .modal-submit {
+    border: 1px solid rgba(72, 120, 161, 0.48);
+    background: linear-gradient(180deg, rgba(72, 120, 161, 0.34), rgba(37, 61, 82, 0.28))
+}
+:root[data-visual="phosphor"] .algo-price-block {
+    border: 1px solid rgba(72, 120, 161, 0.18);
+    background: rgba(72, 120, 161, 0.045)
+}
+:root[data-visual="phosphor"] .proxy-type-row button.active {
+    border-color: rgba(72, 120, 161, 0.62);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .data-toolbar__actions button:hover:not(:disabled) {
+    border-color: rgba(74, 123, 165, 0.5)
+}
+:root[data-visual="phosphor"] .data-range-tabs button.active {
+    background: rgba(74, 123, 165, 0.2)
+}
+:root[data-visual="phosphor"] .data-chart-legend i.equity {
+    background: rgb(82, 137, 183)
+}
+:root[data-visual="phosphor"] .data-chart-dot {
+    stroke: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .data-chart-badge.equity {
+    fill: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .data-chart-tip i.equity {
+    background: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .language-option:hover {
+    border-color: rgba(98, 163, 218, 0.52);
+    background: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .language-option.active {
+    border-color: rgba(98, 163, 218, 0.78);
+    background: linear-gradient(135deg, rgba(72, 120, 161, 0.2), rgba(72, 120, 161, 0.06));
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .language-option input {
+    accent-color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .language-option-check {
+    color: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .language-preference-note {
+    border-inline-start: 2px solid rgba(98, 163, 218, 0.74);
+    background: rgba(72, 120, 161, 0.055)
+}
+:root[data-visual="phosphor"] .settings-page-head {
+    background: radial-gradient(circle at 82% 0%, rgba(72, 120, 161, 0.16), transparent 32%),
+    linear-gradient(180deg, rgba(13, 13, 16, 0.98), #050506)
+}
+:root[data-visual="phosphor"] .settings-page-current {
+    border: 1px solid rgba(72, 120, 161, 0.22);
+    background: rgba(72, 120, 161, 0.055)
+}
+:root[data-visual="phosphor"] .settings-page-current span {
+    color: rgba(121, 201, 255, 0.82)
+}
+:root[data-visual="phosphor"] .settings-page-tabs button.active {
+    border-color: rgba(72, 120, 161, 0.42);
+    background: linear-gradient(180deg, rgba(72, 120, 161, 0.28), rgba(72, 120, 161, 0.16));
+    box-shadow: 0 0 0 1px transparent inset
+}
+:root[data-visual="phosphor"] .settings-tabs {
+    border: 1px solid rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .settings-tabs button.active {
+    background: rgba(72, 120, 161, 0.26)
+}
+:root[data-visual="phosphor"] .settings-page-panel > .proxy-modal-body .modal-actions .primary-action {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: linear-gradient(135deg, rgba(72, 120, 161, 0.78), rgba(48, 79, 106, 0.62))
+}
+:root[data-visual="phosphor"] .notification-channel-toggle input,
+:root[data-visual="phosphor"] .notification-event-option input {
+    accent-color: rgb(69, 115, 154)
+}
+:root[data-visual="phosphor"] .notification-event-option:has(input:focus-visible) {
+    outline: 2px solid rgba(72, 120, 161, 0.3)
+}
+:root[data-visual="phosphor"] .skill-option.active {
+    border-color: rgba(72, 120, 161, 0.44);
+    background: rgba(72, 120, 161, 0.1)
+}
+:root[data-visual="phosphor"] .skill-edit-panel {
+    border: 1px solid rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .skill-version-management-head button:hover:not(:disabled),
+:root[data-visual="phosphor"] .skill-version-card-head button:hover:not(:disabled),
+:root[data-visual="phosphor"] .skill-version-history-row button:hover:not(:disabled) {
+    border-color: rgba(72, 120, 161, 0.42);
+    background: rgba(72, 120, 161, 0.13)
+}
+:root[data-visual="phosphor"] .skill-version-card.active {
+    border-color: rgba(72, 120, 161, 0.42)
+}
+:root[data-visual="phosphor"] .settings-section button,
+:root[data-visual="phosphor"] .settings-modal .primary-action {
+    border: 1px solid rgba(72, 120, 161, 0.58);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .skill-source-tabs button.active {
+    border-color: rgba(72, 120, 161, 0.44);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .skill-source-tabs button:focus-visible,
+:root[data-visual="phosphor"] .skill-source-form input:focus-visible,
+:root[data-visual="phosphor"] .skill-source-form textarea:focus-visible {
+    outline: 2px solid rgba(98, 163, 218, 0.9)
+}
+:root[data-visual="phosphor"] .skill-source-picker-actions button:hover {
+    border-color: rgba(98, 163, 218, 0.42);
+    background: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .skill-source-hint {
+    border-left: 2px solid rgba(98, 163, 218, 0.72);
+    background: rgba(72, 120, 161, 0.065)
+}
+:root[data-visual="phosphor"] .skill-source-hint > svg {
+    color: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .settings-watchlist-tip {
+    border: 1px solid rgba(72, 120, 161, 0.5)
+}
+:root[data-visual="phosphor"] .account-config-guide-trigger > svg:first-child {
+    color: rgb(110, 183, 245)
+}
+:root[data-visual="phosphor"] .account-guide-step > b {
+    border: 1px solid rgba(72, 120, 161, 0.38);
+    color: rgb(125, 207, 255)
+}
+:root[data-visual="phosphor"] .account-guide-step a {
+    color: rgb(122, 203, 255)
+}
+:root[data-visual="phosphor"] .account-list-row.active {
+    border-color: rgba(72, 120, 161, 0.5);
+    background: rgba(72, 120, 161, 0.13)
+}
+:root[data-visual="phosphor"] .account-form input:focus,
+:root[data-visual="phosphor"] .account-form select:focus {
+    border-color: rgba(72, 120, 161, 0.58)
+}
+:root[data-visual="phosphor"] .account-actions button {
+    border: 1px solid rgba(72, 120, 161, 0.48);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .modal-actions .primary-action {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: linear-gradient(135deg, rgba(72, 120, 161, 0.86), rgba(73, 122, 163, 0.58));
+    box-shadow: 0 10px 26px transparent
+}
+:root[data-visual="phosphor"] .ticket-tabs .active {
+    background: rgba(52, 86, 115, 0.13);
+    box-shadow: inset 0 -2px transparent, inset 0 1px rgba(255, 255, 255, 0.04)
+}
+:root[data-visual="phosphor"] .depth-expand:focus-visible {
+    outline: 2px solid rgba(72, 120, 161, 0.62)
+}
+:root[data-visual="phosphor"] .depth-row:focus-visible {
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .mid-price {
+    box-shadow: inset 0 1px rgba(255, 255, 255, 0.06), 0 0 16px transparent
+}
+:root[data-visual="phosphor"] .recent-trades h3 {
+    border-left: 2px solid rgba(102, 169, 227, 0.5)
+}
+:root[data-visual="phosphor"] .ticket {
+    background: linear-gradient(180deg, rgba(74, 123, 165, 0.035), transparent 180px),
+    #07090c
+}
+:root[data-visual="phosphor"] .account-permission-note {
+    border: 1px solid rgba(72, 120, 161, 0.36);
+    background: rgba(72, 120, 161, 0.09)
+}
+:root[data-visual="phosphor"] .account-permission-note button {
+    border: 1px solid rgba(104, 172, 231, 0.48);
+    background: rgba(72, 120, 161, 0.2)
+}
+:root[data-visual="phosphor"] .ticket-section--execution {
+    border-top-color: rgba(102, 169, 227, 0.24)
+}
+:root[data-visual="phosphor"] .ticket-form input:focus-visible,
+:root[data-visual="phosphor"] .ticket-form .terminal-select-trigger:focus-visible {
+    border-color: rgba(98, 163, 218, 0.68);
+    box-shadow: 0 0 0 2px transparent
+}
+:root[data-visual="phosphor"] .ticket-form .attached-exits-toggle > input[type="checkbox"] {
+    accent-color: rgb(72, 120, 161)
+}
+:root[data-visual="phosphor"] .close-size-summary button.active {
+    border-color: rgba(98, 163, 218, 0.62);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .account-permission-note button:hover {
+    border-color: rgba(104, 172, 231, 0.7);
+    background: rgba(72, 120, 161, 0.26)
+}
+:root[data-visual="phosphor"] .ticket-tabs button:focus-visible,
+:root[data-visual="phosphor"] .empty-account button:focus-visible,
+:root[data-visual="phosphor"] .account-permission-note button:focus-visible,
+:root[data-visual="phosphor"] .ticket-form .segmented button:focus-visible,
+:root[data-visual="phosphor"] .ticket-form .percent-row button:focus-visible,
+:root[data-visual="phosphor"] .close-size-summary button:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.68)
+}
+:root[data-visual="phosphor"] .ticket-form .segmented .active {
+    background: rgb(28, 46, 62);
+    box-shadow: inset 0 0 0 1px transparent, inset 0 1px rgba(255, 255, 255, 0.1), 0 0 14px transparent
+}
+:root[data-visual="phosphor"] .ticket-form .percent-row button:hover,
+:root[data-visual="phosphor"] .ticket-form .percent-row button.active {
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .trade-buttons button:focus-visible {
+    outline: 2px solid rgba(104, 172, 231, 0.72)
+}
+:root[data-visual="phosphor"] .instrument-operation-state[data-stage="accepted"],
+:root[data-visual="phosphor"] .instrument-operation-state[data-stage="reconciling"] {
+    border-left-color: rgba(72, 120, 161, 0.7)
+}
+:root[data-visual="phosphor"] .bottom-panel {
+    border-top: 1px solid rgba(74, 123, 165, 0.26)
+}
+:root[data-visual="phosphor"] .bottom-tabs .active {
+    color: rgb(101, 168, 225);
+    box-shadow: inset 0 -2px transparent
+}
+:root[data-visual="phosphor"] .bottom-tabs::-webkit-scrollbar-thumb {
+    background: rgba(74, 123, 165, 0.36)
+}
+:root[data-visual="phosphor"] .sub-tabs {
+    border: 1px solid rgba(72, 120, 161, 0.2)
+}
+:root[data-visual="phosphor"] .sub-tabs button.active {
+    background: rgba(72, 120, 161, 0.28)
+}
+:root[data-visual="phosphor"] .order-type-tabs button:hover {
+    border-color: rgba(72, 120, 161, 0.42)
+}
+:root[data-visual="phosphor"] .order-type-tabs button.active {
+    border-color: rgba(72, 120, 161, 0.44);
+    background: rgba(72, 120, 161, 0.2)
+}
+:root[data-visual="phosphor"] .order-type-tabs button:focus-visible {
+    outline: 2px solid rgba(98, 163, 218, 0.72)
+}
+:root[data-visual="phosphor"] .position-actions button {
+    border: 1px solid rgba(72, 120, 161, 0.42);
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .position-actions button:hover:not(:disabled) {
+    border-color: rgba(98, 163, 218, 0.75);
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .table-action {
+    border: 1px solid rgba(72, 120, 161, 0.45);
+    background: rgba(72, 120, 161, 0.13)
+}
+:root[data-visual="phosphor"] .table-action:hover {
+    border-color: rgba(72, 120, 161, 0.72);
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .episode-detail-modal {
+    border-color: rgba(72, 120, 161, 0.34);
+    box-shadow: 0 32px 96px rgba(0, 0, 0, 0.78), 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .episode-price-path-connector i {
+    background: linear-gradient(90deg, rgba(72, 120, 161, 0.18), rgba(104, 172, 231, 0.72))
+}
+:root[data-visual="phosphor"] .episode-price-path-connector i::after {
+    border-top: 1px solid rgba(104, 172, 231, 0.9);
+    border-right: 1px solid rgba(104, 172, 231, 0.9)
+}
+:root[data-visual="phosphor"] .episode-timeline-head svg {
+    color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .episode-event-list {
+    scrollbar-color: rgba(72, 120, 161, 0.22) transparent
+}
+:root[data-visual="phosphor"] .episode-event-list::before {
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .episode-event-list::-webkit-scrollbar-thumb {
+    background: rgba(72, 120, 161, 0.2)
+}
+:root[data-visual="phosphor"] .episode-event-card::before {
+    background: rgba(72, 120, 161, 0.26)
+}
+:root[data-visual="phosphor"] .episode-event-card:hover {
+    border-color: rgba(104, 172, 231, 0.24)
+}
+:root[data-visual="phosphor"] .opportunity-sync-dot {
+    background: rgb(72, 120, 161);
+    box-shadow: 0 0 16px transparent
+}
+:root[data-visual="phosphor"] .opportunity-metric.pending::after {
+    background: rgb(72, 120, 161)
+}
+:root[data-visual="phosphor"] .opportunity-panel-head b {
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .table-row.opportunity-row.active {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: rgba(72, 120, 161, 0.105);
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .opportunity-actions button {
+    border: 1px solid rgba(72, 120, 161, 0.42);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .opportunity-detail-actions button,
+:root[data-visual="phosphor"] .opportunity-empty button {
+    border: 1px solid rgba(72, 120, 161, 0.5);
+    background: rgba(72, 120, 161, 0.82)
+}
+:root[data-visual="phosphor"] .status-badge.pending {
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .systematic-research-loading::before,
+:root[data-visual="phosphor"] .systematic-research-loading::after {
+    background: linear-gradient(90deg, transparent, rgba(120, 199, 255, 0.72), rgba(122, 222, 239, 0.1));
+    box-shadow: 0 0 11px transparent
+}
+:root[data-visual="phosphor"] .systematic-research-loading__dialog {
+    border: 1px solid rgba(105, 174, 234, 0.34)
+}
+:root[data-visual="phosphor"] .systematic-research-loading__dialog > svg {
+    color: rgb(105, 174, 234)
+}
+:root[data-visual="phosphor"] .opportunity-icon-button:hover {
+    border-color: rgba(72, 120, 161, 0.46);
+    background: rgba(72, 120, 161, 0.1)
+}
+:root[data-visual="phosphor"] .opportunity-tabs button.active::after {
+    background: rgb(72, 120, 161)
+}
+:root[data-visual="phosphor"] .opportunity-list-select:focus-visible,
+:root[data-visual="phosphor"] .opportunity-tabs button:focus-visible,
+:root[data-visual="phosphor"] .opportunity-icon-button:focus-visible,
+:root[data-visual="phosphor"] .opportunity-clear-button:focus-visible,
+:root[data-visual="phosphor"] .opportunity-detail-delete:focus-visible,
+:root[data-visual="phosphor"] .opportunity-detail-actions button:focus-visible {
+    outline: 2px solid rgba(72, 120, 161, 0.72)
+}
+:root[data-visual="phosphor"] .opportunity-list-plan b.neutral,
+:root[data-visual="phosphor"] .opportunity-plan-summary strong.neutral {
+    color: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .opportunity-detail-actions button,
+:root[data-visual="phosphor"] .opportunity-empty button {
+    border: 1px solid rgba(72, 120, 161, 0.42);
+    background: rgba(72, 120, 161, 0.14)
+}
+:root[data-visual="phosphor"] .opportunity-detail-actions button:hover,
+:root[data-visual="phosphor"] .opportunity-empty button:hover {
+    border-color: rgba(72, 120, 161, 0.68);
+    background: rgba(72, 120, 161, 0.22)
+}
+:root[data-visual="phosphor"] .intelligence-result-meta b.refreshing {
+    color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .intelligence-page .intelligence-calendar-view-switch > button.active {
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .intelligence-calendar-important-toggle input:checked + i {
+    border-color: rgba(98, 163, 218, 0.62);
+    background: rgba(54, 90, 121, 0.26)
+}
+:root[data-visual="phosphor"] .intelligence-calendar-important-toggle input:checked + i::after {
+    background: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .intelligence-page button.intelligence-calendar-week-day.selected {
+    background: rgba(72, 120, 161, 0.14);
+    box-shadow: inset 0 -2px transparent
+}
+:root[data-visual="phosphor"] .intelligence-page button.intelligence-calendar-day.selected {
+    background: rgba(72, 120, 161, 0.1);
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .first-launch-spotlight {
+    border: 1px solid rgba(98, 163, 218, 0.94);
+    box-shadow: 0 0 0 4px transparent,
+    0 0 30px transparent,
+    0 0 0 9999px rgba(2, 2, 5, 0.58)
+}
+:root[data-visual="phosphor"] .first-launch-guide-title {
+    color: rgb(108, 179, 240)
+}
+:root[data-visual="phosphor"] .first-launch-progress i.active {
+    background: rgb(84, 140, 188)
+}
+:root[data-visual="phosphor"] .first-launch-eyebrow {
+    color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .first-launch-card-foot button {
+    border: 1px solid rgb(72, 120, 161);
+    background: rgb(54, 90, 121)
+}
+:root[data-visual="phosphor"] .first-launch-card-foot button:hover,
+:root[data-visual="phosphor"] .first-launch-card-foot button:focus-visible {
+    border-color: rgb(105, 174, 234);
+    background: rgb(67, 111, 149)
+}
+:root[data-visual="phosphor"] .help-center-button > span {
+    background: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .settings-data-root-banner {
+    border: 1px solid rgba(74, 123, 165, 0.28);
+    background: rgba(74, 123, 165, 0.08)
+}
+:root[data-visual="phosphor"] .settings-data-root-banner button.primary-action {
+    border-color: rgba(72, 120, 161, 0.58);
+    background: rgba(72, 120, 161, 0.18)
+}
+:root[data-visual="phosphor"] .settings-data-root-banner button:hover:not(:disabled) {
+    border-color: rgba(74, 123, 165, 0.55)
+}
+:root[data-visual="phosphor"] ::selection {
+    background: rgba(74, 123, 165, 0.25)
+}
+:root[data-visual="phosphor"] button:focus-visible,
+:root[data-visual="phosphor"] [role="button"]:focus-visible,
+:root[data-visual="phosphor"] input:focus-visible,
+:root[data-visual="phosphor"] select:focus-visible,
+:root[data-visual="phosphor"] textarea:focus-visible,
+:root[data-visual="phosphor"] a:focus-visible,
+:root[data-visual="phosphor"] [tabindex]:focus-visible {
+    box-shadow: 0 0 0 2px transparent,
+    var(--glow-accent)
+}
+:root[data-visual="phosphor"] .rail-item[data-workspace="ai"]::after {
+    background: conic-gradient(from 0deg, transparent, var(--accent-bright), rgba(74, 123, 165, 0.5), transparent)
+}
+:root[data-visual="phosphor"] .chart-workspace-controls button:hover:not(:disabled) {
+    border-color: rgba(98, 163, 218, 0.65);
+    background: rgba(72, 120, 161, 0.12)
+}
+:root[data-visual="phosphor"] .chart-workspace-controls button.is-active,
+:root[data-visual="phosphor"] .chart-workspace-controls__member.is-active {
+    border-color: rgba(72, 120, 161, 0.72);
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .chart-workspace-controls button:focus-visible,
+:root[data-visual="phosphor"] .chart-workspace-controls select:focus-visible {
+    outline: 2px solid rgba(98, 163, 218, 0.72)
+}
+:root[data-visual="phosphor"] .chart-workspace-controls__member.is-active .chart-workspace-controls__status-dot {
+    background: rgb(98, 163, 218);
+    box-shadow: 0 0 0 3px transparent
+}
+:root[data-visual="phosphor"] .chart-workspace-template-manager__identity {
+    color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .chart-workspace-template-manager button:not(.terminal-select-trigger):hover:not(:disabled) {
+    border-color: rgba(98, 163, 218, 0.68);
+    background: rgba(54, 90, 121, 0.15)
+}
+:root[data-visual="phosphor"] .chart-workspace-template-manager button:not(.terminal-select-trigger):focus-visible,
+:root[data-visual="phosphor"] .chart-workspace-template-manager .terminal-select-trigger:focus-visible,
+:root[data-visual="phosphor"] .chart-workspace-template-manager input:focus-visible {
+    outline: 2px solid rgba(98, 163, 218, 0.72)
+}
+:root[data-visual="phosphor"] .chart-pane-layout-composer__slot.is-active {
+    border-color: rgba(72, 120, 161, 0.7);
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .chart-pane-layout-composer__drag-handle:hover:not(:disabled) {
+    color: rgb(124, 205, 255)
+}
+:root[data-visual="phosphor"] .chart-pane-layout-composer__drag-handle:focus-visible,
+:root[data-visual="phosphor"] .chart-pane-layout-composer__split:focus-visible {
+    outline: 2px solid rgba(98, 163, 218, 0.72)
+}
+:root[data-visual="phosphor"] .chart-pane-layout-composer__split:hover:not(:disabled) {
+    color: rgb(124, 205, 255)
+}
+:root[data-visual="phosphor"] .systematic-strategy-lab__prepare-track > span {
+    background: linear-gradient(90deg, var(--purple), rgb(101, 168, 225));
+    box-shadow: 0 0 10px transparent
+}
+:root[data-visual="phosphor"] .systematic-lab__prepare-notice {
+    background: rgba(101, 168, 225, 0.06)
+}
+:root[data-visual="phosphor"] .systematic-strategy-lab .systematic-lab__save-button:hover:not(:disabled) {
+    border-color: rgba(124, 205, 255, 0.88)
+}
+:root[data-visual="phosphor"] .systematic-python-editor__typing-preview::after {
+    background: rgb(122, 203, 255)
+}
+:root[data-visual="phosphor"] .systematic-lab-selected-version {
+    background: rgba(62, 103, 138, 0.1)
+}
+:root[data-visual="phosphor"] .systematic-lab-strategy-versions__summary > small {
+    color: rgb(126, 209, 255)
+}
+:root[data-visual="phosphor"] .systematic-lab-ai-message.user .systematic-lab-ai-message__role {
+    color: rgb(131, 217, 255)
+}
+:root[data-visual="phosphor"] .systematic-lab-ai-message__status {
+    color: rgb(126, 209, 255)
+}
+:root[data-visual="phosphor"] .systematic-lab-strategy-ai-panel__composer.is-busy small {
+    color: rgb(126, 209, 255)
+}
+:root[data-visual="phosphor"] .systematic-lab-optimization-card:hover {
+    border-color: rgba(101, 168, 225, 0.34);
+    box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24), 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .systematic-lab-optimization-badge.is-active {
+    border-color: rgba(101, 168, 225, 0.45);
+    color: rgb(122, 202, 255);
+    background: rgba(72, 120, 161, 0.1)
+}
+:root[data-visual="phosphor"] .systematic-lab-optimization-card__params span {
+    border: 1px solid rgba(101, 168, 225, 0.22);
+    background: rgba(72, 120, 161, 0.07)
+}
+:root[data-visual="phosphor"] .systematic-lab-optimization-card__progress > span b {
+    background: linear-gradient(90deg, var(--purple), rgb(101, 168, 225));
+    box-shadow: 0 0 8px transparent
+}
+:root[data-visual="phosphor"] .terminal-select-trigger:hover:not(:disabled) {
+    border-color: rgba(92, 153, 205, 0.5)
+}
+:root[data-visual="phosphor"] .terminal-select-trigger:focus-visible {
+    border-color: rgba(92, 153, 205, 0.78);
+    box-shadow: 0 0 0 2px transparent
+}
+:root[data-visual="phosphor"] .terminal-select.open .terminal-select-trigger {
+    border-color: rgba(92, 153, 205, 0.72);
+    background: rgba(72, 120, 161, 0.09)
+}
+:root[data-visual="phosphor"] .terminal-select.open .terminal-select-chevron {
+    color: rgb(122, 203, 255)
+}
+:root[data-visual="phosphor"] .terminal-select-menu {
+    border: 1px solid rgba(72, 120, 161, 0.46)
+}
+:root[data-visual="phosphor"] .terminal-select-option > svg {
+    color: rgb(112, 186, 250)
+}
+:root[data-visual="phosphor"] .terminal-select-option.active:not(:disabled) {
+    background: rgba(72, 120, 161, 0.16)
+}
+:root[data-visual="phosphor"] .terminal-select-option:focus-visible {
+    outline: 1px solid rgba(72, 120, 161, 0.62)
+}
+:root[data-visual="phosphor"] .appearance-option:hover {
+    border-color: rgba(98, 163, 218, 0.52);
+    background: rgba(72, 120, 161, 0.08)
+}
+:root[data-visual="phosphor"] .appearance-option.active {
+    border-color: rgba(98, 163, 218, 0.78);
+    background: linear-gradient(135deg, rgba(72, 120, 161, 0.2), rgba(72, 120, 161, 0.06));
+    box-shadow: inset 0 0 0 1px transparent
+}
+:root[data-visual="phosphor"] .appearance-option input {
+    accent-color: rgb(98, 163, 218)
+}
+:root[data-visual="phosphor"] .appearance-option-check {
+    color: rgb(121, 201, 255)
+}
+:root[data-visual="phosphor"] .language-preference-note {
+    border-inline-start: 2px solid rgba(98, 163, 218, 0.74);
+    background: rgba(72, 120, 161, 0.055)
+}

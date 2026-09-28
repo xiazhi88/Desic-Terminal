@@ -137,15 +137,30 @@ function processText(key: string, english: string, chinese: string, values: Reco
   }));
 }
 
+// 流式输出时每个 token 都会重渲染消息列表；工具结果字符串按原串缓存解析结果，避免反复 JSON.parse。
+const toolPayloadCache = new Map<string, unknown>();
+
 function normalizeAiToolPayload(value: unknown) {
   if (typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
+  if (toolPayloadCache.has(value)) {
+    const hit = toolPayloadCache.get(value);
+    toolPayloadCache.delete(value);
+    toolPayloadCache.set(value, hit);
+    return hit;
   }
+  const trimmed = value.trim();
+  let parsed: unknown;
+  if (!trimmed) parsed = undefined;
+  else {
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = trimmed;
+    }
+  }
+  toolPayloadCache.set(value, parsed);
+  if (toolPayloadCache.size > 2048) toolPayloadCache.delete(toolPayloadCache.keys().next().value!);
+  return parsed;
 }
 
 function isFailureStatus(value: string | undefined) {

@@ -1,9 +1,11 @@
 import type { MarketRadarResearchScore, MarketRadarSnapshotFrames } from "../../types";
 import type { MarketRadarRow } from "../../lib/marketRadar";
 import { buildRadarSnapshotInput } from "../../lib/marketRadarSnapshot";
+import { radarSectorOf, radarSectorOrder } from "../../lib/radarSectors";
 
 // 星图数据模型：把后端列式快照帧 + 当前实时行统一成稠密数组。
-// 坐标轴因子在每一帧内取百分位（0–100）：存储的是加权分，量纲随模型版本变化，百分位只保留相对位置。
+// 坐标轴因子在每一帧内做横截面标准化再软饱和到 0–100（50 = 当帧均值）：存储的是加权分，
+// 量纲随模型版本变化，标准化只保留相对位置；软饱和让极端值渐近而不贴边，主体呈中心云团。
 
 export const CONSTELLATION_FACTORS = ["composite", "strength", "lowVolatility", "activity", "trendQuality"] as const;
 export type ConstellationFactor = (typeof CONSTELLATION_FACTORS)[number];
@@ -21,12 +23,29 @@ export type ConstellationModel = {
   frames: number;
   valid: Uint8Array;
   factors: Record<ConstellationFactor, Float32Array>;
+  /** 综合评分原值（未标准化），详情面板展示用。 */
+  compositeRaw: Float32Array;
   /** 24h 涨跌，单位 %。 */
   change: Float32Array;
   turnover: Float32Array;
   rank: Float32Array;
   /** 每帧的上涨占比（市场宽度），用于时间轴背景曲线。 */
   breadth: Float32Array;
+  /** 每帧有效合约数。 */
+  validCount: Uint32Array;
+  /** 板块（按 radarSectors 归类）去重后的展示顺序。 */
+  sectors: string[];
+  /** 从数据中检测到的板块轮动 / 宽度极值事件，按时间升序。 */
+  events: ConstellationEvent[];
+};
+
+export type ConstellationEvent = {
+  frame: number;
+  time: number;
+  kind: "sector-up" | "sector-down" | "breadth-up" | "breadth-down";
+  sector: string | null;
+  /** 板块事件：24h 内板块平均综合位置变化（0–100 尺度）；宽度事件：上涨占比。 */
+  value: number;
 };
 
 type FrameValues = {
@@ -34,21 +53,21 @@ type FrameValues = {
   rows: Array<{ index: number; rank: number; factors: Record<ConstellationFactor, number | null>; change: number; turnover: number }>;
 };
 
-function percentiles(values: Array<number | null>): Array<number | null> {
-  const indexed = values.map((value, index) => ({ value, index })).filter((entry): entry is { value: number; index: number } => entry.value !== null && Number.isFinite(entry.value));
-  indexed.sort((left, right) => left.value - right.value);
-  const out: Array<number | null> = values.map(() => null);
-  const last = Math.max(indexed.length - 1, 1);
-  let start = 0;
-  // 并列值取同一平均名次，避免同分合约在坐标轴上被人为拉开。
-  while (start < indexed.length) {
-    let end = start;
-    while (end + 1 < indexed.length && indexed[end + 1]!.value === indexed[start]!.value) end += 1;
-    const position = ((start + end) / 2 / last) * 100;
-    for (let cursor = start; cursor <= end; cursor += 1) out[indexed[cursor]!.index] = position;
-    start = end + 1;
+// 横截面标准化 + tanh 软饱和（与原型相同的 50 + 48·tanh(17z/48)）。并列值得到同一坐标。
+function softScores(values: Array<number | null>): Array<number | null> {
+  let n = 0;
+  let sum = 0;
+  let sumSq = 0;
+  for (const value of values) {
+    if (value === null || !Number.isFinite(value)) continue;
+    n += 1;
+    sum += value;
+    sumSq += value * value;
   }
-  return out;
+  if (n === 0) return values.map(() => null);
+  const mean = sum / n;
+  const sd = Math.sqrt(Math.max(1e-12, sumSq / n - mean * mean));
+  return values.map((value) => (value === null || !Number.isFinite(value) ? null : 50 + 48 * Math.tanh((17 * ((value - mean) / sd)) / 48)));
 }
 
 export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null, liveRows: MarketRadarRow[], researchScores: MarketRadarResearchScore[], liveAt: number | null): ConstellationModel {
@@ -60,7 +79,7 @@ export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null
     if (existing !== undefined) return existing;
     indexOf.set(instId, instIds.length);
     instIds.push(instId);
-    categories.push(category || "other");
+    categories.push(radarSectorOf(instId, category));
     return instIds.length - 1;
   };
 
@@ -119,6 +138,8 @@ export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null
   const valid = new Uint8Array(frameCount * count);
   const factors = Object.fromEntries(CONSTELLATION_FACTORS.map((factor) => [factor, new Float32Array(frameCount * count)])) as Record<ConstellationFactor, Float32Array>;
   const change = new Float32Array(frameCount * count);
+  const compositeRaw = new Float32Array(frameCount * count);
+  const validCount = new Uint32Array(frameCount);
   const turnover = new Float32Array(frameCount * count);
   const rank = new Float32Array(frameCount * count);
   const breadth = new Float32Array(frameCount);
@@ -130,11 +151,13 @@ export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null
       change[base + row.index] = row.change;
       turnover[base + row.index] = row.turnover;
       rank[base + row.index] = row.rank;
+      compositeRaw[base + row.index] = row.factors.composite ?? 0;
       if (row.change > 0) rising += 1;
     }
+    validCount[frameIndex] = frame.rows.length;
     breadth[frameIndex] = frame.rows.length > 0 ? rising / frame.rows.length : 0.5;
     for (const factor of CONSTELLATION_FACTORS) {
-      const ranked = percentiles(frame.rows.map((row) => row.factors[factor]));
+      const ranked = softScores(frame.rows.map((row) => row.factors[factor]));
       frame.rows.forEach((row, position) => {
         factors[factor][base + row.index] = ranked[position] ?? 50;
       });
@@ -144,6 +167,8 @@ export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null
   const frameTimes = collected.map((frame) => frame.time);
   const step = frames?.stepHours ? frames.stepHours * 3_600_000 : 3_600_000;
   const gapAfter = frameTimes.slice(1).map((time, index) => time - frameTimes[index]! > step * 1.5);
+  const sectors = [...new Set(categories)].sort((left, right) => radarSectorOrder(left) - radarSectorOrder(right));
+  const partial = { instIds, categories, frameTimes, count, frames: frameCount, valid, factors, breadth };
   return {
     instIds,
     labels: instIds.map((instId) => instId.replace(/-USDT-SWAP$/, "")),
@@ -158,8 +183,68 @@ export function buildConstellationModel(frames: MarketRadarSnapshotFrames | null
     change,
     turnover,
     rank,
-    breadth
+    breadth,
+    compositeRaw,
+    validCount,
+    sectors,
+    events: detectEvents(partial, sectors)
   };
+}
+
+type EventInput = Pick<ConstellationModel, "instIds" | "categories" | "frameTimes" | "count" | "frames" | "valid" | "factors" | "breadth">;
+
+// 事件只从数据里读：板块平均综合位置 24h 内显著上移 / 下移，或全市场上涨占比到达极值。
+// 同一板块 48h 内只记一次，最多保留 8 个幅度最大的事件，时间轴上按时间排列。
+function detectEvents(model: EventInput, sectors: string[]): ConstellationEvent[] {
+  if (model.frames < 3) return [];
+  const composite = model.factors.composite;
+  const hour = 3_600_000;
+  const found: ConstellationEvent[] = [];
+  const members = new Map(sectors.map((sector) => [sector, model.categories.flatMap((category, index) => (category === sector ? [index] : []))]));
+  const sectorMean = (sector: string, frame: number) => {
+    let sum = 0;
+    let n = 0;
+    for (const index of members.get(sector) ?? []) {
+      const key = frame * model.count + index;
+      if (!model.valid[key]) continue;
+      sum += composite[key]!;
+      n += 1;
+    }
+    return n >= 4 ? sum / n : null;
+  };
+  const frameBefore = (frame: number, hours: number) => {
+    const target = model.frameTimes[frame]! - hours * hour;
+    let cursor = frame;
+    while (cursor > 0 && model.frameTimes[cursor]! > target) cursor -= 1;
+    return Math.abs(model.frameTimes[cursor]! - target) <= Math.max(3, hours / 4) * hour ? cursor : null;
+  };
+  for (const sector of sectors) {
+    if (sector === "other") continue;
+    let lastAt = -Infinity;
+    for (let frame = 1; frame < model.frames; frame += 1) {
+      const time = model.frameTimes[frame]!;
+      if (time - lastAt < 48 * hour) continue;
+      const back = frameBefore(frame, 24);
+      if (back === null) continue;
+      const now = sectorMean(sector, frame);
+      const before = sectorMean(sector, back);
+      if (now === null || before === null) continue;
+      const delta = now - before;
+      if (Math.abs(delta) < 6) continue;
+      found.push({ frame, time, kind: delta > 0 ? "sector-up" : "sector-down", sector, value: delta });
+      lastAt = time;
+    }
+  }
+  let lastBreadth = -Infinity;
+  for (let frame = 0; frame < model.frames; frame += 1) {
+    const time = model.frameTimes[frame]!;
+    const value = model.breadth[frame]!;
+    if (time - lastBreadth < 72 * hour || (value > 0.25 && value < 0.75)) continue;
+    found.push({ frame, time, kind: value >= 0.75 ? "breadth-up" : "breadth-down", sector: null, value });
+    lastBreadth = time;
+  }
+  const magnitude = (event: ConstellationEvent) => (event.sector ? Math.abs(event.value) / 6 : Math.abs(event.value - 0.5) * 6);
+  return found.sort((left, right) => magnitude(right) - magnitude(left)).slice(0, 8).sort((left, right) => left.time - right.time);
 }
 
 /** 某合约在 frame 与 frame 之前约 hours 小时两帧之间的名次变化（正数 = 上升）；任一帧缺失返回 null。 */

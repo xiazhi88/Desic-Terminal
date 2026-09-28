@@ -1,8 +1,10 @@
 import type { MarketRadarSnapshotFrames } from "../../types";
+import { radarSectorOf, RADAR_SECTORS } from "../../lib/radarSectors";
 
 // 仅用于浏览器预览（?radarFrames=synthetic）：按真实合约列表生成确定性的回放帧，
 // 让星图的回放、彗尾、质心与空洞渲染在没有桌面端快照时也能验证。
-// 合约按名称哈希分成若干“板块”，各板块在不同时段轮动；中间留一段空洞，验证空洞如实显示。
+// 合约按 radarSectors 归类，各板块在不同时段轮动（带动量的随机游走，避免逐帧抖动）；
+// 中间留一段空洞，验证空洞如实显示。
 
 function hash(text: string) {
   let value = 2166136261;
@@ -34,9 +36,13 @@ export function buildPreviewSnapshotFrames(instIds: string[], categories: Array<
   const gapEnd = gapStart + Math.max(2, Math.floor(count * 0.06));
   const kept = times.filter((_, index) => index < gapStart || index >= gapEnd);
   const n = instIds.length;
-  const groups = instIds.map((instId) => hash(instId) % 6);
+  const sectorCount = RADAR_SECTORS.length;
+  const groups = instIds.map((instId, index) => RADAR_SECTORS.findIndex((sector) => sector.id === radarSectorOf(instId, categories[index])));
   const random = instIds.map((instId) => rng(hash(instId)));
-  const base = instIds.map((_, index) => ({ strength: 30 + random[index]!() * 40, activity: 30 + random[index]!() * 40, calm: 30 + random[index]!() * 40, trend: 30 + random[index]!() * 40, turnover: Math.exp(15 + random[index]!() * 5) }));
+  // 起点贴近当前实时值（有锚点时），回放末端与实时帧自然衔接，不会在最后几帧大幅跳跃。
+  const near = (anchor: number | undefined, index: number) => (anchor === undefined ? 30 + random[index]!() * 40 : Math.min(98, Math.max(2, anchor + (random[index]!() - 0.5) * 24)));
+  const base = instIds.map((_, index) => ({ strength: near(anchors[index]?.strength, index), activity: near(anchors[index]?.activity, index), calm: near(anchors[index]?.lowVolatility, index), trend: near(anchors[index]?.trendQuality, index), turnover: anchors[index]?.turnover ?? Math.exp(15 + random[index]!() * 5), vs: 0, va: 0, home: { strength: 0, activity: 0 } }));
+  for (const item of base) item.home = { strength: item.strength, activity: item.activity };
   const frames = kept.map((time) => {
     const phase = (time - times[0]!) / Math.max(1, times.at(-1)! - times[0]!);
     const composite: number[] = [];
@@ -50,11 +56,15 @@ export function buildPreviewSnapshotFrames(instIds: string[], categories: Array<
       const next = random[index]!;
       const group = groups[index]!;
       // 每个板块有一段轮动窗口：窗口内强度与活跃度抬升。
-      const center = (group + 0.5) / 6;
-      const boost = Math.exp(-Math.pow((phase - center) / 0.07, 2));
+      const center = ((group * 5) % sectorCount + 0.5) / sectorCount;
+      const boost = group === sectorCount - 1 ? 0 : Math.exp(-Math.pow((phase - center) / 0.09, 2));
       const item = base[index]!;
-      item.strength = Math.min(98, Math.max(2, item.strength + (next() - 0.5) * 3 + (boost - 0.25) * 2.2));
-      item.activity = Math.min(98, Math.max(2, item.activity + (next() - 0.5) * 4 + (boost - 0.25) * 3));
+      // 速度带动量（AR(1)），位置只积分速度：轨迹平滑、方向可读。
+      item.vs = 0.86 * item.vs + (next() - 0.5) * 0.9 + (boost - 0.2) * 0.5 * stepHours;
+      item.va = 0.86 * item.va + (next() - 0.5) * 1.1 + (boost - 0.2) * 0.7 * stepHours;
+      // 弱均值回归：合成序列围绕起点游走，不会一路漂出坐标区。
+      item.strength = Math.min(98, Math.max(2, item.strength + item.vs + 0.03 * (item.home.strength - item.strength)));
+      item.activity = Math.min(98, Math.max(2, item.activity + item.va + 0.03 * (item.home.activity - item.activity)));
       item.calm = Math.min(98, Math.max(2, item.calm + (next() - 0.5) * 2 - boost * 1.2));
       item.trend = Math.min(98, Math.max(2, item.trend + (next() - 0.5) * 2.5 + boost));
       const anchor = anchors[index];

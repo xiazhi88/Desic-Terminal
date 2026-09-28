@@ -1,5 +1,4 @@
 import type { ConstellationFactor, ConstellationModel } from "./constellationModel";
-import { rankChangeOver } from "./constellationModel";
 
 // 市场星图渲染引擎（与 React 解耦）：网格层（2D）+ 星点 / 彗尾层（WebGL2）+ 叠加层（2D：质心、标签、扫描、套索）。
 // 颜色只表达 24h 涨跌（红涨绿跌），点大小 = 成交额，光晕只给近 6 小时综合名次显著变化的合约（活数据）。
@@ -8,14 +7,22 @@ export type AxisLabels = { x: string; y: string; xLow: string; xHigh: string; yL
 
 export type EngineCallbacks = {
   onHover: (index: number | null, clientX: number, clientY: number) => void;
+  /** -1 = 点击空白处，清除选中。 */
   onSelect: (index: number) => void;
+  /** ⌘ / Ctrl 点击：加入或移出比较。 */
+  onToggleCompare: (index: number) => void;
   onLasso: (indices: number[]) => void;
   onTime: (frame: number, playing: boolean) => void;
 };
 
-const PAD = { left: 50, right: 22, top: 26, bottom: 40 };
+const PAD = { left: 46, right: 18, top: 58, bottom: 36 };
 const PT_STRIDE = 8;
-const TRAIL_SEG = 14;
+const TRAIL_SEG = 16;
+/** 比较序列色（与比较面板一致）。 */
+export const COMPARE_SERIES = ["#ecebf4", "#5fd4e0", "#f3b23c", "#86a8ff"];
+const UI_FONT = "ui-sans-serif, system-ui, -apple-system, sans-serif";
+const NUM_FONT = "ui-monospace, SFMono-Regular, Menlo, monospace";
+const INK = { ink: "#f4f4fa", ink2: "#b9bacb", ink3: "#7e8096", ink4: "#53556a", bg: "#05060b", live: "#5fd4e0" };
 const CHANGE_SCALE = 10;
 
 const POINT_VS = `#version 300 es
@@ -116,6 +123,9 @@ export class RadarConstellationEngine {
   private height = 1;
   private dpr = 1;
   private region = { x0: 0, y0: 0, x1: 1, y1: 1 };
+  /** 坐标轴可见范围（0–100 尺度内）：按回放区间的数据分布收紧，避免星点挤在中间、四周大片留白。 */
+  private domainX: [number, number] = [0, 100];
+  private domainY: [number, number] = [0, 100];
   private xFactor: ConstellationFactor = "strength";
   private yFactor: ConstellationFactor = "activity";
   private labels: AxisLabels = { x: "", y: "", xLow: "", xHigh: "", yLow: "", yHigh: "" };
@@ -140,6 +150,12 @@ export class RadarConstellationEngine {
   private focusMask: Uint8Array | null = null;
   private hiddenCategories = new Set<string>();
   private categoryNames: Record<string, string> = {};
+  private categoryFocus: string | null = null;
+  private showTrails = true;
+  private showCentroids = true;
+  private badges = new Map<number, { delta: number; at: number }>();
+  private birthDelay = new Float32Array(0);
+  private readonly bootAt = performance.now();
   private selected = -1;
   private compare: number[] = [];
   private hover = -1;
@@ -197,6 +213,7 @@ export class RadarConstellationEngine {
       this.dy = new Float32Array(n);
       this.ds = new Float32Array(n);
       this.flash = new Float32Array(n);
+      this.birthDelay = Float32Array.from({ length: n }, () => (this.reducedMotion ? 0 : 0.05 + Math.random() * 0.55));
       this.drawOrder = Array.from({ length: n }, (_, index) => index);
       this.pointData = new Float32Array(n * PT_STRIDE);
       this.lineData = new Float32Array(n * TRAIL_SEG * 2 * 6 + 64);
@@ -225,6 +242,18 @@ export class RadarConstellationEngine {
     if (changed && !this.reducedMotion && this.model) {
       this.axisAnimation = { start: performance.now(), fromX: this.dx.slice(), fromY: this.dy.slice() };
     }
+    this.drawGrid();
+  }
+
+  setDomain(x: [number, number], y: [number, number]) {
+    if (x[0] === this.domainX[0] && x[1] === this.domainX[1] && y[0] === this.domainY[0] && y[1] === this.domainY[1]) return;
+    const shift = Math.max(Math.abs(x[0] - this.domainX[0]), Math.abs(x[1] - this.domainX[1]), Math.abs(y[0] - this.domainY[0]), Math.abs(y[1] - this.domainY[1]));
+    // 实时刷新带来的细微变化直接生效（星点本身有平滑逼近）；明显的视野变化才播放过渡。
+    if (shift > 2 && !this.reducedMotion && this.model && !this.axisAnimation) {
+      this.axisAnimation = { start: performance.now(), fromX: this.dx.slice(), fromY: this.dy.slice() };
+    }
+    this.domainX = x;
+    this.domainY = y;
     this.drawGrid();
   }
 
@@ -262,6 +291,15 @@ export class RadarConstellationEngine {
 
   setCategoryNames(names: Record<string, string>) {
     this.categoryNames = names;
+  }
+
+  setCategoryFocus(category: string | null) {
+    this.categoryFocus = category;
+  }
+
+  setLayers(trails: boolean, centroids: boolean) {
+    this.showTrails = trails;
+    this.showCentroids = centroids;
   }
 
   setSelection(selected: number, compare: number[]) {
@@ -365,9 +403,14 @@ export class RadarConstellationEngine {
 
   resize() {
     const rect = this.host.getBoundingClientRect();
-    this.width = Math.max(1, rect.width);
-    this.height = Math.max(1, rect.height);
-    this.dpr = Math.min(window.devicePixelRatio || 1, 2);
+    const width = Math.max(1, Math.round(rect.width));
+    const height = Math.max(1, Math.round(rect.height));
+    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+    // 尺寸没变就不动画布：重设 canvas 宽高会清空并重新分配（含 WebGL 绘图缓冲），代价很高。
+    if (width === this.width && height === this.height && dpr === this.dpr) return;
+    this.width = width;
+    this.height = height;
+    this.dpr = dpr;
     for (const canvas of [this.grid, this.glCanvas, this.overlay]) {
       canvas.width = Math.round(this.width * this.dpr);
       canvas.height = Math.round(this.height * this.dpr);
@@ -377,11 +420,13 @@ export class RadarConstellationEngine {
   }
 
   private sx(value: number) {
-    return this.region.x0 + (value / 100) * (this.region.x1 - this.region.x0);
+    const [low, high] = this.domainX;
+    return this.region.x0 + ((value - low) / (high - low)) * (this.region.x1 - this.region.x0);
   }
 
   private sy(value: number) {
-    return this.region.y1 - (value / 100) * (this.region.y1 - this.region.y0);
+    const [low, high] = this.domainY;
+    return this.region.y1 - ((value - low) / (high - low)) * (this.region.y1 - this.region.y0);
   }
 
   private token(name: string, fallback: string) {
@@ -400,29 +445,49 @@ export class RadarConstellationEngine {
     const muted = this.token("--muted", "#b3b5c6");
     context.lineWidth = 1;
     context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
-    for (let value = 0; value <= 100; value += 10) {
-      const x = Math.round(this.sx(value)) + 0.5;
-      const y = Math.round(this.sy(value)) + 0.5;
-      context.strokeStyle = value === 50 ? hairStrong : hair;
-      context.globalAlpha = value % 25 !== 0 && value % 50 !== 0 ? 0.45 : 1;
-      context.setLineDash(value === 50 ? [2, 4] : []);
-      context.beginPath();
-      context.moveTo(x, y0);
-      context.lineTo(x, y1);
-      context.moveTo(x0, y);
-      context.lineTo(x1, y);
-      context.stroke();
-      context.globalAlpha = 1;
-      if (value % 25 === 0) {
-        context.fillStyle = weak;
-        context.textAlign = "center";
-        context.textBaseline = "top";
-        context.fillText(String(value), x, y1 + 7);
-        context.textAlign = "right";
-        context.textBaseline = "middle";
-        context.fillText(String(value), x0 - 8, y);
+    // 刻度随可见范围取 5 或 10 的倍数；50（全市场均值）画虚线。
+    const drawAxis = (axis: "x" | "y") => {
+      const [low, high] = axis === "x" ? this.domainX : this.domainY;
+      const step = high - low <= 45 ? 5 : 10;
+      for (let value = Math.ceil(low / step) * step; value <= high + 1e-6; value += step) {
+        const major = value % 10 === 0;
+        if (axis === "x") {
+          const x = Math.round(this.sx(value)) + 0.5;
+          context.strokeStyle = value === 50 ? hairStrong : hair;
+          context.globalAlpha = major ? 1 : 0.45;
+          context.setLineDash(value === 50 ? [2, 4] : []);
+          context.beginPath();
+          context.moveTo(x, y0);
+          context.lineTo(x, y1);
+          context.stroke();
+          context.globalAlpha = 1;
+          if (major) {
+            context.fillStyle = weak;
+            context.textAlign = "center";
+            context.textBaseline = "top";
+            context.fillText(String(value), x, y1 + 7);
+          }
+        } else {
+          const y = Math.round(this.sy(value)) + 0.5;
+          context.strokeStyle = value === 50 ? hairStrong : hair;
+          context.globalAlpha = major ? 1 : 0.45;
+          context.setLineDash(value === 50 ? [2, 4] : []);
+          context.beginPath();
+          context.moveTo(x0, y);
+          context.lineTo(x1, y);
+          context.stroke();
+          context.globalAlpha = 1;
+          if (major) {
+            context.fillStyle = weak;
+            context.textAlign = "right";
+            context.textBaseline = "middle";
+            context.fillText(String(value), x0 - 8, y);
+          }
+        }
       }
-    }
+    };
+    drawAxis("x");
+    drawAxis("y");
     context.setLineDash([]);
     context.strokeStyle = hairStrong;
     context.strokeRect(x0 + 0.5, y0 + 0.5, x1 - x0 - 1, y1 - y0 - 1);
@@ -476,6 +541,7 @@ export class RadarConstellationEngine {
     if (this.hiddenCategories.has(model.categories[index]!)) return 0;
     let alpha = 1;
     if (this.focusMask && !this.focusMask[index]) alpha = 0.13;
+    if (this.categoryFocus && model.categories[index] !== this.categoryFocus) alpha = Math.min(alpha, 0.13);
     if (this.compare.length > 0 && !this.compare.includes(index)) alpha = Math.min(alpha, 0.35);
     return alpha;
   }
@@ -499,13 +565,28 @@ export class RadarConstellationEngine {
       const turnover = this.sample(model.turnover, index, frame);
       this.tsz[index] = clamp(1.7 + (Math.log10(Math.max(1, turnover)) - 6) * 1.42, 1.8, 7.6);
       this.tchg[index] = this.sample(model.change, index, frame) / CHANGE_SCALE;
-      const delta = rankChangeOver(model, index, nearest, 6);
-      this.tlive[index] = delta === null ? 0 : smoothstep(8, 30, Math.abs(delta));
+      const back = this.frameBefore(nearest, 6);
+      const composite = model.factors.composite;
+      this.tlive[index] = back !== null && model.valid[back * model.count + index]
+        ? smoothstep(7, 15, Math.abs(composite[nearest * model.count + index]! - composite[back * model.count + index]!))
+        : 0;
     }
     if (this.orderFrame !== nearest) {
       this.orderFrame = nearest;
       this.drawOrder.sort((left, right) => this.tsz[right]! - this.tsz[left]!);
     }
+  }
+
+  /** 距 frame 约 hours 小时之前的帧；找不到足够接近的帧时返回 null。 */
+  private frameBefore(frame: number, hours: number) {
+    const model = this.model!;
+    const time = model.frameTimes[frame];
+    if (time === undefined) return null;
+    const target = time - hours * 3_600_000;
+    let cursor = frame;
+    while (cursor > 0 && model.frameTimes[cursor]! > target + 30 * 60_000) cursor -= 1;
+    if (cursor === frame || Math.abs(model.frameTimes[cursor]! - target) > Math.max(90 * 60_000, hours * 3_600_000 * 0.25)) return null;
+    return cursor;
   }
 
   private integrate(dt: number, now: number) {
@@ -527,9 +608,12 @@ export class RadarConstellationEngine {
         this.dx[index]! += (this.tx[index]! - this.dx[index]!) * k;
         this.dy[index]! += (this.ty[index]! - this.dy[index]!) * k;
       }
+      // 首次出现时星点按随机延迟逐个“点亮”。
+      const born = (now - this.bootAt) / 1000 > (this.birthDelay[index] ?? 0);
+      const targetSize = born ? this.tsz[index]! : 0;
       const sizeK = this.reducedMotion ? 1 : 1 - Math.exp(-dt / 0.16);
-      this.ds[index]! += (this.tsz[index]! - this.ds[index]!) * sizeK;
-      if (this.ds[index]! < 0.05 && this.tsz[index] === 0) this.ds[index] = 0;
+      this.ds[index]! += (targetSize - this.ds[index]!) * sizeK;
+      if (this.ds[index]! < 0.05 && targetSize === 0) this.ds[index] = 0;
       this.flash[index] = this.reducedMotion ? 0 : this.flash[index]! * Math.exp(-dt / 0.7);
     }
     if (animation && now - animation.start > 900 + 17 * 12) this.axisAnimation = null;
@@ -551,6 +635,8 @@ export class RadarConstellationEngine {
       if (theta <= phi) {
         sweep.fired.add(index);
         this.flash[index] = 1;
+        const delta = sweep.changed.get(index) ?? 0;
+        if (Math.abs(delta) >= 2 && this.badges.size < 8) this.badges.set(index, { delta, at: now });
       }
     }
     if (progress >= 1) this.sweepState = null;
@@ -568,11 +654,13 @@ export class RadarConstellationEngine {
     // 彗尾：最近若干帧的位置（按步长取均值去抖），遇到快照空洞即截断。
     let vertices = 0;
     const current = Math.floor(this.frame);
-    if (!this.axisAnimation && current > 0) {
+    if (this.showTrails && !this.axisAnimation && current > 0) {
       const x = model.factors[this.xFactor];
       const y = model.factors[this.yFactor];
       const base = this.playing || this.scrubbing ? 0.55 : current < model.frames - 1 ? 0.4 : 0.25;
-      const step = this.playing && this.framesPerSecond > 6 ? 3 : 1;
+      // 彗尾窗口随播放速度变长；每段取步长内均值，去掉逐帧抖动，只留方向。
+      const window = this.framesPerSecond <= 1 ? 12 : this.framesPerSecond <= 6 ? 36 : 72;
+      const step = Math.max(1, Math.round(window / TRAIL_SEG));
       for (let index = 0; index < model.count; index += 1) {
         const alpha = this.talpha[index]!;
         if (alpha < 0.2 || this.ds[index]! < 0.5) continue;
@@ -587,8 +675,20 @@ export class RadarConstellationEngine {
           if (frame < current && model.gapAfter[frame]) break;
           const key = frame * model.count + index;
           if (!model.valid[key]) break;
-          const qx = this.sx(x[key]!);
-          const qy = this.sy(y[key]!);
+          let ax = 0;
+          let ay = 0;
+          let m = 0;
+          for (let q = 0; q < step; q += 1) {
+            const back = frame - q;
+            if (back < 0 || (q > 0 && model.gapAfter[back])) break;
+            const averaged = back * model.count + index;
+            if (!model.valid[averaged]) break;
+            ax += x[averaged]!;
+            ay += y[averaged]!;
+            m += 1;
+          }
+          const qx = this.sx(ax / m);
+          const qy = this.sy(ay / m);
           const qa = base * alpha * boost * Math.pow(1 - segment / TRAIL_SEG, 1.6);
           const offset = vertices * 6;
           this.lineData.set([px, py, rgb[0] * pa, rgb[1] * pa, rgb[2] * pa, pa, qx, qy, rgb[0] * qa, rgb[1] * qa, rgb[2] * qa, qa], offset);
@@ -643,10 +743,14 @@ export class RadarConstellationEngine {
     const context = this.overlay.getContext("2d");
     const model = this.model;
     if (!context || !model) return;
+    const { x0, y0, x1, y1 } = this.region;
     context.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
     context.clearRect(0, 0, this.width, this.height);
-    const text = this.token("--text", "#f4f4fa");
-    const weak = this.token("--weak", "#6e7187");
+    context.save();
+    context.beginPath();
+    context.rect(x0, y0, x1 - x0, y1 - y0);
+    context.clip();
+
     // 没有 WebGL2 时退化为 2D 圆点，数据与交互不变。
     if (!this.webglAvailable) {
       for (const index of this.drawOrder) {
@@ -661,99 +765,306 @@ export class RadarConstellationEngine {
       context.globalAlpha = 1;
     }
 
-    this.drawCentroids(context, weak);
-
-    // 雷达扫描：一次性扫过，只在刷新时出现。
-    const sweep = this.sweepState;
-    if (sweep) {
-      const cx = (this.region.x0 + this.region.x1) / 2;
-      const cy = (this.region.y0 + this.region.y1) / 2;
-      const radius = Math.hypot(this.region.x1 - this.region.x0, this.region.y1 - this.region.y0) / 2;
-      const gradient = context.createConicGradient(sweep.phi - Math.PI / 2 - 0.5, cx, cy);
-      gradient.addColorStop(0, "rgba(95, 212, 224, 0)");
-      gradient.addColorStop(0.08, `rgba(95, 212, 224, ${0.1 * sweep.fade})`);
-      gradient.addColorStop(0.0801, "rgba(95, 212, 224, 0)");
-      context.save();
-      context.beginPath();
-      context.rect(this.region.x0, this.region.y0, this.region.x1 - this.region.x0, this.region.y1 - this.region.y0);
-      context.clip();
-      context.fillStyle = gradient;
-      context.beginPath();
-      context.arc(cx, cy, radius, 0, Math.PI * 2);
-      context.fill();
-      context.restore();
-    }
-
-    // 标签：综合名次前 10 + 选中 / 比较 / 悬停，做碰撞避让。
-    const frame = Math.round(this.frame);
-    const candidates: number[] = [];
-    const ranked: Array<[number, number]> = [];
-    for (let index = 0; index < model.count; index += 1) {
-      if (this.talpha[index]! < 0.5 || this.ds[index]! < 0.5) continue;
-      ranked.push([model.rank[frame * model.count + index]!, index]);
-    }
-    ranked.sort((left, right) => left[0] - right[0]);
-    for (const [, index] of ranked.slice(0, 10)) candidates.push(index);
-    const forced = new Set([this.selected, this.hover, ...this.compare].filter((index) => index >= 0));
-    for (const index of forced) if (!candidates.includes(index)) candidates.unshift(index);
-    const boxes: Array<{ x: number; y: number; w: number; h: number }> = [];
-    context.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-    context.textBaseline = "top";
-    for (const index of [...candidates].sort((left, right) => Number(forced.has(right)) - Number(forced.has(left)))) {
-      const label = model.labels[index]!;
-      const rank = model.rank[frame * model.count + index]!;
-      const detail = ` #${rank}`;
-      const width = context.measureText(label).width + context.measureText(detail).width + 4;
-      const x = this.dx[index]!;
-      const y = this.dy[index]!;
-      const gap = this.ds[index]! + 4;
-      const spots: Array<[number, number]> = [[x + gap, y - 6], [x - gap - width, y - 6], [x - width / 2, y - gap - 13], [x - width / 2, y + gap]];
-      const spot = spots.find(([sx, sy]) => sx > this.region.x0 && sx + width < this.region.x1 && sy > this.region.y0 && sy + 13 < this.region.y1
-        && !boxes.some((box) => sx < box.x + box.w && sx + width > box.x && sy < box.y + box.h && sy + 13 > box.y))
-        ?? (forced.has(index) ? spots[0] : null);
-      if (!spot) continue;
-      boxes.push({ x: spot[0] - 2, y: spot[1] - 1, w: width + 4, h: 15 });
-      context.fillStyle = forced.has(index) ? text : "rgba(240, 240, 248, 0.82)";
-      context.fillText(label, spot[0], spot[1]);
-      context.fillStyle = weak;
-      context.font = "10px ui-monospace, SFMono-Regular, Menlo, monospace";
-      context.fillText(detail, spot[0] + context.measureText(label).width + 2, spot[1] + 1);
-      context.font = "600 11px ui-sans-serif, system-ui, sans-serif";
-      if (forced.has(index)) {
-        context.strokeStyle = "rgba(240, 240, 248, 0.7)";
+    // 板块质心：7 天位移显著的板块画平滑弧线（按时间淡出，每天一个刻点），其余只留小标记。
+    const centroids = this.showCentroids && !this.axisAnimation ? this.centroids() : [];
+    for (const centroid of centroids) {
+      if (!centroid.moving) {
+        context.globalAlpha = 0.55;
+        context.strokeStyle = INK.ink3;
         context.lineWidth = 1;
         context.beginPath();
-        context.arc(x, y, this.ds[index]! + 3, 0, Math.PI * 2);
+        context.arc(centroid.x, centroid.y, 2.5, 0, Math.PI * 2);
+        context.stroke();
+        context.globalAlpha = 1;
+        continue;
+      }
+      const path = centroid.path;
+      const length = path.length;
+      context.lineWidth = 1.3;
+      context.lineCap = "round";
+      context.strokeStyle = INK.ink;
+      for (let k = 0; k < length - 1; k += 1) {
+        const p0 = path[Math.max(0, k - 1)]!;
+        const p1 = path[k]!;
+        const p2 = path[k + 1]!;
+        const p3 = path[Math.min(length - 1, k + 2)]!;
+        const age = 1 - (k + 1) / (length - 1);
+        context.globalAlpha = 0.05 + 0.6 * Math.pow(1 - age, 1.6);
+        context.beginPath();
+        context.moveTo(p1[0], p1[1]);
+        context.bezierCurveTo(p1[0] + (p2[0] - p0[0]) / 6, p1[1] + (p2[1] - p0[1]) / 6, p2[0] - (p3[0] - p1[0]) / 6, p2[1] - (p3[1] - p1[1]) / 6, p2[0], p2[1]);
         context.stroke();
       }
+      context.fillStyle = INK.ink;
+      for (let k = length - 5; k >= 0; k -= 4) {
+        context.globalAlpha = 0.1 + 0.5 * (k / (length - 1));
+        context.beginPath();
+        context.arc(path[k]![0], path[k]![1], 1.3, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.lineCap = "butt";
+      context.globalAlpha = 1;
+      context.lineWidth = 1.2;
+      context.beginPath();
+      context.moveTo(centroid.x - 5, centroid.y);
+      context.lineTo(centroid.x - 2, centroid.y);
+      context.moveTo(centroid.x + 2, centroid.y);
+      context.lineTo(centroid.x + 5, centroid.y);
+      context.moveTo(centroid.x, centroid.y - 5);
+      context.lineTo(centroid.x, centroid.y - 2);
+      context.moveTo(centroid.x, centroid.y + 2);
+      context.lineTo(centroid.x, centroid.y + 5);
+      context.stroke();
+    }
+
+    // 选中：到坐标轴的辅助线 + 7 天路径（每天一个刻点）。
+    const frame = Math.round(this.frame);
+    const selected = this.selected;
+    const x = model.factors[this.xFactor];
+    const y = model.factors[this.yFactor];
+    if (selected >= 0 && this.ds[selected]! > 0.3) {
+      const sxp = this.dx[selected]!;
+      const syp = this.dy[selected]!;
+      context.setLineDash([2, 3]);
+      context.strokeStyle = INK.ink3;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(sxp, syp);
+      context.lineTo(sxp, y1);
+      context.moveTo(sxp, syp);
+      context.lineTo(x0, syp);
+      context.stroke();
+      context.setLineDash([]);
+      const start = model.frameTimes[frame]!;
+      context.strokeStyle = INK.ink;
+      context.globalAlpha = 0.45;
+      context.beginPath();
+      context.moveTo(sxp, syp);
+      for (let back = frame - 1; back >= 0; back -= 1) {
+        if (start - model.frameTimes[back]! > 7 * 86_400_000 || model.gapAfter[back]) break;
+        const key = back * model.count + selected;
+        if (!model.valid[key]) break;
+        context.lineTo(this.sx(x[key]!), this.sy(y[key]!));
+      }
+      context.stroke();
+      context.globalAlpha = 1;
+      for (let day = 1; day <= 7; day += 1) {
+        const back = this.frameBefore(frame, day * 24);
+        if (back === null) break;
+        const key = back * model.count + selected;
+        if (!model.valid[key]) break;
+        context.fillStyle = INK.ink2;
+        context.globalAlpha = 1 - day / 9;
+        context.beginPath();
+        context.arc(this.sx(x[key]!), this.sy(y[key]!), 1.6, 0, Math.PI * 2);
+        context.fill();
+      }
+      context.globalAlpha = 1;
+    }
+
+    // 环：比较（序列色）/ 选中 / 悬停。
+    const ring = (index: number, color: string, width: number, gap: number) => {
+      if (index < 0 || this.ds[index]! < 0.3) return;
+      context.strokeStyle = color;
+      context.lineWidth = width;
+      context.beginPath();
+      context.arc(this.dx[index]!, this.dy[index]!, this.ds[index]! + gap, 0, Math.PI * 2);
+      context.stroke();
+    };
+    this.compare.forEach((index, position) => ring(index, COMPARE_SERIES[position % COMPARE_SERIES.length]!, 1.5, 4));
+    if (selected >= 0) ring(selected, INK.ink, 1.5, 4);
+    if (this.hover >= 0 && this.hover !== selected) ring(this.hover, INK.ink2, 1, 3.5);
+
+    // 标签：比较 / 选中 / 悬停必显，其次移动中的板块质心、扫描徽标、综合名次前 10，统一避让。
+    type LabelItem = { index: number; priority: number; force: boolean; far: boolean; x: number; y: number; r: number; text: string; sub: string; badge: string; font: string; color: string; centroid: boolean; lineHeight: number };
+    const items: LabelItem[] = [];
+    const seen = new Set<number>();
+    const push = (index: number, priority: number, force: boolean, color: string) => {
+      if (index < 0 || seen.has(index) || this.ds[index]! < 0.6 || this.talpha[index]! < 0.3) return;
+      seen.add(index);
+      const badge = this.badges.get(index);
+      items.push({
+        index, priority, force, far: false, x: this.dx[index]!, y: this.dy[index]!, r: this.ds[index]!,
+        text: model.labels[index]!, sub: `#${model.rank[frame * model.count + index]}`,
+        badge: badge ? `${badge.delta > 0 ? "▲" : "▼"}${Math.abs(badge.delta)}` : "",
+        font: `600 11px ${UI_FONT}`, color, centroid: false, lineHeight: 12
+      });
+    };
+    this.compare.forEach((index, position) => push(index, 0, true, COMPARE_SERIES[position % COMPARE_SERIES.length]!));
+    push(selected, 0, true, INK.ink);
+    push(this.hover, 0, true, INK.ink);
+    for (const centroid of centroids) {
+      const name = this.categoryNames[centroid.category] ?? centroid.category;
+      items.push(centroid.moving
+        ? { index: -1, priority: 0.5, force: true, far: true, x: centroid.x, y: centroid.y, r: 6, text: name, sub: "", badge: "", font: `600 11px ${UI_FONT}`, color: INK.ink, centroid: true, lineHeight: 12 }
+        : { index: -1, priority: 5, force: false, far: false, x: centroid.x, y: centroid.y, r: 4, text: name, sub: "", badge: "", font: `500 10px ${UI_FONT}`, color: INK.ink4, centroid: true, lineHeight: 11 });
+    }
+    const order: number[] = [];
+    for (let index = 0; index < model.count; index += 1) if (model.valid[frame * model.count + index] && this.talpha[index]! > 0.5) order.push(index);
+    order.sort((left, right) => model.rank[frame * model.count + left]! - model.rank[frame * model.count + right]!);
+    const topN = this.focusMask ? 14 : 10;
+    for (const index of order.slice(0, topN)) push(index, 2, false, INK.ink2);
+    for (const index of this.badges.keys()) push(index, 1.5, false, INK.ink2);
+    items.sort((left, right) => left.priority - right.priority);
+
+    const boxes = centroids.map((centroid) => ({ x: centroid.x - 6, y: centroid.y - 6, w: 12, h: 12 }));
+    const inside = (box: { x: number; y: number; w: number; h: number }) => box.x >= x0 + 2 && box.y >= y0 + 2 && box.x + box.w <= x1 - 2 && box.y + box.h <= y1 - 2;
+    const hit = (box: { x: number; y: number; w: number; h: number }) => boxes.some((other) => box.x < other.x + other.w && box.x + box.w > other.x && box.y < other.y + other.h && box.y + box.h > other.y);
+    const placed: Array<LabelItem & { bx: number; by: number; w: number; h: number; leader: boolean }> = [];
+    for (const item of items) {
+      context.font = item.font;
+      let width = context.measureText(item.text).width;
+      if (item.sub || item.badge) {
+        context.font = `10px ${NUM_FONT}`;
+        width += context.measureText(` ${item.sub}${item.badge ? `  ${item.badge}` : ""}`).width + 2;
+      }
+      const height = item.lineHeight;
+      const gap = item.r + 4;
+      const candidates: Array<[number, number]> = [
+        [item.x + gap, item.y - height / 2], [item.x - gap - width, item.y - height / 2],
+        [item.x - width / 2, item.y - gap - height], [item.x - width / 2, item.y + gap],
+        [item.x + gap * 0.8, item.y - gap - height * 0.8], [item.x - gap * 0.8 - width, item.y + gap * 0.6]
+      ];
+      const near = candidates.length;
+      if (item.far) {
+        for (const distance of [26, 44]) {
+          candidates.push([item.x + distance, item.y - distance * 0.75 - height], [item.x - distance - width, item.y - distance * 0.75 - height], [item.x + distance, item.y + distance * 0.6], [item.x - distance - width, item.y + distance * 0.6]);
+        }
+      }
+      let done = false;
+      for (let position = 0; position < candidates.length; position += 1) {
+        const [bx, by] = candidates[position]!;
+        const box = { x: bx - 2, y: by - 1, w: width + 4, h: height + 2 };
+        if (!inside(box) || hit(box)) continue;
+        boxes.push(box);
+        placed.push({ ...item, bx, by, w: width, h: height, leader: position >= near });
+        done = true;
+        break;
+      }
+      if (!done && item.force) {
+        const [bx, by] = candidates.find(([cx, cy]) => inside({ x: cx - 2, y: cy - 1, w: width + 4, h: height + 2 })) ?? candidates[0]!;
+        boxes.push({ x: bx - 2, y: by - 1, w: width + 4, h: height + 2 });
+        placed.push({ ...item, bx, by, w: width, h: height, leader: false });
+      }
+    }
+    context.textBaseline = "top";
+    context.textAlign = "left";
+    for (const label of placed) {
+      if (label.leader) {
+        const tx = clamp(label.x, label.bx - 2, label.bx + label.w + 2);
+        const ty = clamp(label.y, label.by - 1, label.by + label.h + 1);
+        context.strokeStyle = INK.ink3;
+        context.lineWidth = 1;
+        context.globalAlpha = 0.7;
+        context.beginPath();
+        context.moveTo(label.x, label.y);
+        context.lineTo(tx, ty);
+        context.stroke();
+        context.globalAlpha = 1;
+      }
+      context.font = label.font;
+      if (!label.centroid || label.far) {
+        context.globalAlpha = 0.85;
+        context.fillStyle = INK.bg;
+        context.fillRect(label.bx - 2, label.by - 1, label.w + 4, 14);
+        context.globalAlpha = 1;
+      }
+      context.fillStyle = label.color;
+      context.fillText(label.text, label.bx, label.by);
+      if (label.sub) {
+        const textWidth = context.measureText(label.text).width;
+        context.font = `10px ${NUM_FONT}`;
+        context.fillStyle = INK.ink4;
+        context.fillText(label.sub, label.bx + textWidth + 4, label.by + 1);
+        if (label.badge) {
+          const badge = this.badges.get(label.index);
+          const age = badge ? (now - badge.at) / 1000 : 9;
+          context.globalAlpha = age < 1.6 ? 1 : Math.max(0, 1 - (age - 1.6));
+          context.fillStyle = INK.live;
+          context.fillText(label.badge, label.bx + textWidth + 4 + context.measureText(`${label.sub} `).width + 4, label.by + 1);
+          context.globalAlpha = 1;
+        }
+      }
+    }
+    for (const [index, badge] of this.badges) if ((now - badge.at) / 1000 > 2.6) this.badges.delete(index);
+
+    // 雷达扫描（一次性，只在实时刷新时出现）。
+    const sweep = this.sweepState;
+    if (sweep) {
+      const cx = (x0 + x1) / 2;
+      const cy = (y0 + y1) / 2;
+      const radius = Math.hypot(x1 - x0, y1 - y0) / 2;
+      const lead = sweep.phi - Math.PI / 2;
+      const span = 0.7;
+      const slices = 28;
+      context.fillStyle = INK.live;
+      for (let slice = 0; slice < slices; slice += 1) {
+        const a1 = lead - (slice / slices) * span;
+        const a0 = lead - ((slice + 1) / slices) * span;
+        context.globalAlpha = 0.13 * sweep.fade * Math.pow(1 - slice / slices, 1.6);
+        context.beginPath();
+        context.moveTo(cx, cy);
+        context.arc(cx, cy, radius, a0, a1);
+        context.closePath();
+        context.fill();
+      }
+      context.globalAlpha = 0.55 * sweep.fade;
+      context.strokeStyle = INK.live;
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(cx, cy);
+      context.lineTo(cx + Math.cos(lead) * radius, cy + Math.sin(lead) * radius);
+      context.stroke();
+      context.globalAlpha = 1;
     }
 
     if (this.lasso && this.lasso.length > 1) {
-      context.strokeStyle = "rgba(240, 240, 248, 0.6)";
-      context.setLineDash([4, 3]);
-      context.fillStyle = "rgba(240, 240, 248, 0.04)";
       context.beginPath();
       this.lasso.forEach(([lx, ly], position) => (position === 0 ? context.moveTo(lx, ly) : context.lineTo(lx, ly)));
       context.closePath();
+      context.fillStyle = INK.ink;
+      context.globalAlpha = 0.05;
       context.fill();
+      context.globalAlpha = 0.8;
+      context.setLineDash([3, 3]);
+      context.strokeStyle = INK.ink2;
       context.stroke();
       context.setLineDash([]);
+      context.globalAlpha = 1;
     }
-    void now;
+    context.restore();
+
+    // 坐标轴读数（选中时）。
+    if (selected >= 0 && this.ds[selected]! > 0.3) {
+      const xv = this.sample(x, selected, this.frame);
+      const yv = this.sample(y, selected, this.frame);
+      context.font = `10px ${NUM_FONT}`;
+      const tag = (label: string, tx: number, ty: number, axis: "x" | "y") => {
+        const width = context.measureText(label).width + 8;
+        const bx = axis === "x" ? tx - width / 2 : tx - width;
+        context.fillStyle = INK.ink;
+        context.fillRect(bx, ty - 8, width, 16);
+        context.fillStyle = INK.bg;
+        context.textAlign = "center";
+        context.textBaseline = "middle";
+        context.fillText(label, bx + width / 2, ty);
+      };
+      tag(xv.toFixed(0), this.dx[selected]!, y1 + 13, "x");
+      tag(yv.toFixed(0), x0 - 4, this.dy[selected]!, "y");
+    }
   }
 
-  // 类别质心：7 天路径（每 6 小时一个样本）EMA 平滑，只有位移显著的类别画轨迹。
-  private drawCentroids(context: CanvasRenderingContext2D, weak: string) {
+  // 板块质心：当前位置 + 7 天路径（每 6 小时一个样本，EMA 平滑去掉逐小时抖动），
+  // 只有 7 天位移显著的前 3 个板块（或被聚焦的板块）画轨迹。
+  private centroids() {
     const model = this.model!;
     const frame = Math.round(this.frame);
-    const categories = [...new Set(model.categories)];
-    if (categories.length < 2) return;
     const x = model.factors[this.xFactor];
     const y = model.factors[this.yFactor];
     const diagonal = Math.hypot(this.region.x1 - this.region.x0, this.region.y1 - this.region.y0);
-    const labelBoxes: Array<{ x: number; y: number; w: number; h: number }> = [];
-    for (const category of categories) {
-      if (this.hiddenCategories.has(category)) continue;
+    const out: Array<{ category: string; x: number; y: number; path: Array<[number, number]>; displacement: number; moving: boolean }> = [];
+    for (const category of model.sectors) {
+      if (this.hiddenCategories.has(category) || category === "other") continue;
       let count = 0;
       let cx = 0;
       let cy = 0;
@@ -766,13 +1077,10 @@ export class RadarConstellationEngine {
       if (count < 3) continue;
       cx /= count;
       cy /= count;
-      const path: Array<[number, number]> = [];
-      const time = model.frameTimes[frame]!;
+      const raw: Array<[number, number]> = [];
       for (let back = 28; back >= 1; back -= 1) {
-        const target = time - back * 6 * 3_600_000;
-        let cursor = frame;
-        while (cursor > 0 && model.frameTimes[cursor]! > target) cursor -= 1;
-        if (Math.abs(model.frameTimes[cursor]! - target) > 3 * 3_600_000) continue;
+        const cursor = this.frameBefore(frame, back * 6);
+        if (cursor === null) continue;
         let m = 0;
         let ax = 0;
         let ay = 0;
@@ -783,47 +1091,24 @@ export class RadarConstellationEngine {
           ay += y[key]!;
           m += 1;
         }
-        if (m > 0) path.push([this.sx(ax / m), this.sy(ay / m)]);
+        if (m > 0) raw.push([this.sx(ax / m), this.sy(ay / m)]);
       }
-      path.push([cx, cy]);
-      const smoothed: Array<[number, number]> = [];
-      let ex = path[0]![0];
-      let ey = path[0]![1];
-      for (const [px, py] of path) {
+      raw.push([cx, cy]);
+      const path: Array<[number, number]> = [];
+      let ex = raw[0]![0];
+      let ey = raw[0]![1];
+      for (const [px, py] of raw) {
         ex += (px - ex) * 0.26;
         ey += (py - ey) * 0.26;
-        smoothed.push([ex, ey]);
+        path.push([ex, ey]);
       }
-      smoothed[smoothed.length - 1] = [cx, cy];
-      const displacement = (Math.hypot(cx - smoothed[0]![0], cy - smoothed[0]![1]) / diagonal) * 100;
-      if (displacement > 5.5 && smoothed.length > 2) {
-        context.strokeStyle = "rgba(240, 240, 248, 0.45)";
-        context.lineWidth = 1.2;
-        context.beginPath();
-        smoothed.forEach(([px, py], position) => (position === 0 ? context.moveTo(px, py) : context.lineTo(px, py)));
-        context.stroke();
-      }
-      context.strokeStyle = "rgba(240, 240, 248, 0.75)";
-      context.lineWidth = 1;
-      context.beginPath();
-      context.moveTo(cx - 4, cy);
-      context.lineTo(cx + 4, cy);
-      context.moveTo(cx, cy - 4);
-      context.lineTo(cx, cy + 4);
-      context.stroke();
-      context.fillStyle = weak;
-      context.font = "10px ui-sans-serif, system-ui, sans-serif";
-      context.textBaseline = "bottom";
-      const name = this.categoryNames[category] ?? category;
-      const width = context.measureText(name).width;
-      // 质心名称互相避让：依次尝试右上、右下、左上、左下，全部冲突则不画名称（十字标记保留）。
-      const spot = ([[cx + 6, cy - 3], [cx + 6, cy + 14], [cx - 6 - width, cy - 3], [cx - 6 - width, cy + 14]] as Array<[number, number]>)
-        .find(([lx, ly]) => !labelBoxes.some((box) => lx < box.x + box.w && lx + width > box.x && ly - 12 < box.y + box.h && ly > box.y));
-      if (spot) {
-        labelBoxes.push({ x: spot[0], y: spot[1] - 12, w: width, h: 12 });
-        context.fillText(name, spot[0], spot[1]);
-      }
+      path[path.length - 1] = [cx, cy];
+      const displacement = (Math.hypot(cx - path[0]![0], cy - path[0]![1]) / diagonal) * 100;
+      out.push({ category, x: cx, y: cy, path, displacement, moving: false });
     }
+    out.filter((item) => item.displacement > 5.5 && item.path.length > 4).sort((left, right) => right.displacement - left.displacement).slice(0, 3).forEach((item) => { item.moving = true; });
+    for (const item of out) if (this.categoryFocus === item.category && item.path.length > 4) item.moving = true;
+    return out;
   }
 
   private pick(x: number, y: number) {
@@ -882,7 +1167,8 @@ export class RadarConstellationEngine {
       }
       const [x, y] = local(event);
       const index = this.pick(x, y);
-      if (index >= 0) this.callbacks.onSelect(index);
+      if (index >= 0 && (event.metaKey || event.ctrlKey)) this.callbacks.onToggleCompare(index);
+      else this.callbacks.onSelect(index);
     });
   }
 

@@ -204,24 +204,31 @@ async function main() {
      const evidenceStrip = page.locator(".ai-evidence-strip");
      if (await evidenceStrip.count() !== 1) throw new Error("Only the evidence-ledger answer should show a balance summary strip");
      await evidenceStrip.click();
-     await page.waitForSelector(".ai-evidence-board .ai-evidence-balance", { timeout: 10_000 });
+     await page.waitForSelector(".evb .evb-bal", { timeout: 10_000 });
      const evidence = await page.evaluate(() => ({
-       bear: document.querySelectorAll(".ai-evidence-column.is-bear .ai-evidence-card").length,
-       bull: document.querySelectorAll(".ai-evidence-column.is-bull .ai-evidence-card").length,
-       context: document.querySelectorAll(".ai-evidence-context .ai-evidence-card").length,
-       active: document.querySelector(".ai-evidence-slot.is-active")?.textContent || "",
-       revised: document.querySelectorAll(".ai-evidence-revision").length,
-       wake: document.querySelectorAll(".ai-evidence-wake-row").length,
-       stats: document.querySelector(".ai-evidence-balance-stats")?.textContent || ""
+       bear: document.querySelectorAll(".evb-col.is-bear .evb-card").length,
+       bull: document.querySelectorAll(".evb-col.is-bull .evb-card").length,
+       context: document.querySelectorAll(".evb-neutral .evb-card").length,
+       active: document.querySelector(".evb-stamp")?.textContent || "",
+       revised: document.querySelectorAll(".evb-card.is-reviewed").length,
+       wake: document.querySelectorAll(".evb-wake").length,
+       stats: document.querySelector(".evb-bal-readout")?.textContent || ""
      }));
      if (evidence.bear !== 4 || evidence.bull !== 4 || evidence.context !== 3) throw new Error(`Evidence columns do not match the ledger: ${JSON.stringify(evidence)}`);
-     if (!evidence.active.includes("放弃") || evidence.revised !== 1 || evidence.wake !== 3 || !/冲突度 97%/.test(evidence.stats)) throw new Error(`Evidence decision, revision or wake panel is wrong: ${JSON.stringify(evidence)}`);
+     if (!evidence.active.includes("放弃") || evidence.revised !== 1 || evidence.wake !== 0 || !/冲突度 97%/.test(evidence.stats)) throw new Error(`Evidence decision, revision or wake panel is wrong: ${JSON.stringify(evidence)}`);
      await page.screenshot({ path: path.join(artifactDir, "ai-research-evidence.png"), fullPage: false });
-     await page.locator(".ai-evidence-view-switch button").nth(1).click();
-     if (await page.locator(".ai-orbit-node").count() !== 3 || await page.locator(".ai-orbit-lane").count() !== 3) throw new Error("Collaboration orbit should show the three consulted experts");
+     await page.locator(".evb-seg button").nth(1).click();
+     await page.waitForSelector(".evb-onode.is-main", { timeout: 5_000 });
+     if (await page.locator(".evb-onode:not(.is-main)").count() !== 3) throw new Error("Collaboration orbit should show the three consulted experts");
      await page.screenshot({ path: path.join(artifactDir, "ai-research-orbit.png"), fullPage: false });
      await page.locator(".ai-inspector-shortcut[aria-label*='证据天平']").click();
-     if (await page.locator(".ai-evidence-note").count() !== 1 || await page.locator(".ai-evidence-balance").count() !== 0) throw new Error("A turn without a ledger must explain it instead of drawing a balance");
+     // 仍在生成的回合即使还没有账本也显示等待中的天平（证据随记录实时入列）；结束后仍无账本才显示原因说明。
+     const runningBoard = await page.evaluate(() => ({
+       noLedger: document.querySelectorAll(".evb.is-no-ledger").length,
+       balance: document.querySelectorAll(".evb-bal").length,
+       readout: document.querySelector(".evb-bal-readout")?.textContent || ""
+     }));
+     if (runningBoard.noLedger !== 0 || runningBoard.balance !== 1 || !runningBoard.readout.includes("等待证据")) throw new Error(`A running turn without a ledger should show a waiting balance: ${JSON.stringify(runningBoard)}`);
      await intelligenceShortcut.click();
       const expandIntelligence = page.locator(".ai-intelligence-expand");
     if (await expandIntelligence.count() !== 1 || await expandIntelligence.isDisabled()) throw new Error("Full Market Intelligence action is missing");

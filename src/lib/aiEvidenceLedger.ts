@@ -62,16 +62,35 @@ export type EvidenceLedger = {
 const LEDGER_EVIDENCE_TOOL = "research.recordEvidence";
 const LEDGER_DECISION_TOOL = "research.recordDecision";
 
-function asRecord(value: unknown): Record<string, unknown> {
-  if (typeof value === "string") {
-    try {
-      const parsed = JSON.parse(value) as unknown;
-      return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
-    } catch {
-      return {};
-    }
+// 工具结果常以 JSON 字符串到达，单条可达上百 KB；流式输出时界面每个 token 都会重算账本，
+// 不缓存就会反复 JSON.parse 同一批结果把主线程堵死。按字符串本身缓存（同一字符串对象的哈希由引擎缓存）。
+const PARSE_CACHE_LIMIT = 2048;
+const parseCache = new Map<string, unknown>();
+
+/** 解析工具结果（字符串 JSON 或对象），结果按原字符串缓存；调用方不得修改返回值。 */
+export function parseToolPayload(value: unknown): unknown {
+  if (typeof value !== "string") return value;
+  if (parseCache.has(value)) {
+    // 命中时移到队尾（LRU）：长会话里常用结果不会被按插入顺序挤出。
+    const hit = parseCache.get(value);
+    parseCache.delete(value);
+    parseCache.set(value, hit);
+    return hit;
   }
-  return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value) as unknown;
+  } catch {
+    parsed = null;
+  }
+  parseCache.set(value, parsed);
+  if (parseCache.size > PARSE_CACHE_LIMIT) parseCache.delete(parseCache.keys().next().value!);
+  return parsed;
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  const parsed = parseToolPayload(value);
+  return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {};
 }
 
 function text(value: unknown): string | null {
@@ -122,7 +141,23 @@ function readWakeCondition(value: unknown): EvidenceWakeCondition | null {
   };
 }
 
+// 账本只取决于每个工具的 id / 状态 / 结果；流式正文变化不会改变它，按签名复用上一次推导。
+const LEDGER_CACHE_LIMIT = 64;
+const ledgerCache = new Map<string, { results: unknown[]; ledger: EvidenceLedger }>();
+
 export function deriveEvidenceLedger(message: Pick<AiUiMessage, "tools">): EvidenceLedger {
+  const signature = message.tools.map((tool) => `${tool.id}:${tool.status}:${tool.name}`).join("|");
+  const cached = ledgerCache.get(signature);
+  if (cached && cached.results.length === message.tools.length && cached.results.every((result, index) => result === message.tools[index]!.result)) {
+    return cached.ledger;
+  }
+  const ledger = computeEvidenceLedger(message);
+  ledgerCache.set(signature, { results: message.tools.map((tool) => tool.result), ledger });
+  if (ledgerCache.size > LEDGER_CACHE_LIMIT) ledgerCache.delete(ledgerCache.keys().next().value!);
+  return ledger;
+}
+
+function computeEvidenceLedger(message: Pick<AiUiMessage, "tools">): EvidenceLedger {
   // message.tools 按工具首次调用的先后排列，账本的修订顺序即数组顺序。
   const ordered = message.tools;
 

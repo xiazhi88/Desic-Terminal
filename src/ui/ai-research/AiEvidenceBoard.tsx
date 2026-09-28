@@ -1,443 +1,562 @@
-import { useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import clsx from "clsx";
-import { Scale, Orbit, TriangleAlert, Clock3, ArrowUpRight, ArrowDownRight } from "lucide-react";
+import { ArrowLeft, ExternalLink, Scale } from "lucide-react";
 import {
   deriveEvidenceLedger,
-  wakePriceDistance,
+  deriveOrbitExperts,
   toolResultRecord,
   type EvidenceDecision,
   type EvidenceLedger,
   type EvidenceLedgerItem,
-  type EvidenceSource,
-  type EvidenceWakeCondition
+  type EvidenceSource
 } from "../../lib/aiEvidenceLedger";
-import { parseMarketCandles } from "../../lib/aiCandleSeries";
-import { prefersReducedMotion, useSpringValue } from "../../lib/springMotion";
-import { useMarketHotStore } from "../../lib/marketHotStore";
+import { prefersReducedMotion, stepSpring } from "../../lib/springMotion";
 import { aiResearchArtifactForTool, type AiResearchArtifact, type AiToolRun, type AiUiMessage } from "../AiMessageProcess";
-import { useNowInterval } from "./useNowInterval";
 import { AiCollaborationOrbit } from "./AiCollaborationOrbit";
+import { alpha, EVB_COLORS, evidenceDrawer, prepCanvas } from "./evidenceViz";
 import "./ai-evidence.css";
+
+// 证据天平：结构、几何与动效复刻证据天平原型（viz/prototypes/evidence-scale.html）。
+// 数据只来自 research.recordEvidence / recordDecision 与主 Agent 工具结果上的 evidenceRef；
+// 没有账本的回合不画天平，卡片全部留在「待定」，界面不从正文推断立场或权重。
 
 type UiText = (zh: string, en: string) => string;
 
 type BoardProps = {
   message: AiUiMessage | null;
+  /** 该回合是否仍在生成；由工作区的流式状态传入。 */
+  running?: boolean;
   uiText: UiText;
   onOpenArtifact?: (artifact: AiResearchArtifact) => void;
 };
 
-const MAX_TILT_DEG = 12;
+type CardState = "pending" | "bear" | "bull" | "neutral";
 
-export function AiEvidenceBoard({ message, uiText, onOpenArtifact }: BoardProps) {
+type CardModel = {
+  key: string;
+  /** 从待定区飞入立场列时，用来源编号找到起飞位置。 */
+  flipOrigin?: string;
+  state: CardState;
+  claim: string;
+  src: string;
+  via: string | null;
+  kindLabel: string | null;
+  weight: number;
+  previousWeight: number | null;
+  reviewed: boolean;
+  refs: string[];
+  tool: AiToolRun | undefined;
+  item: EvidenceLedgerItem | null;
+};
+
+const EASE = "cubic-bezier(0.2, 0.8, 0.2, 1)";
+const MONO = "ui-monospace, SFMono-Regular, Menlo, monospace";
+const BAL = { px: 300, py: 30, L: 170, drop: 44 };
+const SVG_NS = "http://www.w3.org/2000/svg";
+
+function isExpertTool(tool: AiToolRun | undefined) {
+  return tool?.name === "consult_expert" || tool?.name === "consult_experts" || tool?.name === "follow_up";
+}
+
+function expertNames(tool: AiToolRun | undefined) {
+  if (!tool || !isExpertTool(tool)) return null;
+  const result = toolResultRecord(tool);
+  const names = Array.isArray(result.results)
+    ? result.results.map((entry) => String((entry as Record<string, unknown>)?.expertName ?? "")).filter(Boolean)
+    : [String(result.expertName ?? "")].filter(Boolean);
+  return names.length > 0 ? names.join(" / ") : null;
+}
+
+function buildCards(ledger: EvidenceLedger, uiText: UiText): CardModel[] {
+  const cards: CardModel[] = ledger.items.map((item) => {
+    const sources = item.sourceRefs.map((ref) => ledger.sources.get(ref)).filter((source): source is EvidenceSource => Boolean(source));
+    const expert = sources.find((source) => isExpertTool(source.tool))?.tool;
+    const direct = sources.find((source) => !isExpertTool(source.tool))?.tool ?? sources[0]?.tool;
+    return {
+      key: `item:${item.id}`,
+      flipOrigin: item.sourceRefs[0] ? `ref:${item.sourceRefs[0]}` : undefined,
+      state: item.stance === "constraint" ? "neutral" : item.stance,
+      claim: item.claim,
+      src: direct && !isExpertTool(direct) ? direct.name : direct ? uiText("专家结论", "Expert finding") : uiText("来源缺失", "Missing source"),
+      via: expertNames(expert),
+      kindLabel: item.stance === "constraint" ? uiText("约束", "Constraint") : item.stance === "neutral" ? uiText("中性", "Neutral") : null,
+      weight: item.weight,
+      previousWeight: item.revisions > 0 && item.previousWeight !== null && item.previousWeight !== item.weight ? item.previousWeight : null,
+      reviewed: item.revisions > 0,
+      refs: item.sourceRefs,
+      tool: direct,
+      item
+    };
+  });
+  for (const source of ledger.unassigned) {
+    cards.push({
+      key: `ref:${source.ref}`,
+      state: "pending",
+      claim: source.tool.summary || source.tool.name,
+      src: source.tool.name,
+      via: expertNames(source.tool),
+      kindLabel: null,
+      weight: 0,
+      previousWeight: null,
+      reviewed: false,
+      refs: [source.ref],
+      tool: source.tool,
+      item: null
+    });
+  }
+  return cards;
+}
+
+export function AiEvidenceBoard({ message, running: runningProp, uiText, onOpenArtifact }: BoardProps) {
   const [view, setView] = useState<"evidence" | "orbit">("evidence");
+  const [detailKey, setDetailKey] = useState<string | null>(null);
   const ledger = useMemo(() => (message ? deriveEvidenceLedger(message) : null), [message]);
-  const hasAgents = (message?.agents?.length ?? 0) > 0;
+  const cards = useMemo(() => (ledger ? buildCards(ledger, uiText) : []), [ledger, uiText]);
+  const expertSignature = message ? (message.agents ?? []).map((agent) => `${agent.id}:${agent.status}:${agent.endedAt ?? ""}`).join("|") : "";
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const experts = useMemo(() => (message ? deriveOrbitExperts(message) : []), [expertSignature]);
+  const activeExperts = experts.filter((expert) => expert.status === "running" || expert.status === "queued").length;
+  const running = Boolean(message && runningProp && !message.completed && !message.error);
 
   if (!message || !ledger) {
-    return <section className="ai-evidence-board is-empty" aria-label={uiText("证据天平", "Evidence balance")}>
-      <p>{uiText("还没有研究回合。提出一个需要判断方向的问题后，工具结果会在这里按证据整理。", "No research turn yet. Ask a question that needs a directional call and tool results will be organized here as evidence.")}</p>
+    return <section className="evb is-empty" aria-label={uiText("证据天平", "Evidence balance")}>
+      <p className="evb-empty-note">{uiText("还没有研究回合。提出一个需要判断方向的问题后，工具结果会在这里按证据整理。", "No research turn yet. Ask a question that needs a directional call and tool results will be organized here as evidence.")}</p>
     </section>;
   }
 
-  const openSource = (source: EvidenceSource) => {
-    if (!onOpenArtifact) return;
-    onOpenArtifact(aiResearchArtifactForTool(source.tool, message.id) ?? fallbackArtifact(source, message.id));
-  };
+  const assigned = cards.filter((card) => card.state !== "pending").length;
+  const pending = cards.length - assigned;
+  const sealed = Boolean(ledger.decision) && pending === 0;
+  // 回答进行中即使还没有账本也显示天平（等待证据入账）；回合结束仍没有账本才说明原因。
+  const noLedger = !ledger.hasLedger && !running;
+  const detail = detailKey ? cards.find((card) => card.key === detailKey) ?? null : null;
 
-  return <section className="ai-evidence-board" aria-label={uiText("证据天平", "Evidence balance")}>
-    <header className="ai-evidence-head">
-      <div className="ai-evidence-view-switch" role="tablist" aria-label={uiText("证据视图", "Evidence view")}>
-        <button type="button" role="tab" aria-selected={view === "evidence"} onClick={() => setView("evidence")}><Scale size={13} />{uiText("证据板", "Evidence")}</button>
-        <button type="button" role="tab" aria-selected={view === "orbit"} onClick={() => setView("orbit")} disabled={!hasAgents} title={hasAgents ? undefined : uiText("本回合没有咨询专家", "No experts were consulted this turn")}><Orbit size={13} />{uiText("协作轨道", "Collaboration")}</button>
+  return <section className={clsx("evb", noLedger && "is-no-ledger", sealed && "is-sealed")} aria-label={uiText("证据天平", "Evidence balance")}>
+    <header className="evb-head">
+      <div className="evb-seg" role="group" aria-label={uiText("证据视图", "Evidence view")}>
+        <button type="button" aria-pressed={view === "evidence"} onClick={() => setView("evidence")}>{uiText("证据板", "Evidence")}</button>
+        <button type="button" aria-pressed={view === "orbit"} onClick={() => setView("orbit")}>
+          {uiText("协作轨道", "Collaboration")}
+          {activeExperts > 0 ? <span className="evb-tab-badge"><span className="evb-live is-ai" />{activeExperts}</span> : null}
+        </button>
       </div>
-      <small className="ai-evidence-counts">
-        {ledger.hasLedger
-          ? uiText(`账本 ${ledger.items.length} 条 · 来源 ${ledger.sources.size}`, `${ledger.items.length} ledger items · ${ledger.sources.size} sources`)
+      <span className="evb-ledger-tag">
+        {!noLedger
+          ? uiText(`账本 ${assigned} 条${pending > 0 ? ` · ${pending} 待定` : ""}`, `${assigned} ledger items${pending > 0 ? ` · ${pending} pending` : ""}`)
           : uiText(`来源 ${ledger.sources.size} · 无账本`, `${ledger.sources.size} sources · no ledger`)}
-      </small>
+      </span>
     </header>
-    {view === "orbit" && hasAgents
-      ? <AiCollaborationOrbit message={message} uiText={uiText} />
-      : <EvidenceView ledger={ledger} messageKey={message.id} uiText={uiText} onOpenSource={openSource} />}
-  </section>;
-}
-
-function EvidenceView({ ledger, messageKey, uiText, onOpenSource }: { ledger: EvidenceLedger; messageKey: string; uiText: UiText; onOpenSource: (source: EvidenceSource) => void }) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  useFlipLayout(hostRef, `${messageKey}:${ledger.items.map((item) => `${item.id}:${item.stance}`).join("|")}:${ledger.unassigned.map((source) => source.ref).join("|")}`);
-  const bear = ledger.items.filter((item) => item.stance === "bear");
-  const bull = ledger.items.filter((item) => item.stance === "bull");
-  const context = ledger.items.filter((item) => item.stance === "neutral" || item.stance === "constraint");
-
-  return <div className="ai-evidence-view" ref={hostRef}>
-    {ledger.hasLedger
-      ? <>
-        <EvidenceBalance ledger={ledger} uiText={uiText} />
-        <DecisionSlots decision={ledger.decision} uiText={uiText} />
-      </>
-      : <p className="ai-evidence-note">{uiText("本回合没有调用证据账本：工具结果只按返回顺序列出，不从回答正文推断立场，因此不显示天平。", "This turn did not use the evidence ledger. Tool results are listed in return order, stances are never inferred from the answer text, so no balance is shown.")}</p>}
-    {ledger.unknownRefs.length > 0
-      ? <p className="ai-evidence-warning" role="note"><TriangleAlert size={13} />{uiText(`账本引用了本轮不存在的来源编号：${ledger.unknownRefs.join("、")}（未计入来源）`, `The ledger cites refs that do not exist this turn: ${ledger.unknownRefs.join(", ")} (not counted as sources)`)}</p>
-      : null}
-    {ledger.hasLedger
-      ? <div className="ai-evidence-columns">
-        <EvidenceColumn stance="bear" title={uiText("偏空", "Bearish")} items={bear} ledger={ledger} uiText={uiText} onOpenSource={onOpenSource} />
-        <EvidenceColumn stance="bull" title={uiText("偏多", "Bullish")} items={bull} ledger={ledger} uiText={uiText} onOpenSource={onOpenSource} />
+    <div className="evb-body">
+      <div className="evb-view" data-hidden={view !== "evidence"}>
+        <EvidenceView ledger={ledger} cards={cards} running={running} noLedger={noLedger} messageKey={message.id} uiText={uiText} onOpenDetail={setDetailKey} />
       </div>
-      : null}
-    {context.length > 0
-      ? <section className="ai-evidence-context" aria-label={uiText("中性与约束", "Neutral and constraints")}>
-        <header><span>{uiText("中性 / 约束", "Neutral / constraints")}</span><small>{uiText("不计权重", "Not weighted")}</small></header>
-        <div>{context.map((item) => <EvidenceItemCard key={item.id} item={item} ledger={ledger} uiText={uiText} onOpenSource={onOpenSource} compact />)}</div>
-      </section>
-      : null}
-    {ledger.unassigned.length > 0
-      ? <section className="ai-evidence-pending" aria-label={uiText("待归类", "Unassigned")}>
-        <header><span>{ledger.hasLedger ? uiText("待归类", "Unassigned") : uiText("工具结果", "Tool results")}</span><small>{ledger.hasLedger ? uiText("已返回、账本尚未引用", "Returned, not yet cited by the ledger") : uiText("按返回顺序", "In return order")}</small></header>
-        <div>{ledger.unassigned.map((source) => <SourceCard key={source.ref} source={source} uiText={uiText} onOpen={() => onOpenSource(source)} />)}</div>
-      </section>
-      : null}
-    {ledger.decision && ledger.decision.wakeConditions.length > 0
-      ? <WakePanel decision={ledger.decision} instId={ledger.decision.instId ?? ledger.instId} uiText={uiText} />
-      : null}
-  </div>;
-}
-
-function EvidenceColumn({ stance, title, items, ledger, uiText, onOpenSource }: { stance: "bull" | "bear"; title: string; items: EvidenceLedgerItem[]; ledger: EvidenceLedger; uiText: UiText; onOpenSource: (source: EvidenceSource) => void }) {
-  const total = stance === "bull" ? ledger.bull : ledger.bear;
-  return <section className={clsx("ai-evidence-column", `is-${stance}`)} aria-label={title}>
-    <header><span>{title}</span><small>{items.length} · {formatWeight(total)}</small></header>
-    {items.length === 0
-      ? <p className="ai-evidence-column-empty">{uiText("暂无", "None yet")}</p>
-      : items.map((item) => <EvidenceItemCard key={item.id} item={item} ledger={ledger} uiText={uiText} onOpenSource={onOpenSource} />)}
-  </section>;
-}
-
-function EvidenceItemCard({ item, ledger, uiText, onOpenSource, compact = false }: { item: EvidenceLedgerItem; ledger: EvidenceLedger; uiText: UiText; onOpenSource: (source: EvidenceSource) => void; compact?: boolean }) {
-  const sources = item.sourceRefs.map((ref) => ledger.sources.get(ref)).filter((source): source is EvidenceSource => Boolean(source));
-  const primary = sources[0];
-  const revised = item.revisions > 0 && item.previousWeight !== null && item.previousWeight !== item.weight;
-  return <button
-    type="button"
-    className={clsx("ai-evidence-card", `is-${item.stance}`, compact && "is-compact")}
-    data-flip-key={`item:${item.id}`}
-    data-flip-origin={item.sourceRefs[0] ? `ref:${item.sourceRefs[0]}` : undefined}
-    onClick={() => primary && onOpenSource(primary)}
-    disabled={!primary}
-    title={item.revisionNote ?? undefined}
-  >
-    <span className="ai-evidence-card-meta">
-      <code title={sources.map((source) => source.tool.name).join(", ")}>{primary ? sourceLabel(primary.tool.name, uiText) : uiText("来源缺失", "Missing source")}</code>
-      <span className="ai-evidence-refs">{item.sourceRefs.map((ref) => <i key={ref} className={ledger.sources.has(ref) ? undefined : "is-unknown"}>{ref}</i>)}</span>
-      {item.stance === "bull" || item.stance === "bear"
-        ? <span className="ai-evidence-weight" aria-label={uiText(`权重 ${formatWeight(item.weight)}`, `Weight ${formatWeight(item.weight)}`)}>
-          {revised ? <s>{formatWeight(item.previousWeight!)}</s> : null}
-          <i className="ai-evidence-weight-track"><em style={{ width: `${(item.weight / 3) * 100}%` }} /></i>
-          <b>{formatWeight(item.weight)}</b>
-        </span>
-        : <span className="ai-evidence-kind">{item.stance === "constraint" ? uiText("约束", "Constraint") : uiText("中性", "Neutral")}</span>}
-    </span>
-    <span className="ai-evidence-claim">{item.claim}</span>
-    {revised ? <span className="ai-evidence-revision">{uiText("已修订", "Revised")}{item.revisionNote ? ` · ${item.revisionNote}` : ""}</span> : null}
-    {!compact && primary ? <EvidenceMini tool={primary.tool} /> : null}
-  </button>;
-}
-
-function SourceCard({ source, uiText, onOpen }: { source: EvidenceSource; uiText: UiText; onOpen: () => void }) {
-  return <button type="button" className="ai-evidence-card is-pending" data-flip-key={`ref:${source.ref}`} onClick={onOpen}>
-    <span className="ai-evidence-card-meta"><code title={source.tool.name}>{sourceLabel(source.tool.name, uiText)}</code><span className="ai-evidence-refs"><i>{source.ref}</i></span></span>
-    <span className="ai-evidence-claim">{source.tool.summary || uiText("工具已返回", "Tool returned")}</span>
-    <EvidenceMini tool={source.tool} />
-  </button>;
-}
-
-// —— 天平：按净权重倾斜，欠阻尼弹簧晃动后落定 ——
-function EvidenceBalance({ ledger, uiText }: { ledger: EvidenceLedger; uiText: UiText }) {
-  const target = ledger.total > 0 ? Math.max(-1, Math.min(1, ledger.net / Math.max(ledger.total, 3))) * MAX_TILT_DEG : 0;
-  const angle = useSpringValue(target, { stiffness: 70, damping: 7 });
-  const radians = (angle * Math.PI) / 180;
-  const pivot = { x: 180, y: 34 };
-  const arm = 128;
-  const left = { x: pivot.x - arm * Math.cos(radians), y: pivot.y - arm * Math.sin(radians) };
-  const right = { x: pivot.x + arm * Math.cos(radians), y: pivot.y + arm * Math.sin(radians) };
-  const bearItems = ledger.items.filter((item) => item.stance === "bear");
-  const bullItems = ledger.items.filter((item) => item.stance === "bull");
-  return <div className="ai-evidence-balance">
-    <div className="ai-evidence-side is-bear"><small>{uiText("偏空", "Bearish")}</small><strong>{formatWeight(ledger.bear)}</strong><span>{uiText(`${bearItems.length} 条`, `${bearItems.length} items`)}</span></div>
-    <svg viewBox="0 0 360 130" role="img" aria-label={uiText(`证据天平：偏空 ${formatWeight(ledger.bear)}，偏多 ${formatWeight(ledger.bull)}`, `Evidence balance: bearish ${formatWeight(ledger.bear)}, bullish ${formatWeight(ledger.bull)}`)}>
-      <path className="ai-balance-stand" d={`M ${pivot.x} ${pivot.y} V 116 M ${pivot.x - 30} 116 H ${pivot.x + 30}`} />
-      <line className="ai-balance-beam" x1={left.x} y1={left.y} x2={right.x} y2={right.y} />
-      <circle className="ai-balance-pivot" cx={pivot.x} cy={pivot.y} r={3.5} />
-      <BalancePan anchor={left} items={bearItems} stance="bear" />
-      <BalancePan anchor={right} items={bullItems} stance="bull" />
-    </svg>
-    <div className="ai-evidence-side is-bull"><small>{uiText("偏多", "Bullish")}</small><strong>{formatWeight(ledger.bull)}</strong><span>{uiText(`${bullItems.length} 条`, `${bullItems.length} items`)}</span></div>
-    <p className="ai-evidence-balance-stats">
-      {uiText("净", "Net")} {formatSigned(ledger.net)} · {uiText("总", "Total")} {formatWeight(ledger.total)}
-      {ledger.conflict !== null ? <> · {uiText("冲突度", "Conflict")} {Math.round(ledger.conflict * 100)}%</> : null}
-    </p>
-  </div>;
-}
-
-function BalancePan({ anchor, items, stance }: { anchor: { x: number; y: number }; items: EvidenceLedgerItem[]; stance: "bull" | "bear" }) {
-  const panY = anchor.y + 46;
-  const widths = items.map((item) => 5 + item.weight * 7);
-  const totalWidth = widths.reduce((sum, width) => sum + width + 2, 0) - 2;
-  let cursor = anchor.x - Math.max(totalWidth, 0) / 2;
-  return <g className={clsx("ai-balance-pan", `is-${stance}`)}>
-    <path className="ai-balance-string" d={`M ${anchor.x} ${anchor.y} L ${anchor.x - 30} ${panY} M ${anchor.x} ${anchor.y} L ${anchor.x + 30} ${panY}`} />
-    <path className="ai-balance-dish" d={`M ${anchor.x - 38} ${panY} Q ${anchor.x} ${panY + 12} ${anchor.x + 38} ${panY}`} />
-    {items.map((item, index) => {
-      const width = widths[index] ?? 5;
-      const x = cursor;
-      cursor += width + 2;
-      return <rect key={item.id} className="ai-balance-weight" x={x} y={panY - 8} width={width} height={7} rx={1.5} />;
-    })}
-  </g>;
-}
-
-function DecisionSlots({ decision, uiText }: { decision: EvidenceDecision | null; uiText: UiText }) {
-  const middleLabel = decision?.outcome === "hold" ? uiText("持有", "Hold") : uiText("放弃", "Abstain");
-  const slots: Array<{ key: string; label: string; active: boolean; tone: string }> = [
-    { key: "short", label: uiText("开空", "Short"), active: decision?.outcome === "short", tone: "bear" },
-    { key: "middle", label: middleLabel, active: decision?.outcome === "abstain" || decision?.outcome === "hold", tone: "neutral" },
-    { key: "long", label: uiText("开多", "Long"), active: decision?.outcome === "long", tone: "bull" }
-  ];
-  return <div className="ai-evidence-decision">
-    <div className="ai-evidence-slots" role="list" aria-label={uiText("本轮决策", "Decision")}>
-      {slots.map((slot) => <span role="listitem" key={slot.key} className={clsx("ai-evidence-slot", `is-${slot.tone}`, slot.active && "is-active", !decision && "is-waiting")} aria-current={slot.active ? "true" : undefined}>{slot.label}</span>)}
+      <div className="evb-view" data-hidden={view !== "orbit"}>
+        {view === "orbit" ? <AiCollaborationOrbit message={message} running={running} uiText={uiText} /> : null}
+      </div>
+      {detail ? <EvidenceDetail card={detail} messageId={message.id} uiText={uiText} onClose={() => setDetailKey(null)} onOpenArtifact={onOpenArtifact} /> : null}
     </div>
-    <p className="ai-evidence-decision-reason">
-      {decision
-        ? <>{decision.outcome === "abstain" ? <b>{uiText("不交易也是有效决策 · ", "Not trading is a valid decision · ")}</b> : null}{decision.reason}</>
-        : uiText("等待 AI 记录本轮决策", "Waiting for the AI to record a decision")}
-    </p>
-  </div>;
-}
-
-// —— 唤醒条件：只展示，不安排唤醒 ——
-function WakePanel({ decision, instId, uiText }: { decision: EvidenceDecision; instId: string | null; uiText: UiText }) {
-  const price = useLivePrice(instId);
-  const hasTime = decision.wakeConditions.some((condition) => condition.kind === "time");
-  const now = useNowInterval(hasTime);
-  const priceConditions = decision.wakeConditions.filter((condition) => condition.price !== null);
-  const bounds = priceConditions.length > 0 && price !== null
-    ? rulerBounds([price, ...priceConditions.map((condition) => condition.price!)])
-    : null;
-  return <section className="ai-evidence-wake" aria-label={uiText("唤醒条件", "Wake conditions")}>
-    <header><span>{uiText("唤醒条件", "Wake conditions")}</span><small>{instId ?? ""}{price !== null ? ` · ${formatPrice(price)}` : ` · ${uiText("无实时价格", "No live price")}`}</small></header>
-    {bounds && price !== null
-      ? <div className="ai-evidence-ruler" aria-hidden="true">
-        <span className="ai-evidence-ruler-track" />
-        {priceConditions.map((condition, index) => <span key={index} className={clsx("ai-evidence-ruler-mark", condition.kind === "price_above" ? "is-above" : "is-below")} style={{ left: `${rulerPosition(condition.price!, bounds)}%` }}><i>{formatPrice(condition.price!)}</i></span>)}
-        <span className="ai-evidence-ruler-price" style={{ left: `${rulerPosition(price, bounds)}%` }} />
-      </div>
-      : null}
-    <ul>
-      {decision.wakeConditions.map((condition, index) => <WakeRow key={index} condition={condition} price={price} now={now} uiText={uiText} />)}
-    </ul>
-    <p className="ai-evidence-wake-note">{uiText("交互研究的唤醒条件仅用于展示，不会自动唤醒或下单。", "Interactive research wake conditions are display-only; nothing is scheduled or submitted.")}</p>
   </section>;
 }
 
-function WakeRow({ condition, price, now, uiText }: { condition: EvidenceWakeCondition; price: number | null; now: number; uiText: UiText }) {
-  if (condition.kind === "time") {
-    const remaining = condition.dueAt !== null ? Math.max(0, condition.dueAt - now) : null;
-    const hours = (condition.afterMinutes ?? 0) / 60;
-    return <li className="ai-evidence-wake-row">
-      <Clock3 size={13} />
-      <span>{hours >= 1 && Number.isInteger(hours) ? uiText(`${hours} 小时后复查`, `Review in ${hours}h`) : uiText(`${condition.afterMinutes} 分钟后复查`, `Review in ${condition.afterMinutes}m`)}{condition.note ? <small>{condition.note}</small> : null}</span>
-      <b>{remaining === null ? "--" : remaining === 0 ? uiText("已到期", "Due") : formatCountdown(remaining)}</b>
-    </li>;
-  }
-  const distance = wakePriceDistance(condition, price);
-  const near = distance !== null && !distance.reached && Math.abs(distance.pct) < 0.0015;
-  return <li className={clsx("ai-evidence-wake-row", near && "is-near", distance?.reached && "is-reached")}>
-    {condition.kind === "price_above" ? <ArrowUpRight size={13} /> : <ArrowDownRight size={13} />}
-    <span>{condition.kind === "price_above" ? uiText("突破", "Above") : uiText("跌破", "Below")} {formatPrice(condition.price ?? 0)}{condition.note ? <small>{condition.note}</small> : null}</span>
-    <b>{distance === null ? uiText("无实时价格", "No live price") : distance.reached ? uiText("已触及", "Reached") : `${distance.pct > 0 ? "+" : ""}${(distance.pct * 100).toFixed(2)}%`}</b>
-  </li>;
+function EvidenceView({ ledger, cards, running, noLedger, messageKey, uiText, onOpenDetail }: { ledger: EvidenceLedger; cards: CardModel[]; running: boolean; noLedger: boolean; messageKey: string; uiText: UiText; onOpenDetail: (key: string) => void }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  useFlip(hostRef, `${messageKey}|${cards.map((card) => `${card.key}:${card.state}`).join(",")}`);
+  const bear = cards.filter((card) => card.state === "bear");
+  const bull = cards.filter((card) => card.state === "bull");
+  const neutral = cards.filter((card) => card.state === "neutral");
+  const pending = cards.filter((card) => card.state === "pending");
+  const open = (card: CardModel) => () => onOpenDetail(card.key);
+  return <div className="evb-ev" ref={hostRef}>
+    {!noLedger
+      ? <Balance ledger={ledger} running={running} uiText={uiText} />
+      : <section className="evb-bal-empty">
+        <b>{uiText("本轮输出未包含结构化立场字段", "This turn has no structured stance fields")}</b>
+        {uiText("模型没有调用 research.recordEvidence，缺少 stance / weight，不显示天平。证据卡保留在待定区，界面不会从正文推断立场或权重。", "The model did not call research.recordEvidence, so stance / weight are missing and no balance is drawn. Evidence stays pending; the UI never infers stance or weight from the prose.")}
+      </section>}
+    <section className="evb-pending">
+      <div className="evb-side-label"><span className="evb-micro">{uiText("待定", "Pending")}</span><span>{!noLedger ? uiText("等待账本立场", "Awaiting stance") : uiText("未归类", "Unassigned")}</span></div>
+      <div className="evb-pending-row">
+        {pending.length === 0 ? <span className="evb-pending-empty">{uiText("工具返回的证据先落在这里", "Returned evidence lands here first")}</span> : null}
+        {pending.map((card) => <EvidenceCard key={card.key} card={card} running={running} uiText={uiText} onOpen={open(card)} />)}
+      </div>
+    </section>
+    <section className="evb-cols">
+      <Column title={uiText("偏空", "Bearish")} stance="bear" cards={bear} running={running} uiText={uiText} open={open} />
+      <Column title={uiText("偏多", "Bullish")} stance="bull" cards={bull} running={running} uiText={uiText} open={open} />
+    </section>
+    <section className="evb-neutral">
+      <div className="evb-side-label"><span className="evb-micro">{uiText("中性", "Neutral")}</span><span>{uiText("约束 · 不计权重", "Constraints · unweighted")}</span></div>
+      <div className="evb-neutral-row">
+        {neutral.length === 0 ? <span className="evb-pending-empty">—</span> : neutral.map((card) => <EvidenceCard key={card.key} card={card} running={running} uiText={uiText} onOpen={open(card)} />)}
+      </div>
+    </section>
+  </div>;
 }
 
-function useLivePrice(instId: string | null) {
-  return useMarketHotStore((state) => {
-    if (!instId) return null;
-    const ticker = state.ticker?.instId === instId ? state.ticker : state.watchTickers[instId];
-    const value = Number(ticker?.last);
-    return Number.isFinite(value) && value > 0 ? value : null;
-  });
+function Column({ title, stance, cards, running, uiText, open }: { title: string; stance: "bear" | "bull"; cards: CardModel[]; running: boolean; uiText: UiText; open: (card: CardModel) => () => void }) {
+  return <div className={clsx("evb-col", `is-${stance}`)}>
+    <div className="evb-col-head"><span className="evb-micro">{title}</span><span className="evb-cnt">{cards.length}</span><span className="evb-rule-line" /></div>
+    <div className="evb-col-list">
+      {cards.length === 0 ? <span className="evb-col-empty">{uiText("暂无", "None yet")}</span> : cards.map((card) => <EvidenceCard key={card.key} card={card} running={running} uiText={uiText} onOpen={open(card)} />)}
+    </div>
+  </div>;
 }
 
-// —— 证据卡迷你可视化：只画工具真实返回的数据 ——
-function EvidenceMini({ tool }: { tool: AiToolRun }): ReactNode {
-  const name = tool.name;
-  if (name === "market.readCandles") return <MiniCandles tool={tool} />;
-  if (name === "market.readOrderBook") return <MiniDepth tool={tool} />;
-  if (name === "market.readTrades") return <MiniTrades tool={tool} />;
-  return null;
+function EvidenceCard({ card, running, uiText, onOpen }: { card: CardModel; running: boolean; uiText: UiText; onOpen: () => void }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const draw = useMemo(() => evidenceDrawer(card.tool), [card.tool]);
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !draw) return;
+    const context = prepCanvas(canvas, 84, 34);
+    if (context) draw(context, 84, 34, false);
+  }, [draw]);
+  const weighted = card.state === "bear" || card.state === "bull";
+  return <article
+    className={clsx("evb-card", `is-${card.state}`, card.reviewed && "is-reviewed")}
+    data-flip-key={card.key}
+    data-flip-origin={card.flipOrigin}
+    tabIndex={0}
+    onClick={onOpen}
+    onKeyDown={(event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        onOpen();
+      }
+    }}
+  >
+    <div className="evb-top">
+      <span className="evb-src">{card.src}</span>
+      {card.via ? <span className="evb-via">via {card.via}</span> : null}
+      {card.reviewed ? <span className="evb-check">· {uiText("已复核", "Reviewed")}</span> : null}
+      {card.kindLabel ? <span className="evb-kind">{card.kindLabel}</span> : null}
+      {weighted ? <span className="evb-w">
+        {card.previousWeight !== null ? <span className="evb-adj">{card.previousWeight.toFixed(1)}→</span> : null}
+        <i><b style={{ width: `${Math.min(100, (card.weight / 3) * 100)}%` }} /></i>
+        <em>{card.weight.toFixed(1)}</em>
+      </span> : null}
+      {card.state === "pending" ? <span className="evb-wait">{running ? <span className="evb-spin" /> : null}{card.refs.join(" ")}</span> : null}
+    </div>
+    <div className="evb-card-body">
+      <p className="evb-claim">{card.claim}</p>
+      {draw ? <canvas className="evb-viz" ref={canvasRef} aria-hidden="true" /> : null}
+    </div>
+  </article>;
 }
 
-function MiniCandles({ tool }: { tool: AiToolRun }) {
-  const candles = useMemo(() => parseMarketCandles(tool.result).candles.slice(-48), [tool.result]);
-  if (candles.length < 2) return null;
-  const highs = candles.map((item) => item.high);
-  const lows = candles.map((item) => item.low);
-  const max = Math.max(...highs);
-  const min = Math.min(...lows);
-  const span = max - min || 1;
-  const width = 120;
-  const height = 34;
-  const step = width / candles.length;
-  const y = (value: number) => 2 + (1 - (value - min) / span) * (height - 4);
-  return <svg className="ai-evidence-mini" viewBox={`0 0 ${width} ${height}`} aria-hidden="true">
-    {candles.map((item, index) => {
-      const x = index * step + step / 2;
-      const up = item.close >= item.open;
-      return <g key={item.time} className={up ? "is-up" : "is-down"}>
-        <line x1={x} x2={x} y1={y(item.high)} y2={y(item.low)} />
-        <rect x={x - Math.max(step * 0.32, 0.6)} width={Math.max(step * 0.64, 1.2)} y={Math.min(y(item.open), y(item.close))} height={Math.max(Math.abs(y(item.open) - y(item.close)), 0.8)} />
-      </g>;
-    })}
-  </svg>;
+// —— 天平：几何与原型一致；横梁是欠阻尼弹簧（k 42 / c 5.2），砝码块按权重落入秤盘 ——
+type Block = {
+  side: "bear" | "bull";
+  el: SVGRectElement;
+  target: number;
+  y: { value: number; velocity: number };
+  w: { value: number; velocity: number };
+};
+
+function Balance({ ledger, running, uiText }: { ledger: EvidenceLedger; running: boolean; uiText: UiText }) {
+  const beamRef = useRef<SVGGElement | null>(null);
+  const needleRef = useRef<SVGLineElement | null>(null);
+  const leftRef = useRef<SVGGElement | null>(null);
+  const rightRef = useRef<SVGGElement | null>(null);
+  const leftBlocksRef = useRef<SVGGElement | null>(null);
+  const rightBlocksRef = useRef<SVGGElement | null>(null);
+  const beam = useRef({ value: 0, velocity: 0 });
+  const blocks = useRef(new Map<string, Block>());
+  const frame = useRef<number | null>(null);
+  const mounted = useRef(false);
+
+  const weighted = ledger.items.filter((item) => item.stance === "bear" || item.stance === "bull");
+  const total = ledger.bull + ledger.bear;
+  // 与原型相同的倾角映射：净权重相对总权重，最多 ±12°。
+  const target = total > 0 ? Math.max(-1, Math.min(1, (ledger.bull - ledger.bear) / (total * 0.35 + 2))) * 12 : 0;
+  const signature = weighted.map((item) => `${item.id}:${item.stance}:${item.weight}`).join("|");
+
+  useEffect(() => {
+    const reduced = prefersReducedMotion();
+    const instant = reduced || !mounted.current;
+    mounted.current = true;
+    const map = blocks.current;
+    const seen = new Set<string>();
+    for (const item of weighted) {
+      seen.add(item.id);
+      const side = item.stance as "bear" | "bull";
+      const existing = map.get(item.id);
+      if (existing && existing.side === side) {
+        existing.target = item.weight * 12;
+        continue;
+      }
+      existing?.el.remove();
+      const parent = side === "bear" ? leftBlocksRef.current : rightBlocksRef.current;
+      if (!parent) continue;
+      const color = side === "bear" ? EVB_COLORS.rise : EVB_COLORS.fall;
+      const rect = document.createElementNS(SVG_NS, "rect");
+      rect.setAttribute("height", "7");
+      rect.setAttribute("rx", "1");
+      rect.setAttribute("fill", alpha(color, 0.35));
+      rect.setAttribute("stroke", color);
+      rect.setAttribute("stroke-width", "0.8");
+      parent.appendChild(rect);
+      map.set(item.id, { side, el: rect, target: item.weight * 12, y: { value: instant ? 0 : -38, velocity: 0 }, w: { value: item.weight * 12, velocity: 0 } });
+    }
+    for (const [id, block] of map) {
+      if (seen.has(id)) continue;
+      block.el.remove();
+      map.delete(id);
+    }
+    if (instant) beam.current = { value: target, velocity: 0 };
+
+    const render = () => {
+      const th = beam.current.value;
+      const rad = (th * Math.PI) / 180;
+      const pivot = `translate(${BAL.px} ${BAL.py}) rotate(${th.toFixed(3)})`;
+      beamRef.current?.setAttribute("transform", pivot);
+      needleRef.current?.setAttribute("transform", pivot);
+      leftRef.current?.setAttribute("transform", `translate(${(BAL.px - BAL.L * Math.cos(rad)).toFixed(2)} ${(BAL.py - BAL.L * Math.sin(rad)).toFixed(2)})`);
+      rightRef.current?.setAttribute("transform", `translate(${(BAL.px + BAL.L * Math.cos(rad)).toFixed(2)} ${(BAL.py + BAL.L * Math.sin(rad)).toFixed(2)})`);
+      for (const side of ["bear", "bull"] as const) {
+        const list = [...map.values()].filter((block) => block.side === side);
+        // 秤盘宽 116：砝码按行码放，满一行向上叠。
+        let x = -54;
+        let row = 0;
+        for (const block of list) {
+          const width = Math.max(1, block.w.value);
+          if (x + width > 54 && x > -54) {
+            x = -54;
+            row += 1;
+          }
+          block.el.setAttribute("x", x.toFixed(2));
+          block.el.setAttribute("width", width.toFixed(2));
+          block.el.setAttribute("y", (BAL.drop - 8 - row * 8 + block.y.value).toFixed(2));
+          block.el.setAttribute("opacity", Math.max(0, Math.min(1, 1 + block.y.value / 38)).toFixed(2));
+          x += width + 2;
+        }
+      }
+    };
+
+    let last = performance.now();
+    const tick = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      beam.current = reduced ? { value: target, velocity: 0 } : stepSpring(beam.current, target, dt, { stiffness: 42, damping: 5.2 });
+      let settled = Math.abs(beam.current.value - target) < 0.01 && Math.abs(beam.current.velocity) < 0.01;
+      for (const block of map.values()) {
+        block.y = reduced ? { value: 0, velocity: 0 } : stepSpring(block.y, 0, dt, { stiffness: 190, damping: 16 });
+        block.w = reduced ? { value: block.target, velocity: 0 } : stepSpring(block.w, block.target, dt, { stiffness: 120, damping: 18 });
+        if (Math.abs(block.y.value) > 0.05 || Math.abs(block.w.value - block.target) > 0.05) settled = false;
+      }
+      render();
+      frame.current = settled ? null : requestAnimationFrame(tick);
+    };
+    render();
+    if (frame.current !== null) cancelAnimationFrame(frame.current);
+    frame.current = requestAnimationFrame(tick);
+    return () => {
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+      frame.current = null;
+    };
+    // 只在账本内容（立场 / 权重）变化时重新驱动弹簧；weighted 由 signature 完整描述。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [signature, target]);
+
+  const bearCount = weighted.filter((item) => item.stance === "bear").length;
+  const bullCount = weighted.length - bearCount;
+  return <section className="evb-bal">
+    <div className="evb-bal-top">
+      <span className="evb-micro">{uiText("证据天平", "Evidence balance")}</span>
+      <span className="evb-rule">{uiText("|净| / 总 < 20% → 证据冲突", "|net| / total < 20% → conflict")}</span>
+    </div>
+    <div className="evb-bal-stage">
+      <svg className="evb-bal-svg" viewBox="0 0 600 118" preserveAspectRatio="xMidYMid meet" aria-hidden="true">
+        <g>
+          {Array.from({ length: 9 }, (_, index) => {
+            const angle = -12 + index * 3;
+            const radian = ((angle - 90) * Math.PI) / 180;
+            const inner = angle % 6 === 0 ? 19 : 21;
+            return <line key={angle} x1={BAL.px + Math.cos(radian) * inner} y1={BAL.py + Math.sin(radian) * inner} x2={BAL.px + Math.cos(radian) * 24} y2={BAL.py + Math.sin(radian) * 24} stroke={angle === 0 ? EVB_COLORS.ink2 : EVB_COLORS.ink4} strokeWidth={1} />;
+          })}
+          <text x={BAL.px - 30} y={BAL.py - 12} fill={EVB_COLORS.rise} fontSize={9.5} fontFamily={MONO} textAnchor="middle">{uiText("空", "S")}</text>
+          <text x={BAL.px + 30} y={BAL.py - 12} fill={EVB_COLORS.fall} fontSize={9.5} fontFamily={MONO} textAnchor="middle">{uiText("多", "L")}</text>
+        </g>
+        <line x1={BAL.px} y1={BAL.py} x2={BAL.px} y2={94} stroke={EVB_COLORS.ink3} strokeWidth={1.2} />
+        <path d={`M${BAL.px - 34} 94 L${BAL.px + 34} 94`} stroke={EVB_COLORS.ink3} strokeWidth={1.2} strokeLinecap="round" />
+        <path d={`M${BAL.px - 12} 94 L${BAL.px} 83 L${BAL.px + 12} 94`} stroke={EVB_COLORS.ink4} strokeWidth={1} fill="none" />
+        <g ref={beamRef} transform={`translate(${BAL.px} ${BAL.py})`}>
+          <line x1={-BAL.L} y1={0} x2={BAL.L} y2={0} stroke={EVB_COLORS.ink} strokeWidth={1.6} strokeLinecap="round" />
+          {[-4, -3, -2, -1, 1, 2, 3, 4].map((tick) => <line key={tick} x1={tick * (BAL.L / 4.5)} y1={-2.5} x2={tick * (BAL.L / 4.5)} y2={2.5} stroke={EVB_COLORS.ink3} strokeWidth={1} />)}
+          <circle cx={-BAL.L} cy={0} r={2.6} fill={EVB_COLORS.bg} stroke={EVB_COLORS.ink} strokeWidth={1.2} />
+          <circle cx={BAL.L} cy={0} r={2.6} fill={EVB_COLORS.bg} stroke={EVB_COLORS.ink} strokeWidth={1.2} />
+        </g>
+        {(["bear", "bull"] as const).map((side) => {
+          const color = side === "bear" ? EVB_COLORS.rise : EVB_COLORS.fall;
+          return <g key={side} ref={side === "bear" ? leftRef : rightRef} transform={`translate(${side === "bear" ? BAL.px - BAL.L : BAL.px + BAL.L} ${BAL.py})`}>
+            <path d={`M0 0 L-50 ${BAL.drop} M0 0 L50 ${BAL.drop}`} stroke={EVB_COLORS.ink4} strokeWidth={0.8} />
+            <g ref={side === "bear" ? leftBlocksRef : rightBlocksRef} />
+            <path d={`M-58 ${BAL.drop} Q0 ${BAL.drop + 16} 58 ${BAL.drop}`} stroke={EVB_COLORS.ink2} strokeWidth={1.3} fill={alpha(color, 0.05)} />
+            <path d={`M-58 ${BAL.drop} L58 ${BAL.drop}`} stroke={alpha(color, 0.5)} strokeWidth={1} />
+          </g>;
+        })}
+        <line ref={needleRef} x1={0} y1={0} x2={0} y2={-20} stroke={EVB_COLORS.ink} strokeWidth={1.4} strokeLinecap="round" transform={`translate(${BAL.px} ${BAL.py})`} />
+        <circle cx={BAL.px} cy={BAL.py} r={3.6} fill={running ? EVB_COLORS.ai : EVB_COLORS.ink3} />
+      </svg>
+      <div className="evb-bal-total is-bear"><span className="evb-micro">{uiText("偏空", "Bearish")}</span><RollingNumber value={ledger.bear} /><span className="evb-cnt">{uiText(`${bearCount} 条`, `${bearCount} items`)}</span></div>
+      <div className="evb-bal-total is-bull"><span className="evb-micro">{uiText("偏多", "Bullish")}</span><RollingNumber value={ledger.bull} /><span className="evb-cnt">{uiText(`${bullCount} 条`, `${bullCount} items`)}</span></div>
+      <div className="evb-bal-readout">
+        {total > 0
+          ? <>{uiText("净", "Net")} <b>{ledger.net > 0 ? "+" : ledger.net < 0 ? "−" : ""}{Math.abs(ledger.net).toFixed(1)}</b> · {uiText("总", "Total")} <b>{total.toFixed(1)}</b> · {uiText("冲突度", "Conflict")} <b>{Math.round((ledger.conflict ?? 0) * 100)}%</b></>
+          : uiText("等待证据", "Awaiting evidence")}
+      </div>
+    </div>
+    <Outcomes decision={ledger.decision} conflict={ledger.conflict} uiText={uiText} />
+  </section>;
 }
 
-function sideTotal(levels: unknown) {
-  if (!Array.isArray(levels)) return 0;
-  return levels.slice(0, 50).reduce<number>((sum, level) => {
-    const size = Array.isArray(level) ? Number(level[1]) : Number((level as Record<string, unknown> | null)?.sz ?? (level as Record<string, unknown> | null)?.size);
-    return Number.isFinite(size) ? sum + size : sum;
-  }, 0);
+// 合计权重：数值变化时滚动到新值（与原型的里程表读数一致）。
+function RollingNumber({ value }: { value: number }) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const shown = useRef(value);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element) return;
+    const from = shown.current;
+    shown.current = value;
+    if (from === value || prefersReducedMotion()) {
+      element.textContent = value.toFixed(1);
+      return;
+    }
+    const start = performance.now();
+    let frame = 0;
+    const tick = (now: number) => {
+      const p = Math.min(1, (now - start) / 520);
+      const eased = 1 - Math.pow(1 - p, 3);
+      element.textContent = (from + (value - from) * eased).toFixed(1);
+      if (p < 1) frame = requestAnimationFrame(tick);
+    };
+    frame = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(frame);
+  }, [value]);
+  return <span className="evb-num" ref={ref}>{value.toFixed(1)}</span>;
 }
 
-function MiniDepth({ tool }: { tool: AiToolRun }) {
-  const result = toolResultRecord(tool);
-  const book = (result.book && typeof result.book === "object" ? result.book : result) as Record<string, unknown>;
-  const bids = sideTotal(book.bids);
-  const asks = sideTotal(book.asks);
-  if (bids + asks <= 0) return null;
-  const share = bids / (bids + asks);
-  return <span className="ai-evidence-mini ai-evidence-mini-depth" aria-hidden="true"><i className="is-bid" style={{ width: `${share * 100}%` }} /><i className="is-ask" style={{ width: `${(1 - share) * 100}%` }} /></span>;
+function Outcomes({ decision, conflict, uiText }: { decision: EvidenceDecision | null; conflict: number | null; uiText: UiText }) {
+  const stampRef = useRef<HTMLDivElement | null>(null);
+  const seenRef = useRef<string | undefined>(undefined);
+  const stampKey = decision ? `${decision.outcome}:${decision.recordedAt ?? ""}` : "";
+  useEffect(() => {
+    const first = seenRef.current === undefined;
+    const changed = seenRef.current !== stampKey;
+    seenRef.current = stampKey;
+    if (!stampKey || first || !changed || prefersReducedMotion() || !stampRef.current) return;
+    stampRef.current.animate([
+      { transform: "rotate(-4deg) scale(1.5)", opacity: 0 },
+      { transform: "rotate(0.6deg) scale(0.985)", opacity: 1, offset: 0.62 },
+      { transform: "none", opacity: 1 }
+    ], { duration: 560, easing: "cubic-bezier(0.3, 0.7, 0.2, 1)" });
+  }, [stampKey]);
+  const slot = decision?.outcome === "short" ? "short" : decision?.outcome === "long" ? "long" : decision ? "mid" : null;
+  const label = decision?.outcome === "long" ? uiText("开多", "Long") : decision?.outcome === "short" ? uiText("开空", "Short") : decision?.outcome === "hold" ? uiText("持有", "Hold") : uiText("放弃", "Abstain");
+  const sub = conflict !== null && conflict >= 0.8 ? uiText("证据冲突", "Conflicting") : uiText("账本决策", "Ledger decision");
+  const stamp = <div className="evb-stamp" ref={stampRef} title={decision?.reason}>{label} <small>{sub}</small></div>;
+  return <>
+    <div className="evb-outcomes">
+      <div className="evb-oc is-short">{uiText("开空", "Short")}{slot === "short" ? stamp : null}</div>
+      <div className="evb-oc"><em>{uiText("待决策", "Pending")}</em>{slot === "mid" ? stamp : null}</div>
+      <div className="evb-oc is-long">{uiText("开多", "Long")}{slot === "long" ? stamp : null}</div>
+    </div>
+    <div className={clsx("evb-no-trade", decision?.outcome === "abstain" && "is-on")}>{uiText("不交易也是有效决策 · 等待证据收敛", "Not trading is a valid decision · waiting for evidence to converge")}</div>
+  </>;
 }
 
-function MiniTrades({ tool }: { tool: AiToolRun }) {
-  const result = toolResultRecord(tool);
-  const trades = (Array.isArray(result.trades) ? result.trades : Array.isArray(result.data) ? result.data : []).slice(0, 50) as Array<Record<string, unknown>>;
-  if (trades.length < 2) return null;
-  const sizes = trades.map((trade) => Number(trade.sz ?? trade.size) || 0);
-  const max = Math.max(...sizes, 1e-9);
-  return <svg className="ai-evidence-mini" viewBox={`0 0 ${trades.length * 3} 30`} aria-hidden="true">
-    {trades.slice().reverse().map((trade, index) => {
-      const size = sizes[trades.length - 1 - index] ?? 0;
-      const height = 2 + (Math.sqrt(size / max)) * 26;
-      return <rect key={index} className={trade.side === "buy" ? "is-bid" : "is-ask"} x={index * 3} y={30 - height} width={2} height={height} />;
-    })}
-  </svg>;
+// —— 详情：原型的检查器视图，大图 + 指标 + 来源调用 + 账本字段 ——
+function EvidenceDetail({ card, messageId, uiText, onClose, onOpenArtifact }: { card: CardModel; messageId: string; uiText: UiText; onClose: () => void; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const draw = useMemo(() => evidenceDrawer(card.tool), [card.tool]);
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas || !draw) return;
+    const rect = canvas.getBoundingClientRect();
+    const context = prepCanvas(canvas, rect.width, rect.height);
+    if (context) draw(context, rect.width, rect.height, true);
+  }, [draw]);
+  useEffect(() => {
+    const handle = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", handle);
+    return () => window.removeEventListener("keydown", handle);
+  }, [onClose]);
+  const result = card.tool ? toolResultRecord(card.tool) : {};
+  const metrics = Object.entries(result)
+    .filter(([key, value]) => key !== "evidenceRef" && key !== "evidenceLedgerReminder" && (typeof value === "number" || typeof value === "boolean" || (typeof value === "string" && value.length <= 40)))
+    .slice(0, 8);
+  const stanceLabel = card.state === "bear" ? uiText("偏空", "Bearish") : card.state === "bull" ? uiText("偏多", "Bullish") : card.state === "neutral" ? card.kindLabel ?? uiText("中性", "Neutral") : uiText("待定", "Pending");
+  const args = card.tool?.arguments && typeof card.tool.arguments === "object" ? Object.entries(card.tool.arguments as Record<string, unknown>) : [];
+  const call = card.tool ? `${card.tool.name}(${args.map(([key, value]) => `${key}=${typeof value === "object" ? JSON.stringify(value) : String(value)}`).join(", ")})` : "";
+  const artifact = card.tool && onOpenArtifact ? aiResearchArtifactForTool(card.tool, messageId) : null;
+  return <div className="evb-detail" role="dialog" aria-label={card.claim}>
+    <div className="evb-detail-bar">
+      <button type="button" className="evb-btn" onClick={onClose}><ArrowLeft size={13} />{uiText("返回证据板", "Back")}</button>
+      {artifact && onOpenArtifact ? <button type="button" className="evb-btn" onClick={() => onOpenArtifact(artifact)}><ExternalLink size={13} />{uiText("在检查器中打开", "Open in inspector")}</button> : null}
+    </div>
+    <div className={clsx("evb-detail-head", `is-${card.state}`)}>
+      <div className="evb-row1">
+        <span className="evb-stance">{stanceLabel}</span>
+        {card.item && card.state !== "neutral" ? <span>{uiText("权重", "Weight")} {card.previousWeight !== null ? `${card.previousWeight.toFixed(1)} → ` : ""}{card.weight.toFixed(1)}</span> : null}
+        {card.via ? <span>via {card.via}</span> : null}
+        <span>{card.refs.join(" · ")}</span>
+      </div>
+      <h2>{card.claim}</h2>
+    </div>
+    {draw ? <canvas className="evb-detail-canvas" ref={canvasRef} aria-hidden="true" /> : null}
+    {metrics.length > 0 ? <div className="evb-metrics">{metrics.map(([key, value]) => <div key={key}><span>{key}</span><b>{String(value)}</b></div>)}</div> : null}
+    <div className="evb-prov">
+      {call ? <><span>{uiText("来源调用", "Source call")}</span><code>{call}</code></> : null}
+      {card.item ? <><span>{uiText("账本字段", "Ledger fields")}</span><code>{JSON.stringify({ id: card.item.id, stance: card.item.stance, weight: card.item.weight, sourceRefs: card.item.sourceRefs, ...(card.item.revisionNote ? { revisionNote: card.item.revisionNote } : {}) }, null, 2)}</code></> : null}
+    </div>
+  </div>;
 }
 
-// —— FLIP：卡片从「待归类」飞入立场列 ——
-function useFlipLayout(hostRef: RefObject<HTMLDivElement | null>, signature: string) {
-  const rectsRef = useRef(new Map<string, DOMRect>());
+// —— FLIP：卡片在待定区与立场列之间的物理位移（平移 + 缩放，与原型一致）——
+function useFlip(hostRef: RefObject<HTMLDivElement | null>, signature: string) {
+  const rects = useRef(new Map<string, DOMRect>());
   useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host) return;
-    const previous = rectsRef.current;
+    const previous = rects.current;
     const next = new Map<string, DOMRect>();
-    const nodes = Array.from(host.querySelectorAll<HTMLElement>("[data-flip-key]"));
     const animate = !prefersReducedMotion() && previous.size > 0;
-    for (const node of nodes) {
+    for (const node of host.querySelectorAll<HTMLElement>("[data-flip-key]")) {
       const key = node.dataset.flipKey!;
       const rect = node.getBoundingClientRect();
       next.set(key, rect);
-      if (!animate) continue;
+      if (!animate || rect.width === 0) continue;
       const before = previous.get(key) ?? (node.dataset.flipOrigin ? previous.get(node.dataset.flipOrigin) : undefined);
       if (!before) {
-        node.animate([{ opacity: 0, transform: "translateY(6px)" }, { opacity: 1, transform: "none" }], { duration: 260, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+        node.animate([{ opacity: 0, transform: "translateY(8px) scale(0.97)" }, { opacity: 1, transform: "none" }], { duration: 360, easing: EASE });
         continue;
       }
       const dx = before.left - rect.left;
       const dy = before.top - rect.top;
-      if (Math.abs(dx) < 1 && Math.abs(dy) < 1) continue;
-      node.animate([{ transform: `translate(${dx}px, ${dy}px)` }, { transform: "none" }], { duration: 420, easing: "cubic-bezier(0.2, 0.8, 0.2, 1)" });
+      const sx = before.width / rect.width;
+      const sy = before.height / rect.height;
+      if (Math.abs(dx) < 0.5 && Math.abs(dy) < 0.5 && Math.abs(sx - 1) < 0.01 && Math.abs(sy - 1) < 0.01) continue;
+      node.animate([{ transform: `translate(${dx}px, ${dy}px) scale(${sx}, ${sy})` }, { transform: "none" }], { duration: 560, easing: EASE });
     }
-    rectsRef.current = next;
+    rects.current = next;
   }, [hostRef, signature]);
 }
 
-// 卡片上的短来源标签；完整工具名在悬停提示里。
-function sourceLabel(name: string, uiText: UiText) {
-  if (name === "market.readCandles") return uiText("K 线", "Candles");
-  if (name === "market.readOrderBook") return uiText("盘口", "Order book");
-  if (name === "market.readTrades") return uiText("成交", "Trades");
-  if (name === "market.readIndicators") return uiText("指标", "Indicators");
-  if (name === "market.readTicker") return uiText("行情", "Ticker");
-  if (name === "market.readFundingRate") return uiText("资金费率", "Funding");
-  if (name === "consult_expert" || name === "consult_experts") return uiText("专家", "Experts");
-  if (name === "follow_up") return uiText("追问", "Follow-up");
-  if (name.startsWith("intelligence.")) return uiText("情报", "Intel");
-  if (name.startsWith("radar.")) return uiText("雷达", "Radar");
-  if (name.startsWith("account.")) return uiText("账户", "Account");
-  if (name.startsWith("trade.")) return uiText("预检", "Precheck");
-  if (name === "research.webSearch") return uiText("网页", "Web");
-  return name.split(".").at(-1) ?? name;
-}
-
-function fallbackArtifact(source: EvidenceSource, messageId: string): AiResearchArtifact {
-  return {
-    id: `evidence:${messageId}:${source.ref}`,
-    kind: "research",
-    title: `${source.ref} · ${source.tool.name}`,
-    summary: source.tool.summary ?? "",
-    data: source.tool.result,
-    toolName: source.tool.name,
-    sourceMessageId: messageId
-  };
-}
-
-function rulerBounds(values: number[]) {
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const pad = (max - min || max * 0.01) * 0.18;
-  return { min: min - pad, max: max + pad };
-}
-
-function rulerPosition(value: number, bounds: { min: number; max: number }) {
-  return ((value - bounds.min) / (bounds.max - bounds.min || 1)) * 100;
-}
-
-function formatWeight(value: number) {
-  return Number.isInteger(value) ? value.toFixed(1) : value.toFixed(value * 10 === Math.round(value * 10) ? 1 : 2);
-}
-
-function formatSigned(value: number) {
-  return `${value > 0 ? "+" : value < 0 ? "−" : ""}${formatWeight(Math.abs(value))}`;
-}
-
-function formatPrice(value: number) {
-  const digits = value >= 1000 ? 1 : value >= 10 ? 2 : value >= 1 ? 3 : 5;
-  return value.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
-}
-
-function formatCountdown(ms: number) {
-  const total = Math.floor(ms / 1000);
-  const hours = Math.floor(total / 3600);
-  const minutes = Math.floor((total % 3600) / 60);
-  const seconds = total % 60;
-  return `${hours}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
-}
-
-// —— 消息流内的紧凑摘要：决策落定后一行天平，点击打开证据板 ——
+// —— 消息流内的紧凑摘要：有账本的回合一行天平，点击打开证据板 ——
 export function AiEvidenceSummaryStrip({ message, uiText, onOpen }: { message: AiUiMessage; uiText: UiText; onOpen: () => void }) {
   const ledger = useMemo(() => deriveEvidenceLedger(message), [message]);
   if (!ledger.hasLedger) return null;
-  const tilt = ledger.total > 0 ? Math.max(-1, Math.min(1, ledger.net / Math.max(ledger.total, 3))) : 0;
+  const tilt = ledger.total > 0 ? Math.max(-1, Math.min(1, ledger.net / (ledger.total * 0.35 + 2))) : 0;
   const outcome = ledger.decision?.outcome;
   const outcomeLabel = outcome === "long" ? uiText("开多", "Long") : outcome === "short" ? uiText("开空", "Short") : outcome === "hold" ? uiText("持有", "Hold") : outcome === "abstain" ? uiText("放弃", "Abstain") : uiText("待决策", "Pending");
   return <button type="button" className="ai-evidence-strip" onClick={onOpen} title={uiText("打开证据天平", "Open evidence balance")}>
     <Scale size={13} />
-    <span className="ai-evidence-strip-side is-bear">{uiText("空", "Bear")} {formatWeight(ledger.bear)}</span>
-    <span className="ai-evidence-strip-beam" aria-hidden="true"><i style={{ transform: `rotate(${tilt * MAX_TILT_DEG}deg)` }} /></span>
-    <span className="ai-evidence-strip-side is-bull">{uiText("多", "Bull")} {formatWeight(ledger.bull)}</span>
+    <span className="ai-evidence-strip-side is-bear">{uiText("空", "Bear")} {ledger.bear.toFixed(1)}</span>
+    <span className="ai-evidence-strip-beam" aria-hidden="true"><i style={{ transform: `rotate(${tilt * 12}deg)` }} /></span>
+    <span className="ai-evidence-strip-side is-bull">{uiText("多", "Bull")} {ledger.bull.toFixed(1)}</span>
     {ledger.conflict !== null ? <small>{uiText("冲突度", "Conflict")} {Math.round(ledger.conflict * 100)}%</small> : null}
     <b className={clsx("ai-evidence-strip-outcome", outcome && `is-${outcome}`)}>{outcomeLabel}</b>
   </button>;

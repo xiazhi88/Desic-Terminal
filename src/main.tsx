@@ -7,6 +7,7 @@ import "./theme/data-voice.css";
 import "./theme/motion.css";
 import "./theme/signature.css";
 import "./ui/shell/shell.css";
+import "./theme/phosphor-neutralize.css";
 import "./theme/phosphor.css";
 import { i18n, initializeI18n } from "./i18n/runtime";
 import { applyPlatformAttribute } from "./lib/platform";

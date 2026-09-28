@@ -30,14 +30,21 @@
   --ai-bright: #c3a5ff;
   --ai-soft: rgba(154, 99, 255, 0.14);
   --live: #5fd4e0;
-  /* 通用强调色回到中性：选中、焦点、描边不再借用品牌紫。 */
-  --accent: #c9cad8;
-  --accent-bright: #eeeef6;
-  --accent-dim: rgba(200, 200, 230, 0.34);
-  --focus: #dcdde8;
-  --surface-selected: rgba(200, 200, 230, 0.075);
-  --line-tinted: rgba(200, 200, 230, 0.12);
-  --line-tinted-strong: rgba(200, 200, 230, 0.22);
+  /* 信号色（非 AI 区域的强调色）：冷天蓝，只用于选中、焦点、当前标签与主操作，不发光。
+     与 AI 紫（色相 ~296°）、涨跌红绿、实时数据青（~205°）都拉开距离；换色只改这一组。 */
+  --signal: #6ab0ec;
+  --signal-bright: #a9d2f7;
+  --signal-soft: rgba(106, 176, 236, 0.12);
+  /* 旧样式直接引用的品牌紫（var(--purple)）在非 AI 区域映射为信号色；AI 区域在下方恢复为 AI 紫。 */
+  --purple: var(--signal);
+  --purple-2: #4f8fca;
+  --accent: var(--signal);
+  --accent-bright: var(--signal-bright);
+  --accent-dim: rgba(106, 176, 236, 0.34);
+  --focus: var(--signal-bright);
+  --surface-selected: var(--signal-soft);
+  --line-tinted: rgba(106, 176, 236, 0.18);
+  --line-tinted-strong: rgba(106, 176, 236, 0.32);
   --panel-grad: linear-gradient(var(--panel), var(--panel));
   --panel-grad-soft: linear-gradient(var(--panel), var(--panel));
   --glow-accent: 0 0 0 transparent;
@@ -65,6 +72,9 @@
     --ai-bright: oklch(0.8 0.12 296);
     --ai-soft: oklch(0.63 0.22 296 / 0.14);
     --live: oklch(0.82 0.1 205);
+    --signal: oklch(0.74 0.11 243);
+    --signal-bright: oklch(0.86 0.07 243);
+    --signal-soft: oklch(0.74 0.11 243 / 0.12);
   }
 }
 
@@ -79,6 +89,8 @@
 :root[data-visual="phosphor"] :is(.ai-research-shell, .automation-workspace, .agent-library) {
   --accent: var(--ai);
   --accent-bright: var(--ai-bright);
+  --purple: var(--ai);
+  --purple-2: color-mix(in oklab, var(--ai) 80%, black);
   --accent-dim: color-mix(in oklab, var(--ai) 55%, transparent);
   --focus: var(--ai-bright);
   --surface-selected: var(--ai-soft);
@@ -214,58 +226,438 @@
 
 .odometer {
   display: inline-flex;
-  align-items: baseline;
+  align-items: flex-start;
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
 
-/* 数字位：自身文字只占位不显示；伪元素是 0-9 竖列，按 --digit 平移，颜色继承父元素的涨跌色。 */
+/* 数字位：自身文字只占位不显示（textContent / 复制 / 读屏仍是真实数字）。
+   可见数字由两个单行伪元素绘制：::after = 当前位（data-d），::before = 上一位（data-p）。
+   变化时两者同步滑动交接。不用 0–9 多行竖列：WebKit 的多行行距与 1.15em 不严格一致，
+   竖列平移会逐位漂移，看起来像每位都露出上下两个数字。 */
+.odometer__digit,
+.odometer__separator {
+  height: 1.15em;
+  line-height: 1.15em;
+}
+
 .odometer__digit {
   position: relative;
   display: inline-block;
   overflow: hidden;
-  height: 1.15em;
-  line-height: 1.15em;
-  vertical-align: bottom;
   -webkit-text-fill-color: transparent;
 }
 
+.odometer__digit::before,
 .odometer__digit::after {
-  content: "0\A 1\A 2\A 3\A 4\A 5\A 6\A 7\A 8\A 9";
   position: absolute;
-  left: 0;
-  right: 0;
   top: 0;
+  right: 0;
+  left: 0;
+  height: 1.15em;
+  line-height: 1.15em;
   text-align: center;
-  white-space: pre;
+  white-space: nowrap;
   -webkit-text-fill-color: currentColor;
-  transform: translateY(calc(var(--digit, 0) * -1.15em));
-  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
+.odometer__digit::after {
+  content: attr(data-d);
+}
+
+.odometer__digit::before {
+  content: attr(data-p);
+  transform: translateY(-100%);
+}
+
+/* 上涨：新数字自下而上进入；下跌：自上而下。 */
 .odometer__digit.is-changed-up::after {
-  animation: odometer-flash-up 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: odometer-in-up 240ms cubic-bezier(0.2, 0.8, 0.2, 1), odometer-flash-up 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.odometer__digit.is-changed-up::before {
+  animation: odometer-out-up 240ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
 }
 
 .odometer__digit.is-changed-down::after {
-  animation: odometer-flash-down 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  animation: odometer-in-down 240ms cubic-bezier(0.2, 0.8, 0.2, 1), odometer-flash-down 900ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.odometer__digit.is-changed-down::before {
+  animation: odometer-out-down 240ms cubic-bezier(0.2, 0.8, 0.2, 1) forwards;
+}
+
+@keyframes odometer-in-up {
+  from { transform: translateY(100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes odometer-out-up {
+  from { transform: translateY(0); }
+  to { transform: translateY(-100%); }
+}
+
+@keyframes odometer-in-down {
+  from { transform: translateY(-100%); }
+  to { transform: translateY(0); }
+}
+
+@keyframes odometer-out-down {
+  from { transform: translateY(0); }
+  to { transform: translateY(100%); }
 }
 
 @keyframes odometer-flash-up {
-  from { text-shadow: 0 0 10px var(--up); }
+  from { color: var(--up); text-shadow: 0 0 10px var(--up); }
 }
 
 @keyframes odometer-flash-down {
-  from { text-shadow: 0 0 10px var(--down); }
+  from { color: var(--down); text-shadow: 0 0 10px var(--down); }
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .odometer__digit::after {
-    transition: none;
+  .odometer__digit::before,
+  .odometer__digit::after,
+  .odometer__digit.is-changed-up::after,
+  .odometer__digit.is-changed-up::before,
+  .odometer__digit.is-changed-down::after,
+  .odometer__digit.is-changed-down::before {
+    animation: none;
+  }
+}
+
+/* ============================================================
+ * 顶栏与导航轨：按磷光外壳原型收紧
+ *    48px 顶栏、无底板的合约名、叠放的行情读数、描边胶囊与幽灵图标按钮；
+ *    导航轨 56px，暗色图标，选中只用浅底 + 左侧亮条。
+ * ============================================================ */
+:root[data-visual="phosphor"] .terminal {
+  grid-template-columns: 56px minmax(0, 1fr);
+}
+
+:root[data-visual="phosphor"] .workspace {
+  grid-template-rows: 48px minmax(0, 1fr);
+}
+
+:root[data-visual="phosphor"] .topbar {
+  height: 48px;
+  gap: 20px;
+  padding: 0 10px 0 16px;
+  border-bottom: 1px solid var(--line-soft);
+  background: var(--bg);
+  backdrop-filter: none;
+  box-shadow: none;
+}
+
+:root[data-visual="phosphor"] :is(.topbar, .terminal, .rail)::before {
+  display: none;
+}
+
+:root[data-visual="phosphor"] .market-title {
+  min-width: 0;
+  min-height: 32px;
+  margin-left: -6px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+}
+
+:root[data-visual="phosphor"] .market-title__trigger {
+  height: 32px;
+  gap: 9px;
+  padding: 0 10px 0 6px;
+}
+
+:root[data-visual="phosphor"] .market-title__trigger:hover,
+:root[data-visual="phosphor"] .market-title__trigger.is-open {
+  background: var(--panel-2);
+}
+
+:root[data-visual="phosphor"] .market-title .symbol-icon {
+  width: 22px;
+  min-width: 22px;
+  height: 22px;
+}
+
+:root[data-visual="phosphor"] .market-title strong {
+  font-size: 14px;
+  font-weight: 650;
+  letter-spacing: 0.01em;
+}
+
+:root[data-visual="phosphor"] .market-title__trigger > span:not(.symbol-icon) {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--weak);
+  font-size: 10.5px;
+}
+
+:root[data-visual="phosphor"] .market-title__chevron {
+  margin-left: 0;
+  color: var(--weak);
+}
+
+:root[data-visual="phosphor"] .price-strip-values {
+  gap: 16px;
+}
+
+/* 大价格是墨色：涨跌只在变化的那一位短暂闪色（里程表），24h 涨跌在右侧读数里着色。 */
+:root[data-visual="phosphor"] .price-strip-values > strong,
+:root[data-visual="phosphor"] .price-strip-values > strong:is(.up, .down) {
+  min-width: 118px;
+  padding: 0;
+  color: var(--text);
+  font-size: 25px;
+  font-weight: 600;
+}
+
+:root[data-visual="phosphor"] .price-stat {
+  display: grid;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+:root[data-visual="phosphor"] .price-stat small {
+  margin: 0;
+  color: #53556a;
+  font-size: 9.5px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+:root[data-visual="phosphor"] .price-stat b {
+  color: var(--muted);
+  font: 500 12px/1 var(--font-number);
+  font-variant-numeric: tabular-nums;
+}
+
+:root[data-visual="phosphor"] .price-stat b.up {
+  color: var(--up);
+}
+
+:root[data-visual="phosphor"] .price-stat b.down {
+  color: var(--down);
+}
+
+:root[data-visual="phosphor"] .funding-chip {
+  display: grid;
+  grid-template-columns: auto auto;
+  column-gap: 8px;
+  height: auto;
+  margin-left: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 400;
+}
+
+:root[data-visual="phosphor"] .funding-chip[hidden] {
+  display: none;
+}
+
+:root[data-visual="phosphor"] .funding-chip small {
+  grid-column: 1 / -1;
+}
+
+:root[data-visual="phosphor"] .funding-chip em {
+  color: var(--muted);
+  font: 500 12px/1 var(--font-number);
+}
+
+:root[data-visual="phosphor"] .funding-chip em::before {
+  content: none;
+}
+
+:root[data-visual="phosphor"] .top-actions {
+  gap: 8px;
+}
+
+:root[data-visual="phosphor"] .topbar .icon-button {
+  width: 30px;
+  height: 30px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+}
+
+:root[data-visual="phosphor"] .topbar .icon-button:hover:not(:disabled),
+:root[data-visual="phosphor"] .topbar .icon-button.active {
+  background: var(--panel-2);
+  color: var(--text);
+}
+
+:root[data-visual="phosphor"] .topbar .command-palette-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  width: 150px;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--line-soft);
+  background: var(--panel);
+  color: var(--weak);
+  font-size: 12px;
+}
+
+:root[data-visual="phosphor"] .topbar .command-palette-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+:root[data-visual="phosphor"] .command-palette-button__label {
+  display: inline;
+}
+
+:root[data-visual="phosphor"] .command-palette-button__kbd {
+  display: inline-grid;
+  min-width: 18px;
+  height: 18px;
+  margin-left: auto;
+  padding: 0 4px;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  color: var(--weak);
+  font: 10px/1 var(--font-number);
+}
+
+:root[data-visual="phosphor"] .topbar :is(.account-button, .status-pill) {
+  height: 28px;
+  border: 1px solid var(--line-soft);
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+  font-size: 12px;
+}
+
+:root[data-visual="phosphor"] .topbar .account-button:hover {
+  background: var(--panel-2);
+}
+
+:root[data-visual="phosphor"] .rail {
+  padding: 0 0 10px;
+  gap: 4px;
+  border-right: 1px solid var(--line-soft);
+  background: var(--bg);
+}
+
+/* 品牌格：与 48px 顶栏齐平，底部一条细线分隔导航。 */
+:root[data-visual="phosphor"] .rail > .app-update-badge {
+  display: grid;
+  width: 100%;
+  height: 48px;
+  margin: 0 0 6px;
+  place-items: center;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+:root[data-visual="phosphor"] .rail-logo {
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  box-shadow: none;
+}
+
+:root[data-visual="phosphor"] .rail-item {
+  width: 38px;
+  height: 38px;
+  min-height: 38px;
+  border-radius: 6px;
+  color: #53556a;
+}
+
+:root[data-visual="phosphor"] .rail-item::before {
+  left: -9px;
+  top: 10px;
+  height: 18px;
+}
+
+:root[data-visual="phosphor"] .rail-item:hover:not(.active) {
+  color: var(--muted);
+  background: var(--panel);
+  transform: none;
+}
+
+:root[data-visual="phosphor"] .rail-item.active {
+  color: var(--text);
+  background: var(--panel-2);
+  box-shadow: none;
+}
+
+:root[data-visual="phosphor"] .rail-item[data-workspace="ai"].active {
+  color: var(--ai-bright);
+  background: var(--panel-2);
+  box-shadow: none;
+}
+
+:root[data-visual="phosphor"] .market-title strong {
+  font-family: ui-sans-serif, system-ui, -apple-system, "PingFang SC", sans-serif;
+  font-stretch: normal;
+}
+
+/* 读数按可用宽度整项隐藏（优先级：资金费率 → 成交量 → 低 → 高 → 标记价格），绝不切半个字。 */
+:root[data-visual="phosphor"] .price-strip {
+  flex: 1 1 auto;
+  min-width: 0;
+  container-type: inline-size;
+}
+
+@container (max-width: 730px) {
+  :root[data-visual="phosphor"] .price-stat--funding { display: none !important; }
+}
+
+@container (max-width: 600px) {
+  :root[data-visual="phosphor"] .price-stat--volume { display: none; }
+}
+
+@container (max-width: 480px) {
+  :root[data-visual="phosphor"] .price-stat--low { display: none; }
+}
+
+@container (max-width: 360px) {
+  :root[data-visual="phosphor"] .price-stat--high { display: none; }
+}
+
+@container (max-width: 250px) {
+  :root[data-visual="phosphor"] .price-stat--mark { display: none; }
+}
+
+:root[data-visual="phosphor"] .market-title,
+:root[data-visual="phosphor"] .top-actions {
+  flex: 0 0 auto;
+}
+
+:root[data-visual="phosphor"] .topbar .account-button {
+  max-width: 220px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+/* 大价格：固定一行高，数字位不会把顶栏撑高。 */
+:root[data-visual="phosphor"] .price-strip-values > strong.odometer {
+  height: 1.15em;
+  line-height: 1.15em;
+}
+
+/* 窄窗口：搜索收成图标 + 快捷键，把宽度让给行情读数。 */
+@media (max-width: 1600px) {
+  :root[data-visual="phosphor"] .topbar .command-palette-button {
+    width: auto;
+    padding: 0 6px 0 8px;
   }
 
-  .odometer__digit.is-changed-up::after,
-  .odometer__digit.is-changed-down::after {
-    animation: none;
+  :root[data-visual="phosphor"] .command-palette-button__label {
+    display: none;
   }
 }

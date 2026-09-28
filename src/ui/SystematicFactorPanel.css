@@ -889,23 +889,19 @@
 
 .systematic-factor-builder__field > span { display: flex; align-items: center; gap: 4px; }
 
-.systematic-factor-builder select {
+.systematic-factor-builder .terminal-select {
   width: 100%;
   min-width: 0;
-  min-height: 29px;
-  padding: 4px 7px;
-  border: 1px solid var(--lab-line);
-  border-radius: var(--lab-radius-control);
-  outline: 0;
-  background: var(--lab-bg);
-  color: var(--lab-text);
-  font: inherit;
-  font-size: var(--lab-text-body);
 }
 
-.systematic-factor-builder select:focus-visible {
-  border-color: color-mix(in srgb, var(--lab-accent) 85%, transparent);
-  box-shadow: 0 0 0 2px var(--lab-accent-soft);
+.systematic-factor-builder .terminal-select-trigger {
+  height: 29px;
+  padding: 0 7px;
+  border: 1px solid var(--lab-line);
+  border-radius: var(--lab-radius-control);
+  background: var(--lab-bg);
+  color: var(--lab-text);
+  font-size: var(--lab-text-body);
 }
 
 .systematic-factor-builder__detail {

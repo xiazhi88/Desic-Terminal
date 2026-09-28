@@ -80,6 +80,8 @@ type InspectorProps = {
   onOpenMessage?: (messageId: string) => void;
   /** 证据分区展示的研究回合（默认最近一条助手回答）。 */
   evidenceMessage?: AiUiMessage | null;
+  /** 证据分区跟随的回合是否仍在生成（由工作区的流式状态决定）。 */
+  evidenceRunning?: boolean;
   onOpenEvidenceArtifact?: (artifact: AiResearchArtifact) => void;
   marketAssets?: MarketAssetsSummary | null;
   marketTickers?: Ticker[];
@@ -1077,7 +1079,7 @@ function ResearchTabGroup({ title, tabs, activeTabId, selectedSymbol, onClose, o
   return <section className="ai-inspector-tab-group" aria-label={title}><header><span>{title}</span><small>{tabs.length}</small></header><div role="presentation">{tabs.map((tab) => <ResearchTabRow key={tab.id} tab={tab} active={tab.id === activeTabId} closable={Boolean(tab.closable)} selectedSymbol={selectedSymbol} onClose={onClose} onSelect={onSelect} uiText={uiText} />)}</div></section>;
 }
 
-export function AiResearchInspector({ sessionId, artifact, selectedSymbol, accountId, accountLabel, skillDefinitions = [], open, section, onSectionChange, onClose, onOpenStrategy, onOpenIntelligence, onOpenTrading, onResearchPrompt, onOpenMessage, evidenceMessage = null, onOpenEvidenceArtifact, marketAssets, marketTickers, cacheDir, uiText }: InspectorProps) {
+export function AiResearchInspector({ sessionId, artifact, selectedSymbol, accountId, accountLabel, skillDefinitions = [], open, section, onSectionChange, onClose, onOpenStrategy, onOpenIntelligence, onOpenTrading, onResearchPrompt, onOpenMessage, evidenceMessage = null, evidenceRunning = false, onOpenEvidenceArtifact, marketAssets, marketTickers, cacheDir, uiText }: InspectorProps) {
   const defaultTab = useMemo(() => defaultMarketTab(selectedSymbol, accountLabel, uiText), [accountLabel, selectedSymbol, uiText]);
   const [sessionStates, setSessionStates] = useState<Record<string, InspectorSessionState>>({});
   const state = sessionStates[sessionId] ?? { tabs: [defaultTab], activeTabId: defaultTab.id, section: "artifacts" as const };
@@ -1117,7 +1119,7 @@ export function AiResearchInspector({ sessionId, artifact, selectedSymbol, accou
     <header className="ai-inspector-head"><strong>{uiText("研究标签页", "Research tabs")}</strong><button type="button" title={uiText("收起研究栏", "Collapse research panel")} aria-label={uiText("收起研究栏", "Collapse research panel")} onClick={onClose}><X size={15} /></button></header>
     <div className="ai-inspector-workspace">
 
-      <div className={`ai-inspector-workspace-main${state.section === "intelligence" ? " intelligence-active" : state.section === "radar" ? " radar-active" : state.section === "evidence" ? " evidence-active" : ""}`}>{state.section === "intelligence" ? <IntelligenceSection symbol={selectedSymbol} accountId={accountId} onOpenIntelligence={onOpenIntelligence} uiText={uiText} /> : state.section === "radar" ? <RadarPanel marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} onResearchPrompt={onResearchPrompt} uiText={uiText} /> : state.section === "evidence" ? <AiEvidenceBoard key={evidenceMessage?.id ?? "none"} message={evidenceMessage} uiText={uiText} onOpenArtifact={onOpenEvidenceArtifact} /> : <>
+      <div className={`ai-inspector-workspace-main${state.section === "intelligence" ? " intelligence-active" : state.section === "radar" ? " radar-active" : state.section === "evidence" ? " evidence-active" : ""}`}>{state.section === "intelligence" ? <IntelligenceSection symbol={selectedSymbol} accountId={accountId} onOpenIntelligence={onOpenIntelligence} uiText={uiText} /> : state.section === "radar" ? <RadarPanel marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} onResearchPrompt={onResearchPrompt} uiText={uiText} /> : state.section === "evidence" ? <AiEvidenceBoard key={evidenceMessage?.id ?? "none"} message={evidenceMessage} running={evidenceRunning} uiText={uiText} onOpenArtifact={onOpenEvidenceArtifact} /> : <>
         <div className="ai-inspector-tabs" role="tablist" aria-label={uiText("已打开研究资料", "Open research artifacts")}><ResearchTabGroup title={uiText("证据链", "Evidence chain")} tabs={groups.evidence} activeTabId={activeTab.id} selectedSymbol={selectedSymbol} onClose={closeTab} onSelect={(id) => updateState((current) => ({ ...current, activeTabId: id }))} uiText={uiText} /><ResearchTabGroup title={uiText("产物 / 执行", "Artifacts / execution")} tabs={groups.artifacts} activeTabId={activeTab.id} selectedSymbol={selectedSymbol} onClose={closeTab} onSelect={(id) => updateState((current) => ({ ...current, activeTabId: id }))} uiText={uiText} /></div>
         <div className="ai-inspector-body" role="tabpanel">{currentResearchCard({ selectedSymbol, accountLabel, state, uiText })}{activeTab.kind === "market" ? <MarketArtifact artifact={activeTab} symbol={selectedSymbol} onOpenTrading={onOpenTrading} uiText={uiText} /> : activeTab.kind === "strategy" ? <StrategyArtifact artifact={activeTab} onOpenStrategy={onOpenStrategy} uiText={uiText} /> : activeTab.kind === "skill" ? <SkillArtifact artifact={activeTab} definitions={skillDefinitions} uiText={uiText} /> : <GenericArtifact artifact={activeTab} uiText={uiText} />}<ArtifactReference artifact={activeTab} onOpenMessage={onOpenMessage} uiText={uiText} /></div>
       </>}</div>

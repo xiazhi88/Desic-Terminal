@@ -61,7 +61,8 @@ import {
 } from "../lib/okx";
 import { SymbolIcon } from "./SymbolIcon";
 import { WorkspaceFrame } from "./WorkspaceFrame";
-import { RadarConstellation } from "./radar/RadarConstellation";
+import { TerminalSelect } from "./TerminalSelect";
+import { ConstellationAxisControls, RadarConstellation, readConstellationAxes } from "./radar/RadarConstellation";
 import "./MarketRadarPage.css";
 
 type RadarView = "overview" | "strong" | "movers" | "active" | "stable" | "new" | "stocks" | "expert";
@@ -127,6 +128,7 @@ export function MarketRadarPage({
   const [validationReport, setValidationReport] = useState<MarketRadarValidationReport | null>(null);
   const [validationLoading, setValidationLoading] = useState(false);
   // 表格 / 星图：星图是同一份排行数据的空间视图，外加历史快照回放。
+  const [constellationAxes, setConstellationAxes] = useState(readConstellationAxes);
   const [presentation, setPresentation] = useState<"table" | "constellation">(() => window.localStorage.getItem("desic.radar.presentation.v1") === "constellation" ? "constellation" : "table");
   const switchPresentation = (next: "table" | "constellation") => {
     setPresentation(next);
@@ -226,8 +228,12 @@ export function MarketRadarPage({
 
   const selected = (presentation === "constellation" ? rows : visibleRows).find((row) => row.instrument.instId === selectedId) ?? visibleRows[0] ?? null;
   // 星图里当前标签页 / 搜索 / 筛选命中的合约保持高亮，其余淡化（不隐藏，保留全市场语境）。
-  const constellationFocus = useMemo(() => (visibleRows.length === rows.length ? null : new Set(visibleRows.map((row) => row.instrument.instId))), [rows.length, visibleRows]);
-  const constellationCategoryName = useCallback((category: string) => categoryLabel(category === "other" ? undefined : category, chinese), [chinese]);
+  // 与原型一致：各标签在星图里高亮自己的前若干名（其余淡化），搜索 / 筛选再叠加收窄。
+  const constellationFocus = useMemo(() => {
+    const limit = view === "strong" || view === "movers" || view === "active" || view === "stable" ? 40 : view === "new" ? 24 : null;
+    const focused = limit === null ? visibleRows : visibleRows.slice(0, limit);
+    return focused.length === rows.length ? null : new Set(focused.map((row) => row.instrument.instId));
+  }, [rows.length, view, visibleRows]);
   const rankChangeMap = useMemo(() => new Map(rankChanges.map((change) => [change.instId, change])), [rankChanges]);
   const breadth = useMemo(() => buildMarketBreadth(rows), [rows]);
   const compareRows = compareIds.flatMap((instId) => rows.find((row) => row.instrument.instId === instId) ?? []);
@@ -311,6 +317,7 @@ export function MarketRadarPage({
             {query ? <button type="button" onClick={() => setQuery("")} title={text("清空", "Clear")}><X size={12} /></button> : null}
           </label>
         ) : null}
+        {view !== "expert" && presentation === "constellation" ? <ConstellationAxisControls axes={constellationAxes} text={text} onChange={setConstellationAxes} /> : null}
         {view !== "expert" ? (
           <div className="market-radar-page__view-toggle" role="radiogroup" aria-label={text("呈现方式", "Presentation")}>
             <button type="button" aria-pressed={presentation === "table"} onClick={() => switchPresentation("table")}><Table2 size={13} />{text("表格", "Table")}</button>
@@ -407,16 +414,14 @@ export function MarketRadarPage({
             researchScores={researchScores}
             fetchedAt={fetchedAt}
             focusIds={constellationFocus}
-            selectedId={selected?.instrument.instId ?? null}
             compareIds={compareIds}
+            axes={constellationAxes}
             desktop={desktop}
+            chinese={chinese}
             text={text}
-            categoryName={constellationCategoryName}
             onSelect={setSelectedId}
-            onCompare={(instIds) => {
-              setCompareIds(instIds);
-              if (instIds.length > 0) setToolMode("compare");
-            }}
+            onCompareChange={setCompareIds}
+            onOpenSymbol={onOpenSymbol}
           />
         ) : (
         <section className="market-radar-table" aria-label={text("市场排行", "Market ranking")}>
@@ -481,7 +486,7 @@ export function MarketRadarPage({
         </section>
         )}
 
-        <aside className="market-radar-detail" aria-label={text("评分说明", "Score explanation")}>
+        {presentation === "constellation" ? null : <aside className="market-radar-detail" aria-label={text("评分说明", "Score explanation")}>
           {selected ? <RadarDetail
             row={selected}
             rankChange={rankChangeMap.get(selected.instrument.instId)}
@@ -489,7 +494,7 @@ export function MarketRadarPage({
             onOpen={() => onOpenSymbol(selected.instrument.instId)}
             onCompare={() => addCompare(selected.instrument.instId)}
           /> : null}
-        </aside>
+        </aside>}
       </div>
       )}
     </WorkspaceFrame>
@@ -577,7 +582,19 @@ function RadarToolsPanel({
           </div>
         ) : null}
         <div className="market-radar-filter-grid">
-          <label><span>{text("产品类别", "Category")}</span><select value={activeFilter.category ?? ""} onChange={(event) => onFilterChange({ ...activeFilter, category: (event.target.value || undefined) as RadarFilterDefinition["category"] })}><option value="">{text("全部", "All")}</option><option value="1">{text("加密货币", "Crypto")}</option><option value="3">{text("股票", "Stock")}</option><option value="4">{text("商品", "Commodity")}</option><option value="5">{text("外汇", "FX")}</option><option value="6">{text("债券", "Bond")}</option></select></label>
+          <label><span>{text("产品类别", "Category")}</span><TerminalSelect
+            value={activeFilter.category ?? ""}
+            ariaLabel={text("产品类别", "Category")}
+            options={[
+              { value: "", label: text("全部", "All") },
+              { value: "1", label: text("加密货币", "Crypto") },
+              { value: "3", label: text("股票", "Stock") },
+              { value: "4", label: text("商品", "Commodity") },
+              { value: "5", label: text("外汇", "FX") },
+              { value: "6", label: text("债券", "Bond") }
+            ]}
+            onChange={(value) => onFilterChange({ ...activeFilter, category: (value || undefined) as RadarFilterDefinition["category"] })}
+          /></label>
           <label><span>{text("最低成交额", "Min turnover")}</span><input type="number" min="0" value={activeFilter.minTurnover24h ?? ""} onChange={(event) => updateNumber("minTurnover24h", event.target.value)} /></label>
           <label><span>{text("最大点差 bp", "Max spread bp")}</span><input type="number" min="0" step="0.1" value={activeFilter.maxSpreadBps ?? ""} onChange={(event) => updateNumber("maxSpreadBps", event.target.value)} /></label>
           <label><span>{text("最低综合评分", "Min composite")}</span><input type="number" min="0" max="100" value={activeFilter.minCompositeScore ?? ""} onChange={(event) => updateNumber("minCompositeScore", event.target.value)} /></label>
@@ -607,7 +624,14 @@ function RadarToolsPanel({
     return (
       <section className="market-radar-tools-panel" aria-label={text("多标的比较", "Market comparison")}>
         <div className="market-radar-compare__add">
-          <select value={compareCandidate} onChange={(event) => setCompareCandidate(event.target.value)}><option value="">{text("选择交易对", "Choose market")}</option>{available.slice(0, 200).map((row) => <option key={row.instrument.instId} value={row.instrument.instId}>{row.instrument.baseCcy} · {row.instrument.localizedSecurityName || row.instrument.securityName || row.instrument.instId}</option>)}</select>
+          <TerminalSelect
+            value={compareCandidate}
+            ariaLabel={text("选择交易对", "Choose market")}
+            placeholder={text("选择交易对", "Choose market")}
+            menuMinWidth={260}
+            options={available.slice(0, 200).map((row) => ({ value: row.instrument.instId, label: `${row.instrument.baseCcy} · ${row.instrument.localizedSecurityName || row.instrument.securityName || row.instrument.instId}` }))}
+            onChange={setCompareCandidate}
+          />
           <button type="button" disabled={!compareCandidate || compareRows.length >= 4} onClick={() => { onAddCompare(compareCandidate); setCompareCandidate(""); }}>{text("加入比较", "Add")}</button>
           <span>{text(`已选择 ${compareRows.length}/4`, `${compareRows.length}/4 selected`)}</span>
         </div>
@@ -658,16 +682,30 @@ function RadarToolsPanel({
       <section className="market-radar-tools-panel" aria-label={text("雷达提醒", "Radar alerts")}>
         <div className="market-radar-alert-form">
           <input value={alertName} onChange={(event) => setAlertName(event.target.value)} maxLength={64} placeholder={text("提醒名称", "Alert name")} />
-          <select value={alertKind} onChange={(event) => setAlertKind(event.target.value)}>
-            <option value="enterTop">{text("首次进入 Top N", "Enters Top N")}</option>
-            <option value="rankRise">{text("1 小时排名上升", "1h rank rise")}</option>
-            <option value="activityAbove">{text("活跃度跨过阈值", "Activity crosses threshold")}</option>
-            <option value="spreadAbove">{text("点差恶化超过 bp", "Spread worsens above bp")}</option>
-            <option value="newListing">{text("新标的首次出现", "New listing appears")}</option>
-            <option value="historyReady">{text("研究历史首次就绪", "Research history becomes ready")}</option>
-          </select>
+          <TerminalSelect
+            value={alertKind}
+            ariaLabel={text("提醒类型", "Alert type")}
+            menuMinWidth={220}
+            options={[
+              { value: "enterTop", label: text("首次进入 Top N", "Enters Top N") },
+              { value: "rankRise", label: text("1 小时排名上升", "1h rank rise") },
+              { value: "activityAbove", label: text("活跃度跨过阈值", "Activity crosses threshold") },
+              { value: "spreadAbove", label: text("点差恶化超过 bp", "Spread worsens above bp") },
+              { value: "newListing", label: text("新标的首次出现", "New listing appears") },
+              { value: "historyReady", label: text("研究历史首次就绪", "Research history becomes ready") }
+            ]}
+            onChange={setAlertKind}
+          />
           {requiresThreshold ? <input type="number" min="0" value={alertThreshold} onChange={(event) => setAlertThreshold(event.target.value)} aria-label={text("阈值", "Threshold")} /> : <span className="market-radar-alert-form__fixed">{text("状态变化", "State transition")}</span>}
-          <select value={alertScope} onChange={(event) => setAlertScope(event.target.value as "all" | "selected")}><option value="all">{text("全市场", "All markets")}</option><option value="selected" disabled={!selectedId}>{text("当前选中标的", "Selected market")}</option></select>
+          <TerminalSelect
+            value={alertScope}
+            ariaLabel={text("提醒范围", "Alert scope")}
+            options={[
+              { value: "all", label: text("全市场", "All markets") },
+              { value: "selected", label: text("当前选中标的", "Selected market"), disabled: !selectedId }
+            ]}
+            onChange={(value) => setAlertScope(value as "all" | "selected")}
+          />
           <button type="button" disabled={!alertName.trim()} onClick={() => void saveAlert()}><Bell size={13} />{text("创建", "Create")}</button>
         </div>
         <div className="market-radar-alert-list">

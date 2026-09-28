@@ -307,15 +307,17 @@ async function verifyMarketRadar(page) {
   await page.waitForSelector(".radar-constellation__plot canvas", { timeout: 15_000 });
   const constellation = await page.evaluate(() => {
     const plot = document.querySelector(".radar-constellation__plot")?.getBoundingClientRect();
-    const detail = document.querySelector(".market-radar-detail")?.getBoundingClientRect();
+    const detail = document.querySelector(".rc-side")?.getBoundingClientRect();
     return {
       layers: document.querySelectorAll(".radar-constellation__plot canvas").length,
+      overview: document.querySelectorAll(".rc-side .rc-sec").length,
+      axes: document.querySelectorAll(".market-radar-page__toolbar .rc-axes .terminal-select").length,
       status: document.querySelector(".radar-constellation__time small")?.textContent || "",
       plot: plot ? { x: plot.x, y: plot.y, width: plot.width, height: plot.height } : null,
       detail: detail ? { x: detail.x, y: detail.y, width: detail.width, height: detail.height } : null
     };
   });
-  if (constellation.layers !== 3 || !constellation.plot || constellation.plot.width < 300 || constellation.plot.height < 200
+  if (constellation.layers !== 3 || constellation.overview < 3 || constellation.axes !== 2 || !constellation.plot || constellation.plot.width < 300 || constellation.plot.height < 200
     || !constellation.detail || rectsOverlap(constellation.plot, constellation.detail)
     || !constellation.status.includes("回放需要桌面端本地快照")) {
     throw new Error(`market radar constellation layout or replay boundary failed: ${JSON.stringify(constellation)}`);
