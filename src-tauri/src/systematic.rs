@@ -110,6 +110,30 @@ const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 12;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMATIC_PYTHON_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
+/// 依赖装完后的导入校验要加载 numpy/pandas/scikit-learn：新建 venv 里的二进制
+/// 第一次执行时还要被系统逐个校验，冷缓存机器上远超 12 秒，因此单独放宽。
+/// First import check after an environment build. macOS scans every freshly
+/// installed native library on its first load (Gatekeeper / XProtect, plus any
+/// endpoint-security product), which can take minutes on some machines and never
+/// shows up on a developer Mac with those checks relaxed. The check therefore
+/// fails on a stall — no module finishing for `IDLE` — not on total duration;
+/// `MAX` only bounds a run that keeps progressing.
+const SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const SYSTEMATIC_PYTHON_VERIFY_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
+/// Imports one module at a time and reports each on stdout, so progress is
+/// observable. faulthandler writes every thread's stack to stderr every 30s,
+/// which setup.log keeps: a genuine hang then names the exact import (and the
+/// native library load) it is stuck in.
+const SYSTEMATIC_PYTHON_VERIFY_SCRIPT: &str = r#"import faulthandler, sys, time
+faulthandler.dump_traceback_later(30, repeat=True, file=sys.stderr)
+for name in ("numpy", "scipy", "pandas", "sklearn"):
+    print(f"desic-verify loading {name}", flush=True)
+    started = time.perf_counter()
+    __import__(name)
+    print(f"desic-verify loaded {name} in {time.perf_counter() - started:.1f}s", flush=True)
+faulthandler.cancel_dump_traceback_later()
+print("desic-verify version " + ".".join(map(str, sys.version_info[:3])), flush=True)
+"#;
 // The environment root is the stable place for installation evidence: the venv
 // staging directory is deleted after a failure, so anything written there would
 // vanish exactly when a user needs to look at it.
@@ -14571,6 +14595,14 @@ fn local_python_environment_failure_view(
                 "{label} finished preparing the local research environment, but Windows kept the new environment files in use while Desic was activating it. Close programs scanning or using the Desic workspace, then retry.\n{error}"
             ),
         )
+    } else if lowercase.contains("timed out while trying to verify the local python environment") {
+        (
+            "invalidEnvironment",
+            format!(
+                "{label} installed the research dependencies, but loading them for the first time made no progress for {} seconds, even after an automatic retry. The first load of freshly installed native libraries is scanned by macOS (and by any security software), which can be slow but normally keeps progressing; a module that stops completely usually means a security product is holding it. Select Recheck to try again; if it keeps failing, send us setup.log — it records the time of every module and where the load stopped.\n{error}",
+                SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT.as_secs()
+            ),
+        )
     } else {
         (
             "invalidEnvironment",
@@ -14954,6 +14986,7 @@ async fn install_local_python_dependencies(
         let context = LocalPythonStreamContext {
             app,
             stage: "dependencies",
+            emit_stderr: true,
             mirror: Some(label),
             attempt,
             attempt_total,
@@ -15021,24 +15054,104 @@ async fn install_local_python_dependencies(
             "timestamp": now_ms(),
         }),
     );
-    let mut verify = Command::new(interpreter);
-    verify
-        .arg("-I")
-        .arg("-c")
-        .arg("import sys, numpy, pandas, sklearn; print('.'.join(map(str, sys.version_info[:3])))");
-    configure_local_python_execution_command(&mut verify);
-    // Applied after the execution environment is cleared, so the proxy is the
-    // one this app is configured with and never an inherited shell value.
-    apply_local_python_proxy_environment(&mut verify, &proxy_environment);
-    let version = run_local_python_command(
-        &mut verify,
-        "verify the local Python environment",
-        SYSTEMATIC_PYTHON_COMMAND_TIMEOUT,
-    )
-    .await?;
+    // 首次校验要把 numpy/scipy/pandas/scikit-learn 整个加载一遍：刚装好的原生库第一次加载时，
+    // macOS 会逐个做安全扫描（Gatekeeper / XProtect，以及用户装的安全软件），慢的机器上可达数分钟，
+    // 而开发机通常关闭了这些检查，永远复现不了。因此按“进展”判断：逐个模块导入并输出进度，
+    // 只有单个模块超过 IDLE 没有完成才判为卡住（超时后确实杀掉进程），持续推进则最多等到 MAX；
+    // 卡住时 faulthandler 的栈转储写进 setup.log，能看出停在哪个 import / 哪个原生库。
+    // 超时自动重试一次（第一次已加载完的库在重试时不再扫描）；非超时错误立即失败，不掩盖真问题。
+    let mut verify_error = String::new();
+    let mut verified_version = None;
+    for attempt in 1..=2 {
+        let attempt_started = Instant::now();
+        let mut verify = Command::new(interpreter);
+        verify.arg("-I").arg("-c").arg(SYSTEMATIC_PYTHON_VERIFY_SCRIPT);
+        configure_local_python_execution_command(&mut verify);
+        let context = LocalPythonStreamContext {
+            app,
+            stage: "verifying",
+            emit_stderr: false,
+            mirror: None,
+            attempt,
+            attempt_total: 2,
+            started: attempt_started,
+        };
+        append_local_python_setup_log(&format!(
+            "=== verification attempt {attempt}/2 started at {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ));
+        // Applied after the execution environment is cleared, so the proxy is the
+        // one this app is configured with and never an inherited shell value.
+        match run_local_python_streaming_command_with_idle(
+            &mut verify,
+            "verify the local Python environment",
+            SYSTEMATIC_PYTHON_VERIFY_MAX_DURATION,
+            Some(SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT),
+            &proxy_environment,
+            Some(&context),
+        )
+        .await
+        {
+            Ok(output) => {
+                append_local_python_setup_log(&format!(
+                    "=== verification attempt {attempt}/2 finished after {}s",
+                    attempt_started.elapsed().as_secs()
+                ));
+                verified_version = Some(local_python_verified_version(&output).unwrap_or(output));
+                break;
+            }
+            Err(error) => {
+                append_local_python_setup_log(&format!(
+                    "=== verification attempt {attempt}/2 failed after {}s: {error}",
+                    attempt_started.elapsed().as_secs()
+                ));
+                let timed_out = error.contains("Timed out while trying to");
+                verify_error = error;
+                if !timed_out {
+                    break;
+                }
+            }
+        }
+    }
+    let version = match verified_version {
+        Some(version) => version,
+        None => {
+            // 校验失败同样落盘：界面据此显示 setup.log 路径，且重试不会抹掉这次的证据。
+            append_local_python_setup_log(&format!(
+                "=== verification failed at {}: {verify_error} ===",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ));
+            record_local_python_setup_failure(&verify_error, failures);
+            return Err(verify_error);
+        }
+    };
     parse_local_python_version(&version)
         .map(|(_, _, version)| version)
         .ok_or_else(|| "The local Python environment returned an invalid version".to_string())
+}
+
+/// The version line of [`SYSTEMATIC_PYTHON_VERIFY_SCRIPT`].
+fn local_python_verified_version(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("desic-verify version "))
+        .map(|version| version.trim().to_string())
+}
+
+/// The module the import check was loading when it stopped making progress:
+/// the last "loading" line without a matching "loaded" line.
+fn local_python_stall_location(stdout: &str) -> Option<String> {
+    let mut pending = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(module) = line.strip_prefix("desic-verify loading ") {
+            pending = Some(module.trim().to_string());
+        } else if line.starts_with("desic-verify loaded ") {
+            pending = None;
+        }
+    }
+    pending
 }
 
 fn write_local_python_environment_manifest(
@@ -15125,6 +15238,9 @@ struct LocalPythonStreamContext<'a> {
     app: &'a tauri::AppHandle,
     /// `pythonEnvironmentStage` stage name; `dependencies` for pip.
     stage: &'a str,
+    /// Whether stderr lines reach the UI. The import check writes periodic
+    /// faulthandler stack dumps to stderr; those belong in setup.log only.
+    emit_stderr: bool,
     mirror: Option<&'a str>,
     attempt: usize,
     attempt_total: usize,
@@ -15222,6 +15338,21 @@ async fn run_local_python_streaming_command(
     proxy_environment: &[(&'static str, Option<String>)],
     context: Option<&LocalPythonStreamContext<'_>>,
 ) -> Result<String, String> {
+    run_local_python_streaming_command_with_idle(command, action, duration, None, proxy_environment, context).await
+}
+
+/// Same as [`run_local_python_streaming_command`], plus an optional idle limit:
+/// the run fails when no stdout line arrives for `idle`, while steady progress
+/// may continue up to the hard `duration`. Only stdout resets the idle clock, so
+/// diagnostic output on stderr cannot keep a stuck process alive.
+async fn run_local_python_streaming_command_with_idle(
+    command: &mut Command,
+    action: &str,
+    duration: Duration,
+    idle: Option<Duration>,
+    proxy_environment: &[(&'static str, Option<String>)],
+    context: Option<&LocalPythonStreamContext<'_>>,
+) -> Result<String, String> {
     hide_local_python_command_window(command);
     apply_local_python_proxy_environment(command, proxy_environment);
     command
@@ -15254,12 +15385,20 @@ async fn run_local_python_streaming_command(
     let mut tail = LocalPythonStreamTail::default();
     let mut stdout_text = String::new();
     let mut timed_out = false;
+    let mut idled = false;
     let deadline = sleep(duration);
     tokio::pin!(deadline);
+    let idle_limit = idle.unwrap_or(duration);
+    let idle_deadline = sleep(idle_limit);
+    tokio::pin!(idle_deadline);
     loop {
         tokio::select! {
             _ = &mut deadline => {
                 timed_out = true;
+                break;
+            }
+            _ = &mut idle_deadline, if idle.is_some() => {
+                idled = true;
                 break;
             }
             message = receiver.recv() => match message {
@@ -15277,9 +15416,12 @@ async fn run_local_python_streaming_command(
                     if output == LocalPythonOutputStream::Stdout {
                         stdout_text.push_str(&line);
                         stdout_text.push('\n');
+                        idle_deadline.as_mut().reset(tokio::time::Instant::now() + idle_limit);
                     }
                     if let Some(context) = context {
-                        context.emit_line(&line);
+                        if output == LocalPythonOutputStream::Stdout || context.emit_stderr {
+                            context.emit_line(&line);
+                        }
                     }
                 }
                 None => break,
@@ -15293,6 +15435,21 @@ async fn run_local_python_streaming_command(
             duration.as_secs()
         ));
         return Err(format!("Timed out while trying to {action}"));
+    }
+    if idled {
+        let _ = child.kill().await;
+        append_local_python_setup_log(&format!(
+            "--- no progress for {}s while trying to {action}; last stderr:\n{}",
+            idle_limit.as_secs(),
+            tail.stderr
+        ));
+        return Err(format!(
+            "Timed out while trying to {action}: no progress for {}s{}",
+            idle_limit.as_secs(),
+            local_python_stall_location(&tail.stdout)
+                .map(|module| format!(" while loading {module}"))
+                .unwrap_or_default()
+        ));
     }
     let status = child
         .wait()
@@ -17902,6 +18059,56 @@ fn emit_systematic_event(app: &tauri::AppHandle, payload: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_script_output_yields_version_and_stall_location() {
+        let complete = "desic-verify loading numpy\ndesic-verify loaded numpy in 3.1s\ndesic-verify loading scipy\ndesic-verify loaded scipy in 40.2s\ndesic-verify version 3.13.15";
+        assert_eq!(local_python_verified_version(complete).as_deref(), Some("3.13.15"));
+        assert_eq!(local_python_stall_location(complete), None);
+        let stuck = "desic-verify loading numpy\ndesic-verify loaded numpy in 3.1s\ndesic-verify loading scipy";
+        assert_eq!(local_python_stall_location(stuck).as_deref(), Some("scipy"));
+        assert_eq!(local_python_verified_version(stuck), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_idle_limit_fails_a_stall_but_not_slow_progress() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // A load that stops after one line is a stall: killed after the idle limit, naming the module.
+            let started = Instant::now();
+            let mut stuck = Command::new("sh");
+            stuck.arg("-c").arg("echo desic-verify loading scipy; sleep 5");
+            let error = run_local_python_streaming_command_with_idle(
+                &mut stuck, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.starts_with("Timed out while trying to verify the local Python environment"), "{error}");
+            assert!(error.contains("no progress for 1s while loading scipy"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(4), "stalled child must be killed at the idle limit");
+
+            // Slow but steady progress outlives the idle limit.
+            let mut slow = Command::new("sh");
+            slow.arg("-c").arg("for i in 1 2 3 4; do echo tick $i; sleep 0.6; done; echo desic-verify version 3.13.15");
+            let output = run_local_python_streaming_command_with_idle(
+                &mut slow, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(local_python_verified_version(&output).as_deref(), Some("3.13.15"));
+
+            // Diagnostic stderr (faulthandler dumps) must not count as progress.
+            let mut noisy = Command::new("sh");
+            noisy.arg("-c").arg("echo desic-verify loading sklearn; for i in 1 2 3 4 5 6; do echo dump >&2; sleep 0.4; done");
+            let error = run_local_python_streaming_command_with_idle(
+                &mut noisy, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("while loading sklearn"), "{error}");
+        });
+    }
 
     #[test]
     fn package_index_fallback_starts_in_china_and_ends_at_pypi() {
