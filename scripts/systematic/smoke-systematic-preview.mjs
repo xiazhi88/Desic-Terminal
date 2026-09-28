@@ -1,5 +1,8 @@
 import { chromium } from "playwright";
+import { buildReplayTheaterRun, detailPage } from "./replay-theater-fixture.mjs";
+import { terrainFixture } from "./parameter-terrain-fixture.mjs";
 
+const screenshotDir = process.env.DESIC_SYSTEMATIC_SCREENSHOT_DIR || "";
 const previewUrl = process.env.DESIC_SYSTEMATIC_PREVIEW_URL || "http://127.0.0.1:1420/terminal-preview?accounts=demo&marketConsistency=1";
 const minute = 60_000;
 const endAt = Date.UTC(2026, 7, 3, 8, 0, 0);
@@ -253,11 +256,20 @@ function assert(condition, message) {
 
 async function main() {
   const data = fixture();
+  // Replay theater: a deterministic run (25 rounds, partial exits, a losing streak and one
+  // large winner) served page by page exactly like `systematic_backtest_detail`.
+  const theater = buildReplayTheaterRun({ evaluationBars: barCount > 96 ? barCount : 1824 });
+  const theaterRequests = [];
+  data.overview.backtests = [theater.run];
   const browser = await chromium.launch({ headless: true });
   try {
     const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
     const errors = [];
     page.on("pageerror", (error) => errors.push(error.message));
+    await page.exposeFunction("__desicTheaterDetail", (request) => {
+      theaterRequests.push({ offset: request?.offset ?? null, limit: request?.limit ?? null });
+      return detailPage(theater, request ?? {});
+    });
     await page.goto(previewUrl, { waitUntil: "domcontentloaded", timeout: 30_000 });
     await page.waitForSelector(".workspace", { timeout: 30_000 });
     await page.evaluate(({ overview, detail, runtime, endAt: defaultEnd }) => {
@@ -266,9 +278,10 @@ async function main() {
         transformCallback() { return callbackId++; },
         unregisterCallback() {},
         convertFileSrc(path) { return path; },
-        async invoke(command) {
+        async invoke(command, args) {
           if (command === "systematic_overview") return overview;
-          if (command === "systematic_backtest_detail") return detail;
+          if (command === "systematic_optimization_candidates") return window.__desicTerrainViews?.[args?.request?.optimizationId] ?? null;
+          if (command === "systematic_backtest_detail") return window.__desicTheaterDetail(args?.request ?? {});
           if (command === "systematic_backtest_defaults") return { startAt: defaultEnd - 30 * 24 * 60 * 60 * 1000, endAt: defaultEnd };
           if (command === "systematic_python_prepare_environment") return runtime;
           if (command === "plugin:event|listen" || command === "plugin:event|unlisten") return 1;
@@ -276,6 +289,20 @@ async function main() {
         },
       };
     }, { ...data, endAt });
+    // Parameter terrain fixtures: one finished and one in-flight optimization run.
+    const terrainDone = terrainFixture({ id: "optimization-fixture-done", strategyId: "strategy-fixture", instId: "BTC-USDT-SWAP", createdAt: endAt + 7_200_000 });
+    const terrainLive = terrainFixture({ id: "optimization-fixture-live", strategyId: "strategy-fixture", instId: "BTC-USDT-SWAP", createdAt: endAt + 3_600_000, runningAt: 0.55 });
+    await page.evaluate(({ views, optimizations }) => {
+      window.__desicTerrainViews = views;
+      const invoke = window.__TAURI_INTERNALS__.invoke;
+      window.__TAURI_INTERNALS__.invoke = async (command, args) => {
+        const result = await invoke(command, args);
+        return command === "systematic_overview" && result ? { ...result, optimizations } : result;
+      };
+    }, {
+      views: { [terrainDone.optimization.id]: terrainDone, [terrainLive.optimization.id]: terrainLive },
+      optimizations: [terrainDone.optimization, terrainLive.optimization],
+    });
 
     await page.getByRole("button", { name: "Systematic Research" }).click();
     await page.waitForSelector(".systematic-strategy-lab", { timeout: 30_000 });
@@ -305,6 +332,49 @@ async function main() {
     assert(strategyLayout.strategyListIsVertical, `desktop strategy rows must stay vertically stacked in the strategy list: ${JSON.stringify(strategyLayout)}`);
 
     await page.getByRole("button", { name: "Parameter optimization" }).click();
+    await page.waitForSelector(".parameter-terrain .pt-side-scroll .pt-cd-head", { timeout: 10_000 });
+    await page.waitForTimeout(400);
+    const terrainPixels = () => page.evaluate(() => {
+      const canvas = document.querySelector("[data-testid='terrain-canvas']");
+      const context = canvas?.getContext("2d");
+      if (!canvas || !context || canvas.width < 100 || canvas.height < 100) return { painted: 0, distinct: 0, warm: 0, hash: 0 };
+      const { data } = context.getImageData(0, 0, canvas.width, canvas.height);
+      let painted = 0, warm = 0, hash = 0;
+      const colors = new Set();
+      for (let i = 0; i < data.length; i += 4 * 7) {
+        if (data[i + 3] > 0) painted += 1;
+        if (data[i] > data[i + 2] + 60 && data[i + 1] > data[i + 2] + 20) warm += 1;
+        colors.add((data[i] >> 4) << 8 | (data[i + 1] >> 4) << 4 | (data[i + 2] >> 4));
+        hash = (hash * 31 + data[i] + data[i + 1] * 7 + data[i + 2] * 13) >>> 0;
+      }
+      return { painted, distinct: colors.size, warm, hash };
+    });
+    const terrainBefore = await terrainPixels();
+    assert(terrainBefore.painted > 20_000 && terrainBefore.distinct > 40, `parameter terrain canvas must be painted with a field: ${JSON.stringify(terrainBefore)}`);
+    const terrainSelected = await page.locator(".pt-cd-head .id").innerText();
+    assert(terrainSelected === "#57", `terrain must open on the best validation candidate: ${terrainSelected}`);
+    assert(await page.locator(".pt-strip i").count() === 100, "terrain progress strip must show one cell per candidate");
+    const hatch = page.getByTestId("terrain-hatch");
+    await hatch.click();
+    await page.waitForTimeout(150);
+    const terrainHatched = await terrainPixels();
+    assert(await hatch.getAttribute("aria-pressed") === "true", "overfit layer toggle must report its pressed state");
+    assert(terrainHatched.hash !== terrainBefore.hash && terrainHatched.warm > terrainBefore.warm, `overfit layer must hatch the canvas in the warn colour: ${JSON.stringify({ terrainBefore, terrainHatched })}`);
+    await hatch.click();
+    await page.locator(".pt-strip i").nth(0).click();
+    await page.waitForFunction(() => document.querySelector(".pt-cd-head .id")?.textContent === "#0", null, { timeout: 5_000 });
+    const baselinePanel = await page.getByTestId("terrain-side").innerText();
+    assert(/Baseline/.test(baselinePanel) && /train vs validation/i.test(baselinePanel), `selecting a candidate must update the side panel: ${baselinePanel.slice(0, 200)}`);
+    const canvasBox = await page.getByTestId("terrain-canvas").boundingBox();
+    await page.mouse.move(canvasBox.x + canvasBox.width * 0.62, canvasBox.y + canvasBox.height * 0.55);
+    await page.mouse.move(canvasBox.x + canvasBox.width * 0.62 + 3, canvasBox.y + canvasBox.height * 0.55 + 2);
+    await page.waitForSelector(".pt-tip.is-on", { timeout: 3_000 });
+    await page.mouse.move(canvasBox.x + 4, canvasBox.y + 4);
+    await page.locator(".pt-select--record .terminal-select-trigger").click();
+    await page.getByRole("option").nth(1).click();
+    await page.waitForFunction(() => document.querySelectorAll(".pt-strip i.r").length > 0, null, { timeout: 5_000 });
+    assert(await page.locator(".pt-badge.is-run").count() === 1, "an in-flight optimization must show the running badge");
+    await page.getByRole("button", { name: "Configure tuning" }).click();
     await page.waitForSelector(".systematic-lab-tuning-view", { timeout: 10_000 });
     const tuningLayout = await page.evaluate(() => {
       const root = document.querySelector(".systematic-lab-tuning-view")?.getBoundingClientRect();
@@ -376,28 +446,87 @@ async function main() {
     assert(leverageValues.includes(10) && leverageValues.includes(1), "backtest must expose default leverage and margin safety multiplier");
 
     await page.getByRole("button", { name: "Results & replay" }).click();
-    await page.waitForSelector(".systematic-lab-review-main", { timeout: 20_000 });
-    const reviewLayout = await page.evaluate(() => {
-      const sizeOf = (selector) => {
-        const rect = document.querySelector(selector)?.getBoundingClientRect();
-        return rect ? { width: rect.width, height: rect.height } : null;
-      };
+    await page.waitForSelector(".systematic-lab-review-main .rt canvas", { timeout: 20_000 });
+    await page.waitForFunction(() => document.querySelectorAll(".rt-row").length > 0, null, { timeout: 10_000 });
+    await page.waitForTimeout(600);
+    const theaterLayout = await page.evaluate(() => {
+      const rect = (selector) => document.querySelector(selector)?.getBoundingClientRect();
+      const canvas = document.querySelector(".rt-tracks canvas");
+      let inkPixels = 0;
+      let colours = 0;
+      if (canvas instanceof HTMLCanvasElement) {
+        const context = canvas.getContext("2d");
+        const pixels = context.getImageData(0, 0, canvas.width, canvas.height).data;
+        const seen = new Set();
+        for (let index = 0; index < pixels.length; index += 16) {
+          if (pixels[index + 3] > 0) { inkPixels += 1; seen.add(`${pixels[index] >> 4}-${pixels[index + 1] >> 4}-${pixels[index + 2] >> 4}`); }
+        }
+        colours = seen.size;
+        inkPixels /= pixels.length / 16;
+      }
+      const kpis = Array.from(document.querySelectorAll(".rt-kpi")).filter((kpi) => kpi.getBoundingClientRect().width > 0);
       return {
-        chart: sizeOf(".systematic-lab-replay-stage"),
-        equity: sizeOf(".systematic-lab-equity-stage"),
-        statistics: sizeOf(".systematic-lab-statistics-stage"),
-        accountTabs: Array.from(document.querySelectorAll(".systematic-lab-account-tabs button")).map((button) => {
-          const tabList = button.parentElement?.getBoundingClientRect();
-          const rect = button.getBoundingClientRect();
-          return { label: button.getAttribute("aria-label"), fits: Boolean(tabList) && rect.left >= tabList.left && rect.right <= tabList.right };
-        }),
+        documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
+        tracks: rect(".rt-tracks"),
+        side: rect(".rt-side"),
+        oldBlocks: document.querySelectorAll(".systematic-lab-replay-stage, .systematic-lab-equity-stage, .systematic-lab-statistics-stage, .systematic-lab-trade-ledger").length,
+        kpis: kpis.length,
+        kpisTruncated: kpis.filter((kpi) => kpi.scrollWidth > kpi.clientWidth + 1).map((kpi) => kpi.textContent),
+        calmarInferred: Boolean(document.querySelector(".rt-kpi__der")),
+        rows: document.querySelectorAll(".rt-row").length,
+        inkPixels,
+        colours,
+        hud: document.querySelector(".rt-hud")?.textContent ?? "",
+        playheadClock: document.querySelector(".rt-clock__d")?.textContent ?? "",
       };
     });
-    assert(reviewLayout.chart?.height > 100, "replay chart must have visible height");
-    assert(reviewLayout.equity?.height > 60, "equity chart must have visible height");
-    assert(reviewLayout.statistics?.height > 80, "statistics panel must have visible height");
-    assert(reviewLayout.accountTabs.length === 3, "replay must expose fill, current-position, and position-history tabs");
-    assert(reviewLayout.accountTabs.every((tab) => tab.fits && tab.label), "replay account tabs must remain accessible and fit their pane");
+    assert(theaterLayout.documentOverflow <= 2, `replay theater has horizontal overflow: ${JSON.stringify(theaterLayout)}`);
+    assert(theaterLayout.oldBlocks === 0, "replay theater must replace the separate chart, equity, statistics and ledger blocks");
+    assert(theaterLayout.tracks?.height > 300 && theaterLayout.tracks?.width > 500, `replay theater tracks must be usable: ${JSON.stringify(theaterLayout.tracks)}`);
+    assert(theaterLayout.side?.width > 250, "replay theater must keep the trade card and round list");
+    assert(theaterLayout.kpis >= 7 && theaterLayout.kpisTruncated.length === 0, `replay theater KPIs must be complete and untruncated: ${JSON.stringify(theaterLayout.kpisTruncated)}`);
+    assert(theaterLayout.calmarInferred, "the frontend Calmar estimate must be labelled as inferred");
+    assert(theaterLayout.rows === theater.rounds, `round list must show every round (${theaterLayout.rows} / ${theater.rounds})`);
+    assert(theaterLayout.inkPixels > 0.08 && theaterLayout.colours > 12, `replay theater canvas is blank: ${theaterLayout.inkPixels} / ${theaterLayout.colours}`);
+    assert(theaterLayout.hud.length > 10 && theaterLayout.playheadClock.length > 5, "replay theater HUD and clock must render");
+    assert(theaterRequests.some((request) => request.limit === 5_000 && (barCount > 96 || request.offset === 0)), `replay theater must lazily load the uncovered page: ${JSON.stringify(theaterRequests)}`);
+
+    await page.locator('.rt-row[data-round="7"]').click();
+    await page.waitForFunction(() => document.querySelector(".rt-card__id")?.textContent === "#07", null, { timeout: 5_000 });
+    const selection = await page.evaluate(() => ({
+      selectedRows: Array.from(document.querySelectorAll(".rt-row.is-sel")).map((row) => row.getAttribute("data-round")),
+      fills: document.querySelectorAll(".rt-fl > span").length / 5,
+      actions: document.querySelectorAll(".rt-act").length,
+    }));
+    assert(selection.selectedRows.length === 1 && selection.selectedRows[0] === "7", `clicking a round must select it in the list: ${JSON.stringify(selection)}`);
+    assert(selection.fills >= 2 && selection.actions >= 1, `selected trade card must list its fills and strategy actions: ${JSON.stringify(selection)}`);
+    await page.locator(".rt-act").first().click();
+    const afterActionSeek = await page.locator(".rt-clock__d").textContent();
+    assert(afterActionSeek && afterActionSeek !== theaterLayout.playheadClock, "clicking a numbered action must move the playhead");
+    await page.locator(".rt-list-h").getByRole("button", { name: "Wins", exact: true }).click();
+    const winRows = await page.evaluate(() => Array.from(document.querySelectorAll(".rt-row .rt-row__pn > span")).map((cell) => cell.className));
+    assert(winRows.length > 0 && winRows.length < theater.rounds && winRows.every((name) => name.includes("is-pos")), `win filter must keep only profitable rounds: ${JSON.stringify(winRows)}`);
+    await page.locator(".rt-list-h").getByRole("button", { name: "All", exact: true }).click();
+    await page.getByRole("button", { name: "Clear selection (Esc)" }).click();
+    assert(await page.locator(".rt-row.is-sel").count() === 0, "closing the trade card must clear the selection");
+
+    const clockBefore = await page.locator(".rt-clock__d").textContent();
+    await page.locator(".rt-play").click();
+    await page.waitForTimeout(900);
+    const clockAfter = await page.locator(".rt-clock__d").textContent();
+    await page.locator(".rt-play").click();
+    assert(clockBefore !== clockAfter, `play must advance the playhead: ${clockBefore} -> ${clockAfter}`);
+
+    // 回放剧场模式下回测记录收在左侧抽屉里：默认收起、不占剧场宽度，标题栏按钮开合。
+    const runDrawer = page.locator(".systematic-lab-review-view.is-theater > .systematic-lab-run-list");
+    const drawerClosedState = await runDrawer.evaluate((node) => ({ visibility: getComputedStyle(node).visibility, hidden: node.getAttribute("aria-hidden") }));
+    assert(drawerClosedState.visibility === "hidden" && drawerClosedState.hidden === "true", `backtest run drawer must start collapsed in theater mode: ${JSON.stringify(drawerClosedState)}`);
+    const headHeight = await page.locator(".systematic-lab-review-main__head").evaluate((node) => node.getBoundingClientRect().height);
+    assert(headHeight <= 42, `theater result head must be a single compact row: ${headHeight}`);
+    if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/theater-${barCount}.png` });
+    await page.locator(".systematic-lab-run-drawer-toggle").click();
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".systematic-lab-review-view.is-theater > .systematic-lab-run-list")).visibility === "visible", null, { timeout: 5_000 });
+    if (screenshotDir) { await page.waitForTimeout(260); await page.screenshot({ path: `${screenshotDir}/theater-drawer-${barCount}.png` }); }
 
     const actionsTrigger = page.getByRole("button", { name: "Actions: Multi-timeframe pullback" });
     assert(await actionsTrigger.count() === 1, "backtest rows should expose one Actions trigger");
@@ -417,56 +546,78 @@ async function main() {
     });
     assert(actionsMenuLayout.portaled && actionsMenuLayout.insideViewport, `backtest Actions menu must escape scroll clipping: ${JSON.stringify(actionsMenuLayout)}`);
     assert(await actionsTrigger.evaluate((button) => getComputedStyle(button).fontSize) === "9px", "backtest Actions trigger should use compact text");
-    await page.locator(".systematic-lab-review-main__head").click();
+    await page.locator(".systematic-lab-run-list .systematic-lab__pane-head").click();
     assert(await page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" }).count() === 0, "backtest Actions menu should close on outside click");
     await actionsTrigger.click();
     assert(await page.getByRole("menu", { name: "Actions: Multi-timeframe pullback" }).count() === 1, "backtest Actions menu should reopen after outside click");
     await actionsTrigger.click();
+    await page.keyboard.press("Escape");
+    await page.waitForFunction(() => getComputedStyle(document.querySelector(".systematic-lab-review-view.is-theater > .systematic-lab-run-list")).visibility === "hidden", null, { timeout: 5_000 });
+    // 最高档 4K 根/秒：播放头应在 1 秒内推进数千根。
+    await page.locator(".rt-transport .rt-seg button").last().click();
+    const evaluatedBars = async () => {
+      const label = await page.locator(".rt-clock__s").textContent();
+      const match = /([\d,]+)\s*\//.exec(label ?? "");
+      return match ? Number(match[1].replace(/,/g, "")) : null;
+    };
+    const fastBefore = await evaluatedBars();
+    await page.locator(".rt-play").click();
+    await page.waitForTimeout(1_000);
+    const fastAfter = await evaluatedBars();
+    if (screenshotDir) await page.screenshot({ path: `${screenshotDir}/theater-fast-${barCount}.png` });
+    await page.locator(".rt-play").click();
+    if (fastBefore !== null && fastAfter !== null && barCount > 96) {
+      assert(fastAfter - fastBefore > 1_500, `4K bars/s playback must advance quickly: ${fastBefore} -> ${fastAfter}`);
+    }
+    await page.locator(".rt-transport .rt-seg button").nth(1).click();
 
     if (barCount > 96) {
-      const replayPerformance = await page.evaluate(async () => {
-        const slider = document.querySelector(".systematic-lab-replay-controls input[type='range']");
-        if (!(slider instanceof HTMLInputElement)) throw new Error("replay slider is unavailable");
-        const max = Number(slider.max);
-        const values = [max, Math.round(max * 0.75), Math.round(max * 0.5), Math.round(max * 0.25), 1, max];
-        const startedAt = performance.now();
-        for (const value of values) {
-          slider.value = String(value);
-          slider.dispatchEvent(new Event("input", { bubbles: true }));
-          await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      // A long run must page lazily: the full-range view loads every page in view,
+      // bounded at the backend page size, without blocking the timeline.
+      await page.waitForFunction((expected) => document.querySelectorAll(".rt-row").length === expected, theater.rounds, { timeout: 20_000 });
+      const pages = Math.ceil(barCount / 5_000);
+      const startedAt = Date.now();
+      while (new Set(theaterRequests.filter((request) => request.limit === 5_000).map((request) => request.offset)).size < pages && Date.now() - startedAt < 30_000) {
+        await page.waitForTimeout(250);
+      }
+      const offsets = new Set(theaterRequests.filter((request) => request.limit === 5_000).map((request) => request.offset));
+      assert(offsets.size >= pages, `month replay theater must load every page in the full view: ${offsets.size}/${pages}`);
+      assert(theaterRequests.every((request) => request.limit === null || request.limit <= 5_000), "replay pages must stay bounded");
+      const frameStats = await page.evaluate(async () => {
+        document.querySelector(".rt-play")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        const times = [];
+        let last = performance.now();
+        for (let index = 0; index < 60; index += 1) {
+          await new Promise((resolve) => requestAnimationFrame(resolve));
+          const now = performance.now();
+          times.push(now - last);
+          last = now;
         }
-        return {
-          durationMs: performance.now() - startedAt,
-          sliderMax: max,
-          chartCandleCount: Number(document.querySelector(".systematic-lab-replay-stage .chart-wrap")?.getAttribute("data-candle-count") ?? 0),
-          ledgerRows: document.querySelectorAll(".systematic-lab-virtual-list .systematic-lab-ledger-row").length,
-          ledgerHeight: document.querySelector(".systematic-lab-virtual-list__spacer")?.getBoundingClientRect().height ?? 0,
-        };
+        document.querySelector(".rt-play")?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+        times.sort((a, b) => a - b);
+        return { median: times[30], p90: times[54] };
       });
-      assert(replayPerformance.sliderMax === barCount, `month replay timeline must expose the complete backtest: ${JSON.stringify(replayPerformance)}`);
-      assert(replayPerformance.chartCandleCount > 0 && replayPerformance.chartCandleCount <= replayBarLimit, `month replay chart page must remain bounded: ${JSON.stringify(replayPerformance)}`);
-      assert(replayPerformance.ledgerRows > 0 && replayPerformance.ledgerRows <= 20, `month replay ledger must render only the visible rows: ${JSON.stringify(replayPerformance)}`);
-      assert(replayPerformance.ledgerHeight > 100_000, `month replay must retain the full scrollable ledger: ${JSON.stringify(replayPerformance)}`);
-      assert(replayPerformance.durationMs < 4_000, `month replay slider updates are too slow: ${JSON.stringify(replayPerformance)}`);
+      assert(frameStats.median < 50, `month replay playback must stay smooth: ${JSON.stringify(frameStats)}`);
     }
 
     await page.setViewportSize({ width: 1280, height: 720 });
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))));
     const compactLayout = await page.evaluate(() => {
       const root = document.querySelector(".systematic-strategy-lab")?.getBoundingClientRect();
-      const replay = document.querySelector(".systematic-lab-replay-stage")?.getBoundingClientRect();
-      const tabList = document.querySelector(".systematic-lab-account-tabs")?.getBoundingClientRect();
-      const tabs = Array.from(document.querySelectorAll(".systematic-lab-account-tabs button")).map((button) => button.getBoundingClientRect());
+      const replay = document.querySelector(".rt-tracks")?.getBoundingClientRect();
+      const side = document.querySelector(".rt-side")?.getBoundingClientRect();
+      const kpis = Array.from(document.querySelectorAll(".rt-kpi")).filter((kpi) => kpi.getBoundingClientRect().width > 0);
       return {
         documentOverflow: document.documentElement.scrollWidth - document.documentElement.clientWidth,
         rootHeight: root?.height ?? 0,
         replayHeight: replay?.height ?? 0,
-        tabsFit: Boolean(tabList) && tabs.length === 3 && tabs.every((tab) => tab.left >= tabList.left && tab.right <= tabList.right),
+        tabsFit: Boolean(side && side.width > 240) && kpis.length >= 7 && kpis.every((kpi) => kpi.scrollWidth <= kpi.clientWidth + 1),
+        truncated: kpis.filter((kpi) => kpi.scrollWidth > kpi.clientWidth + 1).map((kpi) => `${kpi.textContent} (${kpi.scrollWidth}/${kpi.clientWidth})`),
       };
     });
     assert(compactLayout.documentOverflow <= 2, `compact systematic view has horizontal overflow: ${compactLayout.documentOverflow}`);
     assert(compactLayout.rootHeight > 400 && compactLayout.replayHeight > 100, "compact systematic review must preserve a usable replay chart");
-    assert(compactLayout.tabsFit, "compact replay account tabs must fit their pane");
+    assert(compactLayout.tabsFit, `compact replay theater must keep the trade list and untruncated KPIs: ${JSON.stringify(compactLayout.truncated)}`);
 
     await page.locator(".systematic-strategy-lab__tabs button").nth(0).click();
     await page.waitForSelector(".systematic-python-editor", { timeout: 10_000 });
@@ -500,7 +651,7 @@ async function main() {
     assert(profileEstimate.includes("The host converts this to contracts at execution"), `Profile budget explanation is missing: ${profileEstimate}`);
     assert(profileLayout.documentOverflow <= 2 && profileLayout.hintRight <= profileLayout.editorRight + 1, `Profile estimate must fit its editor: ${JSON.stringify(profileLayout)}`);
     assert(errors.length === 0, `systematic preview raised errors: ${errors.join(" | ")}`);
-    process.stdout.write(`[systematic-preview] ok: bars=${barCount}, tuning=workbench, range=30d, review-tabs=${reviewLayout.accountTabs.length}, compact=1280x720, ai-panel=visible, profile-estimate=visible\n`);
+    process.stdout.write(`[systematic-preview] ok: bars=${barCount}, tuning=workbench+terrain, range=30d, theater-rounds=${theaterLayout.rows}, theater-pages=${new Set(theaterRequests.map((request) => request.offset)).size}, compact=1280x720, ai-panel=visible, profile-estimate=visible\n`);
   } finally {
     await browser.close();
   }

@@ -595,6 +595,10 @@ export type SystematicEvent = {
   progressPct?: number;
   timing?: SystematicBacktestTiming;
   optimizationId?: string;
+  /** `optimizationProgress`: the candidate that just started or finished. */
+  candidateIndex?: number;
+  candidateStatus?: string;
+  validationCalmar?: number | null;
   completed?: number;
   total?: number;
   workerCount?: number;
@@ -1081,6 +1085,35 @@ export function startSystematicOptimization(request: {
 
 export function cancelSystematicOptimization(optimizationId: string) {
   return invokeDesktop<SystematicOptimizationView>("systematic_optimization_cancel", {
+    request: { optimizationId },
+  });
+}
+
+export type SystematicOptimizationCandidateStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
+
+export type SystematicOptimizationCandidate = {
+  index: number;
+  parameters: Record<string, unknown>;
+  status: SystematicOptimizationCandidateStatus | string;
+  trainMetrics?: SystematicBacktestMetrics | null;
+  validationMetrics?: SystematicBacktestMetrics | null;
+  trainCalmar?: number | null;
+  /** Null when the backend scored the candidate as −∞. */
+  validationCalmar?: number | null;
+  validationCalmarReason?: "insufficientTrades" | "noDrawdown" | string | null;
+  error?: string | null;
+  updatedAt: number;
+};
+
+export type SystematicOptimizationCandidatesView = {
+  optimization: SystematicOptimizationView;
+  parameterTuning: Record<string, SystematicPythonParameterTuning>;
+  baselineParameters: Record<string, unknown>;
+  candidates: SystematicOptimizationCandidate[];
+};
+
+export function loadSystematicOptimizationCandidates(optimizationId: string) {
+  return invokeDesktop<SystematicOptimizationCandidatesView>("systematic_optimization_candidates", {
     request: { optimizationId },
   });
 }

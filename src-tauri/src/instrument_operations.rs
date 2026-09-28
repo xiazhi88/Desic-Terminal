@@ -1174,7 +1174,7 @@ fn upsert_residual_targets_with_conn(
     error: &str,
 ) -> Result<(), String> {
     let transaction = conn
-        .transaction()
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|db_error| db_error.to_string())?;
     let now = now_ms();
     for target in targets {
@@ -1482,7 +1482,7 @@ fn prepare_interrupted_operation(
     operation_id: &str,
 ) -> Result<InstrumentOperationView, String> {
     let mut conn = open_database(app)?;
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let now = now_ms();
     transaction
         .execute(
@@ -1783,7 +1783,14 @@ fn active_operation_kind_conflict_with_conn(
 }
 
 #[tauri::command]
-pub(crate) fn okx_active_instrument_operations(
+pub(crate) async fn okx_active_instrument_operations(app: tauri::AppHandle, request: InstrumentOperationScope) -> Result<Vec<InstrumentOperationView>, String> {
+    crate::blocking_work::run_blocking(move || {
+        okx_active_instrument_operations_blocking(app, request)
+    })
+    .await
+}
+
+pub(crate) fn okx_active_instrument_operations_blocking(
     app: tauri::AppHandle,
     request: InstrumentOperationScope,
 ) -> Result<Vec<InstrumentOperationView>, String> {

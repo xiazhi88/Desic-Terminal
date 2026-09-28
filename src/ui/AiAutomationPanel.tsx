@@ -106,7 +106,10 @@ import { buildProfileSaveInput, checkProfileSaveArgs, describeSerializationIssue
 import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
-import { loadAiConfigSummary } from "../lib/ai";
+import { loadAiAutomationRunsInRange, loadAiConfigSummary, type AiAutomationPulseRange } from "../lib/ai";
+import { WatchPulse } from "./automation/WatchPulse";
+import { automationRunStub, pulseRunFromAutomationRun, type PulseRun, type WatchPulseProfile } from "./automation/watchPulseModel";
+import { createWatchPulseFixture } from "./automation/watchPulseFixture";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { resolveAiAutomationRunError } from "../lib/aiAgentTrace";
 import { createDeferredCleanupSlot } from "../lib/deferredCleanup";
@@ -1953,7 +1956,11 @@ function RunsView({
   deliveries,
   focusId,
   readDetail = readAutomationRunDetail,
-  onForceDeep
+  onForceDeep,
+  pulseProfiles,
+  loadPulseRange = loadAiAutomationRunsInRange,
+  pulseNow,
+  initialViewMode
 }: {
   items: AiAutomationRun[];
   profiles: Map<string, AiAgentProfile>;
@@ -1962,7 +1969,22 @@ function RunsView({
   readDetail?: (id: string) => Promise<AiAutomationRunDetail | null>;
   /** C19.4：一键强制深度（返回 false 表示命令不可用/失败 → UI 降级）。 */
   onForceDeep?: (runId: string) => Promise<boolean>;
+  /** 值守心电图的泳道（默认 = profiles 全部）。 */
+  pulseProfiles?: WatchPulseProfile[];
+  loadPulseRange?: (fromMs: number, toMs: number) => Promise<AiAutomationPulseRange | null>;
+  pulseNow?: () => number;
+  /** 显式指定时不读本地偏好（预览夹具固定视图）。 */
+  initialViewMode?: RunsViewMode;
 }) {
+  const [viewMode, setViewModeState] = useState<RunsViewMode>(() => initialViewMode ?? readRunsViewMode());
+  const setViewMode = useCallback((mode: RunsViewMode) => {
+    setViewModeState(mode);
+    if (!initialViewMode) {
+      try { window.localStorage.setItem(RUNS_VIEW_MODE_KEY, mode); } catch { /* 本地偏好不可写时只影响本次会话 */ }
+    }
+  }, [initialViewMode]);
+  // 心电图可以打开不在最新 50 条列表里的运行：用轻量字段占位，详情读回后替换。
+  const [pulseRunStub, setPulseRunStub] = useState<AiAutomationRun | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(focusId ?? null);
   const [details, setDetails] = useState<Record<string, AiAutomationRunDetail>>({});
   const [loadingId, setLoadingId] = useState<string | null>(null);
@@ -2039,8 +2061,30 @@ function RunsView({
     : timeFilter === "today" && kindFilter === "all" && !query.trim()
       ? automationText("runEmptyTodayDetail", "Run a Profile manually or wait until its maximum silence period expires.", "可手动运行 Profile，或等待最长静默时间到期。")
       : automationText("runNoFilterMatchesDetail", "Expand the time range, change the status filter, or clear the search.", "尝试扩大时间范围、切换状态筛选或清空搜索。");
-  const selectedRun = items.find((item) => item.id === selectedId) ?? null;
+  const selectedRun = items.find((item) => item.id === selectedId)
+    ?? (selectedId && pulseRunStub?.id === selectedId ? details[selectedId]?.run ?? pulseRunStub : null);
   const selectedDetail = selectedRun ? details[selectedRun.id] : undefined;
+  const openPulseRun = useCallback((run: PulseRun) => {
+    setPulseRunStub(automationRunStub(run));
+    openRun(run.id);
+  }, [openRun]);
+  const viewToggle = (
+    <div className="automation-segmented compact automation-runs-view-toggle" role="tablist" aria-label={automationText("runViewModeAria", "Run view", "运行记录视图")} data-runs-view-toggle>
+      <button type="button" role="tab" aria-selected={viewMode === "pulse"} className={viewMode === "pulse" ? "active" : ""} onClick={() => setViewMode("pulse")} data-runs-view="pulse">{automationText("runViewPulse", "Pulse", "心电图")}</button>
+      <button type="button" role="tab" aria-selected={viewMode === "list"} className={viewMode === "list" ? "active" : ""} onClick={() => setViewMode("list")} data-runs-view="list">{automationText("runViewList", "List", "列表")}</button>
+    </div>
+  );
+  const detailDialog = selectedRun ? (
+    <RunDetailDialog
+      run={selectedRun}
+      profileName={profiles.get(selectedRun.profileId)?.name ?? selectedRun.profileId}
+      detail={selectedDetail}
+      loading={loadingId === selectedRun.id}
+      error={detailErrors[selectedRun.id]}
+      onClose={closeRun}
+      onForceDeep={onForceDeep}
+    />
+  ) : null;
 
   useEffect(() => {
     if (!selectedRun || !selectedDetail || loadingId === selectedRun.id) return;
@@ -2049,8 +2093,26 @@ function RunsView({
     void loadRunDetail(selectedRun.id);
   }, [loadRunDetail, loadingId, selectedDetail, selectedRun]);
 
+  if (viewMode === "pulse") {
+    return (
+      <div className="automation-runs-view automation-runs-view--pulse" data-runs-view-mode="pulse">
+        <WatchPulse
+          profiles={pulseProfiles ?? [...profiles.values()]}
+          liveRuns={items}
+          loadRange={loadPulseRange}
+          readDetail={readDetail}
+          onOpenFullDetail={openPulseRun}
+          now={pulseNow}
+          toolbarStart={viewToggle}
+          suspendKeys={Boolean(selectedRun)}
+        />
+        {detailDialog}
+      </div>
+    );
+  }
+
   return (
-    <div className="automation-runs-view">
+    <div className="automation-runs-view" data-runs-view-mode="list">
       <div className="automation-run-audit-head">
         <div className="automation-run-stat-strip">
           <div><span>{automationText("runCurrentRange", "Current range", "当前范围")}</span><strong>{stats.total}</strong><small>{i18n.t("automation:runs")}</small></div>
@@ -2062,6 +2124,7 @@ function RunsView({
         </div>
         <div className="automation-run-filter-panel">
           <div className="automation-run-filter-row">
+            {viewToggle}
             <div className="automation-segmented" role="tablist" aria-label={automationText("runTimeRangeAria", "Run time range", "运行记录时间范围")}>
               {RUN_TIME_FILTERS.map((item) => (
                 <button type="button" key={item.id} className={timeFilter === item.id ? "active" : ""} onClick={() => setTimeFilter(item.id)}>
@@ -2127,19 +2190,20 @@ function RunsView({
           );
         })}
       </div>
-      {selectedRun ? (
-        <RunDetailDialog
-          run={selectedRun}
-          profileName={profiles.get(selectedRun.profileId)?.name ?? selectedRun.profileId}
-          detail={selectedDetail}
-          loading={loadingId === selectedRun.id}
-          error={detailErrors[selectedRun.id]}
-          onClose={closeRun}
-          onForceDeep={onForceDeep}
-        />
-      ) : null}
+      {detailDialog}
     </div>
   );
+}
+
+type RunsViewMode = "pulse" | "list";
+const RUNS_VIEW_MODE_KEY = "desic.automation.runsView.v1";
+
+function readRunsViewMode(): RunsViewMode {
+  try {
+    return window.localStorage.getItem(RUNS_VIEW_MODE_KEY) === "list" ? "list" : "pulse";
+  } catch {
+    return "pulse";
+  }
 }
 
 function readAutomationRunDetail(id: string) {
@@ -5510,6 +5574,11 @@ function AiAutomationPanelComponent({
   }, [activeTab, createNewProfile, loading, onboardingActive, profileDraft, profiles.length, summary]);
   const scopeProfile = scopeProfileId ? profiles.find((profile) => profile.id === scopeProfileId) ?? null : null;
   const scopeRuns = scopeProfileId ? (summary?.runs ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.runs ?? []);
+  const pulseLaneProfiles = useMemo(() => (scopeProfile ? [scopeProfile] : summary?.profiles ?? []), [scopeProfile, summary?.profiles]);
+  const loadScopedPulseRange = useCallback(
+    (fromMs: number, toMs: number) => loadAiAutomationRunsInRange(fromMs, toMs, scopeProfileId || null),
+    [scopeProfileId]
+  );
   const scopeWakeConditions = scopeProfileId ? (summary?.wakeConditions ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.wakeConditions ?? []);
   const automationNotificationDeliveries = (summary?.notificationDeliveries ?? []).filter((item) => !["systematic_profile_signal", "strategy_signal"].includes(item.relatedType ?? ""));
   const scopeNotificationDeliveries = scopeProfileId ? automationNotificationDeliveries.filter((item) => item.profileId === scopeProfileId) : automationNotificationDeliveries;
@@ -5777,7 +5846,15 @@ function AiAutomationPanelComponent({
             onNotify={onNotify}
           />
         ) : activeTab === "runs" ? (
-          <RunsView items={scopeRuns} profiles={profileMap} deliveries={scopeNotificationDeliveries} focusId={focusId} onForceDeep={forceDeep} />
+          <RunsView
+            items={scopeRuns}
+            profiles={profileMap}
+            deliveries={scopeNotificationDeliveries}
+            focusId={focusId}
+            onForceDeep={forceDeep}
+            pulseProfiles={pulseLaneProfiles}
+            loadPulseRange={loadScopedPulseRange}
+          />
         ) : activeTab === "wake_conditions" ? (
           <WakeConditionsView
             items={scopeWakeConditions}
@@ -6872,7 +6949,7 @@ const AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES: Record<string, string> = {
 
 export function AutomationPreview() {
   const requestedView = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
-  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run"];
+  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run", "pulse"];
   const initialView = requestedView && previewViews.includes(requestedView) ? requestedView : "config";
   const [view, setView] = useState<string>(initialView);
   // P0：点击保存时实际传给回调的参数个数（0 = 正确；>=1 说明事件被当参数传进去了）。
@@ -6934,6 +7011,7 @@ export function AutomationPreview() {
             <button type="button" role="tab" aria-selected={view === "run" || view === "single-run" || view === "model-error"} className={view === "run" || view === "single-run" || view === "model-error" ? "active" : ""} onClick={() => setView("run")}>{automationText("runTrace", "Run trace", "运行轨迹")}</button>
             <button type="button" role="tab" aria-selected={view === "agents"} className={view === "agents" ? "active" : ""} onClick={() => setView("agents")}>{automationText("agents", "Agent library", "Agent 库")}</button>
             <button type="button" role="tab" aria-selected={view === "triage"} className={view === "triage" ? "active" : ""} onClick={() => setView("triage")}>{automationText("triageTitle", "Triage", "试判")}</button>
+            <button type="button" role="tab" aria-selected={view === "pulse"} className={view === "pulse" ? "active" : ""} onClick={() => setView("pulse")} data-preview-tab="pulse">{automationText("runViewPulse", "Pulse", "心电图")}</button>
             <button type="button" role="tab" aria-selected={view === "minimal"} className={view === "minimal" ? "active" : ""} onClick={() => setView("minimal")}>{automationText("singleAgentMode", "Single-Agent mode", "单 Agent 模式")}</button>
             <button type="button" role="tab" aria-selected={view === "new-profile"} className={view === "new-profile" ? "active" : ""} onClick={() => setView("new-profile")}>{automationText("profileNewPickerTitle", "New Profile", "新建 Profile")}</button>
             <button type="button" role="tab" aria-selected={view === "fastlane-config"} className={view === "fastlane-config" ? "active" : ""} onClick={() => setView("fastlane-config")}>{automationText("fastlaneConfigTitle", "Fastlane configuration", "快判配置")}</button>
@@ -7005,9 +7083,12 @@ export function AutomationPreview() {
               {/* C24：极简运行详情（徽标 + 一句话 summary + 排版提醒）。 */}
               <div className="automation-preview-run"><RunDetailPanel detail={AUTOMATION_PREVIEW_MINIMAL_DETAIL} /></div>
             </div>
+          ) : view === "pulse" ? (
+            <AutomationPulsePreview />
           ) : view === "triage" ? (
             <div className="automation-preview-triage">
               <RunsView
+                initialViewMode="list"
                 items={AUTOMATION_PREVIEW_TRIAGE_RUNS}
                 profiles={AUTOMATION_PREVIEW_TRIAGE_PROFILES}
                 deliveries={[]}
@@ -7265,11 +7346,50 @@ function AutomationRunRefreshPreview() {
   return (
     <div className="automation-preview-run automation-refresh-preview" data-refresh-hold-ms={holdMs} data-refresh-completed={completed ? "true" : "false"}>
       <RunsView
+        initialViewMode="list"
         items={[run]}
         profiles={new Map([[profile.id, profile]])}
         deliveries={[]}
         focusId={run.id}
         readDetail={readDetail}
+      />
+    </div>
+  );
+}
+
+/** `?view=pulse`：值守心电图（确定性夹具，"现在"从固定锚点起按真实时间推进）。 */
+function AutomationPulsePreview() {
+  const fixture = useMemo(() => createWatchPulseFixture(), []);
+  const profileMap = useMemo(() => new Map(fixture.profiles.map((profile) => [profile.id, normalizeProfile({
+    ...createProfile([], "preview-model"),
+    id: profile.id,
+    name: profile.name,
+    environment: profile.environment,
+    scanIntervalMinutes: profile.scanIntervalMinutes,
+    dailyReviewEnabled: profile.dailyReviewEnabled
+  })])), [fixture]);
+  // 与面板一致：列表只持有最近的一页运行，心电图按区间读取其余部分。
+  const latestRuns = useMemo(() => fixture.runs.slice(-50).reverse(), [fixture]);
+  const loadRange = useCallback(async (fromMs: number, toMs: number): Promise<AiAutomationPulseRange> => {
+    await new Promise((resolve) => window.setTimeout(resolve, 60));
+    const runs = fixture.runs.filter((run) => run.startedAt >= fromMs && run.startedAt <= toMs).map(pulseRunFromAutomationRun);
+    return { fromMs, toMs, runs, truncated: false };
+  }, [fixture]);
+  const readDetail = useCallback(async (id: string) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 120));
+    return fixture.details.get(id) ?? null;
+  }, [fixture]);
+  return (
+    <div className="automation-preview-pulse" data-pulse-anchor={fixture.anchor}>
+      <RunsView
+        initialViewMode="pulse"
+        items={latestRuns}
+        profiles={profileMap}
+        pulseProfiles={fixture.profiles}
+        deliveries={[]}
+        readDetail={readDetail}
+        loadPulseRange={loadRange}
+        pulseNow={fixture.now}
       />
     </div>
   );

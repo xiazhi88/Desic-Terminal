@@ -163,6 +163,11 @@ export function queueCandle(candle: Candle, seriesKey: string | null = null) {
   schedulePublish();
 }
 
+/** 尚未发布（等待下一帧合并）的 K 线；连续补丁应在它之上叠加，而不是在已发布的旧值上。 */
+export function pendingCandleFor(seriesKey: string): Candle | null {
+  return pendingCandle && pendingCandle.seriesKey === seriesKey ? pendingCandle.candle : null;
+}
+
 export function queuePublicStreamStatus(status: PublicWsStatus) {
   pendingPublicStatuses[status.streamId] = status;
   schedulePublish();

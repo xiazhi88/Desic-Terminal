@@ -188,6 +188,15 @@ export const AGENT_AUTHORING_TOOLS = new Set([
   "agent.update"
 ]);
 
+// 证据账本：AI 研究回合的结构化证据立场与决策记录。只做校验与回显，不写库、不下单、
+// 不安排唤醒；仅供界面渲染证据天平与复盘。边界 = 显式声明的主 Agent + 交互式
+// AI 研究会话（strategySessionKind=trading-research），后台 / 复盘 Run、策略编辑器、
+// 指标会话与委派专家一律拒绝（Rust authorize_ai_tool 同口径复核）。
+export const RESEARCH_LEDGER_TOOLS = new Set([
+  "research.recordEvidence",
+  "research.recordDecision"
+]);
+
 export const DISABLED_SUBAGENT_WRAPPER_TOOLS = new Set([
   "subagent_readonly_analyst"
 ]);
@@ -261,7 +270,8 @@ export function allKnownToolNames() {
     ...TRADE_TOOLS,
     ...PROHIBITED_TOOLS,
     ...DISABLED_SUBAGENT_WRAPPER_TOOLS,
-    ...AGENT_AUTHORING_TOOLS
+    ...AGENT_AUTHORING_TOOLS,
+    ...RESEARCH_LEDGER_TOOLS
   ]));
 }
 
@@ -329,6 +339,19 @@ export function resolveToolPolicy(name, config = {}) {
       return disabledPolicy("disabled:agent-authoring-interactive-only");
     }
     return enabledPolicy("auto-approved:main-agent-authoring");
+  }
+
+  // 证据账本同样要求 config 显式声明 main（deny-by-default，理由同上）。
+  if (RESEARCH_LEDGER_TOOLS.has(canonicalName)) {
+    const declaredRole = String(config?.agentRole ?? "").trim().toLowerCase();
+    if (declaredRole !== "main") return disabledPolicy("disabled:research-ledger-main-only");
+    if (boolConfig(config.backgroundRun, false) || boolConfig(config.reviewRun, false)) {
+      return disabledPolicy("disabled:research-ledger-interactive-only");
+    }
+    if (String(config.strategySessionKind || "") !== "trading-research") {
+      return disabledPolicy("disabled:research-ledger-research-session-only");
+    }
+    return enabledPolicy("auto-approved:main-research-ledger");
   }
 
   // C19：试判结论只能由后台 Run 的主 Agent 提交。

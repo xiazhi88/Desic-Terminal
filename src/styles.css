@@ -27816,3 +27816,24 @@ button {
 .automation-run-action-kind { display: inline-flex; align-items: center; gap: 5px; color: var(--weak); font-size: 10.5px; }
 .automation-run-wake-partial { margin: 0; color: var(--warning, #f5a524); font-size: 10.5px; }
 .fastlane-run__wake-hint { color: var(--muted); }
+
+/* 顶栏行情：标签与数值分开渲染（磷光外观叠放），经典外观保持一行内联。 */
+.price-stat small {
+  margin-right: 4px;
+  color: inherit;
+  font-size: inherit;
+}
+
+.price-stat b {
+  font-weight: inherit;
+}
+
+.funding-chip em::before {
+  content: "/ ";
+}
+
+/* 命令面板按钮的文字标签只在磷光外观显示。 */
+.command-palette-button__label,
+.command-palette-button__kbd {
+  display: none;
+}

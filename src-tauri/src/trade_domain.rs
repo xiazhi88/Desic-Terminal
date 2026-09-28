@@ -39,7 +39,14 @@ struct TradeAuditEvent {
 }
 
 #[tauri::command]
-pub(crate) fn trade_audit_events(
+pub(crate) async fn trade_audit_events(app: tauri::AppHandle, request: TradeAuditEventsRequest) -> Result<Vec<TradeAuditEventSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        trade_audit_events_blocking(app, request)
+    })
+    .await
+}
+
+pub(crate) fn trade_audit_events_blocking(
     app: tauri::AppHandle,
     request: TradeAuditEventsRequest,
 ) -> Result<Vec<TradeAuditEventSummary>, String> {

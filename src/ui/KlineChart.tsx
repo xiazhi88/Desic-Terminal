@@ -62,6 +62,7 @@ import {
 import { ChartIndicatorCenter, indicatorColor } from "./ChartIndicatorCenter";
 import { TerminalSelect } from "./TerminalSelect";
 import { useDraggableSurface } from "./useDraggableSurface";
+import { ORDER_FLOW_PANE_ID, OrderFlowLegend, useOrderFlowLayer, type OrderFlowPreviewData } from "./chart/OrderFlowLayer";
 import {
   chartTradeVisual,
   formatChartAmount,
@@ -92,6 +93,10 @@ export type ChartHistoryLoadOutcome =
 
 type Props = {
   candles: Candle[];
+  /** 订单流模式：成交量分布、主动买卖差 / CVD、当前大单墙、清算标记与背离。 */
+  orderFlowMode?: boolean;
+  /** 仅浏览器预览：合成的订单流数据。 */
+  orderFlowPreview?: OrderFlowPreviewData | null;
   ticker: Ticker | null;
   symbol?: string;
   timeframe?: string;
@@ -449,7 +454,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, orderFlowMode = false, orderFlowPreview = null, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -478,6 +483,9 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const shouldPersistWorkspace = persistWorkspace ?? !reviewVariant;
   const containerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<TradingChartHandle | null>(null);
+  // 图表实例重建时递增，供需要在新实例上重新挂载图元的效果使用。
+  const [chartHandleVersion, setChartHandleVersion] = useState(0);
+  const orderFlowLayer = useOrderFlowLayer({ chartRef, chartVersion: chartHandleVersion, enabled: orderFlowMode, symbol, timeframe, candles, text: chartText, preview: orderFlowPreview });
   const candleMapRef = useRef<Map<number, Candle>>(new Map());
   const candleIndexRef = useRef<Map<number, number>>(new Map());
   const measureModeRef = useRef(false);
@@ -611,6 +619,28 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
   const [alertWebhookUrl, setAlertWebhookUrl] = useState("");
   const [alertFormError, setAlertFormError] = useState("");
   const [layerVisibility, setLayerVisibility] = useState<ChartLayerVisibility>(DEFAULT_CHART_LAYER_VISIBILITY);
+  // 订单流模式只留 K 线、订单流图层与 CVD 副图：进入时收起其它指标，退出时恢复（只恢复本模式收起的）。
+  // 用户仍可在「图层」里手动打开指标。标记存 localStorage，应用重启后退出模式也能正确恢复。
+  const orderFlowIndicatorsKey = `desic.chart.orderflow-hid-indicators.${workspaceId}.v1`;
+  const previousOrderFlowModeRef = useRef<boolean | null>(null);
+  const orderFlowModeRef = useRef(orderFlowMode);
+  orderFlowModeRef.current = orderFlowMode;
+  useEffect(() => {
+    if (variant !== "full" || previousOrderFlowModeRef.current === orderFlowMode) return;
+    const first = previousOrderFlowModeRef.current === null;
+    previousOrderFlowModeRef.current = orderFlowMode;
+    if (orderFlowMode) {
+      if (first && window.localStorage.getItem(orderFlowIndicatorsKey) === "1") return;
+      setLayerVisibility((items) => {
+        if (!items.indicators) return items;
+        window.localStorage.setItem(orderFlowIndicatorsKey, "1");
+        return { ...items, indicators: false };
+      });
+    } else if (window.localStorage.getItem(orderFlowIndicatorsKey) === "1") {
+      window.localStorage.removeItem(orderFlowIndicatorsKey);
+      setLayerVisibility((items) => (items.indicators ? items : { ...items, indicators: true }));
+    }
+  }, [orderFlowIndicatorsKey, orderFlowMode, variant]);
   const [fillSourceFilter, setFillSourceFilter] = useState<FillSourceFilter>({
     ai: true,
     strategy: true,
@@ -905,7 +935,13 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         const persisted = parseWorkspaceIndicators(workspace.indicators);
         if (persisted.length > 0) setIndicatorInstances(persisted);
         const layers = parseWorkspaceLayers(workspace.layers);
-        if (layers) setLayerVisibility({ ...layers, alerts: true });
+        if (layers) {
+          // 图表工作区是异步读回的：订单流模式下读回的“指标可见”要在这里再收起一次，
+          // 否则会覆盖进入模式时的收起（并记下标记，退出模式时恢复）。
+          const hideForOrderFlow = orderFlowModeRef.current && layers.indicators && variant === "full";
+          if (hideForOrderFlow) window.localStorage.setItem(orderFlowIndicatorsKey, "1");
+          setLayerVisibility({ ...layers, alerts: true, indicators: hideForOrderFlow ? false : layers.indicators });
+        }
       })
       .catch(() => undefined)
       .finally(() => {
@@ -1315,6 +1351,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
     resizeObserver.observe(activeContainer);
 
     chartRef.current = chart;
+    setChartHandleVersion((version) => version + 1);
 
     return () => {
       unsubscribeCrosshair();
@@ -1582,7 +1619,8 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
       candles: canonicalCandles,
       patch,
       instances: indicatorInstances,
-      configSignature: indicatorConfigSignature,
+      // 指标图层显隐也计入签名：切换时整体重建，隐藏时副图随之移除（主图拿回全部高度）。
+      configSignature: `${indicatorConfigSignature}|${layerVisibility.indicators ? "shown" : "hidden"}`,
       calculators: indicatorCalculatorsRef.current,
       seriesKeys: indicatorSeriesKeysRef.current,
       previousConfigSignature: indicatorConfigSignatureRef,
@@ -3413,6 +3451,7 @@ export function KlineChart({ candles, ticker, symbol = "BTC-USDT-SWAP", timefram
         onPointerUp={(event) => finishOrderLineDrag(event)}
         onPointerCancel={(event) => finishOrderLineDrag(event, true)}
       />
+      <OrderFlowLegend layer={orderFlowLayer} text={chartText} />
       {cancellableOrderLineOverlays.length > 0 && (
         <div className="chart-order-cancel-layer" aria-label={chartText("Chart order cancellation controls", "图表委托撤单入口")}>
           {cancellableOrderLineOverlays.map(({ line, y }) => (
@@ -3849,6 +3888,8 @@ function syncManagedIndicators({
   const nextHoverValues = new Map<number, HoverIndicatorValue[]>();
   for (const instance of instances) {
     const definition = INDICATOR_DEFINITIONS[instance.definitionId];
+    // 指标图层隐藏时不创建副图：空的副图仍会占掉主图高度（订单流模式下尤其明显）。
+    if (definition.pane === "sub" && !layersVisible) continue;
     if (definition.pane === "sub") desiredPaneIds.add(instance.paneId);
     let calculator = calculators.get(instance.id);
     if (!calculator) {
@@ -3895,7 +3936,8 @@ function syncManagedIndicators({
   seriesKeys.clear();
   for (const key of nextSeriesKeys) seriesKeys.add(key);
   for (const pane of chart.listPanes()) {
-    if (pane.id !== "main" && !pane.id.startsWith(CHART_SCRIPT_PANE_PREFIX) && !desiredPaneIds.has(pane.id)) chart.removePane(pane.id);
+    // 订单流的 CVD 副图由订单流图层自己管理。
+    if (pane.id !== "main" && pane.id !== ORDER_FLOW_PANE_ID && !pane.id.startsWith(CHART_SCRIPT_PANE_PREFIX) && !desiredPaneIds.has(pane.id)) chart.removePane(pane.id);
   }
   hoverValues.current = nextHoverValues;
   onUnavailableChange((previous) => setsEqual(previous, unavailable) ? previous : unavailable);

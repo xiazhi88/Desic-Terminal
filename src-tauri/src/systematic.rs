@@ -110,6 +110,30 @@ const SYSTEMATIC_PYTHON_MIN_MINOR_VERSION: u32 = 12;
 const SYSTEMATIC_PYTHON_MAX_MINOR_VERSION: u32 = 13;
 const SYSTEMATIC_PYTHON_ENVIRONMENT_TIMEOUT: Duration = Duration::from_secs(180);
 const SYSTEMATIC_PYTHON_COMMAND_TIMEOUT: Duration = Duration::from_secs(12);
+/// 依赖装完后的导入校验要加载 numpy/pandas/scikit-learn：新建 venv 里的二进制
+/// 第一次执行时还要被系统逐个校验，冷缓存机器上远超 12 秒，因此单独放宽。
+/// First import check after an environment build. macOS scans every freshly
+/// installed native library on its first load (Gatekeeper / XProtect, plus any
+/// endpoint-security product), which can take minutes on some machines and never
+/// shows up on a developer Mac with those checks relaxed. The check therefore
+/// fails on a stall — no module finishing for `IDLE` — not on total duration;
+/// `MAX` only bounds a run that keeps progressing.
+const SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
+const SYSTEMATIC_PYTHON_VERIFY_MAX_DURATION: Duration = Duration::from_secs(15 * 60);
+/// Imports one module at a time and reports each on stdout, so progress is
+/// observable. faulthandler writes every thread's stack to stderr every 30s,
+/// which setup.log keeps: a genuine hang then names the exact import (and the
+/// native library load) it is stuck in.
+const SYSTEMATIC_PYTHON_VERIFY_SCRIPT: &str = r#"import faulthandler, sys, time
+faulthandler.dump_traceback_later(30, repeat=True, file=sys.stderr)
+for name in ("numpy", "scipy", "pandas", "sklearn"):
+    print(f"desic-verify loading {name}", flush=True)
+    started = time.perf_counter()
+    __import__(name)
+    print(f"desic-verify loaded {name} in {time.perf_counter() - started:.1f}s", flush=True)
+faulthandler.cancel_dump_traceback_later()
+print("desic-verify version " + ".".join(map(str, sys.version_info[:3])), flush=True)
+"#;
 // The environment root is the stable place for installation evidence: the venv
 // staging directory is deleted after a failure, so anything written there would
 // vanish exactly when a user needs to look at it.
@@ -4035,6 +4059,196 @@ pub(crate) async fn systematic_optimization_cancel(
     Ok(view)
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicOptimizationCandidatesRequest {
+    pub optimization_id: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicOptimizationTuningRangeView {
+    pub min: f64,
+    pub max: f64,
+    pub step: f64,
+}
+
+/// One persisted optimization candidate for the parameter terrain. The
+/// validation Calmar is `None` whenever the backend scored it as −∞ (fewer than
+/// ten validation trades or no drawdown); `validation_calmar_reason` says why.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicOptimizationCandidateView {
+    pub index: usize,
+    pub parameters: Value,
+    pub status: String,
+    pub train_metrics: Option<Value>,
+    pub validation_metrics: Option<Value>,
+    pub train_calmar: Option<f64>,
+    pub validation_calmar: Option<f64>,
+    pub validation_calmar_reason: Option<String>,
+    pub error: Option<String>,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SystematicOptimizationCandidatesView {
+    pub optimization: SystematicOptimizationView,
+    /// Tuned parameter ranges from the pinned strategy version. Empty when the
+    /// version snapshot can no longer be read; the UI then derives ranges from
+    /// the candidate values themselves.
+    pub parameter_tuning: BTreeMap<String, SystematicOptimizationTuningRangeView>,
+    pub baseline_parameters: Value,
+    pub candidates: Vec<SystematicOptimizationCandidateView>,
+}
+
+/// Minimum validation trades before a candidate is scored; mirrors
+/// `evaluate_optimization_candidate_with_runner`.
+const OPTIMIZATION_MIN_VALIDATION_TRADES: u64 = 10;
+
+/// Read-model scoring for one candidate row. Returns
+/// `(train_calmar, validation_calmar, validation_calmar_reason)`. The train
+/// value uses the same net-return / max-drawdown ratio as the persisted
+/// validation score so the two columns are directly comparable; it is display
+/// only and never feeds candidate ranking.
+fn optimization_candidate_scores(
+    status: &str,
+    stored_validation_calmar: Option<f64>,
+    train_metrics: Option<&Value>,
+    validation_metrics: Option<&Value>,
+) -> (Option<f64>, Option<f64>, Option<String>) {
+    if status != "completed" {
+        return (None, None, None);
+    }
+    let ratio = |metrics: Option<&Value>| {
+        let metrics = metrics?;
+        let net = metrics.get("netReturnPct")?.as_f64()?;
+        let drawdown = metrics.get("maxDrawdownPct")?.as_f64()?;
+        (drawdown > 0.0 && net.is_finite() && drawdown.is_finite()).then(|| net / drawdown)
+    };
+    let train_calmar = ratio(train_metrics);
+    match stored_validation_calmar {
+        Some(value) if value.is_finite() => (train_calmar, Some(value), None),
+        _ => {
+            let trades = validation_metrics
+                .and_then(|metrics| metrics.get("closedTradeCount"))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let reason = if trades < OPTIMIZATION_MIN_VALIDATION_TRADES {
+                "insufficientTrades"
+            } else {
+                "noDrawdown"
+            };
+            (train_calmar, None, Some(reason.to_string()))
+        }
+    }
+}
+
+fn load_optimization_candidates_view(
+    conn: &Connection,
+    optimization_id: &str,
+) -> Result<SystematicOptimizationCandidatesView, String> {
+    let optimization = load_optimization_view(conn, optimization_id)?
+        .ok_or_else(|| "Optimization was not found".to_string())?;
+    let mut statement = conn
+        .prepare(
+            "SELECT candidate_index,parameters_json,status,train_metrics_json,
+                    validation_metrics_json,validation_calmar,error,updated_at
+             FROM systematic_optimization_candidates
+             WHERE optimization_id=?1 ORDER BY candidate_index ASC LIMIT 1000",
+        )
+        .map_err(|error| error.to_string())?;
+    let candidates = statement
+        .query_map([optimization_id], |row| {
+            let parameters_json: String = row.get(1)?;
+            let status: String = row.get(2)?;
+            let train_metrics = row
+                .get::<_, Option<String>>(3)?
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok());
+            let validation_metrics = row
+                .get::<_, Option<String>>(4)?
+                .and_then(|value| serde_json::from_str::<Value>(&value).ok());
+            let (train_calmar, validation_calmar, validation_calmar_reason) =
+                optimization_candidate_scores(
+                    &status,
+                    row.get::<_, Option<f64>>(5)?,
+                    train_metrics.as_ref(),
+                    validation_metrics.as_ref(),
+                );
+            Ok(SystematicOptimizationCandidateView {
+                index: row.get::<_, i64>(0)?.max(0) as usize,
+                parameters: serde_json::from_str::<Value>(&parameters_json)
+                    .unwrap_or(Value::Null),
+                status,
+                train_metrics,
+                validation_metrics,
+                train_calmar,
+                validation_calmar,
+                validation_calmar_reason,
+                error: row.get(6)?,
+                updated_at: row.get(7)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    let snapshot = load_strategy_version_snapshot(
+        conn,
+        &optimization.strategy_id,
+        optimization.strategy_version,
+    )
+    .ok();
+    let parameter_tuning = snapshot
+        .as_ref()
+        .map(|snapshot| {
+            snapshot
+                .definition
+                .parameter_tuning
+                .iter()
+                .map(|(key, range)| {
+                    (
+                        key.clone(),
+                        SystematicOptimizationTuningRangeView {
+                            min: range.min,
+                            max: range.max,
+                            step: range.step,
+                        },
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    // Candidate #0 is always the baseline (see optimization_parameter_candidates).
+    let baseline_parameters = candidates
+        .iter()
+        .find(|candidate| candidate.index == 0)
+        .map(|candidate| candidate.parameters.clone())
+        .or_else(|| snapshot.map(|snapshot| snapshot.definition.parameters))
+        .unwrap_or_else(|| json!({}));
+    Ok(SystematicOptimizationCandidatesView {
+        optimization,
+        parameter_tuning,
+        baseline_parameters,
+        candidates,
+    })
+}
+
+/// Read-only candidate list for the parameter terrain view.
+#[tauri::command]
+pub(crate) async fn systematic_optimization_candidates(
+    app: tauri::AppHandle,
+    request: SystematicOptimizationCandidatesRequest,
+) -> Result<SystematicOptimizationCandidatesView, String> {
+    validate_id(&request.optimization_id, "Optimization ID")?;
+    let optimization_id = request.optimization_id;
+    crate::blocking_work::run_blocking(move || {
+        let conn = open_read_database(&app)?;
+        load_optimization_candidates_view(&conn, &optimization_id)
+    })
+    .await
+}
+
 /// Shared bounded train/validation parameter research entry point. Candidates
 /// come exclusively from desktop-owned saved tuning ranges and never affect a
 /// Profile or exchange execution path.
@@ -6770,7 +6984,7 @@ fn snapshot_instrument_registry(
         })
         .collect::<Vec<_>>();
 
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let mut added = 0_usize;
     let mut observed_ids: BTreeSet<String> = BTreeSet::new();
 
@@ -8022,20 +8236,37 @@ fn spawn_optimization_worker(
         }
         drop(sender);
 
-        while let Some(outcome) = receiver.recv().await {
-            record_optimization_outcome(
-                &app,
-                &optimization_id,
-                outcome,
-                &mut completed,
-                &mut succeeded,
-                &mut failures,
-                &control,
-                total,
-                started_at,
-                parallelism,
-            )
-            .await;
+        while let Some(message) = receiver.recv().await {
+            match message {
+                OptimizationLaneMessage::Claimed(index) => {
+                    mark_optimization_candidate_running(
+                        &app,
+                        &optimization_id,
+                        index,
+                        completed,
+                        &control,
+                        total,
+                        started_at,
+                        parallelism,
+                    )
+                    .await;
+                }
+                OptimizationLaneMessage::Finished(outcome) => {
+                    record_optimization_outcome(
+                        &app,
+                        &optimization_id,
+                        outcome,
+                        &mut completed,
+                        &mut succeeded,
+                        &mut failures,
+                        &control,
+                        total,
+                        started_at,
+                        parallelism,
+                    )
+                    .await;
+                }
+            }
         }
         for task in lane_tasks {
             match task.await {
@@ -8113,6 +8344,16 @@ struct OptimizationCandidateOutcome {
     result: Result<OptimizationCandidateResult, String>,
 }
 
+/// Messages from optimization lanes to the supervisor. `Claimed` is sent the
+/// moment a lane takes a candidate so its row moves queued → running before the
+/// (possibly long) train/validation pair starts; `Finished` always follows on
+/// the same channel, so ordering per candidate is preserved.
+#[derive(Debug)]
+enum OptimizationLaneMessage {
+    Claimed(usize),
+    Finished(OptimizationCandidateOutcome),
+}
+
 fn run_optimization_lane(
     next_candidate: Arc<AtomicUsize>,
     candidates: Arc<Vec<Value>>,
@@ -8122,7 +8363,7 @@ fn run_optimization_lane(
     split_index: usize,
     optimization_id: String,
     control: BacktestJobControl,
-    sender: tokio::sync::mpsc::UnboundedSender<OptimizationCandidateOutcome>,
+    sender: tokio::sync::mpsc::UnboundedSender<OptimizationLaneMessage>,
 ) {
     let position_sizing = Some(BacktestPositionSizing {
         sizing: base_request.position_sizing,
@@ -8151,10 +8392,12 @@ fn run_optimization_lane(
                     break;
                 }
                 if sender
-                    .send(OptimizationCandidateOutcome {
-                        index,
-                        result: Err(message.clone()),
-                    })
+                    .send(OptimizationLaneMessage::Finished(
+                        OptimizationCandidateOutcome {
+                            index,
+                            result: Err(message.clone()),
+                        },
+                    ))
                     .is_err()
                 {
                     break;
@@ -8183,6 +8426,9 @@ fn run_optimization_lane(
         if index >= candidates.len() {
             break;
         }
+        if sender.send(OptimizationLaneMessage::Claimed(index)).is_err() {
+            break;
+        }
         let mut definition = (*base_definition).clone();
         definition.parameters = candidates[index].clone();
         let result = evaluate_optimization_candidate_with_runner(
@@ -8197,7 +8443,9 @@ fn run_optimization_lane(
             &control.cancellation_token(),
         );
         if sender
-            .send(OptimizationCandidateOutcome { index, result })
+            .send(OptimizationLaneMessage::Finished(
+                OptimizationCandidateOutcome { index, result },
+            ))
             .is_err()
         {
             break;
@@ -8225,6 +8473,18 @@ async fn record_optimization_outcome(
     let error_for_record = outcome.result.as_ref().err().cloned();
     let cancelled = control.cancellation_token().is_cancelled();
     let candidate_status = if cancelled { "cancelled" } else { "failed" };
+    let event_candidate_status = if succeeded_candidate {
+        "completed"
+    } else {
+        candidate_status
+    };
+    // −∞ (too few validation trades / no drawdown) is reported as null.
+    let event_validation_calmar = outcome
+        .result
+        .as_ref()
+        .ok()
+        .map(|candidate| candidate.validation_calmar)
+        .filter(|value| value.is_finite());
     let persist = run_systematic_blocking({
         let app = app.clone();
         let optimization_id = optimization_id.to_string();
@@ -8325,9 +8585,71 @@ async fn record_optimization_outcome(
             "workerCount": worker_count,
             "elapsedMs": elapsed_ms,
             "estimatedRemainingMs": estimated_remaining_ms,
+            "candidateIndex": candidate_index,
+            "candidateStatus": event_candidate_status,
+            "validationCalmar": event_validation_calmar,
             "timestamp": now_ms(),
         }),
     );
+}
+
+/// Moves a freshly claimed candidate from `queued` to `running` and announces
+/// it on the same throttled `optimizationProgress` channel (completed count is
+/// unchanged). The guarded update never downgrades a terminal row.
+async fn mark_optimization_candidate_running(
+    app: &tauri::AppHandle,
+    optimization_id: &str,
+    candidate_index: usize,
+    completed: usize,
+    control: &BacktestJobControl,
+    total: usize,
+    started_at: i64,
+    worker_count: usize,
+) {
+    let cancelled = control.cancellation_token().is_cancelled();
+    let persisted = run_systematic_blocking({
+        let app = app.clone();
+        let optimization_id = optimization_id.to_string();
+        move || {
+            let conn = open_database(&app)?;
+            mark_optimization_candidate_running_in(&conn, &optimization_id, candidate_index)
+        }
+    })
+    .await;
+    if !matches!(persisted, Ok(true)) {
+        return;
+    }
+    emit_systematic_event(
+        app,
+        json!({
+            "type": "optimizationProgress",
+            "optimizationId": optimization_id,
+            "status": if cancelled { "cancelling" } else { "running" },
+            "completed": completed,
+            "total": total,
+            "workerCount": worker_count,
+            "elapsedMs": now_ms().saturating_sub(started_at).max(0),
+            "candidateIndex": candidate_index,
+            "candidateStatus": "running",
+            "validationCalmar": Value::Null,
+            "timestamp": now_ms(),
+        }),
+    );
+}
+
+fn mark_optimization_candidate_running_in(
+    conn: &Connection,
+    optimization_id: &str,
+    candidate_index: usize,
+) -> Result<bool, String> {
+    conn.execute(
+        "UPDATE systematic_optimization_candidates
+         SET status='running',updated_at=?3
+         WHERE optimization_id=?1 AND candidate_index=?2 AND status='queued'",
+        params![optimization_id, candidate_index as i64, now_ms()],
+    )
+    .map(|updated| updated > 0)
+    .map_err(|error| error.to_string())
 }
 
 async fn persist_optimization_terminal_state(
@@ -8704,7 +9026,7 @@ fn persist_backtest_result(
     let timing_json = serde_json::to_string(timing).map_err(|error| error.to_string())?;
 
     let mut conn = open_database(app)?;
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     transaction
         .execute(
             "UPDATE systematic_backtests
@@ -10990,55 +11312,72 @@ fn load_backtest_page(
     })
 }
 
+const OPTIMIZATION_VIEW_COLUMNS: &str = "id,strategy_id,inst_id,status,candidate_count,completed_count,
+    strategy_version,candidate_budget,sampling_mode,worker_count,
+    train_end_at,validation_start_at,validation_end_at,best_parameters_json,
+    best_validation_calmar,baseline_validation_calmar,created_at,finished_at,error,
+    started_at,elapsed_ms,estimated_remaining_ms";
+
+fn optimization_view_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SystematicOptimizationView> {
+    let best_parameters_json: Option<String> = row.get(13)?;
+    Ok(SystematicOptimizationView {
+        id: row.get(0)?,
+        strategy_id: row.get(1)?,
+        inst_id: row.get(2)?,
+        status: row.get(3)?,
+        candidate_count: row.get::<_, i64>(4)?.max(0) as usize,
+        completed_count: row.get::<_, i64>(5)?.max(0) as usize,
+        strategy_version: row
+            .get::<_, Option<i64>>(6)?
+            .map(|value| value.max(1) as u32),
+        candidate_budget: row
+            .get::<_, Option<i64>>(7)?
+            .map(|value| value.max(1) as usize),
+        sampling_mode: row.get(8)?,
+        worker_count: row
+            .get::<_, Option<i64>>(9)?
+            .map(|value| value.max(1) as usize),
+        train_end_at: row.get(10)?,
+        validation_start_at: row.get(11)?,
+        validation_end_at: row.get(12)?,
+        best_parameters: best_parameters_json
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        best_validation_calmar: row.get(14)?,
+        baseline_validation_calmar: row.get(15)?,
+        created_at: row.get(16)?,
+        finished_at: row.get(17)?,
+        error: row.get(18)?,
+        started_at: row.get(19)?,
+        elapsed_ms: row.get(20)?,
+        estimated_remaining_ms: row.get(21)?,
+    })
+}
+
 fn load_optimization_views(conn: &Connection) -> Result<Vec<SystematicOptimizationView>, String> {
     let mut statement = conn
-        .prepare(
-            "SELECT id,strategy_id,inst_id,status,candidate_count,completed_count,
-                strategy_version,candidate_budget,sampling_mode,worker_count,
-                train_end_at,validation_start_at,validation_end_at,best_parameters_json,
-                best_validation_calmar,baseline_validation_calmar,created_at,finished_at,error,
-                started_at,elapsed_ms,estimated_remaining_ms
-         FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30",
-        )
+        .prepare(&format!(
+            "SELECT {OPTIMIZATION_VIEW_COLUMNS}
+             FROM systematic_optimizations ORDER BY created_at DESC LIMIT 30"
+        ))
         .map_err(|error| error.to_string())?;
     let rows = statement
-        .query_map([], |row| {
-            let best_parameters_json: Option<String> = row.get(13)?;
-            Ok(SystematicOptimizationView {
-                id: row.get(0)?,
-                strategy_id: row.get(1)?,
-                inst_id: row.get(2)?,
-                status: row.get(3)?,
-                candidate_count: row.get::<_, i64>(4)?.max(0) as usize,
-                completed_count: row.get::<_, i64>(5)?.max(0) as usize,
-                strategy_version: row
-                    .get::<_, Option<i64>>(6)?
-                    .map(|value| value.max(1) as u32),
-                candidate_budget: row
-                    .get::<_, Option<i64>>(7)?
-                    .map(|value| value.max(1) as usize),
-                sampling_mode: row.get(8)?,
-                worker_count: row
-                    .get::<_, Option<i64>>(9)?
-                    .map(|value| value.max(1) as usize),
-                train_end_at: row.get(10)?,
-                validation_start_at: row.get(11)?,
-                validation_end_at: row.get(12)?,
-                best_parameters: best_parameters_json
-                    .and_then(|value| serde_json::from_str(&value).ok()),
-                best_validation_calmar: row.get(14)?,
-                baseline_validation_calmar: row.get(15)?,
-                created_at: row.get(16)?,
-                finished_at: row.get(17)?,
-                error: row.get(18)?,
-                started_at: row.get(19)?,
-                elapsed_ms: row.get(20)?,
-                estimated_remaining_ms: row.get(21)?,
-            })
-        })
+        .query_map([], optimization_view_from_row)
         .map_err(|error| error.to_string())?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())
+}
+
+fn load_optimization_view(
+    conn: &Connection,
+    optimization_id: &str,
+) -> Result<Option<SystematicOptimizationView>, String> {
+    conn.query_row(
+        &format!("SELECT {OPTIMIZATION_VIEW_COLUMNS} FROM systematic_optimizations WHERE id=?1"),
+        [optimization_id],
+        optimization_view_from_row,
+    )
+    .optional()
+    .map_err(|error| error.to_string())
 }
 
 fn load_backtest_view(
@@ -14256,6 +14595,14 @@ fn local_python_environment_failure_view(
                 "{label} finished preparing the local research environment, but Windows kept the new environment files in use while Desic was activating it. Close programs scanning or using the Desic workspace, then retry.\n{error}"
             ),
         )
+    } else if lowercase.contains("timed out while trying to verify the local python environment") {
+        (
+            "invalidEnvironment",
+            format!(
+                "{label} installed the research dependencies, but loading them for the first time made no progress for {} seconds, even after an automatic retry. The first load of freshly installed native libraries is scanned by macOS (and by any security software), which can be slow but normally keeps progressing; a module that stops completely usually means a security product is holding it. Select Recheck to try again; if it keeps failing, send us setup.log — it records the time of every module and where the load stopped.\n{error}",
+                SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT.as_secs()
+            ),
+        )
     } else {
         (
             "invalidEnvironment",
@@ -14639,6 +14986,7 @@ async fn install_local_python_dependencies(
         let context = LocalPythonStreamContext {
             app,
             stage: "dependencies",
+            emit_stderr: true,
             mirror: Some(label),
             attempt,
             attempt_total,
@@ -14706,24 +15054,104 @@ async fn install_local_python_dependencies(
             "timestamp": now_ms(),
         }),
     );
-    let mut verify = Command::new(interpreter);
-    verify
-        .arg("-I")
-        .arg("-c")
-        .arg("import sys, numpy, pandas, sklearn; print('.'.join(map(str, sys.version_info[:3])))");
-    configure_local_python_execution_command(&mut verify);
-    // Applied after the execution environment is cleared, so the proxy is the
-    // one this app is configured with and never an inherited shell value.
-    apply_local_python_proxy_environment(&mut verify, &proxy_environment);
-    let version = run_local_python_command(
-        &mut verify,
-        "verify the local Python environment",
-        SYSTEMATIC_PYTHON_COMMAND_TIMEOUT,
-    )
-    .await?;
+    // 首次校验要把 numpy/scipy/pandas/scikit-learn 整个加载一遍：刚装好的原生库第一次加载时，
+    // macOS 会逐个做安全扫描（Gatekeeper / XProtect，以及用户装的安全软件），慢的机器上可达数分钟，
+    // 而开发机通常关闭了这些检查，永远复现不了。因此按“进展”判断：逐个模块导入并输出进度，
+    // 只有单个模块超过 IDLE 没有完成才判为卡住（超时后确实杀掉进程），持续推进则最多等到 MAX；
+    // 卡住时 faulthandler 的栈转储写进 setup.log，能看出停在哪个 import / 哪个原生库。
+    // 超时自动重试一次（第一次已加载完的库在重试时不再扫描）；非超时错误立即失败，不掩盖真问题。
+    let mut verify_error = String::new();
+    let mut verified_version = None;
+    for attempt in 1..=2 {
+        let attempt_started = Instant::now();
+        let mut verify = Command::new(interpreter);
+        verify.arg("-I").arg("-c").arg(SYSTEMATIC_PYTHON_VERIFY_SCRIPT);
+        configure_local_python_execution_command(&mut verify);
+        let context = LocalPythonStreamContext {
+            app,
+            stage: "verifying",
+            emit_stderr: false,
+            mirror: None,
+            attempt,
+            attempt_total: 2,
+            started: attempt_started,
+        };
+        append_local_python_setup_log(&format!(
+            "=== verification attempt {attempt}/2 started at {}",
+            chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+        ));
+        // Applied after the execution environment is cleared, so the proxy is the
+        // one this app is configured with and never an inherited shell value.
+        match run_local_python_streaming_command_with_idle(
+            &mut verify,
+            "verify the local Python environment",
+            SYSTEMATIC_PYTHON_VERIFY_MAX_DURATION,
+            Some(SYSTEMATIC_PYTHON_VERIFY_IDLE_TIMEOUT),
+            &proxy_environment,
+            Some(&context),
+        )
+        .await
+        {
+            Ok(output) => {
+                append_local_python_setup_log(&format!(
+                    "=== verification attempt {attempt}/2 finished after {}s",
+                    attempt_started.elapsed().as_secs()
+                ));
+                verified_version = Some(local_python_verified_version(&output).unwrap_or(output));
+                break;
+            }
+            Err(error) => {
+                append_local_python_setup_log(&format!(
+                    "=== verification attempt {attempt}/2 failed after {}s: {error}",
+                    attempt_started.elapsed().as_secs()
+                ));
+                let timed_out = error.contains("Timed out while trying to");
+                verify_error = error;
+                if !timed_out {
+                    break;
+                }
+            }
+        }
+    }
+    let version = match verified_version {
+        Some(version) => version,
+        None => {
+            // 校验失败同样落盘：界面据此显示 setup.log 路径，且重试不会抹掉这次的证据。
+            append_local_python_setup_log(&format!(
+                "=== verification failed at {}: {verify_error} ===",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S")
+            ));
+            record_local_python_setup_failure(&verify_error, failures);
+            return Err(verify_error);
+        }
+    };
     parse_local_python_version(&version)
         .map(|(_, _, version)| version)
         .ok_or_else(|| "The local Python environment returned an invalid version".to_string())
+}
+
+/// The version line of [`SYSTEMATIC_PYTHON_VERIFY_SCRIPT`].
+fn local_python_verified_version(stdout: &str) -> Option<String> {
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix("desic-verify version "))
+        .map(|version| version.trim().to_string())
+}
+
+/// The module the import check was loading when it stopped making progress:
+/// the last "loading" line without a matching "loaded" line.
+fn local_python_stall_location(stdout: &str) -> Option<String> {
+    let mut pending = None;
+    for line in stdout.lines() {
+        let line = line.trim();
+        if let Some(module) = line.strip_prefix("desic-verify loading ") {
+            pending = Some(module.trim().to_string());
+        } else if line.starts_with("desic-verify loaded ") {
+            pending = None;
+        }
+    }
+    pending
 }
 
 fn write_local_python_environment_manifest(
@@ -14810,6 +15238,9 @@ struct LocalPythonStreamContext<'a> {
     app: &'a tauri::AppHandle,
     /// `pythonEnvironmentStage` stage name; `dependencies` for pip.
     stage: &'a str,
+    /// Whether stderr lines reach the UI. The import check writes periodic
+    /// faulthandler stack dumps to stderr; those belong in setup.log only.
+    emit_stderr: bool,
     mirror: Option<&'a str>,
     attempt: usize,
     attempt_total: usize,
@@ -14907,6 +15338,21 @@ async fn run_local_python_streaming_command(
     proxy_environment: &[(&'static str, Option<String>)],
     context: Option<&LocalPythonStreamContext<'_>>,
 ) -> Result<String, String> {
+    run_local_python_streaming_command_with_idle(command, action, duration, None, proxy_environment, context).await
+}
+
+/// Same as [`run_local_python_streaming_command`], plus an optional idle limit:
+/// the run fails when no stdout line arrives for `idle`, while steady progress
+/// may continue up to the hard `duration`. Only stdout resets the idle clock, so
+/// diagnostic output on stderr cannot keep a stuck process alive.
+async fn run_local_python_streaming_command_with_idle(
+    command: &mut Command,
+    action: &str,
+    duration: Duration,
+    idle: Option<Duration>,
+    proxy_environment: &[(&'static str, Option<String>)],
+    context: Option<&LocalPythonStreamContext<'_>>,
+) -> Result<String, String> {
     hide_local_python_command_window(command);
     apply_local_python_proxy_environment(command, proxy_environment);
     command
@@ -14939,12 +15385,20 @@ async fn run_local_python_streaming_command(
     let mut tail = LocalPythonStreamTail::default();
     let mut stdout_text = String::new();
     let mut timed_out = false;
+    let mut idled = false;
     let deadline = sleep(duration);
     tokio::pin!(deadline);
+    let idle_limit = idle.unwrap_or(duration);
+    let idle_deadline = sleep(idle_limit);
+    tokio::pin!(idle_deadline);
     loop {
         tokio::select! {
             _ = &mut deadline => {
                 timed_out = true;
+                break;
+            }
+            _ = &mut idle_deadline, if idle.is_some() => {
+                idled = true;
                 break;
             }
             message = receiver.recv() => match message {
@@ -14962,9 +15416,12 @@ async fn run_local_python_streaming_command(
                     if output == LocalPythonOutputStream::Stdout {
                         stdout_text.push_str(&line);
                         stdout_text.push('\n');
+                        idle_deadline.as_mut().reset(tokio::time::Instant::now() + idle_limit);
                     }
                     if let Some(context) = context {
-                        context.emit_line(&line);
+                        if output == LocalPythonOutputStream::Stdout || context.emit_stderr {
+                            context.emit_line(&line);
+                        }
                     }
                 }
                 None => break,
@@ -14978,6 +15435,21 @@ async fn run_local_python_streaming_command(
             duration.as_secs()
         ));
         return Err(format!("Timed out while trying to {action}"));
+    }
+    if idled {
+        let _ = child.kill().await;
+        append_local_python_setup_log(&format!(
+            "--- no progress for {}s while trying to {action}; last stderr:\n{}",
+            idle_limit.as_secs(),
+            tail.stderr
+        ));
+        return Err(format!(
+            "Timed out while trying to {action}: no progress for {}s{}",
+            idle_limit.as_secs(),
+            local_python_stall_location(&tail.stdout)
+                .map(|module| format!(" while loading {module}"))
+                .unwrap_or_default()
+        ));
     }
     let status = child
         .wait()
@@ -17587,6 +18059,56 @@ fn emit_systematic_event(app: &tauri::AppHandle, payload: Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn verify_script_output_yields_version_and_stall_location() {
+        let complete = "desic-verify loading numpy\ndesic-verify loaded numpy in 3.1s\ndesic-verify loading scipy\ndesic-verify loaded scipy in 40.2s\ndesic-verify version 3.13.15";
+        assert_eq!(local_python_verified_version(complete).as_deref(), Some("3.13.15"));
+        assert_eq!(local_python_stall_location(complete), None);
+        let stuck = "desic-verify loading numpy\ndesic-verify loaded numpy in 3.1s\ndesic-verify loading scipy";
+        assert_eq!(local_python_stall_location(stuck).as_deref(), Some("scipy"));
+        assert_eq!(local_python_verified_version(stuck), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn verify_idle_limit_fails_a_stall_but_not_slow_progress() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            // A load that stops after one line is a stall: killed after the idle limit, naming the module.
+            let started = Instant::now();
+            let mut stuck = Command::new("sh");
+            stuck.arg("-c").arg("echo desic-verify loading scipy; sleep 5");
+            let error = run_local_python_streaming_command_with_idle(
+                &mut stuck, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.starts_with("Timed out while trying to verify the local Python environment"), "{error}");
+            assert!(error.contains("no progress for 1s while loading scipy"), "{error}");
+            assert!(started.elapsed() < Duration::from_secs(4), "stalled child must be killed at the idle limit");
+
+            // Slow but steady progress outlives the idle limit.
+            let mut slow = Command::new("sh");
+            slow.arg("-c").arg("for i in 1 2 3 4; do echo tick $i; sleep 0.6; done; echo desic-verify version 3.13.15");
+            let output = run_local_python_streaming_command_with_idle(
+                &mut slow, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap();
+            assert_eq!(local_python_verified_version(&output).as_deref(), Some("3.13.15"));
+
+            // Diagnostic stderr (faulthandler dumps) must not count as progress.
+            let mut noisy = Command::new("sh");
+            noisy.arg("-c").arg("echo desic-verify loading sklearn; for i in 1 2 3 4 5 6; do echo dump >&2; sleep 0.4; done");
+            let error = run_local_python_streaming_command_with_idle(
+                &mut noisy, "verify the local Python environment", Duration::from_secs(20), Some(Duration::from_secs(1)), &[], None,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.contains("while loading sklearn"), "{error}");
+        });
+    }
 
     #[test]
     fn package_index_fallback_starts_in_china_and_ends_at_pypi() {
@@ -20456,6 +20978,119 @@ def on_bar(ctx):
         assert!(!blank.source.contains("ctx.open_long"));
         assert!(!blank.source.contains("ctx.open_short"));
         assert!(builtin_python_strategy_template(Some("unknown")).is_err());
+    }
+
+    #[test]
+    fn optimization_candidate_scores_null_out_negative_infinity_with_reason() {
+        let train = json!({ "netReturnPct": 12.0, "maxDrawdownPct": 4.0, "closedTradeCount": 30 });
+        let few = json!({ "netReturnPct": 3.0, "maxDrawdownPct": 2.0, "closedTradeCount": 6 });
+        let flat = json!({ "netReturnPct": 1.0, "maxDrawdownPct": 0.0, "closedTradeCount": 14 });
+        assert_eq!(
+            optimization_candidate_scores("completed", Some(1.5), Some(&train), Some(&few)),
+            (Some(3.0), Some(1.5), None)
+        );
+        assert_eq!(
+            optimization_candidate_scores(
+                "completed",
+                Some(f64::NEG_INFINITY),
+                Some(&train),
+                Some(&few)
+            ),
+            (Some(3.0), None, Some("insufficientTrades".to_string()))
+        );
+        assert_eq!(
+            optimization_candidate_scores(
+                "completed",
+                Some(f64::NEG_INFINITY),
+                Some(&flat),
+                Some(&flat)
+            ),
+            (None, None, Some("noDrawdown".to_string()))
+        );
+        for status in ["queued", "running", "failed", "cancelled"] {
+            assert_eq!(
+                optimization_candidate_scores(status, Some(2.0), Some(&train), Some(&few)),
+                (None, None, None)
+            );
+        }
+    }
+
+    #[test]
+    fn optimization_candidates_view_reads_tuning_baseline_and_ordered_rows() {
+        let conn = Connection::open_in_memory().expect("database");
+        migrate_systematic(&conn).expect("migration");
+        let definition = json!({
+            "schemaVersion": "desic.systematic.strategy/v1",
+            "protocol": SYSTEMATIC_PYTHON_PROTOCOL,
+            "entrypoint": "on_bar",
+            "source": "def on_bar(ctx):\n    return ctx.no_action('x')\n",
+            "parameters": { "fastPeriod": 12, "slowPeriod": 50 },
+            "parameterTuning": {
+                "fastPeriod": { "min": 5.0, "max": 30.0, "step": 1.0 },
+                "slowPeriod": { "min": 20.0, "max": 120.0, "step": 5.0 }
+            }
+        })
+        .to_string();
+        conn.execute(
+            "INSERT INTO systematic_strategies(
+              id,name,kind,runtime,version,status,description,definition_json,source_hash,created_at,updated_at
+            ) VALUES('terrain','Terrain','python','localPython',2,'draft','',?1,'hash',1,1)",
+            [&definition],
+        )
+        .expect("strategy");
+        conn.execute(
+            "INSERT INTO systematic_strategy_versions(
+              strategy_id,version,name,description,definition_json,source_hash,created_at
+            ) VALUES('terrain',2,'Terrain','',?1,'hash',1)",
+            [&definition],
+        )
+        .expect("version");
+        conn.execute(
+            "INSERT INTO systematic_optimizations(
+              id,strategy_id,inst_id,status,request_json,candidate_count,train_end_at,
+              validation_start_at,validation_end_at,strategy_version,created_at,updated_at
+            ) VALUES('opt-terrain','terrain','BTC-USDT-SWAP','running','{}',3,1,1,2,2,1,1)",
+            [],
+        )
+        .expect("optimization");
+        let metrics = json!({ "netReturnPct": 6.0, "maxDrawdownPct": 3.0, "closedTradeCount": 20 })
+            .to_string();
+        conn.execute(
+            "INSERT INTO systematic_optimization_candidates(
+              optimization_id,candidate_index,parameters_json,status,train_metrics_json,
+              validation_metrics_json,validation_calmar,created_at,updated_at
+            ) VALUES
+              ('opt-terrain',2,'{\"fastPeriod\":20,\"slowPeriod\":90}','queued',NULL,NULL,NULL,1,1),
+              ('opt-terrain',0,'{\"fastPeriod\":12,\"slowPeriod\":50}','completed',?1,?1,2.0,1,5),
+              ('opt-terrain',1,'{\"fastPeriod\":8,\"slowPeriod\":40}','completed',?1,?1,?2,1,6)",
+            params![metrics, f64::NEG_INFINITY],
+        )
+        .expect("candidates");
+
+        assert!(mark_optimization_candidate_running_in(&conn, "opt-terrain", 2).expect("claim"));
+        // A terminal row is never downgraded back to running.
+        assert!(!mark_optimization_candidate_running_in(&conn, "opt-terrain", 0).expect("guard"));
+
+        let view = load_optimization_candidates_view(&conn, "opt-terrain").expect("view");
+        assert_eq!(view.optimization.id, "opt-terrain");
+        assert_eq!(view.parameter_tuning.len(), 2);
+        assert_eq!(view.parameter_tuning["slowPeriod"].step, 5.0);
+        assert_eq!(view.baseline_parameters, json!({ "fastPeriod": 12, "slowPeriod": 50 }));
+        let indexes: Vec<_> = view.candidates.iter().map(|item| item.index).collect();
+        assert_eq!(indexes, vec![0, 1, 2]);
+        assert_eq!(view.candidates[0].validation_calmar, Some(2.0));
+        assert_eq!(view.candidates[0].train_calmar, Some(2.0));
+        assert_eq!(view.candidates[1].validation_calmar, None);
+        assert_eq!(
+            view.candidates[1].validation_calmar_reason.as_deref(),
+            Some("noDrawdown")
+        );
+        assert_eq!(view.candidates[2].status, "running");
+        assert!(view.candidates[2].train_metrics.is_none());
+        let encoded = serde_json::to_value(&view).expect("serialize");
+        assert!(encoded["candidates"][1]["validationCalmar"].is_null());
+        assert!(encoded["parameterTuning"]["fastPeriod"]["min"].is_number());
+        assert!(load_optimization_candidates_view(&conn, "missing").is_err());
     }
 
     #[test]

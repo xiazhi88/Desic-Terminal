@@ -236,12 +236,14 @@ export async function cleanupOldDataRoot() {
   return invokeDesktop<void>("cleanup_old_data_root");
 }
 
-export async function invokeDesktop<T>(command: string, args?: Record<string, unknown>): Promise<T | null> {
+/** quiet：调用方自己处理失败（例如有回退路径）时只记 warn，不弹“前端代码异常”通知。 */
+export async function invokeDesktop<T>(command: string, args?: Record<string, unknown>, options?: { quiet?: boolean }): Promise<T | null> {
   if (!isTauriRuntime()) return null;
   try {
     return await invoke<T>(command, args);
   } catch (error) {
-    logger.error(`tauri command failed: ${command}`, error);
+    if (options?.quiet) logger.warn(`tauri command failed (handled by caller): ${command}`, { error: error instanceof Error ? error.message : String(error) });
+    else logger.error(`tauri command failed: ${command}`, error);
     throw error;
   }
 }

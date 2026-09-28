@@ -302,6 +302,28 @@ async function verifyMarketRadar(page) {
   if (!((await page.locator(".market-radar-tools-panel").textContent()) || "").includes("真实产品宇宙")) {
     throw new Error("market radar point-in-time validation boundary is not visible");
   }
+  // 星图：同一份排行的空间视图；浏览器预览没有桌面端快照，只有实时帧，并如实说明回放不可用。
+  await page.locator(".market-radar-page__view-toggle button", { hasText: "星图" }).click();
+  await page.waitForSelector(".radar-constellation__plot canvas", { timeout: 15_000 });
+  const constellation = await page.evaluate(() => {
+    const plot = document.querySelector(".radar-constellation__plot")?.getBoundingClientRect();
+    const detail = document.querySelector(".rc-side")?.getBoundingClientRect();
+    return {
+      layers: document.querySelectorAll(".radar-constellation__plot canvas").length,
+      overview: document.querySelectorAll(".rc-side .rc-sec").length,
+      axes: document.querySelectorAll(".market-radar-page__toolbar .rc-axes .terminal-select").length,
+      status: document.querySelector(".radar-constellation__time small")?.textContent || "",
+      plot: plot ? { x: plot.x, y: plot.y, width: plot.width, height: plot.height } : null,
+      detail: detail ? { x: detail.x, y: detail.y, width: detail.width, height: detail.height } : null
+    };
+  });
+  if (constellation.layers !== 3 || constellation.overview < 3 || constellation.axes !== 2 || !constellation.plot || constellation.plot.width < 300 || constellation.plot.height < 200
+    || !constellation.detail || rectsOverlap(constellation.plot, constellation.detail)
+    || !constellation.status.includes("回放需要桌面端本地快照")) {
+    throw new Error(`market radar constellation layout or replay boundary failed: ${JSON.stringify(constellation)}`);
+  }
+  await page.locator(".market-radar-page__view-toggle button", { hasText: "表格" }).click();
+  await page.waitForFunction(() => document.querySelectorAll(".market-radar-table__row").length >= 1);
   await page.locator(".market-radar-page__tabs button", { hasText: "高级模型" }).click();
   await page.waitForSelector(".market-radar-page__expert-host");
   await page.waitForFunction(() => document.querySelector(".market-radar-page__expert-host")?.textContent?.includes("仅在桌面运行时可用"));

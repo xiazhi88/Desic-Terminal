@@ -1,16 +1,28 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { KlineChart, type ChartHistoryLoadOutcome } from "./KlineChart";
 import type { Candle, ChartFillMarker, ChartOrderLine, ChartPositionRange, ChartSignalMarker, Ticker } from "../types";
 import { useTranslation } from "react-i18next";
 import { chartPositionLabel, formatChartAction, formatChartOrderLabel, formatChartPosition } from "../lib/chartTradeSemantics";
+import { DepthProfile } from "./chart/DepthProfile";
+import { buildOrderFlowPreview, buildOrderFlowPreviewCandles, startPreviewOrderBook } from "./chart/orderFlowPreview";
+
+const orderFlowPreviewMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("orderflow") === "1";
 
 export function ChartPreview() {
-  const { t } = useTranslation(["trading", "chart"]);
+  const { t, i18n } = useTranslation(["trading", "chart"]);
   const [{ symbol, candles }, setPreviewSeries] = useState(() => ({
     symbol: "BTC-USDT-SWAP",
-    candles: buildPreviewCandles(62800)
+    candles: orderFlowPreviewMode ? buildOrderFlowPreviewCandles(62800) : buildPreviewCandles(62800)
   }));
   const [historyRequestCount, setHistoryRequestCount] = useState(0);
+  // ?orderflow=1：由预览 K 线合成订单流数据，并驱动一份合成 400 档盘口（当前大单墙与深度剖面）。
+  const orderFlowPreview = useMemo(() => (orderFlowPreviewMode ? buildOrderFlowPreview(candles) : null), [candles]);
+  const lastCloseRef = useRef(0);
+  lastCloseRef.current = candles.at(-1)?.close ?? 0;
+  useEffect(() => {
+    if (!orderFlowPreviewMode) return;
+    return startPreviewOrderBook("BTC-USDT-SWAP", () => lastCloseRef.current);
+  }, []);
   const historyEnabledRef = useRef(false);
   const historyFailuresRemainingRef = useRef(0);
   useEffect(() => {
@@ -83,8 +95,11 @@ export function ChartPreview() {
       data-history-request-count={historyRequestCount}
       data-earliest-candle-time={candles[0]?.time ?? 0}
     >
-      <div className="chart-preview-shell">
+      <div className="chart-preview-shell" data-orderflow-preview={orderFlowPreviewMode ? "1" : undefined}>
         <KlineChart
+          orderFlowMode={orderFlowPreviewMode}
+          orderFlowPreview={orderFlowPreview}
+          timeframe={orderFlowPreviewMode ? "1m" : undefined}
           candles={candles}
           ticker={ticker}
           symbol={symbol}
@@ -96,6 +111,7 @@ export function ChartPreview() {
           onOrderLineCancel={() => undefined}
           onPositionLineCloseRequest={() => undefined}
         />
+        {orderFlowPreviewMode ? <aside className="chart-preview-depth"><DepthProfile instId="BTC-USDT-SWAP" contractValue={0.01} onPriceSelect={(price) => document.documentElement.setAttribute("data-preview-depth-price", price)} text={(english, chinese) => ((i18n.resolvedLanguage ?? "").startsWith("zh") ? chinese : english)} /></aside> : null}
       </div>
     </main>
   );

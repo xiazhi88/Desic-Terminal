@@ -2948,7 +2948,14 @@ fn ensure_risk_increase_scope_available_with_conn(
 }
 
 #[tauri::command]
-pub fn okx_trade_execution_guards(
+pub async fn okx_trade_execution_guards(app: tauri::AppHandle, request: TradeExecutionGuardsRequest) -> Result<Vec<TradeExecutionGuard>, String> {
+    crate::blocking_work::run_blocking(move || {
+        okx_trade_execution_guards_blocking(app, request)
+    })
+    .await
+}
+
+pub fn okx_trade_execution_guards_blocking(
     app: tauri::AppHandle,
     request: TradeExecutionGuardsRequest,
 ) -> Result<Vec<TradeExecutionGuard>, String> {
@@ -9698,20 +9705,34 @@ fn normalize_duplicate_resolution(value: Option<&str>) -> Result<Option<String>,
 }
 
 #[tauri::command]
-pub fn trade_opportunities(app: tauri::AppHandle) -> Result<Vec<TradeOpportunitySummary>, String> {
+pub async fn trade_opportunities(app: tauri::AppHandle) -> Result<Vec<TradeOpportunitySummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        trade_opportunities_blocking(app)
+    })
+    .await
+}
+
+pub fn trade_opportunities_blocking(app: tauri::AppHandle) -> Result<Vec<TradeOpportunitySummary>, String> {
     let conn = open_database(&app)?;
     list_trade_opportunities(&conn)
 }
 
 #[tauri::command]
-pub fn trade_opportunity_delete(app: tauri::AppHandle, id: String) -> Result<usize, String> {
+pub async fn trade_opportunity_delete(app: tauri::AppHandle, id: String) -> Result<usize, String> {
+    crate::blocking_work::run_serial(move || {
+        trade_opportunity_delete_blocking(app, id)
+    })
+    .await
+}
+
+pub fn trade_opportunity_delete_blocking(app: tauri::AppHandle, id: String) -> Result<usize, String> {
     let mut conn = open_database(&app)?;
     let id = id.trim().to_string();
     if id.is_empty() {
         return Err("交易机会 ID 不能为空".to_string());
     }
     load_trade_opportunity(&conn, &id)?;
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     detach_trade_opportunity_references(&tx, Some(&id))?;
     let deleted = tx
         .execute("DELETE FROM trade_opportunities WHERE id=?1", params![id])
@@ -9721,7 +9742,14 @@ pub fn trade_opportunity_delete(app: tauri::AppHandle, id: String) -> Result<usi
 }
 
 #[tauri::command]
-pub fn trade_opportunities_clear(app: tauri::AppHandle) -> Result<usize, String> {
+pub async fn trade_opportunities_clear(app: tauri::AppHandle) -> Result<usize, String> {
+    crate::blocking_work::run_serial(move || {
+        trade_opportunities_clear_blocking(app)
+    })
+    .await
+}
+
+pub fn trade_opportunities_clear_blocking(app: tauri::AppHandle) -> Result<usize, String> {
     let mut conn = open_database(&app)?;
     let total: usize = conn
         .query_row("SELECT COUNT(*) FROM trade_opportunities", [], |row| {
@@ -9731,7 +9759,7 @@ pub fn trade_opportunities_clear(app: tauri::AppHandle) -> Result<usize, String>
     if total == 0 {
         return Ok(0);
     }
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     detach_trade_opportunity_references(&tx, None)?;
     tx.execute("DELETE FROM trade_opportunities", [])
         .map_err(|err| err.to_string())?;
@@ -9967,7 +9995,14 @@ pub async fn trade_opportunity_approve(
 }
 
 #[tauri::command]
-pub fn trade_opportunity_reject(
+pub async fn trade_opportunity_reject(app: tauri::AppHandle, id: String) -> Result<TradeOpportunitySummary, String> {
+    crate::blocking_work::run_serial(move || {
+        trade_opportunity_reject_blocking(app, id)
+    })
+    .await
+}
+
+pub fn trade_opportunity_reject_blocking(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<TradeOpportunitySummary, String> {

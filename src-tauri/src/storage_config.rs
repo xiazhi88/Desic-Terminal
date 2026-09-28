@@ -445,7 +445,14 @@ pub(crate) fn lock_ai_config_writes() -> Result<std::sync::MutexGuard<'static, (
 }
 
 #[tauri::command]
-pub(crate) fn export_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticExportResult, String> {
+pub(crate) async fn export_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticExportResult, String> {
+    crate::blocking_work::run_blocking(move || {
+        export_diagnostics_blocking(app)
+    })
+    .await
+}
+
+pub(crate) fn export_diagnostics_blocking(app: tauri::AppHandle) -> Result<DiagnosticExportResult, String> {
     let created_at = now_ms();
     let dir = diagnostics_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
@@ -519,8 +526,9 @@ pub(crate) fn export_diagnostics(app: tauri::AppHandle) -> Result<DiagnosticExpo
     })
 }
 
+// 每条前端日志都会调用：用 async 命令让文件追加在后台线程执行，不占 Tauri 主线程。
 #[tauri::command]
-pub(crate) fn frontend_log(app: tauri::AppHandle, entry: FrontendLogEntry) -> Result<(), String> {
+pub(crate) async fn frontend_log(app: tauri::AppHandle, entry: FrontendLogEntry) -> Result<(), String> {
     let dir = frontend_log_dir(&app)?;
     fs::create_dir_all(&dir).map_err(|err| err.to_string())?;
     let file_name = format!("frontend-{}.jsonl", Utc::now().format("%Y-%m-%d"));
@@ -537,7 +545,14 @@ pub(crate) fn frontend_log(app: tauri::AppHandle, entry: FrontendLogEntry) -> Re
 }
 
 #[tauri::command]
-pub(crate) fn ai_config_summary(app: tauri::AppHandle) -> Result<AiConfigSummary, String> {
+pub(crate) async fn ai_config_summary(app: tauri::AppHandle) -> Result<AiConfigSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        ai_config_summary_blocking(app)
+    })
+    .await
+}
+
+pub(crate) fn ai_config_summary_blocking(app: tauri::AppHandle) -> Result<AiConfigSummary, String> {
     match load_ai_config(&app) {
         Ok(config) => Ok(ai_config_summary_from(config)),
         Err(error) if is_unconfigured_ai_config_error(&error) => {
@@ -548,7 +563,14 @@ pub(crate) fn ai_config_summary(app: tauri::AppHandle) -> Result<AiConfigSummary
 }
 
 #[tauri::command]
-pub(crate) fn ai_save_config(
+pub(crate) async fn ai_save_config(app: tauri::AppHandle, update: AiConfigUpdate) -> Result<AiConfigSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_save_config_blocking(app, update)
+    })
+    .await
+}
+
+pub(crate) fn ai_save_config_blocking(
     app: tauri::AppHandle,
     update: AiConfigUpdate,
 ) -> Result<AiConfigSummary, String> {
@@ -720,7 +742,14 @@ pub(crate) fn ai_agent_template_preview_codex(
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_set_runtime_trust(
+pub(crate) async fn ai_skill_set_runtime_trust(app: tauri::AppHandle, skill_id: String, trusted: bool) -> Result<AiConfigSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_skill_set_runtime_trust_blocking(app, skill_id, trusted)
+    })
+    .await
+}
+
+pub(crate) fn ai_skill_set_runtime_trust_blocking(
     app: tauri::AppHandle,
     skill_id: String,
     trusted: bool,
@@ -2166,7 +2195,14 @@ fn persist_imported_skill_bundle(
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_import(
+pub(crate) async fn ai_skill_import(app: tauri::AppHandle, source: String) -> Result<AiConfigSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_skill_import_blocking(app, source)
+    })
+    .await
+}
+
+pub(crate) fn ai_skill_import_blocking(
     app: tauri::AppHandle,
     source: String,
 ) -> Result<AiConfigSummary, String> {

@@ -1655,6 +1655,29 @@ export type MarketRadarAlertTrigger = {
   triggeredAt: number;
 };
 
+/** 星图回放帧：每帧数组都按 instIds 对齐，缺失为 null（该小时没有这个合约的快照行）。 */
+export type MarketRadarSnapshotFrame = {
+  snapshotAt: number;
+  rank: Array<number | null>;
+  composite: Array<number | null>;
+  strength: Array<number | null>;
+  lowVolatility: Array<number | null>;
+  activity: Array<number | null>;
+  trendQuality: Array<number | null>;
+  change24hPct: Array<number | null>;
+  turnover24h: Array<number | null>;
+};
+
+export type MarketRadarSnapshotFrames = {
+  instIds: string[];
+  categories: Array<string | null>;
+  frames: MarketRadarSnapshotFrame[];
+  snapshotsInRange: number;
+  firstSnapshotAt: number | null;
+  lastSnapshotAt: number | null;
+  stepHours: number;
+};
+
 export type MarketRadarSnapshotResult = {
   snapshotAt: number;
   universeSize: number;

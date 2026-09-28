@@ -12,7 +12,7 @@ type LogEntry = {
 
 const buffer: LogEntry[] = [];
 const maxEntries = 500;
-let backendLogFailed = false;
+let backendLogFailedAt = 0;
 let globalContext: Record<string, unknown> = {};
 const subscribers = new Set<(entry: LogEntry) => void>();
 
@@ -46,7 +46,8 @@ function push(entry: LogEntry) {
 }
 
 async function writeBackendLog(entry: LogEntry) {
-  if (!isTauriRuntime() || backendLogFailed) return;
+  // 写入失败后暂停 30 秒再重试，而不是整个会话永久停写（否则卡顿诊断等日志会悄悄丢失）。
+  if (!isTauriRuntime() || Date.now() - backendLogFailedAt < 30_000) return;
   try {
     await invoke("frontend_log", {
       entry: {
@@ -58,8 +59,8 @@ async function writeBackendLog(entry: LogEntry) {
       }
     });
   } catch (error) {
-    backendLogFailed = true;
-    console.warn("[warn] frontend log file write disabled", error);
+    if (backendLogFailedAt === 0) console.warn("[warn] frontend log file write failed; retrying in 30s", error);
+    backendLogFailedAt = Date.now();
   }
 }
 

@@ -1,3 +1,4 @@
+import { TerminalSelect } from "./TerminalSelect";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, CircleAlert, HelpCircle, Plus, Trash2 } from "lucide-react";
 import {
@@ -169,23 +170,19 @@ export function SystematicFactorExpressionBuilder({
             {text.source}
             <HintButton hint={text.sourceHint} label={text.source} />
           </span>
-          <select
+          <TerminalSelect
             value={draft.sourceId}
-            onChange={(event) => {
-              const next = catalogue.sources.find((item) => item.id === event.target.value);
+            ariaLabel={text.source}
+            options={catalogue.sources.map((item) => ({ value: item.id, label: chinese ? item.labelZh : item.labelEn }))}
+            onChange={(value) => {
+              const next = catalogue.sources.find((item) => item.id === value);
               onChange({
                 ...draft,
-                sourceId: event.target.value,
+                sourceId: value,
                 sourceWindow: next?.defaultWindow ?? draft.sourceWindow
               });
             }}
-          >
-            {catalogue.sources.map((item) => (
-              <option key={item.id} value={item.id}>
-                {chinese ? item.labelZh : item.labelEn}
-              </option>
-            ))}
-          </select>
+          />
         </label>
         {source?.takesWindow ? (
           <label className="systematic-factor-builder__field">
@@ -255,16 +252,15 @@ export function SystematicFactorExpressionBuilder({
                   <span />
                 )}
                 {operator.takesDirection ? (
-                  <select
+                  <TerminalSelect
                     value={stage.ascending === false ? "desc" : "asc"}
-                    aria-label={text.direction}
-                    onChange={(event) =>
-                      updateStage(index, { ascending: event.target.value === "asc" })
-                    }
-                  >
-                    <option value="asc">{text.ascending}</option>
-                    <option value="desc">{text.descending}</option>
-                  </select>
+                    ariaLabel={text.direction}
+                    options={[
+                      { value: "asc", label: text.ascending },
+                      { value: "desc", label: text.descending }
+                    ]}
+                    onChange={(value) => updateStage(index, { ascending: value === "asc" })}
+                  />
                 ) : (
                   <span />
                 )}

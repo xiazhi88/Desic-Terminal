@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, type Dispatch, type SetStateAction } from "re
 import { CheckCircle2, CircleAlert, Loader2 } from "lucide-react";
 import clsx from "clsx";
 import { getAiAgentFailure } from "../lib/aiAgentTrace";
+import { agentUsageTokens } from "../lib/aiEvidenceLedger";
 import { expertGrantLabel } from "../lib/aiExpertGrant";
 import { filterInternalAiToolEvents } from "../lib/aiToolEvents";
 import { logger } from "../lib/logger";
@@ -136,15 +137,30 @@ function processText(key: string, english: string, chinese: string, values: Reco
   }));
 }
 
+// 流式输出时每个 token 都会重渲染消息列表；工具结果字符串按原串缓存解析结果，避免反复 JSON.parse。
+const toolPayloadCache = new Map<string, unknown>();
+
 function normalizeAiToolPayload(value: unknown) {
   if (typeof value !== "string") return value;
-  const trimmed = value.trim();
-  if (!trimmed) return undefined;
-  try {
-    return JSON.parse(trimmed);
-  } catch {
-    return trimmed;
+  if (toolPayloadCache.has(value)) {
+    const hit = toolPayloadCache.get(value);
+    toolPayloadCache.delete(value);
+    toolPayloadCache.set(value, hit);
+    return hit;
   }
+  const trimmed = value.trim();
+  let parsed: unknown;
+  if (!trimmed) parsed = undefined;
+  else {
+    try {
+      parsed = JSON.parse(trimmed);
+    } catch {
+      parsed = trimmed;
+    }
+  }
+  toolPayloadCache.set(value, parsed);
+  if (toolPayloadCache.size > 2048) toolPayloadCache.delete(toolPayloadCache.keys().next().value!);
+  return parsed;
 }
 
 function isFailureStatus(value: string | undefined) {
@@ -775,7 +791,7 @@ function strategySourceBlock(tool: AiToolRun) {
 function AiToolFactRows({ tool }: { tool: AiToolRun }) {
   const rows = readableToolFactRows(tool);
   if (rows.length === 0) return null;
-  return <dl className="ai-tool-facts">{rows.map(([key, value]) => <div key={`${key}:${value}`}><dt>{key}</dt><dd title={value}>{value}</dd></div>)}</dl>;
+  return <dl className="ai-tool-facts">{rows.map(([key, value]) => <div key={`${key}:${value}`}><dt>{key}</dt><dd title={value} data-i18n-skip>{value}</dd></div>)}</dl>;
 }
 
 function AiToolDomainDetails({ tool, onOpenArtifact }: { tool: AiToolRun; onOpenArtifact?: (artifact: AiResearchArtifact) => void }) {
@@ -937,11 +953,12 @@ function AiAgentCard({ agent, now }: { agent: AiAgentRun; now: number }) {
   const duration = formatDuration(agent.startedAt, agent.endedAt ?? (agent.status === "running" ? now : undefined));
   const failure = getAiAgentFailure(agent.result, agent.error, agent.status);
   const modelError = failure?.kind === "model";
+  const tokens = agentUsageTokens(agent.result);
   return (
     <details className={clsx("ai-agent-run", `agent-${agent.status}`, modelError && "agent-model-error")} open={modelError || undefined}>
       <summary>
         <span>{modelError && <CircleAlert size={14} aria-hidden="true" />}{processText("subtask", "Subtask", "子任务")} · <span data-i18n-skip>{agent.title}</span></span>
-        <strong>{modelError ? processText("modelError", "Model error", "模型错误") : agentStatusLabel(agent.status)}{duration ? ` · ${duration}` : ""}</strong>
+        <strong>{modelError ? processText("modelError", "Model error", "模型错误") : agentStatusLabel(agent.status)}{duration ? ` · ${duration}` : ""}{tokens !== null ? ` · ${formatLocalizedNumber(tokens)} tok` : ""}</strong>
       </summary>
       {agent.task && <p data-i18n-skip>{agent.task}</p>}
       {agent.progressNotice && agent.status === "running" ? (

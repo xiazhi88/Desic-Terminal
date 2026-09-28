@@ -1,0 +1,191 @@
+/*
+ * orderflow.css — 订单流模式图例与深度剖面
+ * 买 / 卖沿用盘口口径（买盘绿 --down，卖盘红 --up）；成交量分布与 POC 用中性墨色。
+ */
+
+.chart-orderflow-legend {
+  position: absolute;
+  z-index: 6;
+  /* 放在主图左上（OHLC 读数下方、绘图工具栏右侧），不遮挡底部的 CVD 副图。 */
+  top: 64px;
+  left: 64px;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+  max-width: calc(100% - 96px);
+  padding: 6px 10px;
+  border: 1px solid rgba(200, 200, 230, 0.12);
+  border-radius: 6px;
+  background: rgba(6, 7, 11, 0.82);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: auto;
+  backdrop-filter: blur(6px);
+}
+
+.chart-orderflow-legend__item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.chart-orderflow-legend__item i {
+  display: inline-block;
+  width: 12px;
+  height: 8px;
+  border-radius: 2px;
+}
+
+.chart-orderflow-legend__item i.is-profile { background: linear-gradient(90deg, rgba(25, 217, 154, 0.75) 55%, rgba(255, 77, 106, 0.6) 55%); box-shadow: inset -2px 0 0 rgba(106, 176, 236, 0.95); }
+.chart-orderflow-legend__item i.is-delta { background: linear-gradient(90deg, var(--down) 50%, var(--up) 50%); opacity: 0.7; }
+.chart-orderflow-legend__item i.is-wall { height: 2px; background: linear-gradient(90deg, var(--down) 50%, var(--up) 50%); }
+.chart-orderflow-legend__item i.is-liq { width: 9px; height: 9px; border-radius: 50%; border: 1px solid var(--up); background: rgba(255, 77, 106, 0.16); }
+.chart-orderflow-legend__item i.is-div { height: 0; border-top: 1px dashed var(--muted); border-radius: 0; }
+
+.chart-orderflow-legend__note {
+  color: var(--weak);
+}
+
+.chart-orderflow-legend__note.is-warn {
+  color: var(--warn, #f3b23c);
+}
+
+.chart-actions .chart-orderflow-toggle.active {
+  border-color: rgba(200, 200, 230, 0.35);
+  color: var(--text);
+}
+
+/* —— 深度剖面 —— */
+.depth-profile {
+  position: relative;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  gap: 4px;
+  min-height: 0;
+  padding: 6px 8px 8px;
+}
+
+.depth-profile__head {
+  display: flex;
+  justify-content: space-between;
+  color: var(--weak);
+  font-size: 11px;
+}
+
+.depth-profile__plot {
+  position: relative;
+  min-height: 180px;
+}
+
+.depth-profile canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 180px;
+  cursor: crosshair;
+}
+
+.depth-profile canvas.is-selectable { cursor: pointer; }
+
+/* 悬停读数：卖盘（上半区）放在横线下方，买盘（下半区）放在横线上方，始终朝向中间价、不越出面板。 */
+.depth-profile__readout {
+  position: absolute;
+  z-index: 2;
+  left: 6px;
+  right: 6px;
+  display: grid;
+  gap: 4px;
+  padding: 7px 9px;
+  border: 1px solid rgba(200, 200, 230, 0.16);
+  border-radius: 6px;
+  background: rgba(6, 7, 12, 0.92);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.45);
+  color: var(--muted);
+  font-size: 11px;
+  pointer-events: none;
+  transform: translateY(10px);
+  backdrop-filter: blur(6px);
+}
+
+.depth-profile__readout.is-bid { transform: translateY(calc(-100% - 10px)); }
+.depth-profile__readout.is-ask { border-left: 2px solid var(--up); }
+.depth-profile__readout.is-bid { border-left: 2px solid var(--down); }
+
+.depth-profile__readout-price {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-variant-numeric: tabular-nums;
+}
+
+.depth-profile__readout-price b { color: var(--text); font-size: 13px; font-weight: 600; }
+.depth-profile__readout-price span { color: var(--weak); }
+
+.depth-profile__readout dl {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  margin: 0;
+}
+
+.depth-profile__readout dt { color: var(--weak); }
+.depth-profile__readout dd { margin: 0; color: var(--text); text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.depth-profile__readout dd small { color: var(--weak); font-size: 10.5px; }
+.depth-profile__readout.is-ask .depth-profile__readout-wall { color: var(--up); }
+.depth-profile__readout.is-bid .depth-profile__readout-wall { color: var(--down); }
+.depth-profile__readout-wall { font-weight: 600; }
+.depth-profile__readout-hint { color: var(--weak); font-size: 10.5px; }
+
+.depth-profile__imbalance {
+  display: grid;
+  gap: 4px;
+  font-size: 11px;
+}
+
+/* 失衡行保持单行：窄面板里标签截断，数值不换行。 */
+.depth-profile__imbalance > span {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  color: var(--weak);
+  white-space: nowrap;
+}
+
+.depth-profile__imbalance em {
+  min-width: 0;
+  overflow: hidden;
+  font-style: italic;
+  text-overflow: ellipsis;
+}
+
+.depth-profile__imbalance-values { display: inline-flex; flex: none; gap: 4px; }
+.depth-profile__imbalance-values i { font-style: normal; color: var(--weak); }
+
+.depth-profile__imbalance b.is-bid { color: var(--down); font-weight: 600; }
+.depth-profile__imbalance b.is-ask { color: var(--up); font-weight: 600; }
+
+.depth-profile__meter {
+  display: flex;
+  height: 4px;
+  overflow: hidden;
+  border-radius: 2px;
+}
+
+.depth-profile__meter i:first-child { background: var(--down); }
+.depth-profile__meter i:last-child { background: var(--up); }
+
+
+/* 仅 /chart-preview?orderflow=1：图表 + 深度剖面并排 */
+.chart-preview-shell[data-orderflow-preview] {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 240px;
+}
+
+.chart-preview-depth {
+  display: grid;
+  min-height: 0;
+  border-left: 1px solid var(--line);
+}

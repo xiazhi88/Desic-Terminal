@@ -524,6 +524,54 @@ fn expire_chart_price_alert(
         == Some(1)
 }
 
+/// 价格提醒的评估线程：行情读取循环只登记“每个合约最新一笔 ticker”并唤醒它，从不等待数据库
+/// （首次加载提醒、触发与过期时的写入都可能等锁）。线程处理不过来时同一合约只保留最新一笔，
+/// 与逐笔评估相比，只会在数据库繁忙的那段时间里错过“穿越后又立即回到原侧”的瞬时穿越。
+struct PriceAlertQueue {
+    latest: std::sync::Mutex<HashMap<String, Ticker>>,
+    ready: std::sync::Condvar,
+}
+
+static PRICE_ALERT_QUEUE: OnceLock<std::sync::Arc<PriceAlertQueue>> = OnceLock::new();
+
+pub(super) fn queue_chart_price_alert_check(app: &tauri::AppHandle, ticker: &Ticker) {
+    let queue = PRICE_ALERT_QUEUE.get_or_init(|| {
+        let queue = std::sync::Arc::new(PriceAlertQueue {
+            latest: std::sync::Mutex::new(HashMap::new()),
+            ready: std::sync::Condvar::new(),
+        });
+        let worker_queue = queue.clone();
+        let worker_app = app.clone();
+        let spawned = std::thread::Builder::new()
+            .name("chart-price-alerts".to_string())
+            .spawn(move || loop {
+                let pending = {
+                    let Ok(mut latest) = worker_queue.latest.lock() else {
+                        return;
+                    };
+                    while latest.is_empty() {
+                        latest = match worker_queue.ready.wait(latest) {
+                            Ok(guard) => guard,
+                            Err(_) => return,
+                        };
+                    }
+                    std::mem::take(&mut *latest)
+                };
+                for ticker in pending.values() {
+                    process_chart_price_alerts(&worker_app, ticker);
+                }
+            });
+        if let Err(error) = spawned {
+            eprintln!("chart price alert worker not started: {error}");
+        }
+        queue
+    });
+    if let Ok(mut latest) = queue.latest.lock() {
+        latest.insert(ticker.inst_id.clone(), ticker.clone());
+        queue.ready.notify_one();
+    }
+}
+
 pub(super) fn process_chart_price_alerts(app: &tauri::AppHandle, ticker: &Ticker) {
     let current = ticker
         .last

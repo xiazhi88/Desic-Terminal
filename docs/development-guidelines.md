@@ -101,6 +101,8 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 ## 4. Tauri / HMR 注意事项
 
+- 同一仓库同时运行多个 Vite 开发服务器时，它们共用 `node_modules/.vite` 依赖预构建缓存，后启动的实例会改写缓存，已经运行的实例随后懒加载模块（如 CodeMirror 编辑器）可能失败。临时验证用的服务器应通过独立配置指定 `cacheDir`，不要与日常开发服务器共用。
+
 - Windows 上通过 Tauri command 动态创建 `WebviewWindow` 时，创建 command 必须使用 `async fn`，避免同步 IPC 在 `WebviewWindowBuilder::build()` 期间阻塞，表现为原生窗口已出现但 WebView 永久停在 `about:blank`。
 - 动态应用窗口应使用精确的 `WebviewUrl::App("index.html".into())`，窗口业务 ID 通过 `chart-*` 等 label 传递；不要把 query 拼进 `WebviewUrl::App` 的路径。开发态和打包态都交给 Tauri 解析应用 URL。
 
@@ -310,7 +312,16 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
 - 尽量不要使用方方正正按钮、高亮方框、厚重矩形描边。
 - 按钮、配置入口、添加自选、代理配置应使用轻圆角或胶囊形态。
-- 紫色只做品牌、选中、焦点、少量强调，不做大面积粗糙色块。
+- 默认「磷光」外观下紫色只属于 AI：AI 研究、AI 自动化、Agent 库内部与 AI 入口；通用选中、焦点、当前标签与主操作走信号色 token（冷天蓝 `--signal`，`src/theme/phosphor.css` 在 `:root[data-visual="phosphor"]` 下把 `--accent*` 映射过去，不发光）。新样式只写 token，不要再写死 `#955cff` / `rgba(149, 92, 255, …)`。经典外观（`data-visual="classic"`）保留一个版本作为回退。
+- 访问 SQLite 的 Tauri 命令必须写成 `async fn`，命令体交给 `blocking_work::run_blocking`（只读 / 彼此独立）或 `blocking_work::run_serial`（配置与数据写入，按调用顺序串行）。同步命令在主线程执行，数据库等锁时整个界面卡住（macOS 彩球）；`boot.log` 里的 `main-thread:` 记录会列出阻塞主线程超过 200ms 的命令。
+- 不要用 `#[tauri::command(async)]` 修饰同步函数：Tauri 会在异步运行时的 worker 上直接调用它，阻塞工作照样占住 worker。worker 与下单请求共用，占满后所有异步命令停摆。异步函数中途必须做的同步数据库调用用 `blocking_work::blocking(|| ...)` 包住。
+- 行情 / 私有 WebSocket 任务运行在 `market_ws::spawn_stream` 的专用运行时，与命令负载隔离；读取循环里不得做任何阻塞 IO（订单落库走 `run_serial`，价格提醒走独立的合并线程）。症状对照：所有连接的“最近数据”同时涨到数十秒且不重连，就是运行时被占满，而不是网络问题。
+- 本地 Python 研究环境的首次导入（numpy / scipy / pandas / scikit-learn）在用户 Mac 上可能需要数分钟：应用与内置 CPython 均为 ad-hoc 签名、未公证，刚安装的 240 余个原生库首次加载时会被 Gatekeeper / XProtect 与安全软件逐个扫描。开发机若关闭了 Gatekeeper（`spctl --status` 显示 disabled）永远复现不了。凡是“首次加载原生依赖”的步骤都要按进展而非总时长判超时（参见 `SYSTEMATIC_PYTHON_VERIFY_*`），超时必须杀掉子进程，并把逐模块耗时写进 setup.log。
+- 会写入的 SQLite 事务一律用 `TransactionBehavior::Immediate`。默认的 deferred 事务先读后写，另一连接在此期间提交过就会立即返回 `database is locked`（SQLITE_BUSY_SNAPSHOT），busy_timeout 不起作用。
+- 用 `WITH x AS (VALUES ...)` 合约列表去 JOIN `candles` 等大表时，必须写成 `CROSS JOIN candles INDEXED BY sqlite_autoindex_candles_1`。库里有 `PRAGMA optimize` 生成的统计信息，规划器在这类查询上会对整张 K 线表临时建“自动索引”（实测单次 75 秒），期间持续占用读快照（WAL 无法检查点）并抢占 SQLite 全局锁，所有其它连接连打开都要排队。新增涉及大表的查询要用真实库跑 `EXPLAIN QUERY PLAN`，出现 `AUTOMATIC` 或对大表的 `SCAN` 都不能合入。
+- 旧样式里写死的紫色由 `scripts/generate-phosphor-neutralize.mjs` 扫描生成 `src/theme/phosphor-neutralize.css`（磷光下发光去掉、其余换成同亮度的信号色，AI 区域除外）；修改含紫色的样式后重新运行该脚本并一起提交。`var(--purple)` 在磷光下同样映射为信号色，AI 区域内恢复为 AI 紫。
+- 发光只给活数据（实时、正在变化、需要注意），静态内容不加常驻 `text-shadow` / 光晕；价格等命令式更新的数字用 `src/ui/shell/priceOdometer.ts` 的 `writeOdometer`，真实字符保留为文本，`textContent`、复制与读屏不受影响。
+- 工作区切换不要使用 View Transitions API：过渡期间命中测试整体指向根元素，切换后立即点击新页面控件会被吞掉（`::view-transition { pointer-events: none }` 也无效）。需要切换动效时只给新内容区加一次 CSS 进入动画。
 - K 线必须使用金融常规红绿。
 - 主交易终端采用高对比指挥舱层级：冲击力集中在顶部实时价格、当前导航/交易对、中心 K 线结构框、盘口深度和交易动作区；其它辅助面板必须主动压暗，禁止把相同发光、边框或高饱和色平均铺到所有区域。
 - 盘口档位深度色带必须由当前可见挂单量比例驱动，卖盘使用红色、买盘使用绿色；空档位宽度归零，更新只改变色带宽度，不能引起行高或布局跳动。

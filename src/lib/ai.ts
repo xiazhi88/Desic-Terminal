@@ -9,6 +9,45 @@ export async function loadAiTokenUsageSummary(): Promise<AiTokenUsageDashboard |
   return invokeOptional<AiTokenUsageDashboard>("ai_token_usage_summary");
 }
 
+/** 值守心电图用的轻量运行记录（`ai_automation_runs_in_range`）；完整内容走 `ai_automation_run_detail`。 */
+export type AiAutomationPulseTokens = { inputTokens: number; outputTokens: number; cacheReadTokens: number; totalTokens: number };
+export type AiAutomationPulseRun = {
+  id: string;
+  profileId: string;
+  triggerType: string;
+  status: string;
+  recordKind: string;
+  startedAt: number;
+  finishedAt: number | null;
+  nextWakeAt: number | null;
+  error: string | null;
+  actionCounts: { opportunity: number; wake: number; trade: number; notification: number };
+  tokenUsage: AiAutomationPulseTokens | null;
+  triage: {
+    mode: string | null;
+    verdict: string | null;
+    phase: string | null;
+    forced: boolean;
+    forcedBy: string[];
+    sampled: boolean;
+    triageTokens: number | null;
+    deepTokens: number | null;
+    triageUsage: AiAutomationPulseTokens | null;
+    deepUsage: AiAutomationPulseTokens | null;
+  } | null;
+  expertCount: number;
+  expertToolCalls: number;
+};
+export type AiAutomationPulseRange = { fromMs: number; toMs: number; runs: AiAutomationPulseRun[]; truncated: boolean };
+
+export async function loadAiAutomationRunsInRange(fromMs: number, toMs: number, profileId?: string | null): Promise<AiAutomationPulseRange | null> {
+  return invokeDesktop<AiAutomationPulseRange>("ai_automation_runs_in_range", {
+    fromMs: Math.floor(fromMs),
+    toMs: Math.ceil(toMs),
+    profileId: profileId || null
+  }, { quiet: true });
+}
+
 export async function saveAiConfig(update: AiConfigUpdate): Promise<AiConfigSummary | null> {
   const summary = await invokeOptional<AiConfigSummary>("ai_save_config", { update });
   if (summary) {

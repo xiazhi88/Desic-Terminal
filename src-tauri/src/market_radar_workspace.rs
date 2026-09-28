@@ -278,13 +278,18 @@ pub(crate) fn migrate_market_radar_workspace(conn: &Connection) -> Result<(), St
     Ok(())
 }
 
+// 写入 / 读取快照都是批量 SQLite 操作：放到阻塞线程池，不占用 Tauri 主线程（同步命令会让界面卡住）。
 #[tauri::command]
-pub fn market_radar_record_snapshot(
+pub async fn market_radar_record_snapshot(
     app: tauri::AppHandle,
     input: MarketRadarSnapshotInput,
 ) -> Result<MarketRadarSnapshotResult, String> {
-    let mut conn = open_database(&app)?;
-    record_snapshot_with_conn(&mut conn, input)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_database(&app)?;
+        record_snapshot_with_conn(&mut conn, input)
+    })
+    .await
+    .map_err(|error| format!("雷达快照写入任务失败: {error}"))?
 }
 
 fn record_snapshot_with_conn(
@@ -294,7 +299,7 @@ fn record_snapshot_with_conn(
     validate_snapshot_input(&input)?;
     let snapshot_at =
         input.fetched_at.div_euclid(RADAR_SNAPSHOT_INTERVAL_MS) * RADAR_SNAPSHOT_INTERVAL_MS;
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     tx.execute(
         "INSERT INTO market_radar_snapshots(snapshot_at,model_version,universe_size,created_at)
          VALUES(?1,?2,?3,?4)
@@ -956,10 +961,11 @@ fn load_validation_candles(
     }
     let cutoff_parameter = values.len() + 1;
     values.push(rusqlite::types::Value::Integer(cutoff));
+    // 与 market_radar_research_scores 相同：固定按合约逐个走主键，避免规划器对整张 K 线表临时建自动索引。
     let sql = format!(
         "WITH instruments(symbol,interval) AS (VALUES {})
          SELECT candles.symbol,candles.open_time,candles.close
-         FROM instruments JOIN candles
+         FROM instruments CROSS JOIN candles INDEXED BY sqlite_autoindex_candles_1
            ON candles.symbol=instruments.symbol AND candles.interval=instruments.interval
          WHERE candles.confirm=1 AND candles.open_time>=?{}
          ORDER BY candles.symbol ASC,candles.open_time ASC",
@@ -1065,14 +1071,28 @@ fn validation_limitations() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn market_radar_saved_filters(
+pub async fn market_radar_saved_filters(app: tauri::AppHandle) -> Result<Vec<MarketRadarSavedItem>, String> {
+    crate::blocking_work::run_blocking(move || {
+        market_radar_saved_filters_blocking(app)
+    })
+    .await
+}
+
+pub fn market_radar_saved_filters_blocking(
     app: tauri::AppHandle,
 ) -> Result<Vec<MarketRadarSavedItem>, String> {
     list_saved_items(&open_read_database(&app)?, "market_radar_saved_filters")
 }
 
 #[tauri::command]
-pub fn market_radar_save_filter(
+pub async fn market_radar_save_filter(app: tauri::AppHandle, input: MarketRadarSavedItemInput) -> Result<MarketRadarSavedItem, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_save_filter_blocking(app, input)
+    })
+    .await
+}
+
+pub fn market_radar_save_filter_blocking(
     app: tauri::AppHandle,
     input: MarketRadarSavedItemInput,
 ) -> Result<MarketRadarSavedItem, String> {
@@ -1080,19 +1100,40 @@ pub fn market_radar_save_filter(
 }
 
 #[tauri::command]
-pub fn market_radar_delete_filter(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+pub async fn market_radar_delete_filter(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_delete_filter_blocking(app, id)
+    })
+    .await
+}
+
+pub fn market_radar_delete_filter_blocking(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     delete_item(&open_database(&app)?, "market_radar_saved_filters", &id)
 }
 
 #[tauri::command]
-pub fn market_radar_alert_rules(
+pub async fn market_radar_alert_rules(app: tauri::AppHandle) -> Result<Vec<MarketRadarSavedItem>, String> {
+    crate::blocking_work::run_blocking(move || {
+        market_radar_alert_rules_blocking(app)
+    })
+    .await
+}
+
+pub fn market_radar_alert_rules_blocking(
     app: tauri::AppHandle,
 ) -> Result<Vec<MarketRadarSavedItem>, String> {
     list_saved_items(&open_read_database(&app)?, "market_radar_alert_rules")
 }
 
 #[tauri::command]
-pub fn market_radar_save_alert_rule(
+pub async fn market_radar_save_alert_rule(app: tauri::AppHandle, input: MarketRadarSavedItemInput) -> Result<MarketRadarSavedItem, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_save_alert_rule_blocking(app, input)
+    })
+    .await
+}
+
+pub fn market_radar_save_alert_rule_blocking(
     app: tauri::AppHandle,
     input: MarketRadarSavedItemInput,
 ) -> Result<MarketRadarSavedItem, String> {
@@ -1103,7 +1144,14 @@ pub fn market_radar_save_alert_rule(
 }
 
 #[tauri::command]
-pub fn market_radar_delete_alert_rule(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+pub async fn market_radar_delete_alert_rule(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_delete_alert_rule_blocking(app, id)
+    })
+    .await
+}
+
+pub fn market_radar_delete_alert_rule_blocking(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     delete_item(&open_database(&app)?, "market_radar_alert_rules", &id)
 }
 
@@ -1977,6 +2025,187 @@ fn radar_ai_empty(kind: &str, message: &str) -> Value {
     })
 }
 
+// —— 星图回放：按时间范围返回列式快照帧 ——
+// 每帧的数组都按 instIds 对齐，缺失为 null；按 stepHours 分桶时每桶保留最后一帧，
+// 超过 maxFrames 时保留最新的若干帧。应用未运行期间没有快照，前端据 snapshotAt 间隔如实标出空洞。
+
+const RADAR_FRAMES_MAX: usize = 400;
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct MarketRadarSnapshotFramesRequest {
+    from_ms: i64,
+    to_ms: i64,
+    step_hours: Option<u32>,
+    max_frames: Option<usize>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketRadarSnapshotFrame {
+    snapshot_at: i64,
+    rank: Vec<Option<u32>>,
+    composite: Vec<Option<f32>>,
+    strength: Vec<Option<f32>>,
+    low_volatility: Vec<Option<f32>>,
+    activity: Vec<Option<f32>>,
+    trend_quality: Vec<Option<f32>>,
+    change_24h_pct: Vec<Option<f32>>,
+    turnover_24h: Vec<Option<f64>>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MarketRadarSnapshotFrames {
+    inst_ids: Vec<String>,
+    categories: Vec<Option<String>>,
+    frames: Vec<MarketRadarSnapshotFrame>,
+    /// 范围内实际存在的快照数量（降采样前）。
+    snapshots_in_range: usize,
+    first_snapshot_at: Option<i64>,
+    last_snapshot_at: Option<i64>,
+    step_hours: u32,
+}
+
+#[tauri::command]
+pub async fn market_radar_snapshot_frames(
+    app: tauri::AppHandle,
+    request: MarketRadarSnapshotFramesRequest,
+) -> Result<MarketRadarSnapshotFrames, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_database(&app)?;
+        load_snapshot_frames(&conn, request)
+    })
+    .await
+    .map_err(|error| format!("星图快照读取任务失败: {error}"))?
+}
+
+fn load_snapshot_frames(
+    conn: &Connection,
+    request: MarketRadarSnapshotFramesRequest,
+) -> Result<MarketRadarSnapshotFrames, String> {
+    if request.from_ms < 0 || request.to_ms < request.from_ms {
+        return Err("星图回放的时间范围无效".to_string());
+    }
+    let step_hours = request.step_hours.unwrap_or(1).clamp(1, 24);
+    let max_frames = request.max_frames.unwrap_or(200).clamp(1, RADAR_FRAMES_MAX);
+    let mut statement = conn
+        .prepare(
+            "SELECT snapshot_at FROM market_radar_snapshots
+             WHERE snapshot_at BETWEEN ?1 AND ?2 ORDER BY snapshot_at ASC",
+        )
+        .map_err(|error| error.to_string())?;
+    let all: Vec<i64> = statement
+        .query_map([request.from_ms, request.to_ms], |row| row.get(0))
+        .map_err(|error| error.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|error| error.to_string())?;
+    let bucket_ms = i64::from(step_hours) * RADAR_SNAPSHOT_INTERVAL_MS;
+    let mut selected: Vec<i64> = Vec::new();
+    for snapshot_at in &all {
+        let bucket = snapshot_at.div_euclid(bucket_ms);
+        match selected.last() {
+            Some(previous) if previous.div_euclid(bucket_ms) == bucket => {
+                *selected.last_mut().unwrap() = *snapshot_at;
+            }
+            _ => selected.push(*snapshot_at),
+        }
+    }
+    if selected.len() > max_frames {
+        selected.drain(0..selected.len() - max_frames);
+    }
+
+    // 先按出现顺序建立合约字典，再按字典宽度填每一帧；同一合约在不同帧的位置一致。
+    let mut inst_index: HashMap<String, usize> = HashMap::new();
+    let mut inst_ids: Vec<String> = Vec::new();
+    let mut categories: Vec<Option<String>> = Vec::new();
+    let mut row_statement = conn
+        .prepare(
+            "SELECT inst_id,category,rank,composite_score,strength_score,low_volatility_score,
+                    raw_activity_score,trend_quality_score,raw_trend_quality_score,
+                    change_24h_pct,turnover_24h
+             FROM market_radar_snapshot_rows WHERE snapshot_at=?1",
+        )
+        .map_err(|error| error.to_string())?;
+    let mut raw_frames: Vec<(i64, Vec<(usize, u32, [f32; 6], f64)>)> = Vec::with_capacity(selected.len());
+    for snapshot_at in &selected {
+        let rows = row_statement
+            .query_map([snapshot_at], |row| {
+                let trend = row.get::<_, f64>(7)?;
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Option<String>>(1)?,
+                    row.get::<_, i64>(2)?.max(0) as u32,
+                    [
+                        row.get::<_, f64>(3)? as f32,
+                        row.get::<_, f64>(4)? as f32,
+                        row.get::<_, f64>(5)? as f32,
+                        row.get::<_, f64>(6)? as f32,
+                        row.get::<_, Option<f64>>(8)?.unwrap_or(trend) as f32,
+                        row.get::<_, f64>(9)? as f32,
+                    ],
+                    row.get::<_, f64>(10)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        let mut frame_rows = Vec::with_capacity(rows.len());
+        for (inst_id, category, rank, values, turnover) in rows {
+            let index = match inst_index.get(&inst_id) {
+                Some(index) => *index,
+                None => {
+                    inst_index.insert(inst_id.clone(), inst_ids.len());
+                    inst_ids.push(inst_id);
+                    categories.push(category);
+                    inst_ids.len() - 1
+                }
+            };
+            frame_rows.push((index, rank, values, turnover));
+        }
+        raw_frames.push((*snapshot_at, frame_rows));
+    }
+
+    let width = inst_ids.len();
+    let frames = raw_frames
+        .into_iter()
+        .map(|(snapshot_at, rows)| {
+            let mut frame = MarketRadarSnapshotFrame {
+                snapshot_at,
+                rank: vec![None; width],
+                composite: vec![None; width],
+                strength: vec![None; width],
+                low_volatility: vec![None; width],
+                activity: vec![None; width],
+                trend_quality: vec![None; width],
+                change_24h_pct: vec![None; width],
+                turnover_24h: vec![None; width],
+            };
+            for (index, rank, [composite, strength, low_volatility, activity, trend_quality, change], turnover) in rows {
+                frame.rank[index] = Some(rank);
+                frame.composite[index] = Some(composite);
+                frame.strength[index] = Some(strength);
+                frame.low_volatility[index] = Some(low_volatility);
+                frame.activity[index] = Some(activity);
+                frame.trend_quality[index] = Some(trend_quality);
+                frame.change_24h_pct[index] = Some(change);
+                frame.turnover_24h[index] = Some(turnover);
+            }
+            frame
+        })
+        .collect();
+
+    Ok(MarketRadarSnapshotFrames {
+        inst_ids,
+        categories,
+        frames,
+        snapshots_in_range: all.len(),
+        first_snapshot_at: all.first().copied(),
+        last_snapshot_at: all.last().copied(),
+        step_hours,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2359,6 +2588,57 @@ mod tests {
             definition_json: "[]".to_string(),
             ..valid
         })
+        .is_err());
+    }
+
+    #[test]
+    fn snapshot_frames_align_rows_and_downsample_by_step() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        migrate_market_radar_workspace(&conn).unwrap();
+        let hour = RADAR_SNAPSHOT_INTERVAL_MS;
+        let base = now_ms().div_euclid(6 * hour) * (6 * hour) - 48 * hour;
+        for offset in 0..12 {
+            let mut rows = vec![row("AAA-USDT-SWAP", 1, 60.0 + offset as f64)];
+            if offset % 2 == 0 {
+                rows.push(row("BBB-USDT-SWAP", 2, 40.0));
+            }
+            record_snapshot_with_conn(&mut conn, input(base + offset * hour, rows)).unwrap();
+        }
+        let hourly = load_snapshot_frames(
+            &conn,
+            MarketRadarSnapshotFramesRequest { from_ms: base, to_ms: base + 24 * hour, step_hours: None, max_frames: None },
+        )
+        .unwrap();
+        assert_eq!(hourly.frames.len(), 12);
+        assert_eq!(hourly.snapshots_in_range, 12);
+        assert_eq!(hourly.inst_ids, vec!["AAA-USDT-SWAP".to_string(), "BBB-USDT-SWAP".to_string()]);
+        // BBB 只在偶数小时出现：奇数帧对应位置为空，不补值。
+        assert_eq!(hourly.frames[1].rank[1], None);
+        assert_eq!(hourly.frames[2].rank[1], Some(2));
+        assert_eq!(hourly.frames[3].composite[0], Some(63.0));
+
+        let six_hourly = load_snapshot_frames(
+            &conn,
+            MarketRadarSnapshotFramesRequest { from_ms: base, to_ms: base + 24 * hour, step_hours: Some(6), max_frames: None },
+        )
+        .unwrap();
+        // 每个 6 小时桶保留最后一帧：第 5、11 小时。
+        assert_eq!(six_hourly.frames.len(), 2);
+        assert_eq!(six_hourly.frames[0].snapshot_at, base + 5 * hour);
+        assert_eq!(six_hourly.frames[1].snapshot_at, base + 11 * hour);
+
+        let capped = load_snapshot_frames(
+            &conn,
+            MarketRadarSnapshotFramesRequest { from_ms: base, to_ms: base + 24 * hour, step_hours: None, max_frames: Some(3) },
+        )
+        .unwrap();
+        assert_eq!(capped.frames.len(), 3);
+        assert_eq!(capped.frames[2].snapshot_at, base + 11 * hour);
+
+        assert!(load_snapshot_frames(
+            &conn,
+            MarketRadarSnapshotFramesRequest { from_ms: base, to_ms: base - 1, step_hours: None, max_frames: None },
+        )
         .is_err());
     }
 }

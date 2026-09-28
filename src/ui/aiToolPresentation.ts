@@ -32,6 +32,9 @@ const PRESENTATIONS: Record<string, Omit<AiToolPresentation, "canonicalName">> =
   "trade.submit": { label: "Submit order", summary: "Submit an authorized order request.", domain: "trade", icon: "trade" },
   "radar.readRanking": { label: "Read market ranking", summary: "Read persisted cross-market research evidence.", domain: "research", icon: "research" },
   "research.webSearch": { label: "Web research", summary: "Read attributable external market intelligence.", domain: "intelligence", icon: "intelligence" },
+  // 证据账本：回显型记录工具，只驱动证据天平与复盘展示，不下单、不安排唤醒。
+  "research.recordEvidence": { label: "Record evidence", summary: "Record the stance and weight of this turn's cited evidence.", domain: "research", icon: "research" },
+  "research.recordDecision": { label: "Record decision", summary: "Record this turn's research decision and display-only wake conditions.", domain: "research", icon: "research" },
   // Agent 库工具（契约 v3 C6）：主 Agent 读取目录/正文，创建与更新仅在交互式会话可用。
   "agent.list": { label: "List Agents", summary: "Read the Agent library with roles, sources, and dependency warnings.", domain: "agent", icon: "agent" },
   "agent.read": { label: "Read Agent", summary: "Read one AGENTS.md with its parsed metadata and body.", domain: "agent", icon: "agent" },

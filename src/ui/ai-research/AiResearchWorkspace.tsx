@@ -22,6 +22,7 @@ import {
   PinOff,
   Plus,
   Radar,
+  Scale,
   RefreshCw,
   RotateCcw,
   Send,
@@ -55,6 +56,7 @@ import {
 import { logger } from "../../lib/logger";
 import { createDeferredCleanupSlot } from "../../lib/deferredCleanup";
 import { isTauriRuntime } from "../../lib/tauri";
+import { AI_RESEARCH_PROMPT_EVENT } from "../../lib/shellEvents";
 import {
   AiEvidenceReferences,
   AiInlineEvidenceCards,
@@ -70,7 +72,9 @@ import {
 import { AiCommandPalette } from "../AiCommandPalette";
 import { AiContextMeter } from "../AiContextMeter";
 import { AiResearchWelcome } from "../AiResearchWelcome";
-import { AiResearchInspector } from "../AiResearchInspector";
+import { AiResearchInspector, type InspectorSection } from "../AiResearchInspector";
+import { AiEvidenceSummaryStrip } from "./AiEvidenceBoard";
+import { deriveEvidenceLedger } from "../../lib/aiEvidenceLedger";
 import { AI_RESEARCH_COMMANDS, expandAiSlashInput, filterAiSlashEntries, type AiSlashEntry } from "../aiResearchCommands";
 import { TerminalSelect } from "../TerminalSelect";
 import { useConfirmPrompt } from "../ConfirmPrompt";
@@ -119,6 +123,8 @@ import { AiResearchMessageDuration, AiResearchMessageTimeline, AiThroughputMetri
 /* AI 对话偏好（模型/权限/思考深度）合法值集合，用于校验持久化读回值 */
 const AI_PERMISSION_MODES = new Set(["advisor", "copilot", "limited_auto"]);
 const AI_REASONING_DEPTHS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
+// 流式事件静默超过这个时长才用整段会话快照兜底对账。
+const AI_RECONCILE_QUIET_MS = 6_000;
 
 export function AiResearchWorkspace({ active = true, preview, onOpenSettings, onOpenStrategy, onOpenIntelligence, onOpenTrading, onRuntimeStateChange, accountId, accountLabel, accountEnvironment, selectedSymbol, marketAssets, marketTickers, cacheDir }: { active?: boolean; preview?: boolean; onOpenSettings?: () => void; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenIntelligence?: () => void; onOpenTrading?: () => void; onRuntimeStateChange?: (state: { status: string; unread: boolean }) => void; accountId?: string; accountLabel?: string; accountEnvironment?: string; selectedSymbol?: string; marketAssets?: MarketAssetsSummary | null; marketTickers?: Ticker[]; cacheDir?: string } = {}) {
   const { t, i18n } = useTranslation(["automation", "common", "settings"]);
@@ -200,8 +206,28 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
   const [inspectorOpen, setInspectorOpen] = useState(() => preview || window.localStorage.getItem("desic.ai-research.inspector-open") !== "false");
-  const [inspectorSection, setInspectorSection] = useState<"artifacts" | "intelligence" | "radar">("artifacts");
+  const [inspectorSection, setInspectorSection] = useState<InspectorSection>("artifacts");
   const [inspectorArtifact, setInspectorArtifact] = useState<AiResearchArtifact | null>(null);
+  // 证据分区跟随的研究回合；null = 最近一条助手回答（流式时实时更新）。
+  const [evidenceMessageId, setEvidenceMessageId] = useState<string | null>(null);
+  const evidenceMessage = useMemo(() => {
+    if (evidenceMessageId) {
+      const selected = messages.find((message) => message.id === evidenceMessageId);
+      if (selected) return selected;
+    }
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message && message.role === "assistant" && message.id !== "welcome") return message;
+    }
+    return null;
+  }, [evidenceMessageId, messages]);
+  const latestAssistantId = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      if (message && message.role === "assistant" && message.id !== "welcome") return message.id;
+    }
+    return null;
+  }, [messages]);
   // 聚焦模式：会话级状态，不持久化；仅通过 CSS 类收起周边列，不改默认网格。
   const [focusMode, setFocusMode] = useState(false);
   const [columnWidths, setColumnWidths] = useState(() => readAiResearchColumnWidths());
@@ -227,6 +253,25 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
   const aiDockRenderCountRef = useRef(0);
   aiDockRenderCountRef.current += 1;
   const isStreaming = status === "connecting" || status === "running" || status === "streaming" || status === "tooling" || status === "retrying";
+  // 研究回合一出现可引用证据（工具结果带 evidenceRef 或已写入账本），右侧自动从「市场数据工作台」
+  // 切到「证据天平」，每个回合只切一次；用户正在看情报 / 雷达等其它分区时不打扰。
+  const evidenceAutoSwitchedRef = useRef<string | null>(null);
+  const lastStreamEventAtRef = useRef(0);
+  const latestEvidenceCount = useMemo(() => {
+    if (!latestAssistantId) return 0;
+    const message = messages.find((item) => item.id === latestAssistantId);
+    if (!message) return 0;
+    const ledger = deriveEvidenceLedger(message);
+    return ledger.sources.size + ledger.items.length;
+  }, [latestAssistantId, messages]);
+  useEffect(() => {
+    if (!isStreaming || !latestAssistantId || latestEvidenceCount === 0) return;
+    if (evidenceAutoSwitchedRef.current === latestAssistantId) return;
+    evidenceAutoSwitchedRef.current = latestAssistantId;
+    if (inspectorSection !== "artifacts") return;
+    setEvidenceMessageId(null);
+    setInspectorSection("evidence");
+  }, [inspectorSection, isStreaming, latestAssistantId, latestEvidenceCount]);
   const hasUnreadOutput = unreadSessionIds.has(sessionId);
   const hasAnyUnreadOutput = unreadSessionIds.size > 0;
   const chatModel = config?.models.find((model) => model.id === chatModelId) ?? config?.models[0] ?? null;
@@ -498,6 +543,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     const listenerCleanup = createDeferredCleanupSlot();
     void listenAiEvents((event) => {
       const active = event.sessionId === sessionIdRef.current;
+      if (active) lastStreamEventAtRef.current = Date.now();
       if (event.type === "pendingPrompts" || event.type === "pendingPromptSubmitted"
         || event.type === "pendingPromptError" || event.type === "turnStarted") {
         invalidatePendingRefresh(event.sessionId);
@@ -585,6 +631,8 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     let disposed = false;
     let interval: number | null = null;
     const reconcile = async () => {
+      // 只是“事件丢失”的兜底：事件仍在持续到达时不重读整段会话（整段会话可达数 MB）。
+      if (Date.now() - lastStreamEventAtRef.current < AI_RECONCILE_QUIET_MS) return;
       const snapshot = await loadAiSession(sessionIdRef.current).catch((error) => {
         logger.debug("ai session terminal reconciliation failed", { error: error instanceof Error ? error.message : String(error) });
         return null;
@@ -1059,6 +1107,13 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     window.requestAnimationFrame(() => inputRef.current?.focus());
   }, []);
 
+  // 命令面板「问 AI」：只把问题填入输入框并聚焦，由用户确认后发送。
+  useEffect(() => {
+    const handlePrompt = (event: Event) => insertResearchPrompt(String((event as CustomEvent<string>).detail ?? ""));
+    window.addEventListener(AI_RESEARCH_PROMPT_EVENT, handlePrompt);
+    return () => window.removeEventListener(AI_RESEARCH_PROMPT_EVENT, handlePrompt);
+  }, [insertResearchPrompt]);
+
   const openAiMessageById = useCallback((messageId: string) => {
     const host = scrollRef.current;
     const target = host?.querySelector(`[data-ai-message-id="${CSS.escape(messageId)}"]`);
@@ -1112,7 +1167,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     }
   }, [clearAiTimers, invalidatePendingRefresh, markSessionUnread, preview, uiText]);
 
-  const openInspectorSection = (section: "artifacts" | "intelligence" | "radar") => {
+  const openInspectorSection = (section: InspectorSection) => {
     setInspectorSection(section);
     setInspectorOpen(true);
   };
@@ -1299,7 +1354,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     <div className="ai-dock ai-research-host" hidden={!active}>
       <section
         className={clsx("ai-panel ai-research-shell sessions-open", inspectorOpen && "inspector-open", focusMode && "ai-focus-mode")}
-        style={{ "--ai-sessions-width": `${columnWidths.sessions}px`, "--ai-inspector-width": `${columnWidths.inspector}px` } as CSSProperties}
+        style={{ "--ai-sessions-width": `${columnWidths.sessions}px`, "--ai-inspector-width": inspectorOpen && inspectorSection === "evidence" ? `max(${columnWidths.inspector}px, clamp(540px, 44vw, 660px))` : `${columnWidths.inspector}px` } as CSSProperties}
         aria-label={t("automation:aiConversation")}
       >
           <aside className="ai-session-sidebar open" aria-label={t("automation:sessionHistory")}>
@@ -1429,6 +1484,16 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                >
                  <Radar size={13} />
                </button>
+               <button
+                 type="button"
+                 className={clsx("window-button ai-inspector-shortcut", "shortcut-evidence", inspectorOpen && inspectorSection === "evidence" && "active")}
+                 onClick={() => { setEvidenceMessageId(null); openInspectorSection("evidence"); }}
+                 title={uiText("证据天平", "Evidence balance")}
+                 aria-label={uiText("证据天平", "Evidence balance")}
+                 aria-pressed={inspectorOpen && inspectorSection === "evidence"}
+               >
+                 <Scale size={13} />
+               </button>
              </nav>
              <div className="ai-provider">
             <span>{config?.baseUrl ?? t("automation:modelServiceDisconnected")}</span>
@@ -1478,6 +1543,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                 )}
                 {/* B2：简单工具（readTicker/readFundingRate/readInstrument）完成后在 footer 上方落地内联证据卡 */}
                 {message.role === "assistant" ? <AiInlineEvidenceCards message={message} /> : null}
+                {message.role === "assistant" ? <AiEvidenceSummaryStrip message={message} uiText={uiText} onOpen={() => { setEvidenceMessageId(message.id); openInspectorSection("evidence"); }} /> : null}
                 {message.role === "assistant" ? <AiEvidenceReferences message={message} onOpenArtifact={(artifact) => { setInspectorArtifact(artifact); openInspectorSection("artifacts"); }} onOpenMessage={openAiMessageById} uiText={uiText} /> : null}
                 {(message.createdAt || message.text || message.status || (message.role === "assistant" && Boolean(message.usage))) && (
                   <footer className={clsx("ai-message-actions", "ai-message-footer", copiedMessageId === message.id && "is-copied")}>
@@ -1544,7 +1610,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
             {showWelcomeDeck ? null : composerNode}
           </div>
           {inspectorOpen ? <button type="button" className="ai-column-resize ai-column-resize-inspector" aria-label={uiText("调整研究栏宽度", "Resize research panel")} title={uiText("拖动调整研究栏宽度", "Drag to resize research panel")} onPointerDown={(event) => beginColumnResize("inspector", event)}><GripVertical size={14} /></button> : null}
-          <AiResearchInspector sessionId={sessionId} artifact={inspectorArtifact} selectedSymbol={selectedSymbol} accountId={accountId} accountLabel={accountLabel} skillDefinitions={skillOptions} open={inspectorOpen} section={inspectorSection} onSectionChange={setInspectorSection} onClose={() => setInspectorOpen(false)} onOpenStrategy={onOpenStrategy} onOpenIntelligence={onOpenIntelligence} onOpenTrading={onOpenTrading} onResearchPrompt={insertResearchPrompt} onOpenMessage={openAiMessageById} marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} uiText={uiText} />
+          <AiResearchInspector sessionId={sessionId} artifact={inspectorArtifact} selectedSymbol={selectedSymbol} accountId={accountId} accountLabel={accountLabel} skillDefinitions={skillOptions} open={inspectorOpen} section={inspectorSection} onSectionChange={setInspectorSection} onClose={() => setInspectorOpen(false)} onOpenStrategy={onOpenStrategy} onOpenIntelligence={onOpenIntelligence} onOpenTrading={onOpenTrading} onResearchPrompt={insertResearchPrompt} onOpenMessage={openAiMessageById} evidenceMessage={evidenceMessage} evidenceRunning={isStreaming && evidenceMessage?.id === latestAssistantId} onOpenEvidenceArtifact={(artifact) => { setInspectorArtifact(artifact); openInspectorSection("artifacts"); }} marketAssets={marketAssets} marketTickers={marketTickers} cacheDir={cacheDir} uiText={uiText} />
 
         </section>
       {forkPrompt.element}

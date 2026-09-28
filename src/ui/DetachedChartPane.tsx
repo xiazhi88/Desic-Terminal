@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import type { TFunction } from "i18next";
 import { useTranslation } from "react-i18next";
-import { BellRing, ExternalLink, Layers3, Loader2, Redo2, SlidersHorizontal, Undo2, X } from "lucide-react";
+import { BellRing, ExternalLink, Layers3, Loader2, Redo2, SlidersHorizontal, Undo2, Waves, X } from "lucide-react";
 import type {
   Candle,
   AccountSummary,
@@ -40,6 +40,7 @@ import {
 import { logger } from "../lib/logger";
 import { listenOptional } from "../lib/tauri";
 import { subscribeMarketEvents } from "../lib/marketEventBus";
+import { ingestOrderBookForWalls } from "../lib/orderBookWalls";
 import { i18n } from "../i18n/runtime";
 import { createChartIndicatorTemplate, loadChartIndicatorTemplates, saveChartIndicatorTemplates, type ChartIndicatorTemplate } from "../lib/chartIndicatorTemplates";
 import { DEFAULT_CHART_LAYER_VISIBILITY, KlineChart, type ChartContextTradeIntent, type ChartHistoryLoadOutcome } from "./KlineChart";
@@ -302,6 +303,28 @@ export function DetachedChartPane({
   const [headerActions, setHeaderActions] = useState<HTMLElement | null>(null);
   const [drawingHistoryState, setDrawingHistoryState] = useState({ canUndo: false, canRedo: false });
   const indicatorTriggerRef = useRef<HTMLButtonElement | null>(null);
+  // 订单流：每个图表格独立开关，按格记住。
+  const orderFlowStorageKey = `desic.chart.order-flow.pane.${paneId}.v1`;
+  const [orderFlowMode, setOrderFlowMode] = useState(() => {
+    try {
+      return window.localStorage.getItem(orderFlowStorageKey) === "1";
+    } catch {
+      return false;
+    }
+  });
+  const orderFlowModeRef = useRef(orderFlowMode);
+  orderFlowModeRef.current = orderFlowMode;
+  const toggleOrderFlow = useCallback(() => {
+    setOrderFlowMode((current) => {
+      const next = !current;
+      try {
+        window.localStorage.setItem(orderFlowStorageKey, next ? "1" : "0");
+      } catch {
+        // 本地存储不可用时只在本次会话生效。
+      }
+      return next;
+    });
+  }, [orderFlowStorageKey]);
   const requestVersionRef = useRef(0);
   const seriesEpochRef = useRef(0);
   const historyLoadingRef = useRef(false);
@@ -332,7 +355,9 @@ export function DetachedChartPane({
     setLoading(true);
     setPaneStatus(paneText("Loading chart data", "加载图表数据"));
     try {
-      const [snapshot, nextCandles, nextTicker, nextFunding, accountSnapshot, nextFills, algos, nextTradeSources] = await Promise.all([
+      // 各项数据各自容错：K 线是图表的主数据；委托、成交、策略委托等任何一项失败（例如交易所策略委托服务
+      // 暂不可用 51290）只降级该项并在状态里说明，不能让整格图表显示“加载失败”。
+      const [snapshotResult, candlesResult, tickerResult, fundingResult, accountResult, fillsResult, algosResult, sourcesResult] = await Promise.allSettled([
         fetchMarketSnapshot(),
         fetchCandles(symbol, timeframe, 300),
         fetchTicker(symbol),
@@ -343,19 +368,38 @@ export function DetachedChartPane({
         accountId ? fetchChartTradeSources() : Promise.resolve(null)
       ]);
       if (version !== requestVersionRef.current) return;
+      const settledValue = <T,>(result: PromiseSettledResult<T>) => (result.status === "fulfilled" ? result.value : null);
+      const snapshot = settledValue(snapshotResult);
       const cachedTicker = snapshot?.tickers?.[symbol] ?? (snapshot?.ticker?.instId === symbol ? snapshot.ticker : null);
       const cachedOrderBook = snapshot?.orderbooks?.[symbol] ?? (snapshot?.orderbookInstId === symbol ? snapshot.orderbook : null);
       const cachedTrades = snapshot?.tradesByInst?.[symbol] ?? (snapshot?.tradesInstId === symbol ? snapshot.trades : EMPTY_TRADES);
-      setCandles((current) => mergeCandles(current, nextCandles));
-      setTicker(nextTicker ?? cachedTicker ?? null);
+      if (candlesResult.status === "fulfilled") setCandles((current) => mergeCandles(current, candlesResult.value));
+      setTicker(settledValue(tickerResult) ?? cachedTicker ?? null);
       setOrderBook(cachedOrderBook ?? null);
       setTrades(cachedTrades.slice(0, 80));
-      setFundingRate(nextFunding ?? snapshot?.fundingRates?.[symbol] ?? null);
-      setPrivateSnapshot(accountSnapshot ?? snapshot?.privateSnapshot ?? null);
-      setFills(nextFills ?? EMPTY_FILLS);
-      setTradeSources(nextTradeSources);
-      setAlgoOrders(algos?.orders ?? EMPTY_ORDERS);
-      setPaneStatus(paneText("Live monitoring", "实时监听中"));
+      setFundingRate(settledValue(fundingResult) ?? snapshot?.fundingRates?.[symbol] ?? null);
+      const accountSnapshot = settledValue(accountResult);
+      if (accountSnapshot || snapshot?.privateSnapshot) setPrivateSnapshot(accountSnapshot ?? snapshot?.privateSnapshot ?? null);
+      if (fillsResult.status === "fulfilled") setFills(fillsResult.value ?? EMPTY_FILLS);
+      if (sourcesResult.status === "fulfilled") setTradeSources(sourcesResult.value);
+      if (algosResult.status === "fulfilled") setAlgoOrders(algosResult.value?.orders ?? EMPTY_ORDERS);
+      const degraded = ([
+        [accountResult, paneText("account", "账户")],
+        [fillsResult, paneText("fills", "成交")],
+        [algosResult, paneText("algo orders", "策略委托")],
+        [sourcesResult, paneText("trade sources", "交易来源")]
+      ] as const).filter(([result]) => result.status === "rejected");
+      for (const [result, label] of degraded) {
+        logger.warn("detached chart pane data partially unavailable", { paneId, symbol, timeframe, part: label, error: result.status === "rejected" ? String(result.reason instanceof Error ? result.reason.message : result.reason) : "" });
+      }
+      if (candlesResult.status === "rejected") {
+        logger.error("failed to load detached chart pane candles", candlesResult.reason, { paneId, symbol, timeframe });
+        setPaneStatus(paneText("Candles failed to load; existing data retained", "K 线加载失败，保留现有数据"));
+      } else if (degraded.length > 0) {
+        setPaneStatus(paneText(`Live · ${degraded.map(([, label]) => label).join(", ")} unavailable`, `实时监听中 · ${degraded.map(([, label]) => label).join("、")}暂不可用`));
+      } else {
+        setPaneStatus(paneText("Live monitoring", "实时监听中"));
+      }
     } catch (error) {
       if (version !== requestVersionRef.current) return;
       logger.error("failed to load detached chart pane data", error, { paneId, symbol, timeframe });
@@ -382,7 +426,10 @@ export function DetachedChartPane({
     unlisten = subscribeMarketEvents((event) => {
       if (!mounted) return;
       if (event.type === "ticker" && event.ticker.instId === symbol) setTicker(event.ticker);
-      if (event.type === "orderBook" && event.instId === symbol) setOrderBook(event.book);
+      if (event.type === "orderBook" && event.instId === symbol) {
+        setOrderBook(event.book);
+        if (orderFlowModeRef.current) ingestOrderBookForWalls(symbol, event.book);
+      }
       if (event.type === "trade" && event.instId === symbol) setTrades((current) => [event.trade, ...current].slice(0, 80));
       if (event.type === "fundingRate" && event.funding.instId === symbol) setFundingRate(event.funding);
       if (event.type === "candle" && event.instId === symbol && (!event.bar || event.bar === timeframe || event.bar === "1m")) {
@@ -507,6 +554,7 @@ export function DetachedChartPane({
       <div className="detached-chart-pane-menu-group">
         <button type="button" ref={indicatorTriggerRef} className="detached-chart-pane-menu" onClick={() => { setTemplateMenuOpen(false); setLayerMenuOpen(false); requestToolbarAction("indicators"); }} title={paneText("Manage indicators", "管理指标")}><SlidersHorizontal size={13} /> {paneText("Indicators", "指标")}</button>
         <button type="button" data-chart-alert-trigger="true" className="detached-chart-pane-menu" onClick={() => { setTemplateMenuOpen(false); setLayerMenuOpen(false); requestToolbarAction("alerts"); }} title={paneText("Price alerts", "价格提醒")}><BellRing size={13} /> {paneText("Alerts", "提醒")}</button>
+        <button type="button" className={orderFlowMode ? "detached-chart-pane-menu detached-chart-pane-orderflow is-active" : "detached-chart-pane-menu detached-chart-pane-orderflow"} aria-pressed={orderFlowMode} onClick={() => { setTemplateMenuOpen(false); setLayerMenuOpen(false); toggleOrderFlow(); }} title={paneText("Order flow: volume profile, taker delta / CVD, current walls, liquidations", "订单流：成交量分布、主动买卖差 / CVD、当前大单墙、清算")}><Waves size={13} /> {paneText("Order flow", "订单流")}</button>
         <button type="button" className={templateMenuOpen ? "detached-chart-pane-menu is-active" : "detached-chart-pane-menu"} onClick={() => { setTemplateMenuOpen((open) => !open); setLayerMenuOpen(false); }} title={paneText("Indicator templates", "指标模板")}>{paneText("Templates", "模板")}</button>
         {templateMenuOpen && <div className="detached-chart-pane-dropdown detached-chart-pane-template-menu" onPointerDown={(event) => event.stopPropagation()}>
           <strong>{paneText("Indicator templates", "指标模板")}</strong><div className="detached-chart-pane-template-save"><input value={templateName} onChange={(event) => setTemplateName(event.target.value)} placeholder={paneText("Template name", "模板名称")} maxLength={48} /><button type="button" onClick={saveIndicatorTemplate} disabled={!templateName.trim()}>{paneText("Save current", "保存当前")}</button></div>
@@ -558,6 +606,7 @@ export function DetachedChartPane({
         {(loading || historyLoading) && <div className="detached-chart-pane-loading"><Loader2 size={16} className="spin" />{historyLoading ? paneText("Loading earlier candles...", "加载更早 K 线...") : paneText("Loading chart data...", "加载图表数据...")}</div>}
         <KlineChart
           key={`${paneId}\u0000${symbol}\u0000${timeframe}`}
+          orderFlowMode={orderFlowMode}
           candles={candles}
           ticker={ticker}
           symbol={symbol}
