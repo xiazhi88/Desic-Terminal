@@ -1,5 +1,5 @@
 use super::*;
-use crate::chart_alerts::{process_chart_indicator_alerts, process_chart_price_alerts};
+use crate::chart_alerts::{process_chart_indicator_alerts, queue_chart_price_alert_check};
 use crate::chart_consumers::{
     MarketChannel, MarketConsumerRegistry, MarketConsumerRequest, MarketSubscriptionDiff,
 };
@@ -35,6 +35,34 @@ struct LiveCandleWriteQueue {
 }
 
 static LIVE_CANDLE_WRITE_QUEUE: OnceLock<LiveCandleWriteQueue> = OnceLock::new();
+
+/// 行情 / 私有 WebSocket 专用运行时。
+///
+/// Tauri 的异步命令、后台同步与这些连接原本共用一个运行时（worker 数 = CPU 核数）。任何一处在 worker 上做了
+/// 阻塞工作（数据库等锁、慢查询），几个并发就能占满全部 worker：所有连接同时停止收数，连接内部的
+/// 超时重连逻辑也得不到调度，界面上表现为每条连接“最近数据”一起涨到数十秒且不重连。
+/// 连接任务放在这里后，与命令负载完全隔离；连接内部不得做阻塞 IO（数据库写入走串行写入线程）。
+static STREAM_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+const STREAM_RUNTIME_WORKERS: usize = 3;
+
+fn stream_runtime() -> &'static tokio::runtime::Runtime {
+    STREAM_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(STREAM_RUNTIME_WORKERS)
+            .thread_name("desic-market-ws")
+            .enable_all()
+            .build()
+            .expect("market stream runtime")
+    })
+}
+
+pub(crate) fn spawn_stream<F>(future: F) -> tauri::async_runtime::JoinHandle<F::Output>
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    tauri::async_runtime::JoinHandle::Tokio(stream_runtime().spawn(future))
+}
 
 impl LiveCandleWriteQueue {
     fn start(app: tauri::AppHandle) -> Self {
@@ -444,7 +472,7 @@ fn restart_public_market_tasks(
         .lock()
         .map_err(|err| err.to_string())?
         .insert("business-candles".to_string(), business_control.clone());
-    let business_task = tauri::async_runtime::spawn(async move {
+    let business_task = spawn_stream(async move {
         run_business_ws_reconnecting(
             app_handle,
             business_runtime,
@@ -468,7 +496,7 @@ fn restart_public_market_tasks(
             .lock()
             .map_err(|err| err.to_string())?
             .insert(stream_id.clone(), control.clone());
-        tasks.push(tauri::async_runtime::spawn(async move {
+        tasks.push(spawn_stream(async move {
             if connect_index > 0 {
                 tokio::time::sleep(Duration::from_millis(
                     connect_index as u64 * PUBLIC_SHARD_CONNECT_STAGGER_MS,
@@ -618,7 +646,7 @@ pub async fn reconcile_private_streams(
     for (key, fingerprint, account) in started {
         let app_handle = app.clone();
         let private_runtime = runtime.inner().clone();
-        let task = tauri::async_runtime::spawn(async move {
+        let task = spawn_stream(async move {
             run_private_ws_reconnecting(app_handle, private_runtime, account).await;
         });
         runtime
@@ -1653,7 +1681,7 @@ async fn run_private_ws(
     {
         let warm_runtime = runtime.clone();
         let warm_account = account.clone();
-        tauri::async_runtime::spawn(async move {
+        spawn_stream(async move {
             if let Err(error) = cached_okx_account_config(&warm_runtime, &warm_account).await {
                 eprintln!(
                     "account config warmup failed account={} env={}: {}",
@@ -1666,7 +1694,7 @@ async fn run_private_ws(
         let snapshot_app = app.clone();
         let snapshot_runtime = runtime.clone();
         let snapshot_account = account.clone();
-        tauri::async_runtime::spawn(async move {
+        spawn_stream(async move {
             match fetch_private_account_snapshot(&snapshot_account).await {
                 Ok(snapshot) => update_private_snapshot(&snapshot_app, &snapshot_runtime, snapshot),
                 Err(error) => {
@@ -2049,7 +2077,7 @@ fn handle_public_message(
                         store.ticker = Some(ticker.clone());
                         store.tickers.insert(ticker.inst_id.clone(), ticker.clone());
                     }
-                    process_chart_price_alerts(app, &ticker);
+                    queue_chart_price_alert_check(app, &ticker);
                     emit_market(app, MarketEvent::Ticker { ticker });
                 }
             }
@@ -2220,15 +2248,6 @@ fn handle_private_message(
                         || !pending_order_is_cancelled(runtime, account, order)
                 })
                 .collect::<Vec<_>>();
-            if let Err(error) = persist_private_order_updates(app, account, &orders) {
-                emit_private_status(
-                    app,
-                    Some(account),
-                    format!("private orders persist failed: {}", error),
-                    None,
-                    Some(now_ms()),
-                );
-            }
             for order in &orders {
                 emit_market(
                     app,
@@ -2238,30 +2257,53 @@ fn handle_private_message(
                         order: order.clone(),
                     },
                 );
-                let _ = crate::ai_automation::record_domain_event(
-                    app,
-                    &desic_agent_automation::DomainEvent {
-                        event_type: "order_state_changed".to_string(),
-                        account_id: Some(account.id.clone()),
-                        inst_id: Some(order.inst_id.clone()),
-                        state: Some(if order.state.trim().is_empty() {
-                            "live".to_string()
-                        } else {
-                            order.state.clone()
-                        }),
-                        occurred_at: order
-                            .u_time
-                            .parse::<i64>()
-                            .or_else(|_| order.c_time.parse::<i64>())
-                            .unwrap_or_else(|_| now_ms()),
-                        ..Default::default()
-                    },
-                    json!({
-                        "ordId": order.ord_id,
-                        "clOrdId": order.cl_ord_id,
-                        "source": "private_wss"
-                    }),
-                );
+            }
+            // 订单落库与领域事件交给串行写入线程（按到达顺序）：数据库等锁最长 30 秒，
+            // 不能卡住私有推送的读取循环，否则账户、持仓、订单推送与心跳一起停摆。
+            {
+                let persist_app = app.clone();
+                let persist_account = account.clone();
+                let persist_orders = orders.clone();
+                let _ = crate::blocking_work::run_serial(move || {
+                    if let Err(error) =
+                        persist_private_order_updates(&persist_app, &persist_account, &persist_orders)
+                    {
+                        emit_private_status(
+                            &persist_app,
+                            Some(&persist_account),
+                            format!("private orders persist failed: {}", error),
+                            None,
+                            Some(now_ms()),
+                        );
+                    }
+                    for order in &persist_orders {
+                        let _ = crate::ai_automation::record_domain_event(
+                            &persist_app,
+                            &desic_agent_automation::DomainEvent {
+                                event_type: "order_state_changed".to_string(),
+                                account_id: Some(persist_account.id.clone()),
+                                inst_id: Some(order.inst_id.clone()),
+                                state: Some(if order.state.trim().is_empty() {
+                                    "live".to_string()
+                                } else {
+                                    order.state.clone()
+                                }),
+                                occurred_at: order
+                                    .u_time
+                                    .parse::<i64>()
+                                    .or_else(|_| order.c_time.parse::<i64>())
+                                    .unwrap_or_else(|_| now_ms()),
+                                ..Default::default()
+                            },
+                            json!({
+                                "ordId": order.ord_id,
+                                "clOrdId": order.cl_ord_id,
+                                "source": "private_wss"
+                            }),
+                        );
+                    }
+                    Ok::<(), String>(())
+                });
             }
             mutate_private_snapshot(app, runtime, account, |snapshot| {
                 for order in orders {

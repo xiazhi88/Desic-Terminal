@@ -6770,7 +6770,7 @@ fn snapshot_instrument_registry(
         })
         .collect::<Vec<_>>();
 
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     let mut added = 0_usize;
     let mut observed_ids: BTreeSet<String> = BTreeSet::new();
 
@@ -8704,7 +8704,7 @@ fn persist_backtest_result(
     let timing_json = serde_json::to_string(timing).map_err(|error| error.to_string())?;
 
     let mut conn = open_database(app)?;
-    let transaction = conn.transaction().map_err(|error| error.to_string())?;
+    let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     transaction
         .execute(
             "UPDATE systematic_backtests

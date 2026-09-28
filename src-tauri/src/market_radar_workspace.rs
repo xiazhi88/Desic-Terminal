@@ -278,13 +278,18 @@ pub(crate) fn migrate_market_radar_workspace(conn: &Connection) -> Result<(), St
     Ok(())
 }
 
+// 写入 / 读取快照都是批量 SQLite 操作：放到阻塞线程池，不占用 Tauri 主线程（同步命令会让界面卡住）。
 #[tauri::command]
-pub fn market_radar_record_snapshot(
+pub async fn market_radar_record_snapshot(
     app: tauri::AppHandle,
     input: MarketRadarSnapshotInput,
 ) -> Result<MarketRadarSnapshotResult, String> {
-    let mut conn = open_database(&app)?;
-    record_snapshot_with_conn(&mut conn, input)
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut conn = open_database(&app)?;
+        record_snapshot_with_conn(&mut conn, input)
+    })
+    .await
+    .map_err(|error| format!("雷达快照写入任务失败: {error}"))?
 }
 
 fn record_snapshot_with_conn(
@@ -294,7 +299,7 @@ fn record_snapshot_with_conn(
     validate_snapshot_input(&input)?;
     let snapshot_at =
         input.fetched_at.div_euclid(RADAR_SNAPSHOT_INTERVAL_MS) * RADAR_SNAPSHOT_INTERVAL_MS;
-    let tx = conn.transaction().map_err(|error| error.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|error| error.to_string())?;
     tx.execute(
         "INSERT INTO market_radar_snapshots(snapshot_at,model_version,universe_size,created_at)
          VALUES(?1,?2,?3,?4)
@@ -956,10 +961,11 @@ fn load_validation_candles(
     }
     let cutoff_parameter = values.len() + 1;
     values.push(rusqlite::types::Value::Integer(cutoff));
+    // 与 market_radar_research_scores 相同：固定按合约逐个走主键，避免规划器对整张 K 线表临时建自动索引。
     let sql = format!(
         "WITH instruments(symbol,interval) AS (VALUES {})
          SELECT candles.symbol,candles.open_time,candles.close
-         FROM instruments JOIN candles
+         FROM instruments CROSS JOIN candles INDEXED BY sqlite_autoindex_candles_1
            ON candles.symbol=instruments.symbol AND candles.interval=instruments.interval
          WHERE candles.confirm=1 AND candles.open_time>=?{}
          ORDER BY candles.symbol ASC,candles.open_time ASC",
@@ -1065,14 +1071,28 @@ fn validation_limitations() -> Vec<String> {
 }
 
 #[tauri::command]
-pub fn market_radar_saved_filters(
+pub async fn market_radar_saved_filters(app: tauri::AppHandle) -> Result<Vec<MarketRadarSavedItem>, String> {
+    crate::blocking_work::run_blocking(move || {
+        market_radar_saved_filters_blocking(app)
+    })
+    .await
+}
+
+pub fn market_radar_saved_filters_blocking(
     app: tauri::AppHandle,
 ) -> Result<Vec<MarketRadarSavedItem>, String> {
     list_saved_items(&open_read_database(&app)?, "market_radar_saved_filters")
 }
 
 #[tauri::command]
-pub fn market_radar_save_filter(
+pub async fn market_radar_save_filter(app: tauri::AppHandle, input: MarketRadarSavedItemInput) -> Result<MarketRadarSavedItem, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_save_filter_blocking(app, input)
+    })
+    .await
+}
+
+pub fn market_radar_save_filter_blocking(
     app: tauri::AppHandle,
     input: MarketRadarSavedItemInput,
 ) -> Result<MarketRadarSavedItem, String> {
@@ -1080,19 +1100,40 @@ pub fn market_radar_save_filter(
 }
 
 #[tauri::command]
-pub fn market_radar_delete_filter(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+pub async fn market_radar_delete_filter(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_delete_filter_blocking(app, id)
+    })
+    .await
+}
+
+pub fn market_radar_delete_filter_blocking(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     delete_item(&open_database(&app)?, "market_radar_saved_filters", &id)
 }
 
 #[tauri::command]
-pub fn market_radar_alert_rules(
+pub async fn market_radar_alert_rules(app: tauri::AppHandle) -> Result<Vec<MarketRadarSavedItem>, String> {
+    crate::blocking_work::run_blocking(move || {
+        market_radar_alert_rules_blocking(app)
+    })
+    .await
+}
+
+pub fn market_radar_alert_rules_blocking(
     app: tauri::AppHandle,
 ) -> Result<Vec<MarketRadarSavedItem>, String> {
     list_saved_items(&open_read_database(&app)?, "market_radar_alert_rules")
 }
 
 #[tauri::command]
-pub fn market_radar_save_alert_rule(
+pub async fn market_radar_save_alert_rule(app: tauri::AppHandle, input: MarketRadarSavedItemInput) -> Result<MarketRadarSavedItem, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_save_alert_rule_blocking(app, input)
+    })
+    .await
+}
+
+pub fn market_radar_save_alert_rule_blocking(
     app: tauri::AppHandle,
     input: MarketRadarSavedItemInput,
 ) -> Result<MarketRadarSavedItem, String> {
@@ -1103,7 +1144,14 @@ pub fn market_radar_save_alert_rule(
 }
 
 #[tauri::command]
-pub fn market_radar_delete_alert_rule(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+pub async fn market_radar_delete_alert_rule(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        market_radar_delete_alert_rule_blocking(app, id)
+    })
+    .await
+}
+
+pub fn market_radar_delete_alert_rule_blocking(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     delete_item(&open_database(&app)?, "market_radar_alert_rules", &id)
 }
 
@@ -2020,12 +2068,16 @@ pub struct MarketRadarSnapshotFrames {
 }
 
 #[tauri::command]
-pub fn market_radar_snapshot_frames(
+pub async fn market_radar_snapshot_frames(
     app: tauri::AppHandle,
     request: MarketRadarSnapshotFramesRequest,
 ) -> Result<MarketRadarSnapshotFrames, String> {
-    let conn = open_database(&app)?;
-    load_snapshot_frames(&conn, request)
+    tauri::async_runtime::spawn_blocking(move || {
+        let conn = open_database(&app)?;
+        load_snapshot_frames(&conn, request)
+    })
+    .await
+    .map_err(|error| format!("星图快照读取任务失败: {error}"))?
 }
 
 fn load_snapshot_frames(

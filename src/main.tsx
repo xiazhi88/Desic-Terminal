@@ -11,6 +11,7 @@ import "./theme/phosphor.css";
 import { i18n, initializeI18n } from "./i18n/runtime";
 import { applyPlatformAttribute } from "./lib/platform";
 import { applyVisualPreference } from "./lib/visualPreference";
+import { installStallMonitor } from "./lib/stallMonitor";
 
 applyPlatformAttribute();
 // 首帧之前写入外观属性，避免从经典外观闪到磷光外观。
@@ -36,6 +37,7 @@ const isDesignSystemPreview =
 const isTerminalPreview =
   window.location.pathname === "/terminal-preview" || searchParams.get("preview") === "terminal";
 
+installStallMonitor();
 const root = createRoot(document.getElementById("root")!);
 
 const renderApp = (node: ReactNode) => {

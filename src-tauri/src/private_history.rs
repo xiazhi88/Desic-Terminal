@@ -158,31 +158,31 @@ async fn sync_private_history_attempt(
     let max_pages = effective_page_budget(max_pages, single_page);
     let mut conn = open_database(app)?;
     if !force
-        && private_sync_required_endpoints_complete(
+        && crate::blocking_work::blocking(|| private_sync_required_endpoints_complete(
             &conn,
             &account.id,
             &account.environment,
             inst_id.as_deref(),
-        )?
+        ))?
     {
-        if let Some(mut previous) = load_recent_private_sync_watermark(
+        if let Some(mut previous) = crate::blocking_work::blocking(|| load_recent_private_sync_watermark(
             &conn,
             &account.id,
             &account.environment,
             inst_id.as_deref(),
             "private-history",
             6 * 60 * 60_000,
-        )? {
+        ))? {
             // The remote snapshot is still fresh, but account bills or local
             // projections may have repaired a fill since the last network sync.
             previous.fills_upserted +=
-                backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref())?;
-            rebuild_position_episodes_for_account(
+                crate::blocking_work::blocking(|| backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref()))?;
+            crate::blocking_work::blocking(|| rebuild_position_episodes_for_account(
                 &mut conn,
                 &account.id,
                 &account.environment,
                 inst_id.as_deref(),
-            )
+            ))
             .map_err(|err| format!("历史持仓重建失败: {err}"))?;
             return Ok(previous);
         }
@@ -202,7 +202,7 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (orders_newest, orders_oldest, orders_retried) = if sync_pass_covers(scopes, "orders-history") {
-        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), orders_endpoint.scope)?
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), orders_endpoint.scope))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -219,23 +219,23 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 orders_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.orders_fetched = orders_sync.fetched;
     result.orders_upserted =
-        upsert_okx_history_orders(&mut conn, account, "orders-history", &orders_sync.rows)?;
+        crate::blocking_work::blocking(|| upsert_okx_history_orders(&mut conn, account, "orders-history", &orders_sync.rows))?;
     result.retry_endpoints += usize::from(orders_sync.retried);
     result.new_sync_endpoints += usize::from(orders_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(orders_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -245,7 +245,7 @@ async fn sync_private_history_attempt(
         orders_sync.oldest_cursor.as_deref(),
         result.orders_fetched,
         result.orders_upserted,
-    )?;
+    ))?;
 
     let archive_orders_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/trade/orders-history-archive",
@@ -254,12 +254,12 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (archive_orders_newest, archive_orders_oldest, archive_orders_retried) = if sync_pass_covers(scopes, "orders-history-archive") {
-        prepare_private_sync_endpoint(
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(
             &conn,
             account,
             inst_id.as_deref(),
             archive_orders_endpoint.scope,
-        )?
+        ))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -276,27 +276,27 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 archive_orders_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.archive_orders_fetched = archive_orders_sync.fetched;
-    result.archive_orders_upserted = upsert_okx_history_orders(
+    result.archive_orders_upserted = crate::blocking_work::blocking(|| upsert_okx_history_orders(
         &mut conn,
         account,
         "orders-history-archive",
         &archive_orders_sync.rows,
-    )?;
+    ))?;
     result.retry_endpoints += usize::from(archive_orders_sync.retried);
     result.new_sync_endpoints += usize::from(archive_orders_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(archive_orders_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -306,7 +306,7 @@ async fn sync_private_history_attempt(
         archive_orders_sync.oldest_cursor.as_deref(),
         result.archive_orders_fetched,
         result.archive_orders_upserted,
-    )?;
+    ))?;
 
     let recent_fills_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/trade/fills",
@@ -315,12 +315,12 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (recent_fills_newest, recent_fills_oldest, recent_fills_retried) = if sync_pass_covers(scopes, "fills") {
-        prepare_private_sync_endpoint(
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(
             &conn,
             account,
             inst_id.as_deref(),
             recent_fills_endpoint.scope,
-        )?
+        ))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -337,23 +337,23 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 recent_fills_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.recent_fills_fetched = recent_fills_sync.fetched;
     result.recent_fills_upserted =
-        upsert_okx_history_fills(&mut conn, account, "fills", &recent_fills_sync.rows)?;
+        crate::blocking_work::blocking(|| upsert_okx_history_fills(&mut conn, account, "fills", &recent_fills_sync.rows))?;
     result.retry_endpoints += usize::from(recent_fills_sync.retried);
     result.new_sync_endpoints += usize::from(recent_fills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(recent_fills_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -363,7 +363,7 @@ async fn sync_private_history_attempt(
         recent_fills_sync.oldest_cursor.as_deref(),
         result.recent_fills_fetched,
         result.recent_fills_upserted,
-    )?;
+    ))?;
 
     let fills_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/trade/fills-history",
@@ -372,7 +372,7 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (fills_newest, fills_oldest, fills_retried) = if sync_pass_covers(scopes, "fills-history") {
-        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), fills_endpoint.scope)?
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), fills_endpoint.scope))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -389,23 +389,23 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 fills_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.fills_fetched = fills_sync.fetched;
     result.fills_upserted =
-        upsert_okx_history_fills(&mut conn, account, "fills-history", &fills_sync.rows)?;
+        crate::blocking_work::blocking(|| upsert_okx_history_fills(&mut conn, account, "fills-history", &fills_sync.rows))?;
     result.retry_endpoints += usize::from(fills_sync.retried);
     result.new_sync_endpoints += usize::from(fills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(fills_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -415,7 +415,7 @@ async fn sync_private_history_attempt(
         fills_sync.oldest_cursor.as_deref(),
         result.fills_fetched,
         result.fills_upserted,
-    )?;
+    ))?;
 
     let bills_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/account/bills",
@@ -424,7 +424,7 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (bills_newest, bills_oldest, bills_retried) = if sync_pass_covers(scopes, "account-bills") {
-        prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), bills_endpoint.scope)?
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(&conn, account, inst_id.as_deref(), bills_endpoint.scope))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -441,23 +441,23 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 bills_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.bills_fetched = bills_sync.fetched;
     result.bills_upserted =
-        upsert_okx_account_bills(&mut conn, account, "account-bills", &bills_sync.rows)?;
+        crate::blocking_work::blocking(|| upsert_okx_account_bills(&mut conn, account, "account-bills", &bills_sync.rows))?;
     result.retry_endpoints += usize::from(bills_sync.retried);
     result.new_sync_endpoints += usize::from(bills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(bills_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -467,7 +467,7 @@ async fn sync_private_history_attempt(
         bills_sync.oldest_cursor.as_deref(),
         result.bills_fetched,
         result.bills_upserted,
-    )?;
+    ))?;
 
     let archive_bills_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/account/bills-archive",
@@ -476,12 +476,12 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (archive_bills_newest, archive_bills_oldest, archive_bills_retried) = if sync_pass_covers(scopes, "account-bills-archive") {
-        prepare_private_sync_endpoint(
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(
             &conn,
             account,
             inst_id.as_deref(),
             archive_bills_endpoint.scope,
-        )?
+        ))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -498,27 +498,27 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 archive_bills_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.archive_bills_fetched = archive_bills_sync.fetched;
-    result.archive_bills_upserted = upsert_okx_account_bills(
+    result.archive_bills_upserted = crate::blocking_work::blocking(|| upsert_okx_account_bills(
         &mut conn,
         account,
         "account-bills-archive",
         &archive_bills_sync.rows,
-    )?;
+    ))?;
     result.retry_endpoints += usize::from(archive_bills_sync.retried);
     result.new_sync_endpoints += usize::from(archive_bills_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(archive_bills_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -528,13 +528,13 @@ async fn sync_private_history_attempt(
         archive_bills_sync.oldest_cursor.as_deref(),
         result.archive_bills_fetched,
         result.archive_bills_upserted,
-    )?;
+    ))?;
 
     // OKX can expose a trade bill before (or instead of) the same row in
     // fills-history. Repair missing fills from trade-class account bills so a
     // completed close cannot leave the local position episode open forever.
     result.fills_upserted +=
-        backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref())?;
+        crate::blocking_work::blocking(|| backfill_trade_fills_from_account_bills(&mut conn, account, inst_id.as_deref()))?;
 
     let positions_endpoint = PrivateSyncEndpoint {
         endpoint: "/api/v5/account/positions-history",
@@ -543,12 +543,12 @@ async fn sync_private_history_attempt(
         extra_query: &[("instType", "SWAP")],
     };
     let (positions_newest, positions_oldest, positions_retried) = if sync_pass_covers(scopes, "positions-history") {
-        prepare_private_sync_endpoint(
+        crate::blocking_work::blocking(|| prepare_private_sync_endpoint(
         &conn,
         account,
         inst_id.as_deref(),
         positions_endpoint.scope,
-    )?
+    ))?
     } else {
         (Some(SCOPE_SKIPPED.to_string()), None, false)
     };
@@ -565,23 +565,23 @@ async fn sync_private_history_attempt(
     {
         Ok(value) => value,
         Err(error) => {
-            let _ = mark_private_sync_endpoint_failed(
+            let _ = crate::blocking_work::blocking(|| mark_private_sync_endpoint_failed(
                 &conn,
                 account,
                 inst_id.as_deref(),
                 positions_endpoint.scope,
                 &error,
-            );
+            ));
             return Err(error);
         }
     };
     result.positions_fetched = positions_sync.fetched;
     result.positions_upserted =
-        upsert_okx_history_positions(&mut conn, account, &positions_sync.rows)?;
+        crate::blocking_work::blocking(|| upsert_okx_history_positions(&mut conn, account, &positions_sync.rows))?;
     result.retry_endpoints += usize::from(positions_sync.retried);
     result.new_sync_endpoints += usize::from(positions_sync.newer_fetched > 0);
     result.backfill_endpoints += usize::from(positions_sync.older_fetched > 0);
-    mark_private_sync_endpoint_success(
+    crate::blocking_work::blocking(|| mark_private_sync_endpoint_success(
         &conn,
         account,
         inst_id.as_deref(),
@@ -591,7 +591,7 @@ async fn sync_private_history_attempt(
         positions_sync.oldest_cursor.as_deref(),
         result.positions_fetched,
         result.positions_upserted,
-    )?;
+    ))?;
 
     result.finished_at = now_ms();
     upsert_private_sync_watermark(
@@ -603,12 +603,12 @@ async fn sync_private_history_attempt(
         result.finished_at,
         &result,
     )?;
-    rebuild_position_episodes_for_account(
+    crate::blocking_work::blocking(|| rebuild_position_episodes_for_account(
         &mut conn,
         &account.id,
         &account.environment,
         inst_id.as_deref(),
-    )
+    ))
     .map_err(|err| format!("历史持仓重建失败: {err}"))?;
     Ok(result)
 }

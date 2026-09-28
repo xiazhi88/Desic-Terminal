@@ -2722,32 +2722,36 @@ async fn derivatives_query_impl(
     query: DerivativesQuery,
 ) -> Result<IntelligenceResponse, String> {
     let query = query.normalize()?;
-    let conn = open_intelligence_database(&app)?;
     if query.local_only.unwrap_or(false) {
-        let mut items = if kind == "overview" {
-            derivatives_overview_local(&conn, &query)?
-        } else {
-            query_derivatives_local(&conn, kind, &query)?
-        };
-        if kind == "positioning" {
-            let _ = merge_live_oi_snapshot(&query, &mut items);
-            enrich_positioning_prices(&conn, &query.inst_id, &mut items);
-        }
-        if kind == "crowding" {
-            enrich_crowding_semantics(&mut items);
-        }
-        let mut response = derivatives_response(items, query.limit, false);
-        if kind != "overview" {
-            apply_derivative_response_metadata(&mut response, kind, &query);
-        }
-        if kind == "crowding" {
-            response.limitations.push(
-                "accountRatio/topAccountRatio 是多头账户数与空头账户数之比；topPositionRatio 是头部交易者多头持仓价值与空头持仓价值之比。"
-                    .to_string(),
-            );
-        }
-        return Ok(response);
+        // 纯本地读取：在异步流程里就地执行，但先把当前 worker 上的其它任务交给别的线程。
+        return crate::blocking_work::blocking(|| {
+            let conn = open_intelligence_database(&app)?;
+            let mut items = if kind == "overview" {
+                derivatives_overview_local(&conn, &query)?
+            } else {
+                query_derivatives_local(&conn, kind, &query)?
+            };
+            if kind == "positioning" {
+                let _ = merge_live_oi_snapshot(&query, &mut items);
+                enrich_positioning_prices(&conn, &query.inst_id, &mut items);
+            }
+            if kind == "crowding" {
+                enrich_crowding_semantics(&mut items);
+            }
+            let mut response = derivatives_response(items, query.limit, false);
+            if kind != "overview" {
+                apply_derivative_response_metadata(&mut response, kind, &query);
+            }
+            if kind == "crowding" {
+                response.limitations.push(
+                    "accountRatio/topAccountRatio 是多头账户数与空头账户数之比；topPositionRatio 是头部交易者多头持仓价值与空头持仓价值之比。"
+                        .to_string(),
+                );
+            }
+            Ok(response)
+        });
     }
+    let conn = open_intelligence_database(&app)?;
     let fetched = match kind {
         "positioning" => fetch_derivatives_positioning(&app, &query).await,
         "takerFlow" => fetch_derivatives_taker_flow(&app, &query).await,
@@ -3085,7 +3089,14 @@ pub(crate) async fn intelligence_anomalies_query(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_briefings_query(
+pub(crate) async fn intelligence_briefings_query(app: tauri::AppHandle, query: BriefingQuery) -> Result<IntelligenceResponse, String> {
+    crate::blocking_work::run_blocking(move || {
+        intelligence_briefings_query_blocking(app, query)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_briefings_query_blocking(
     app: tauri::AppHandle,
     query: BriefingQuery,
 ) -> Result<IntelligenceResponse, String> {
@@ -3094,7 +3105,14 @@ pub(crate) fn intelligence_briefings_query(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_briefing_generate(
+pub(crate) async fn intelligence_briefing_generate(app: tauri::AppHandle, request: BriefingGenerateRequest) -> Result<IntelligenceResponse, String> {
+    crate::blocking_work::run_blocking(move || {
+        intelligence_briefing_generate_blocking(app, request)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_briefing_generate_blocking(
     app: tauri::AppHandle,
     request: BriefingGenerateRequest,
 ) -> Result<IntelligenceResponse, String> {
@@ -3137,7 +3155,14 @@ pub(crate) async fn intelligence_summary(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_sync_status(
+pub(crate) async fn intelligence_sync_status(app: tauri::AppHandle) -> Result<Vec<IntelligenceSyncState>, String> {
+    crate::blocking_work::run_blocking(move || {
+        intelligence_sync_status_blocking(app)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_sync_status_blocking(
     app: tauri::AppHandle,
 ) -> Result<Vec<IntelligenceSyncState>, String> {
     let conn = open_intelligence_database(&app)?;
@@ -3145,7 +3170,14 @@ pub(crate) fn intelligence_sync_status(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_settings_summary(
+pub(crate) async fn intelligence_settings_summary(app: tauri::AppHandle) -> Result<IntelligenceSettings, String> {
+    crate::blocking_work::run_blocking(move || {
+        intelligence_settings_summary_blocking(app)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_settings_summary_blocking(
     app: tauri::AppHandle,
 ) -> Result<IntelligenceSettings, String> {
     let conn = open_intelligence_database(&app)?;
@@ -3153,7 +3185,14 @@ pub(crate) fn intelligence_settings_summary(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_settings_save(
+pub(crate) async fn intelligence_settings_save(app: tauri::AppHandle, settings: IntelligenceSettings) -> Result<IntelligenceSettings, String> {
+    crate::blocking_work::run_serial(move || {
+        intelligence_settings_save_blocking(app, settings)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_settings_save_blocking(
     app: tauri::AppHandle,
     settings: IntelligenceSettings,
 ) -> Result<IntelligenceSettings, String> {
@@ -3165,7 +3204,14 @@ pub(crate) fn intelligence_settings_save(
 }
 
 #[tauri::command]
-pub(crate) fn intelligence_track_trader(
+pub(crate) async fn intelligence_track_trader(app: tauri::AppHandle, request: TrackedTraderRequest) -> Result<IntelligenceSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        intelligence_track_trader_blocking(app, request)
+    })
+    .await
+}
+
+pub(crate) fn intelligence_track_trader_blocking(
     app: tauri::AppHandle,
     request: TrackedTraderRequest,
 ) -> Result<IntelligenceSummary, String> {
@@ -4327,7 +4373,7 @@ async fn execute_intelligence_tool_impl(
         "intelligence.news.readDailyBriefing" => {
             let query = serde_json::from_value::<BriefingQuery>(input)
                 .map_err(|error| error.to_string())?;
-            serde_json::to_value(intelligence_briefings_query(app, query)?)
+            serde_json::to_value(intelligence_briefings_query(app, query).await?)
         }
         "intelligence.smartMoney.readMarketPositioning"
         | "intelligence.smartMoney.readPositionChanges" => {

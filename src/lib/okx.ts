@@ -775,7 +775,8 @@ export async function fetchCandles(instId: string, bar: string, limit = 300): Pr
   if (isTauriRuntime()) {
     let localFailure: unknown = null;
     try {
-      const local = await invokeDesktop<Candle[]>("local_candles", { instId, bar, limit: boundedLimit });
+      // 本地库读取慢或超时会回退到 OKX 快照，不是前端异常。
+      const local = await invokeDesktop<Candle[]>("local_candles", { instId, bar, limit: boundedLimit }, { quiet: true });
       if (local && local.length > 0) return local;
     } catch (error) {
       localFailure = error;

@@ -456,7 +456,14 @@ pub(crate) fn split_known_enabled_agent_ids(ids: &[String]) -> (Vec<String>, Vec
 /// `includeDeprecated` 是显式开关、**默认关闭**；当前没有 UI 入口，只为将来可能的
 /// "显示已下线"视图预留（调用方必须自己 opt-in，不会误开）。
 #[tauri::command]
-pub(crate) fn ai_agents_list(
+pub(crate) async fn ai_agents_list(app: tauri::AppHandle, include_deprecated: Option<bool>) -> Result<Vec<AiAgentSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        ai_agents_list_blocking(app, include_deprecated)
+    })
+    .await
+}
+
+pub(crate) fn ai_agents_list_blocking(
     app: tauri::AppHandle,
     include_deprecated: Option<bool>,
 ) -> Result<Vec<AiAgentSummary>, String> {
@@ -464,7 +471,14 @@ pub(crate) fn ai_agents_list(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_read(app: tauri::AppHandle, id: String) -> Result<AiAgentDetail, String> {
+pub(crate) async fn ai_agent_read(app: tauri::AppHandle, id: String) -> Result<AiAgentDetail, String> {
+    crate::blocking_work::run_blocking(move || {
+        ai_agent_read_blocking(app, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_read_blocking(app: tauri::AppHandle, id: String) -> Result<AiAgentDetail, String> {
     let summary = summary_for_id(&app, &id)?;
     let entry = load_agent_library_entry(&id)?;
     Ok(AiAgentDetail {
@@ -474,7 +488,14 @@ pub(crate) fn ai_agent_read(app: tauri::AppHandle, id: String) -> Result<AiAgent
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_save(
+pub(crate) async fn ai_agent_save(app: tauri::AppHandle, id: Option<String>, content: String) -> Result<AiAgentSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_agent_save_blocking(app, id, content)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_save_blocking(
     app: tauri::AppHandle,
     id: Option<String>,
     content: String,
@@ -484,7 +505,14 @@ pub(crate) fn ai_agent_save(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_duplicate(
+pub(crate) async fn ai_agent_duplicate(app: tauri::AppHandle, id: String, name: Option<String>) -> Result<AiAgentSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_agent_duplicate_blocking(app, id, name)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_duplicate_blocking(
     app: tauri::AppHandle,
     id: String,
     name: Option<String>,
@@ -524,7 +552,14 @@ pub(crate) fn ai_agent_duplicate(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+pub(crate) async fn ai_agent_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    crate::blocking_work::run_serial(move || {
+        ai_agent_delete_blocking(app, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_delete_blocking(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let entry = load_agent_library_entry(&id)?;
     if is_builtin_agent_id(&entry.definition.id) || entry.definition.source == AGENT_SOURCE_BUILTIN
     {

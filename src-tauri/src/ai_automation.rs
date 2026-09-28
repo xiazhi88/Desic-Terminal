@@ -716,7 +716,16 @@ fn text_display_width(text: &str) -> usize {
 /// **可选平仓**：本版本只停判；`closePositions=true` 时如实回报
 /// `positionsClosed=false` 与说明（平仓要走既有平仓链路，不在停判里隐式下单）。
 #[tauri::command]
-pub(crate) fn ai_fastlane_kill_switch(
+pub(crate) async fn ai_fastlane_kill_switch(app: tauri::AppHandle, profile_id: String, close_positions: Option<bool>) -> Result<Value, String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_fastlane_kill_switch_blocking(app, runtime, profile_id, close_positions)
+    })
+    .await
+}
+
+pub(crate) fn ai_fastlane_kill_switch_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     profile_id: String,
@@ -2070,7 +2079,14 @@ fn non_empty_string(value: String) -> Option<String> {
 }
 
 #[tauri::command]
-pub(crate) fn notification_settings_summary(
+pub(crate) async fn notification_settings_summary(app: tauri::AppHandle) -> Result<NotificationSettingsSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        notification_settings_summary_blocking(app)
+    })
+    .await
+}
+
+pub(crate) fn notification_settings_summary_blocking(
     app: tauri::AppHandle,
 ) -> Result<NotificationSettingsSummary, String> {
     let conn = open_automation_database(&app)?;
@@ -2080,7 +2096,14 @@ pub(crate) fn notification_settings_summary(
 }
 
 #[tauri::command]
-pub(crate) fn ai_automation_save_master_enabled(
+pub(crate) async fn ai_automation_save_master_enabled(app: tauri::AppHandle, enabled: bool) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_automation_save_master_enabled_blocking(app, enabled)
+    })
+    .await
+}
+
+pub(crate) fn ai_automation_save_master_enabled_blocking(
     app: tauri::AppHandle,
     enabled: bool,
 ) -> Result<bool, String> {
@@ -2368,7 +2391,14 @@ fn upsert_profile_row(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_profile_systematic_conflicts(
+pub(crate) async fn ai_agent_profile_systematic_conflicts(app: tauri::AppHandle, request: AiAgentProfileSystematicConflictRequest) -> Result<Vec<AiAgentProfileSystematicConflict>, String> {
+    crate::blocking_work::run_blocking(move || {
+        ai_agent_profile_systematic_conflicts_blocking(app, request)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_profile_systematic_conflicts_blocking(
     app: tauri::AppHandle,
     request: AiAgentProfileSystematicConflictRequest,
 ) -> Result<Vec<AiAgentProfileSystematicConflict>, String> {
@@ -2393,7 +2423,16 @@ pub(crate) fn ai_agent_profile_systematic_conflicts(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_profile_delete(
+pub(crate) async fn ai_agent_profile_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    crate::blocking_work::run_serial(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_agent_profile_delete_blocking(app, runtime, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_profile_delete_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     id: String,
@@ -2707,7 +2746,16 @@ pub(crate) fn background_report_triage(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_profile_run_now(
+pub(crate) async fn ai_agent_profile_run_now(app: tauri::AppHandle, id: String) -> Result<AiAgentRunSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_agent_profile_run_now_blocking(app, runtime, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_profile_run_now_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     id: String,
@@ -2731,7 +2779,16 @@ pub(crate) fn ai_agent_profile_run_now(
 }
 
 #[tauri::command]
-pub(crate) fn ai_agent_profile_run_daily_review(
+pub(crate) async fn ai_agent_profile_run_daily_review(app: tauri::AppHandle, id: String) -> Result<AiDailyMarketReviewSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_agent_profile_run_daily_review_blocking(app, runtime, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_agent_profile_run_daily_review_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     id: String,
@@ -2751,7 +2808,16 @@ pub(crate) fn ai_agent_profile_run_daily_review(
 }
 
 #[tauri::command]
-pub(crate) fn ai_user_wake_condition_save(
+pub(crate) async fn ai_user_wake_condition_save(app: tauri::AppHandle, profile_id: String, condition_id: Option<String>, plan_mode: String, condition: Value, expires_at: Option<i64>) -> Result<AiWakeConditionSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_user_wake_condition_save_blocking(app, runtime, profile_id, condition_id, plan_mode, condition, expires_at)
+    })
+    .await
+}
+
+pub(crate) fn ai_user_wake_condition_save_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     profile_id: String,
@@ -2827,7 +2893,16 @@ pub(crate) fn ai_user_wake_condition_save(
 }
 
 #[tauri::command]
-pub(crate) fn ai_user_wake_condition_delete(
+pub(crate) async fn ai_user_wake_condition_delete(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    crate::blocking_work::run_serial(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_user_wake_condition_delete_blocking(app, runtime, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_user_wake_condition_delete_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     id: String,
@@ -2848,7 +2923,14 @@ pub(crate) fn ai_user_wake_condition_delete(
 }
 
 #[tauri::command]
-pub(crate) fn notification_feishu_config_save(
+pub(crate) async fn notification_feishu_config_save(app: tauri::AppHandle, config: FeishuConfigInput) -> Result<FeishuConfigSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        notification_feishu_config_save_blocking(app, config)
+    })
+    .await
+}
+
+pub(crate) fn notification_feishu_config_save_blocking(
     app: tauri::AppHandle,
     config: FeishuConfigInput,
 ) -> Result<FeishuConfigSummary, String> {
@@ -2916,7 +2998,14 @@ pub(crate) async fn notification_feishu_test(
 }
 
 #[tauri::command]
-pub(crate) fn ai_optimization_suggestion_update(
+pub(crate) async fn ai_optimization_suggestion_update(app: tauri::AppHandle, id: String, status: String) -> Result<AiOptimizationSuggestionSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_optimization_suggestion_update_blocking(app, id, status)
+    })
+    .await
+}
+
+pub(crate) fn ai_optimization_suggestion_update_blocking(
     app: tauri::AppHandle,
     id: String,
     status: String,
@@ -3133,7 +3222,14 @@ fn apply_optimization_suggestion(
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_version_publish(
+pub(crate) async fn ai_skill_version_publish(app: tauri::AppHandle, id: String) -> Result<AiSkillVersionSummary, String> {
+    crate::blocking_work::run_serial(move || {
+        ai_skill_version_publish_blocking(app, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_skill_version_publish_blocking(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<AiSkillVersionSummary, String> {
@@ -3285,7 +3381,14 @@ fn skill_draft_can_be_published(definition: &desic_storage_config::AiSkillDefini
 }
 
 #[tauri::command]
-pub(crate) fn ai_skill_version_discard(app: tauri::AppHandle, id: String) -> Result<(), String> {
+pub(crate) async fn ai_skill_version_discard(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    crate::blocking_work::run_serial(move || {
+        ai_skill_version_discard_blocking(app, id)
+    })
+    .await
+}
+
+pub(crate) fn ai_skill_version_discard_blocking(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let _config_write_guard = crate::storage_config::lock_ai_config_writes()?;
     let conn = open_automation_database(&app)?;
     let changed = conn
@@ -7385,7 +7488,16 @@ fn finish_run_audit(
 /// `manual_force_deep` 直接豁免试判（`triage_config_for_run` 对它返回 `mode=off`），
 /// 所以重排出来的运行不再做试判、不会被再次判为跳过。
 #[tauri::command]
-pub(crate) fn ai_automation_force_deep_run(
+pub(crate) async fn ai_automation_force_deep_run(app: tauri::AppHandle, run_id: String) -> Result<AiAgentRunSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiAutomationRuntime>(&state_app);
+        ai_automation_force_deep_run_blocking(app, runtime, run_id)
+    })
+    .await
+}
+
+pub(crate) fn ai_automation_force_deep_run_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiAutomationRuntime>,
     run_id: String,

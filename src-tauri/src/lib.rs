@@ -44,12 +44,15 @@ mod app_updater;
 mod chart_alerts;
 mod chart_consumers;
 mod data_root_migration;
+mod database_maintenance;
 mod equity_directory;
 mod equity_localization;
 mod fastlane;
 mod instrument_operations;
 mod intelligence;
+mod main_thread_watchdog;
 mod market_radar;
+mod blocking_work;
 mod market_radar_workspace;
 mod market_ws;
 mod okx_rate_limit;
@@ -2085,7 +2088,14 @@ async fn okx_sync_private_history(
 }
 
 #[tauri::command]
-fn private_history_status(
+async fn private_history_status(app: tauri::AppHandle, request: PrivateHistoryStatusRequest) -> Result<PrivateHistoryStatusResponse, String> {
+    crate::blocking_work::run_blocking(move || {
+        private_history_status_blocking(app, request)
+    })
+    .await
+}
+
+fn private_history_status_blocking(
     app: tauri::AppHandle,
     request: PrivateHistoryStatusRequest,
 ) -> Result<PrivateHistoryStatusResponse, String> {
@@ -2093,7 +2103,14 @@ fn private_history_status(
 }
 
 #[tauri::command]
-fn rebuild_position_episodes(
+async fn rebuild_position_episodes(app: tauri::AppHandle, request: RebuildPositionEpisodesRequest) -> Result<RebuildPositionEpisodesResult, String> {
+    crate::blocking_work::run_serial(move || {
+        rebuild_position_episodes_blocking(app, request)
+    })
+    .await
+}
+
+fn rebuild_position_episodes_blocking(
     app: tauri::AppHandle,
     request: RebuildPositionEpisodesRequest,
 ) -> Result<RebuildPositionEpisodesResult, String> {
@@ -2108,7 +2125,14 @@ fn rebuild_position_episodes(
 }
 
 #[tauri::command]
-fn position_episodes(
+async fn position_episodes(app: tauri::AppHandle, request: PositionEpisodesRequest) -> Result<Vec<PositionEpisodeSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        position_episodes_blocking(app, request)
+    })
+    .await
+}
+
+fn position_episodes_blocking(
     app: tauri::AppHandle,
     request: PositionEpisodesRequest,
 ) -> Result<Vec<PositionEpisodeSummary>, String> {
@@ -2127,7 +2151,14 @@ fn position_episodes(
 }
 
 #[tauri::command]
-fn ai_automation_review_detail(
+async fn ai_automation_review_detail(app: tauri::AppHandle, request: AiAutomationReviewDetailRequest) -> Result<AiAutomationReviewDetail, String> {
+    crate::blocking_work::run_blocking(move || {
+        ai_automation_review_detail_blocking(app, request)
+    })
+    .await
+}
+
+fn ai_automation_review_detail_blocking(
     app: tauri::AppHandle,
     request: AiAutomationReviewDetailRequest,
 ) -> Result<AiAutomationReviewDetail, String> {
@@ -2218,7 +2249,14 @@ fn ai_automation_review_detail(
 }
 
 #[tauri::command]
-fn historical_orders(
+async fn historical_orders(app: tauri::AppHandle, request: HistoricalOrdersRequest) -> Result<Vec<HistoricalOrderSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        historical_orders_blocking(app, request)
+    })
+    .await
+}
+
+fn historical_orders_blocking(
     app: tauri::AppHandle,
     request: HistoricalOrdersRequest,
 ) -> Result<Vec<HistoricalOrderSummary>, String> {
@@ -2320,7 +2358,14 @@ fn open_source_licenses(app: tauri::AppHandle) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn historical_fills(
+async fn historical_fills(app: tauri::AppHandle, request: HistoricalFillsRequest) -> Result<Vec<HistoricalFillSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        historical_fills_blocking(app, request)
+    })
+    .await
+}
+
+fn historical_fills_blocking(
     app: tauri::AppHandle,
     request: HistoricalFillsRequest,
 ) -> Result<Vec<HistoricalFillSummary>, String> {
@@ -2357,7 +2402,14 @@ struct ChartTradeSources {
 /// per-profile toggles even when the current fills contain no fills from
 /// that profile yet.
 #[tauri::command]
-fn chart_trade_sources(app: tauri::AppHandle) -> Result<ChartTradeSources, String> {
+async fn chart_trade_sources(app: tauri::AppHandle) -> Result<ChartTradeSources, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_trade_sources_blocking(app)
+    })
+    .await
+}
+
+fn chart_trade_sources_blocking(app: tauri::AppHandle) -> Result<ChartTradeSources, String> {
     let conn = open_database(&app)?;
     Ok(ChartTradeSources {
         ai_profiles: chart_trade_source_rows(
@@ -2389,7 +2441,14 @@ fn chart_trade_source_rows(
 }
 
 #[tauri::command]
-fn account_bills(
+async fn account_bills(app: tauri::AppHandle, request: AccountBillsRequest) -> Result<Vec<AccountBillSummary>, String> {
+    crate::blocking_work::run_blocking(move || {
+        account_bills_blocking(app, request)
+    })
+    .await
+}
+
+fn account_bills_blocking(
     app: tauri::AppHandle,
     request: AccountBillsRequest,
 ) -> Result<Vec<AccountBillSummary>, String> {
@@ -2408,7 +2467,16 @@ fn account_bills(
 }
 
 #[tauri::command]
-fn account_performance_summary(
+async fn account_performance_summary(app: tauri::AppHandle, request: AccountPerformanceRequest) -> Result<AccountPerformanceSummary, String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<MarketRuntime>(&state_app);
+        account_performance_summary_blocking(app, runtime, request)
+    })
+    .await
+}
+
+fn account_performance_summary_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, MarketRuntime>,
     request: AccountPerformanceRequest,
@@ -2593,53 +2661,78 @@ async fn import_account_bills_archive(
     })
 }
 
+// 会话读写都访问 SQLite：流式输出期间侧车同时在写同一个库，同步命令会在 Tauri 主线程上
+// 等锁 / 读取整段会话，界面整体卡住（macOS 转彩球）。这里统一放到阻塞线程池执行。
+async fn run_ai_session_blocking<T, F>(task: F) -> Result<T, String>
+where
+    T: Send + 'static,
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|err| format!("AI 会话任务执行失败: {err}"))?
+}
+
 #[tauri::command]
-fn ai_create_session(
+async fn ai_create_session(
     app: tauri::AppHandle,
     request: AiSessionCreateRequest,
 ) -> Result<AiSessionSnapshot, String> {
-    let conn = open_database(&app)?;
-    let session = create_ai_session(&conn, request.title.unwrap_or_else(|| "新对话".to_string()))?;
-    Ok(AiSessionSnapshot {
-        session,
-        messages: Vec::new(),
+    run_ai_session_blocking(move || {
+        let conn = open_database(&app)?;
+        let session = create_ai_session(&conn, request.title.unwrap_or_else(|| "新对话".to_string()))?;
+        Ok(AiSessionSnapshot {
+            session,
+            messages: Vec::new(),
+        })
     })
+    .await
 }
 
 #[tauri::command]
-fn ai_load_session(
+async fn ai_load_session(
     app: tauri::AppHandle,
     request: AiSessionLoadRequest,
 ) -> Result<AiSessionSnapshot, String> {
-    let mut conn = open_database(&app)?;
-    let session = load_or_create_ai_session(&conn, &request.session_id)?;
-    ensure_ai_message_usage_for_session(&mut conn, &session.id)?;
-    let messages = load_ai_messages(&conn, &session.id)?;
-    Ok(AiSessionSnapshot { session, messages })
+    run_ai_session_blocking(move || {
+        let mut conn = open_database(&app)?;
+        let session = load_or_create_ai_session(&conn, &request.session_id)?;
+        ensure_ai_message_usage_for_session(&mut conn, &session.id)?;
+        let messages = load_ai_messages(&conn, &session.id)?;
+        Ok(AiSessionSnapshot { session, messages })
+    })
+    .await
 }
 
 #[tauri::command]
-fn ai_list_sessions(
+async fn ai_list_sessions(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiRuntime>,
 ) -> Result<Vec<AiSession>, String> {
-    let conn = open_database(&app)?;
-    reconcile_orphaned_user_ai_sessions(&conn, runtime.inner())?;
-    list_ai_sessions(&conn)
+    let runtime = runtime.inner().clone();
+    run_ai_session_blocking(move || {
+        let conn = open_database(&app)?;
+        reconcile_orphaned_user_ai_sessions(&conn, &runtime)?;
+        list_ai_sessions(&conn)
+    })
+    .await
 }
 
 #[tauri::command]
-fn ai_rename_session(
+async fn ai_rename_session(
     app: tauri::AppHandle,
     request: AiSessionRenameRequest,
 ) -> Result<AiSession, String> {
-    let title = request.title.trim();
+    let title = request.title.trim().to_string();
     if title.is_empty() {
         return Err("会话标题不能为空".to_string());
     }
-    let conn = open_database(&app)?;
-    rename_ai_session(&conn, &request.session_id, title)?;
-    load_ai_session(&conn, &request.session_id)
+    run_ai_session_blocking(move || {
+        let conn = open_database(&app)?;
+        rename_ai_session(&conn, &request.session_id, &title)?;
+        load_ai_session(&conn, &request.session_id)
+    })
+    .await
 }
 
 #[tauri::command]
@@ -3095,7 +3188,16 @@ async fn ai_send_message(
 }
 
 #[tauri::command]
-fn ai_generate_chart_indicator(
+async fn ai_generate_chart_indicator(app: tauri::AppHandle, request: AiChartIndicatorGenerateRequest) -> Result<(), String> {
+    crate::blocking_work::run_blocking(move || {
+        let state_app = app.clone();
+        let runtime = tauri::Manager::state::<AiRuntime>(&state_app);
+        ai_generate_chart_indicator_blocking(app, runtime, request)
+    })
+    .await
+}
+
+fn ai_generate_chart_indicator_blocking(
     app: tauri::AppHandle,
     runtime: tauri::State<'_, AiRuntime>,
     request: AiChartIndicatorGenerateRequest,
@@ -4923,7 +5025,14 @@ fn okx_recent_candles_path(inst_id: &str, bar: &str, limit: u16) -> Result<Strin
 }
 
 #[tauri::command]
-fn init_local_storage(app: tauri::AppHandle) -> Result<String, String> {
+async fn init_local_storage(app: tauri::AppHandle) -> Result<String, String> {
+    crate::blocking_work::run_blocking(move || {
+        init_local_storage_blocking(app)
+    })
+    .await
+}
+
+fn init_local_storage_blocking(app: tauri::AppHandle) -> Result<String, String> {
     let path = database_path(&app)?;
     open_database(&app)?;
     Ok(path.to_string_lossy().to_string())
@@ -7986,7 +8095,14 @@ fn chart_workspace_view_exists(
 }
 
 #[tauri::command]
-fn chart_workspaces_list(app: tauri::AppHandle) -> Result<Vec<ChartWorkspace>, String> {
+async fn chart_workspaces_list(app: tauri::AppHandle) -> Result<Vec<ChartWorkspace>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_workspaces_list_blocking(app)
+    })
+    .await
+}
+
+fn chart_workspaces_list_blocking(app: tauri::AppHandle) -> Result<Vec<ChartWorkspace>, String> {
     let conn = open_database(&app)?;
     let mut statement = conn
         .prepare("SELECT id, name, layout_json, indicators_json, layers_json, created_at, updated_at FROM chart_workspaces ORDER BY updated_at DESC")
@@ -7999,7 +8115,14 @@ fn chart_workspaces_list(app: tauri::AppHandle) -> Result<Vec<ChartWorkspace>, S
 }
 
 #[tauri::command]
-fn chart_workspace_load(
+async fn chart_workspace_load(app: tauri::AppHandle, id: String) -> Result<Option<ChartWorkspace>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_workspace_load_blocking(app, id)
+    })
+    .await
+}
+
+fn chart_workspace_load_blocking(
     app: tauri::AppHandle,
     id: String,
 ) -> Result<Option<ChartWorkspace>, String> {
@@ -8015,7 +8138,14 @@ fn chart_workspace_load(
 }
 
 #[tauri::command]
-fn chart_workspace_save(
+async fn chart_workspace_save(app: tauri::AppHandle, input: ChartWorkspaceInput) -> Result<ChartWorkspace, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_workspace_save_blocking(app, input)
+    })
+    .await
+}
+
+fn chart_workspace_save_blocking(
     app: tauri::AppHandle,
     input: ChartWorkspaceInput,
 ) -> Result<ChartWorkspace, String> {
@@ -8044,12 +8174,19 @@ fn chart_workspace_save(
         params![id, name, layout, indicators, layers, now],
     )
     .map_err(|err| err.to_string())?;
-    chart_workspace_load(app, id)?
+    chart_workspace_load_blocking(app, id)?
         .ok_or_else(|| "chart workspace save did not return a record".to_string())
 }
 
 #[tauri::command]
-fn chart_workspace_delete(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+async fn chart_workspace_delete(app: tauri::AppHandle, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_workspace_delete_blocking(app, id)
+    })
+    .await
+}
+
+fn chart_workspace_delete_blocking(app: tauri::AppHandle, id: String) -> Result<bool, String> {
     let id = chart_storage_id(&id, "workspace id")?;
     let conn = open_database(&app)?;
     let transaction = conn
@@ -8083,7 +8220,14 @@ fn chart_workspace_delete(app: tauri::AppHandle, id: String) -> Result<bool, Str
 }
 
 #[tauri::command]
-fn chart_workspace_views_list(
+async fn chart_workspace_views_list(app: tauri::AppHandle, workspace_id: String) -> Result<Vec<ChartWorkspaceView>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_workspace_views_list_blocking(app, workspace_id)
+    })
+    .await
+}
+
+fn chart_workspace_views_list_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
 ) -> Result<Vec<ChartWorkspaceView>, String> {
@@ -8102,7 +8246,14 @@ fn chart_workspace_views_list(
 }
 
 #[tauri::command]
-fn chart_workspace_view_save(
+async fn chart_workspace_view_save(app: tauri::AppHandle, input: ChartWorkspaceViewInput) -> Result<ChartWorkspaceView, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_workspace_view_save_blocking(app, input)
+    })
+    .await
+}
+
+fn chart_workspace_view_save_blocking(
     app: tauri::AppHandle,
     input: ChartWorkspaceViewInput,
 ) -> Result<ChartWorkspaceView, String> {
@@ -8138,7 +8289,14 @@ fn chart_workspace_view_save(
 }
 
 #[tauri::command]
-fn chart_workspace_view_delete(
+async fn chart_workspace_view_delete(app: tauri::AppHandle, workspace_id: String, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_workspace_view_delete_blocking(app, workspace_id, id)
+    })
+    .await
+}
+
+fn chart_workspace_view_delete_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     id: String,
@@ -8174,7 +8332,14 @@ fn chart_workspace_view_delete(
 }
 
 #[tauri::command]
-fn chart_drawings_list(
+async fn chart_drawings_list(app: tauri::AppHandle, workspace_id: String, view_id: Option<String>) -> Result<Vec<ChartDrawing>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_drawings_list_blocking(app, workspace_id, view_id)
+    })
+    .await
+}
+
+fn chart_drawings_list_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     view_id: Option<String>,
@@ -8202,7 +8367,14 @@ fn chart_drawings_list(
 }
 
 #[tauri::command]
-fn chart_drawing_save(
+async fn chart_drawing_save(app: tauri::AppHandle, input: ChartDrawingInput) -> Result<ChartDrawing, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_drawing_save_blocking(app, input)
+    })
+    .await
+}
+
+fn chart_drawing_save_blocking(
     app: tauri::AppHandle,
     input: ChartDrawingInput,
 ) -> Result<ChartDrawing, String> {
@@ -8234,7 +8406,14 @@ fn chart_drawing_save(
 }
 
 #[tauri::command]
-fn chart_drawing_delete(
+async fn chart_drawing_delete(app: tauri::AppHandle, workspace_id: String, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_drawing_delete_blocking(app, workspace_id, id)
+    })
+    .await
+}
+
+fn chart_drawing_delete_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     id: String,
@@ -8252,7 +8431,14 @@ fn chart_drawing_delete(
 }
 
 #[tauri::command]
-fn chart_alerts_list(
+async fn chart_alerts_list(app: tauri::AppHandle, workspace_id: String, view_id: Option<String>) -> Result<Vec<ChartAlert>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_alerts_list_blocking(app, workspace_id, view_id)
+    })
+    .await
+}
+
+fn chart_alerts_list_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     view_id: Option<String>,
@@ -8285,7 +8471,14 @@ fn chart_alerts_list(
 }
 
 #[tauri::command]
-fn chart_alert_save(app: tauri::AppHandle, input: ChartAlertInput) -> Result<ChartAlert, String> {
+async fn chart_alert_save(app: tauri::AppHandle, input: ChartAlertInput) -> Result<ChartAlert, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_alert_save_blocking(app, input)
+    })
+    .await
+}
+
+fn chart_alert_save_blocking(app: tauri::AppHandle, input: ChartAlertInput) -> Result<ChartAlert, String> {
     let id = chart_storage_id(&input.id, "alert id")?;
     let workspace_id = chart_storage_id(&input.workspace_id, "workspace id")?;
     let view_id = input
@@ -8332,7 +8525,14 @@ fn chart_alert_save(app: tauri::AppHandle, input: ChartAlertInput) -> Result<Cha
 }
 
 #[tauri::command]
-fn chart_alert_delete(
+async fn chart_alert_delete(app: tauri::AppHandle, workspace_id: String, id: String) -> Result<bool, String> {
+    crate::blocking_work::run_serial(move || {
+        chart_alert_delete_blocking(app, workspace_id, id)
+    })
+    .await
+}
+
+fn chart_alert_delete_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     id: String,
@@ -8378,7 +8578,14 @@ fn chart_alert_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Chart
 }
 
 #[tauri::command]
-fn chart_alert_events_list(
+async fn chart_alert_events_list(app: tauri::AppHandle, workspace_id: String, alert_id: Option<String>) -> Result<Vec<ChartAlertEvent>, String> {
+    crate::blocking_work::run_blocking(move || {
+        chart_alert_events_list_blocking(app, workspace_id, alert_id)
+    })
+    .await
+}
+
+fn chart_alert_events_list_blocking(
     app: tauri::AppHandle,
     workspace_id: String,
     alert_id: Option<String>,
@@ -10067,7 +10274,7 @@ fn upsert_okx_history_orders(
     source_endpoint: &str,
     rows: &[serde_json::Value],
 ) -> Result<usize, String> {
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     let synced_at = now_ms();
     let mut count = 0;
     for row in rows {
@@ -10625,7 +10832,7 @@ fn upsert_okx_history_fills(
     source_endpoint: &str,
     rows: &[serde_json::Value],
 ) -> Result<usize, String> {
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     let synced_at = now_ms();
     let mut count = 0;
     for row in rows {
@@ -10750,7 +10957,7 @@ fn upsert_okx_history_positions(
     account: &LocalAccount,
     rows: &[serde_json::Value],
 ) -> Result<usize, String> {
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     let synced_at = now_ms();
     let mut count = 0;
     for row in rows {
@@ -10823,7 +11030,7 @@ fn upsert_okx_account_bills(
     source_endpoint: &str,
     rows: &[serde_json::Value],
 ) -> Result<usize, String> {
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     let synced_at = now_ms();
     let mut count = 0;
     for row in rows {
@@ -10906,7 +11113,7 @@ pub fn rebuild_position_episodes_for_account(
 ) -> Result<RebuildPositionEpisodesResult, String> {
     let started_at = now_ms();
     let fills = load_episode_fills(conn, account_id, environment, inst_id)?;
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     if let Some(symbol) = inst_id {
         tx.execute(
             "DELETE FROM position_episode_opportunities WHERE episode_id IN (
@@ -15413,7 +15620,7 @@ fn cleanup_legacy_desic_cline_sessions_with_conn(
     conn: &mut Connection,
     project_root: &str,
 ) -> Result<usize, String> {
-    let tx = conn.transaction().map_err(|err| err.to_string())?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
     let legacy_filter = "session_id IN (
         SELECT session_id FROM sessions
         WHERE (session_id LIKE 'background:%' OR session_id LIKE 'review:%')
@@ -18223,7 +18430,7 @@ async fn execute_ai_tool(
         }
         "tradeOpportunity.list" => {
             let filters = input.clone();
-            let mut rows = trade_opportunities(app)?;
+            let mut rows = trade_opportunities(app).await?;
             if let Some(status) = filters
                 .get("status")
                 .and_then(|item| item.as_str())
@@ -23100,7 +23307,7 @@ fn upsert_raw_candles(
     let step = bar_ms(interval).ok_or_else(|| format!("unsupported interval {}", interval))?;
     let mut inserted = 0usize;
     for chunk in candles.chunks(500) {
-        let tx = conn.transaction().map_err(|err| err.to_string())?;
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(|err| err.to_string())?;
         let mut stmt = tx
             .prepare(
                 "INSERT INTO candles (
@@ -23423,20 +23630,18 @@ fn load_ai_candle_window(
         aggregate_ms += started.elapsed().as_millis();
         merged
     } else {
+        // 稳定历史段在 SQLite 内按目标周期聚合（见开发规范：不把整个高周期窗口的 1m 行物化到 Rust），
+        // 4H×300 从 7.2 万行降为 300 行返回。
         let started = Instant::now();
-        let one_minute = local_candles_between(
+        let (mut aggregated, scanned_rows) = local_candles_aggregated(
             conn,
             symbol,
-            "1m",
+            window.step,
             window.start_open,
             window.source_end_open,
         )?;
         database_read_ms += started.elapsed().as_millis();
-        database_rows += one_minute.len();
-        let started = Instant::now();
-        let mut aggregated =
-            aggregate_one_minute_candles(&one_minute, window.step, window.source_end_open);
-        aggregate_ms += started.elapsed().as_millis();
+        database_rows += scanned_rows;
 
         if let Some(first_memory_open) = memory
             .iter()
@@ -23505,6 +23710,68 @@ fn merge_candle_series<'a>(
         merged.insert(candle.time, candle.clone());
     }
     merged.into_values().collect()
+}
+
+/// 在 SQLite 内把 1m 聚合为目标周期；语义与 `aggregate_one_minute_candles` 一致：
+/// open 取桶内第一根、close 取最后一根，完整（根数齐、首尾时间对齐、全部已确认）才标记 confirm。
+/// 价格以 TEXT 存储，聚合前必须 CAST，否则 MAX/MIN 是按字典序比较。返回（聚合结果，扫描的 1m 行数）。
+fn local_candles_aggregated(
+    conn: &Connection,
+    symbol: &str,
+    step_ms: i64,
+    start_open: i64,
+    end_open: i64,
+) -> Result<(Vec<Candle>, usize), String> {
+    let expected = (step_ms / 60_000).max(1);
+    let mut stmt = conn
+        .prepare_cached(
+            "WITH buckets AS (
+               SELECT (open_time / ?4) * ?4 AS bucket_start,
+                      MIN(open_time) AS first_open, MAX(open_time) AS last_open,
+                      MAX(CAST(high AS REAL)) AS high, MIN(CAST(low AS REAL)) AS low,
+                      SUM(CAST(volume AS REAL)) AS volume, COUNT(*) AS rows, MIN(confirm) AS all_confirmed
+               FROM candles
+               WHERE symbol = ?1 AND interval = '1m' AND open_time >= ?2 AND open_time <= ?3
+               GROUP BY bucket_start
+             )
+             SELECT b.bucket_start, CAST(o.open AS REAL), b.high, b.low, CAST(c.close AS REAL), b.volume,
+                    b.rows, b.first_open, b.last_open, b.all_confirmed
+             FROM buckets b
+             JOIN candles o ON o.symbol = ?1 AND o.interval = '1m' AND o.open_time = b.first_open
+             JOIN candles c ON c.symbol = ?1 AND c.interval = '1m' AND c.open_time = b.last_open
+             ORDER BY b.bucket_start ASC",
+        )
+        .map_err(|err| err.to_string())?;
+    let mut scanned = 0usize;
+    let rows = stmt
+        .query_map(params![symbol, start_open, end_open, step_ms], |row| {
+            let bucket_start = row.get::<_, i64>(0)?;
+            let count = row.get::<_, i64>(6)?;
+            let first_open = row.get::<_, i64>(7)?;
+            let last_open = row.get::<_, i64>(8)?;
+            let all_confirmed = row.get::<_, i64>(9)? == 1;
+            let complete = count == expected && first_open == bucket_start && last_open == bucket_start + step_ms - 60_000;
+            Ok((
+                Candle {
+                    time: bucket_start / 1000,
+                    open: row.get::<_, f64>(1)?,
+                    high: row.get::<_, f64>(2)?,
+                    low: row.get::<_, f64>(3)?,
+                    close: row.get::<_, f64>(4)?,
+                    volume: row.get::<_, f64>(5)?,
+                    confirm: complete && all_confirmed,
+                },
+                count as usize,
+            ))
+        })
+        .map_err(|err| err.to_string())?;
+    let mut candles = Vec::new();
+    for row in rows {
+        let (candle, count) = row.map_err(|err| err.to_string())?;
+        scanned += count;
+        candles.push(candle);
+    }
+    Ok((candles, scanned))
 }
 
 fn aggregate_one_minute_candles(
@@ -25892,6 +26159,8 @@ async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
                 start_ai_automation_worker(app.clone());
                 start_intelligence_collector(app.clone(), app.state::<IntelligenceRuntime>());
                 start_systematic_worker(app.clone(), app.state::<SystematicRuntime>());
+                database_maintenance::start_wal_checkpoint_worker(app.clone());
+                main_thread_watchdog::start(app.clone());
             }
             true
         }
@@ -25909,6 +26178,7 @@ async fn ensure_database_and_workers(app: &tauri::AppHandle) -> bool {
 pub fn run() {
     install_boot_panic_hook();
     boot_log("=== Desic Terminal boot start ===");
+    blocking_work::install_async_runtime();
     let builder = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -25944,7 +26214,8 @@ pub fn run() {
             boot_log("setup: splash shown; awaiting data-root bootstrap");
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![
+        .invoke_handler({
+            let handler: Box<dyn Fn(tauri::ipc::Invoke<tauri::Wry>) -> bool + Send + Sync> = Box::new(tauri::generate_handler![
             data_root_bootstrap_state,
             pick_data_root_directory,
             finalize_data_root_bootstrap,
@@ -26206,6 +26477,9 @@ pub fn run() {
             reconcile_private_streams,
             market_snapshot
         ]);
+            // 记录命令并给主线程上的同步执行计时（卡顿诊断，见 main_thread_watchdog）。
+            move |invoke: tauri::ipc::Invoke<tauri::Wry>| main_thread_watchdog::timed_invoke(invoke, &handler)
+        });
     let app = match builder.build(tauri::generate_context!()) {
         Ok(app) => app,
         Err(error) => {
@@ -29763,6 +30037,55 @@ mod tests {
         assert_eq!(candles[0].time, bucket_open_ms / 1000);
         assert_eq!(candles[0].close, 104.5);
         assert_eq!(candles[0].volume, 50.0);
+    }
+
+    #[test]
+    fn sql_aggregation_matches_rust_for_gaps_unconfirmed_and_text_prices() {
+        let conn = test_conn();
+        let start = 1_800_000_000_000_i64;
+        // 3 个 5m 桶：第 1 个完整（价格跨 99→102，按字典序比较会取错最大值），第 2 个缺一根，
+        // 第 3 个含未确认的 1m，最后再多出一个只有 2 根的尾桶。
+        for index in 0..17_i64 {
+            if index == 7 {
+                continue;
+            }
+            let open_time = start + index * 60_000;
+            let confirm = if index == 12 { 0 } else { 1 };
+            conn.execute(
+                "INSERT INTO candles(
+                   symbol,interval,open_time,close_time,open,high,low,close,volume,
+                   volume_ccy,volume_quote,confirm,source,updated_at
+                 ) VALUES(?1,'1m',?2,?3,?4,?5,?6,?7,?8,NULL,NULL,?9,'test',?2)",
+                params![
+                    "BTC-USDT-SWAP",
+                    open_time,
+                    open_time + 59_999,
+                    (98.0 + index as f64).to_string(),
+                    (99.5 + index as f64 * 1.5).to_string(),
+                    (97.0 + index as f64).to_string(),
+                    (98.5 + index as f64).to_string(),
+                    (1.0 + index as f64 * 0.25).to_string(),
+                    confirm,
+                ],
+            )
+            .expect("insert one minute candle");
+        }
+        let end = start + 16 * 60_000;
+        let raw = local_candles_between(&conn, "BTC-USDT-SWAP", "1m", start, end).expect("load raw candles");
+        let expected = aggregate_one_minute_candles(&raw, 300_000, end);
+        let (actual, scanned) = local_candles_aggregated(&conn, "BTC-USDT-SWAP", 300_000, start, end).expect("sql aggregate");
+        assert_eq!(scanned, raw.len());
+        assert_eq!(actual.len(), expected.len());
+        for (actual, expected) in actual.iter().zip(expected.iter()) {
+            assert_eq!(actual.time, expected.time);
+            assert_eq!(actual.open, expected.open);
+            assert_eq!(actual.high, expected.high);
+            assert_eq!(actual.low, expected.low);
+            assert_eq!(actual.close, expected.close);
+            assert!((actual.volume - expected.volume).abs() < 1e-9);
+            assert_eq!(actual.confirm, expected.confirm, "confirm mismatch at {}", actual.time);
+        }
+        assert_eq!(actual.iter().map(|candle| candle.confirm).collect::<Vec<_>>(), vec![true, false, false, false]);
     }
 
     #[test]

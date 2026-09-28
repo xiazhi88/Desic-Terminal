@@ -86,6 +86,12 @@ debug = 0
 incremental = true
 codegen-units = 256
 
+# 依赖（含 rusqlite 捆绑的 SQLite C 库、serde_json、tokio、reqwest）在开发构建里也开优化：
+# 默认 -O0 下 SQLite 查询与 JSON 序列化慢数倍，tauri:dev 里工具调用、K 线读取与界面都会被拖慢。
+# 应用自身的 crate 仍是 -O0，增量编译速度不受影响；release 构建不受影响。
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dev.build-override]
 debug = 0
 codegen-units = 256

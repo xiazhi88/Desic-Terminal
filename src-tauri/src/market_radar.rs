@@ -224,6 +224,24 @@ pub struct MarketRadarResearchScore {
     model_version: String,
 }
 
+/// CROSS JOIN 固定以合约列表为外层、INDEXED BY 固定走主键 (symbol, interval, open_time)：
+/// 不加约束时规划器会对整张 K 线表（数百万行）临时建“自动索引”，单次 70 秒以上，
+/// 期间长期占用读快照（WAL 无法检查点）并抢占 SQLite 全局锁，拖慢所有其它连接。
+fn research_candles_sql(placeholders: &[String], cutoff_parameter: usize) -> String {
+    format!(
+        "WITH research_symbols(symbol, interval) AS (VALUES {})
+         SELECT candles.symbol, candles.open_time, candles.close, candles.volume_quote
+         FROM research_symbols
+         CROSS JOIN candles INDEXED BY sqlite_autoindex_candles_1
+           ON candles.symbol=research_symbols.symbol
+          AND candles.interval=research_symbols.interval
+         WHERE candles.confirm=1 AND candles.open_time>=?{}
+         ORDER BY candles.symbol ASC, candles.open_time ASC",
+        placeholders.join(","),
+        cutoff_parameter,
+    )
+}
+
 #[tauri::command]
 pub async fn market_radar_research_scores(
     app: tauri::AppHandle,
@@ -263,18 +281,7 @@ pub async fn market_radar_research_scores(
         let cutoff = now_ms().saturating_sub(450 * 86_400_000);
         let cutoff_parameter = bind_values.len() + 1;
         bind_values.push(rusqlite::types::Value::Integer(cutoff));
-        let query = format!(
-            "WITH research_symbols(symbol, interval) AS (VALUES {})
-             SELECT candles.symbol, candles.open_time, candles.close, candles.volume_quote
-             FROM research_symbols
-             JOIN candles
-               ON candles.symbol=research_symbols.symbol
-              AND candles.interval=research_symbols.interval
-             WHERE candles.confirm=1 AND candles.open_time>=?{}
-             ORDER BY candles.symbol ASC, candles.open_time ASC",
-            placeholders.join(","),
-            cutoff_parameter,
-        );
+        let query = research_candles_sql(&placeholders, cutoff_parameter);
         let conn = open_database(&app)?;
         let mut stmt = conn.prepare(&query).map_err(|error| error.to_string())?;
         let rows = stmt
@@ -535,6 +542,37 @@ async fn synchronize_market_radar_history(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn research_candles_query_uses_the_primary_key_not_an_automatic_index() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE candles (symbol TEXT NOT NULL, interval TEXT NOT NULL, open_time INTEGER NOT NULL,
+               close_time INTEGER NOT NULL, open TEXT NOT NULL, high TEXT NOT NULL, low TEXT NOT NULL,
+               close TEXT NOT NULL, volume TEXT NOT NULL, volume_ccy TEXT, volume_quote TEXT,
+               confirm INTEGER NOT NULL, source TEXT NOT NULL, updated_at INTEGER NOT NULL,
+               PRIMARY KEY (symbol, interval, open_time));
+             ANALYZE;
+             INSERT INTO sqlite_stat1 VALUES('candles','sqlite_autoindex_candles_1','1577351 1755 1755 1');
+             ANALYZE sqlite_schema;",
+        )
+        .unwrap();
+        // 注入与真实库相同的统计信息（PRAGMA optimize 产生）：旧写法在这组统计下会选择自动索引。
+        let placeholders = (0..300).map(|index| format!("(?{}, ?{})", index * 2 + 1, index * 2 + 2)).collect::<Vec<_>>();
+        let sql = research_candles_sql(&placeholders, 601);
+        let mut statement = conn.prepare(&format!("EXPLAIN QUERY PLAN {sql}")).unwrap();
+        let plan = statement
+            .query_map(
+                rusqlite::params_from_iter(std::iter::repeat(rusqlite::types::Null).take(601)),
+                |row| row.get::<_, String>(3),
+            )
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap()
+            .join("\n");
+        assert!(!plan.contains("AUTOMATIC"), "{plan}");
+        assert!(plan.contains("sqlite_autoindex_candles_1 (symbol=? AND interval=? AND open_time>?)"), "{plan}");
+    }
 
     #[test]
     fn default_history_status_is_idle() {
