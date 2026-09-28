@@ -26363,6 +26363,7 @@ pub fn run() {
             systematic_backtest_detail,
             systematic_optimization_start,
             systematic_optimization_cancel,
+            crate::systematic::systematic_optimization_candidates,
             systematic_strategy_delete,
             systematic_profile_save,
             systematic_profile_delete,

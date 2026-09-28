@@ -85,7 +85,9 @@ import { KlineChart } from "./KlineChart";
 import { SystematicEquityChart } from "./SystematicEquityChart";
 import { SystematicPythonEditor } from "./SystematicPythonEditor";
 import { SystematicPythonMergeView } from "./SystematicPythonMergeView";
+import { ParameterTerrain, parameterTerrainLabels } from "./systematic/ParameterTerrain";
 import { TerminalSelect } from "./TerminalSelect";
+import { ReplayTheater } from "./systematic/ReplayTheater";
 import { SymbolIcon, symbolBase } from "./SymbolIcon";
 import { useMarketHotStore } from "../lib/marketHotStore";
 import type { AiEvent, AiSession, Candle, ChartFillMarker, ChartPositionRange, ChartSignalMarker, MarketAssetsSummary, OkxInstrumentSummary } from "../types";
@@ -653,7 +655,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
     setTab("review");
   }, []);
 
-  const applyOptimization = useCallback(async (optimizationId: string, parameters: Record<string, unknown>) => {
+  const applyOptimization = useCallback(async (optimizationId: string, parameters: Record<string, unknown>, options?: { openBacktest?: boolean }) => {
     if (!desktop || !selectedPython) return;
     const tuning = parseParameterTuning(draft.parameterTuning) ?? {};
     setApplyingOptimizationId(optimizationId);
@@ -670,7 +672,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
       setDraft((current) => ({ ...current, parameters: JSON.stringify(parameters, null, 2) }));
       setBacktestStrategyVersion(result.strategy.version);
       await refresh();
-      setTab("backtest");
+      if (options?.openBacktest !== false) setTab("backtest");
       const summary = Object.entries(parameters).map(([key, value]) => `${key}=${String(value)}`).join(" · ");
       onNotify({ kind: "success", title: text.optimizationApplied, message: `${text.optimizationAppliedDetailSaved} · v${result.strategy.version}${summary ? ` · ${summary}` : ""}` });
     } catch (error) {
@@ -1363,6 +1365,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         {tab === "tuning" ? (
           <TuningView
             text={text}
+            chinese={chinese}
             strategy={selectedPython}
             draft={draft}
             selectedSymbol={backtestSymbol}
@@ -1385,6 +1388,7 @@ export function SystematicStrategyLab({ overview, selectedSymbol, watchlist, mar
         {tab === "review" ? (
           <ReviewView
             text={text}
+            chinese={chinese}
             runs={runs}
             selectedRun={selectedRun}
             detail={detail}
@@ -2119,6 +2123,7 @@ type OptimizationBudget = 30 | 100 | 300;
 
 function TuningView({
   text,
+  chinese,
   strategy,
   draft,
   selectedSymbol,
@@ -2138,6 +2143,7 @@ function TuningView({
   applyingOptimizationId,
 }: Readonly<{
   text: Copy;
+  chinese: boolean;
   strategy: SystematicStrategyView | null;
   draft: PythonDraft;
   selectedSymbol: string;
@@ -2151,11 +2157,16 @@ function TuningView({
   pythonRuntime?: SystematicPythonRuntimeView | null;
   onOpenBacktest: () => void;
   optimizations: SystematicOverview["optimizations"];
-  onApplyOptimization: (optimizationId: string, parameters: Record<string, unknown>) => void;
+  onApplyOptimization: (optimizationId: string, parameters: Record<string, unknown>, options?: { openBacktest?: boolean }) => void;
   onCancelOptimization: (optimizationId: string) => void;
   cancellingOptimizationId: string | null;
   applyingOptimizationId: string | null;
 }>) {
+  // Results open in the parameter terrain; the workbench is one click away.
+  const [configuring, setConfiguring] = useState(false);
+  const newestOptimizationId = optimizations[0]?.id ?? "";
+  useEffect(() => { if (newestOptimizationId) setConfiguring(false); }, [newestOptimizationId]);
+  const terrainLabels = parameterTerrainLabels(chinese);
   const parameters = parseJsonRecord(draft.parameters);
   const tuning = parseParameterTuning(draft.parameterTuning) ?? {};
   const numericParameters = useMemo(() => parameters
@@ -2202,6 +2213,22 @@ function TuningView({
 
   if (!strategy) {
     return <EmptyState icon={<SlidersHorizontal size={20} />} title={text.noStrategy} detail={text.noStrategyDetail} />;
+  }
+  if (optimizations.length && !configuring) {
+    return (
+      <ParameterTerrain
+        chinese={chinese}
+        optimizations={optimizations}
+        strategyName={strategy.name}
+        desktop={desktop}
+        onConfigure={() => setConfiguring(true)}
+        onApply={(optimizationId, values) => onApplyOptimization(optimizationId, values, { openBacktest: false })}
+        onBacktest={(optimizationId, values) => onApplyOptimization(optimizationId, values)}
+        onCancel={onCancelOptimization}
+        cancellingOptimizationId={cancellingOptimizationId}
+        applyingOptimizationId={applyingOptimizationId}
+      />
+    );
   }
   return (
     <div className="systematic-lab-tuning-view">
@@ -2251,8 +2278,8 @@ function TuningView({
         <p>{text.tuningSaveHint}</p>
         <button className="systematic-lab__command-button is-primary systematic-lab-tuning-summary__start" type="button" disabled={!canStart || starting} onClick={onStart}>{starting ? <LoaderCircle size={14} className="is-spinning" /> : <SlidersHorizontal size={14} />}{starting ? text.queuing : text.startTuning}</button>
         {!desktop ? <small className="systematic-lab-tuning-summary__guard">{text.desktopOnlyDetail}</small> : null}
+        {optimizations.length ? <button className="systematic-lab__command-button systematic-lab-tuning-summary__terrain" type="button" title={terrainLabels.terrainHint} onClick={() => setConfiguring(false)}><BarChart3 size={13} />{terrainLabels.viewTerrain}</button> : null}
       </aside>
-      <div className="systematic-lab-tuning-results"><OptimizationPanel text={text} optimizations={optimizations} onApply={onApplyOptimization} onCancel={onCancelOptimization} cancellingOptimizationId={cancellingOptimizationId} applyingOptimizationId={applyingOptimizationId} /></div>
     </div>
   );
 }
@@ -3595,8 +3622,9 @@ function OptimizationPanel({ text, optimizations, onApply, onCancel, cancellingO
   );
 }
 
-function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, replayAbsoluteIndex, replayPageLoading, replayBars, replayCursorBar, replayFills, replayFillLedger, replayFillCount, replaySnapshot, replayClosedTradeLedger, replayClosedTradeCount, replayFees, onChoose, onReplayIndex, onReplayRangeDragging, onEdit, onRetry, onDelete, editingId, retryingId, deletingId, page, pageLoading, onPageChange }: Readonly<{
+function ReviewView({ text, chinese, runs, selectedRun, detail, loading, replayIndex, replayAbsoluteIndex, replayPageLoading, replayBars, replayCursorBar, replayFills, replayFillLedger, replayFillCount, replaySnapshot, replayClosedTradeLedger, replayClosedTradeCount, replayFees, onChoose, onReplayIndex, onReplayRangeDragging, onEdit, onRetry, onDelete, editingId, retryingId, deletingId, page, pageLoading, onPageChange }: Readonly<{
   text: Copy;
+  chinese: boolean;
   runs: SystematicBacktestView[];
   selectedRun: SystematicBacktestView | null;
   detail: SystematicBacktestDetail | null;
@@ -3627,6 +3655,10 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   onPageChange: (page: number) => void;
 }>) {
   const [accountTab, setAccountTab] = useState<"ledger" | "position" | "history">("ledger");
+  // 回放剧场模式下回测记录收成左侧抽屉，把宽度留给轨道；标题栏左端的按钮开合。
+  const [runDrawerOpen, setRunDrawerOpen] = useState(false);
+  const runDrawerRef = useRef<HTMLElement | null>(null);
+  const runDrawerToggleRef = useRef<HTMLButtonElement | null>(null);
   const [replayPlaying, setReplayPlaying] = useState(false);
   const [replaySpeed, setReplaySpeed] = useState(1);
   const [compareRunIds, setCompareRunIds] = useState<string[]>([]);
@@ -3636,6 +3668,8 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
   const [actionMenuPosition, setActionMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const report = detail?.report;
   const metrics = report?.metrics;
+  // 回放剧场取代原先分离的 K 线回放、权益/回撤、统计格与成交账本四块。
+  const theaterDetail = report && detail && selectedRun && detail.run.id === selectedRun.id && detail.bars.length > 0 && detail.totalBarCount > 0 ? detail : null;
   const visibleBar = replayCursorBar;
   const replayNetPnl = replaySnapshot && metrics
     ? replaySnapshot.equityUsdt - metrics.initialEquityUsdt
@@ -3786,9 +3820,36 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
     });
   }, [absoluteReplayIndex, onReplayIndex, replayTotalBarCount]);
 
+  const theaterMode = Boolean(theaterDetail);
+  useEffect(() => {
+    if (!theaterMode || !runDrawerOpen) return;
+    const closeOutside = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Element)) return;
+      // 操作菜单渲染在 body 上，点击它不应收起抽屉。
+      if (runDrawerRef.current?.contains(target) || runDrawerToggleRef.current?.contains(target) || target.closest(".systematic-lab-run-row__menu")) return;
+      setRunDrawerOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || openActionRunId) return;
+      setRunDrawerOpen(false);
+      runDrawerToggleRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", closeOutside);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeOutside);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [openActionRunId, runDrawerOpen, theaterMode]);
+  const chooseRun = useCallback((runId: string) => {
+    onChoose(runId);
+    setRunDrawerOpen(false);
+  }, [onChoose]);
+
   return (
-    <div className="systematic-lab-review-view">
-      <aside className="systematic-lab-run-list">
+    <div className={clsx("systematic-lab-review-view", theaterMode && "is-theater", theaterMode && runDrawerOpen && "is-run-drawer-open")}>
+      <aside className="systematic-lab-run-list" ref={runDrawerRef} aria-hidden={theaterMode && !runDrawerOpen ? true : undefined}>
         <div className="systematic-lab__pane-head"><span>{text.backtestRuns}</span><span className="systematic-lab__count">{page.total}</span></div>
         <div className="systematic-lab-run-list__scroll">
           {runs.map((run) => {
@@ -3797,7 +3858,7 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
             const actionMenuId = `systematic-backtest-actions-${run.id}`;
             const actionsOpen = openActionRunId === run.id;
             return <div key={run.id} className={clsx("systematic-lab-run-row", selectedRun?.id === run.id && "is-selected", actionsOpen && "is-actions-open")}>
-              <button type="button" className="systematic-lab-run-row__select" onClick={() => onChoose(run.id)}>
+              <button type="button" className="systematic-lab-run-row__select" onClick={() => chooseRun(run.id)}>
                 <span className={clsx("systematic-lab-run-row__state", `is-${run.status}`)} />
                 <span>
                   <strong>{run.strategyName}</strong>
@@ -3872,128 +3933,44 @@ function ReviewView({ text, runs, selectedRun, detail, loading, replayIndex, rep
         {selectedRun ? (
           <>
             <div className="systematic-lab-review-main__head">
-              <div><span className="systematic-lab__eyebrow">{selectedRun.instId} · 1m{detail?.preloadBarCount ? ` · ${formatLocalizedNumber(detail.preloadBarCount)} ${text.preloadHistory}` : ""}</span><h2>{selectedRun.strategyName}</h2></div>
+              {theaterMode ? (
+                <button
+                  type="button"
+                  ref={runDrawerToggleRef}
+                  className={clsx("systematic-lab-run-drawer-toggle", runDrawerOpen && "is-open")}
+                  aria-expanded={runDrawerOpen}
+                  title={text.backtestRuns}
+                  onClick={() => setRunDrawerOpen((open) => !open)}
+                ><History size={13} /><span>{text.backtestRuns}</span><b>{page.total}</b><ChevronDown size={12} /></button>
+              ) : null}
+              <div className="systematic-lab-review-main__title"><span className="systematic-lab__eyebrow">{selectedRun.instId} · 1m{detail?.preloadBarCount ? ` · ${formatLocalizedNumber(detail.preloadBarCount)} ${text.preloadHistory}` : ""}</span><h2>{selectedRun.strategyName}</h2></div>
               {detail ? <div className="systematic-lab-review-main__date-range" title={evaluationRange}><span>{text.evaluationRange}</span><strong>{evaluationRange}</strong></div> : null}
               {selectedRun.startedAt ? <div className="systematic-lab-review-main__date-range systematic-lab-review-main__duration" title={formatBacktestTimingTitle(selectedRun.timing) ?? text.backtestDuration}><span>{text.backtestDuration}</span><strong>{formatBacktestDuration(selectedRun.startedAt, selectedRun.finishedAt, selectedRun.status)}</strong></div> : null}
               <RunStatus run={selectedRun} text={text} />
             </div>
             {loading ? <div className="systematic-lab-loading"><LoaderCircle size={18} className="is-spinning" /> {text.loadingResult}</div> : null}
-            {report && replayBars.length ? (
-              <>
-                <div className="systematic-lab-result-deck">
-                  <section className="systematic-lab-result-deck__group is-final" aria-label={text.fullBacktest}>
-                    <header><span>{text.fullBacktest}</span><small>{selectedRun.dataSnapshotId}</small></header>
-                    <div className="systematic-lab-result-deck__metrics">
-                      <Metric label={text.netPnl} value={formatPnlUsdt(metrics?.netPnlUsdt)} tone={(metrics?.netPnlUsdt ?? 0) >= 0 ? "gain" : "loss"} />
-                      <Metric label={text.finalEquity} value={formatUsdt(metrics?.finalEquityUsdt)} />
-                      <Metric label={text.maxDrawdown} value={`${formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))} · ${formatPercent(metrics?.maxDrawdownPct, false)}`} tone="drawdown" />
-                      <Metric label={text.closedTrades} value={formatLocalizedNumber(metrics?.closedTradeCount ?? 0)} />
-                    </div>
-                  </section>
-                  <section className="systematic-lab-result-deck__group is-cursor" aria-label={text.replayAccount}>
-                    <header><span>{text.replayAccount}</span><small>{visibleBar ? formatRunTime(visibleBar.time * 1_000) : "--"}</small></header>
-                    <div className="systematic-lab-result-deck__metrics">
-                      <Metric label={text.netPnl} value={formatPnlUsdt(replayNetPnl)} tone={(replayNetPnl ?? 0) >= 0 ? "gain" : "loss"} />
-                      <Metric label={text.accountEquity} value={formatUsdt(replaySnapshot?.equityUsdt)} />
-                      <Metric label={text.unrealizedPnl} value={formatPnlUsdt(replaySnapshot?.unrealizedPnlUsdt)} tone={(replaySnapshot?.unrealizedPnlUsdt ?? 0) >= 0 ? "gain" : "loss"} />
-                      <Metric label={text.usedMargin} value={formatUsdt(replaySnapshot?.usedMarginUsdt)} />
-                    </div>
-                  </section>
-                </div>
-                <div className="systematic-lab-replay-stage">
-                  <div className="systematic-lab-replay-stage__toolbar">
-                    <span><i className="systematic-lab-replay-stage__legend systematic-lab-replay-stage__legend--fill" />{text.replayActionLegend}</span>
-                    {report.limitOrderFillModel === "kline_conservative_estimate" ? <span className="systematic-lab-replay-stage__estimate" title={text.limitFillEstimateDetail}>{text.limitFillEstimate}</span> : null}
-                    <strong>1m</strong>
-                  </div>
-                  <div className="systematic-lab-replay-stage__chart">
-                    <KlineChart
-                      candles={replayBars}
-                      ticker={null}
-                      symbol={selectedRun.instId}
-                      timeframe="1m"
-                      fills={replayFills}
-                      signals={replayStrategySignals}
-                      positionRanges={replayPositionRanges}
-                      variant="review"
-                      workspaceId={`systematic-replay-${selectedRun.id}`}
-                      snapshotRevision={`${report.reportHash}:${detail?.barOffset ?? 0}:${replayBars.length}`}
-                      persistWorkspace={false}
-                      synchronizedCrosshairTime={visibleBar?.time ?? null}
-                      followSynchronizedCrosshair
-                    />
-                  </div>
-                </div>
-                <div className="systematic-lab-replay-controls">
-                  <span className="systematic-lab-replay-controls__label"><History size={12} />{text.replay}</span>
-                  <button className="systematic-lab__icon-button" type="button" onClick={toggleReplayPlayback} disabled={replayTotalBarCount <= 0} title={replayPlaying ? text.pauseReplay : text.playReplay} aria-label={replayPlaying ? text.pauseReplay : text.playReplay}>{replayPlaying ? <CirclePause size={15} /> : <Play size={15} />}</button>
-                  <select className="systematic-lab-replay-controls__speed" value={replaySpeed} onChange={(event) => setReplaySpeed(Number(event.target.value))} aria-label={text.replaySpeed} title={text.replaySpeed}>
-                    <option value="0.5">0.5x</option>
-                    <option value="1">1x</option>
-                    <option value="2">2x</option>
-                    <option value="4">4x</option>
-                    <option value="10">10x</option>
-                    <option value="20">20x</option>
-                    <option value="50">50x</option>
-                    <option value="100">100x</option>
-                  </select>
-                  <button className="systematic-lab__icon-button" type="button" onClick={() => onReplayIndex(Math.max(1, absoluteReplayIndex - 1), true)} disabled={replayPageLoading || absoluteReplayIndex <= 1} title={text.previousBar} aria-label={text.previousBar}><ChevronLeft size={16} /></button>
-                  <input
-                    type="range"
-                    min={1}
-                    max={replayTotalBarCount}
-                    value={absoluteReplayIndex}
-                    // Never disabled while a page loads. A disabled input fires no
-                    // pointerup, so disabling mid-drag stranded the drag state as
-                    // "still dragging" and the timeline could not be moved again.
-                    onPointerDown={() => onReplayRangeDragging(true)}
-                    onChange={(event) => onReplayIndex(Number(event.target.value))}
-                    onPointerUp={(event) => {
-                      onReplayRangeDragging(false);
-                      onReplayIndex(Number(event.currentTarget.value), true);
-                    }}
-                    onPointerCancel={(event) => {
-                      onReplayRangeDragging(false);
-                      onReplayIndex(Number(event.currentTarget.value), true);
-                    }}
-                    onKeyUp={(event) => {
-                      if (["ArrowLeft", "ArrowRight", "Home", "End", "PageUp", "PageDown"].includes(event.key)) {
-                        onReplayIndex(Number(event.currentTarget.value), true);
-                      }
-                    }}
-                    aria-label={text.replay}
-                  />
-                  <button className="systematic-lab__icon-button" type="button" onClick={() => onReplayIndex(Math.min(replayTotalBarCount, absoluteReplayIndex + 1), true)} disabled={replayPageLoading || absoluteReplayIndex >= replayTotalBarCount} title={text.nextBar} aria-label={text.nextBar}><ChevronRight size={16} /></button>
-                  <span>{formatLocalizedNumber(absoluteReplayIndex)} / {formatLocalizedNumber(replayTotalBarCount)}</span>
-                  {replayPageLoading ? <span className="systematic-lab-replay-controls__loading" role="status" title={text.loadingReplayPage} aria-label={text.loadingReplayPage}><LoaderCircle size={13} className="is-spinning" /></span> : null}
-                  <strong>{replayPageLoading ? text.loadingReplayPage : visibleBar ? formatRunTime(visibleBar.time * 1_000) : "--"}</strong>
-                </div>
-                <div className="systematic-lab-review-insights">
-                  <div className="systematic-lab-equity-stage">
-                    <div className="systematic-lab-equity-stage__head"><span>{text.equityCurve}</span><div><span>{text.maxDrawdown} <b>{formatPnlUsdt(-(metrics?.maxDrawdownUsdt ?? 0))}</b></span><strong>{formatUsdt(replaySnapshot?.equityUsdt)}</strong></div></div>
-                    <div className="systematic-lab-equity-stage__equity">{report.equitySeriesArchived ? <p className="systematic-lab-equity-stage__archived">{text.equitySeriesArchived}</p> : <SystematicEquityChart points={report.equityCurve} negative={(metrics?.netPnlUsdt ?? 0) < 0} label={`${text.equityCurve} / ${text.maxDrawdown}`} cursorTimeMs={replayTimeMs} />}</div>
-                  </div>
-                  <BacktestStatisticsPanel text={text} report={report} />
-                </div>
-              </>
+            {theaterDetail ? (
+              <ReplayTheater key={`${theaterDetail.run.id}:${theaterDetail.report?.reportHash ?? ""}`} run={selectedRun} detail={theaterDetail} chinese={chinese} />
             ) : selectedRun.status === "completed" && !loading ? <EmptyState icon={<BarChart3 size={20} />} title={text.resultUnavailable} detail={text.resultUnavailableDetail} /> : null}
             {selectedRun.error ? <div className="systematic-lab__error-notice"><AlertTriangle size={15} /> {selectedRun.error}</div> : null}
           </>
         ) : <EmptyState icon={<History size={20} />} title={text.noRuns} detail={text.noRunsDetail} />}
       </main>
-      <aside className="systematic-lab-trade-ledger">
-        <div className="systematic-lab__pane-head systematic-lab-account-tabs" role="tablist" aria-label={text.replayAccount}>
-          <button type="button" role="tab" aria-selected={accountTab === "ledger"} className={accountTab === "ledger" ? "is-active" : ""} onClick={() => setAccountTab("ledger")} title={text.tradeLedger} aria-label={text.tradeLedger}><WalletCards size={12} /><span>{text.tradeLedger}</span></button>
-          <button type="button" role="tab" aria-selected={accountTab === "position"} className={accountTab === "position" ? "is-active" : ""} onClick={() => setAccountTab("position")} title={text.position} aria-label={text.position}><Activity size={12} /><span>{text.position}</span></button>
-          <button type="button" role="tab" aria-selected={accountTab === "history"} className={accountTab === "history" ? "is-active" : ""} onClick={() => setAccountTab("history")} title={text.positionHistory} aria-label={text.positionHistory}><History size={12} /><span>{text.positionHistory}</span></button>
-          <span className="systematic-lab__count">{accountTab === "ledger" ? replayFillCount : accountTab === "history" ? replayClosedTradeCount : replaySnapshot?.position ? 1 : 0}</span>
-        </div>
-        {accountTab === "ledger" ? (
-          <ReplayFillLedgerPanel text={text} fills={replayFillLedger} visibleCount={replayFillCount} />
-        ) : accountTab === "history" ? (
-          <ReplayPositionHistoryPanel text={text} trades={replayClosedTradeLedger} visibleCount={replayClosedTradeCount} onJumpToTrade={jumpToReplayTime} />
-        ) : <ReplayPositionPanel text={text} position={replaySnapshot?.position ?? null} atTimeMs={replaySnapshot?.timeMs ?? null} />}
-      </aside>
+      {theaterDetail ? null : (
+        <aside className="systematic-lab-trade-ledger">
+          <div className="systematic-lab__pane-head systematic-lab-account-tabs" role="tablist" aria-label={text.replayAccount}>
+            <button type="button" role="tab" aria-selected={accountTab === "ledger"} className={accountTab === "ledger" ? "is-active" : ""} onClick={() => setAccountTab("ledger")} title={text.tradeLedger} aria-label={text.tradeLedger}><WalletCards size={12} /><span>{text.tradeLedger}</span></button>
+            <button type="button" role="tab" aria-selected={accountTab === "position"} className={accountTab === "position" ? "is-active" : ""} onClick={() => setAccountTab("position")} title={text.position} aria-label={text.position}><Activity size={12} /><span>{text.position}</span></button>
+            <button type="button" role="tab" aria-selected={accountTab === "history"} className={accountTab === "history" ? "is-active" : ""} onClick={() => setAccountTab("history")} title={text.positionHistory} aria-label={text.positionHistory}><History size={12} /><span>{text.positionHistory}</span></button>
+            <span className="systematic-lab__count">{accountTab === "ledger" ? replayFillCount : accountTab === "history" ? replayClosedTradeCount : replaySnapshot?.position ? 1 : 0}</span>
+          </div>
+          {accountTab === "ledger" ? (
+            <ReplayFillLedgerPanel text={text} fills={replayFillLedger} visibleCount={replayFillCount} />
+          ) : accountTab === "history" ? (
+            <ReplayPositionHistoryPanel text={text} trades={replayClosedTradeLedger} visibleCount={replayClosedTradeCount} onJumpToTrade={jumpToReplayTime} />
+          ) : <ReplayPositionPanel text={text} position={replaySnapshot?.position ?? null} atTimeMs={replaySnapshot?.timeMs ?? null} />}
+        </aside>
+      )}
     </div>
   );
 }
