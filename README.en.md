@@ -5,12 +5,12 @@
 
   <p>English (current) · <a href="./README.md">简体中文</a></p>
 
-  <p><strong>An AI-native trading terminal for OKX USDT perpetual markets.</strong></p>
-  <p>Market, charts, execution, intelligence, AI assistant, automation and systematic research share one real-time state and audit context.</p>
+  <p><strong>An open-source, AI-native quant trading workstation for OKX.</strong></p>
+  <p>A Windows and macOS desktop app for OKX crypto markets. Charting, order entry, an AI trading assistant, AI trading automation behind code-enforced risk gates, and Python strategy backtesting share one live state and audit trail.</p>
 
   <p>
-    <strong><a href="https://desicterminal.cn/">Official Website</a></strong>
-    · <a href="https://desicterminal.cn/#download">Download</a>
+    <strong><a href="https://desicterminal.com/">Official Website</a></strong>
+    · <a href="https://desicterminal.com/#download">Download</a>
     · <a href="https://github.com/xiazhi88/Desic-Terminal/releases">Releases</a>
   </p>
 
@@ -29,12 +29,13 @@
     <a href="#core-capabilities">Capabilities</a> ·
     <a href="#market-radar">Market Radar</a> ·
     <a href="#safety-and-execution-principles">Safety</a> ·
+    <a href="#faq">FAQ</a> ·
     <a href="#development">Development</a> ·
     <a href="#community-and-support">Community</a>
   </p>
 </div>
 
-[![Desic Terminal trading workspace](docs/assets/readme/trading-workspace.png)](https://desicterminal.cn/)
+<p align="center"><img src="docs/assets/readme/hero.gif" width="100%" alt="Desic Terminal in action: order flow, AI evidence ledger, market constellation, parameter terrain and watch pulse (demo data)" /></p>
 
 ## Installation
 
@@ -60,6 +61,7 @@ See [GitHub Releases](https://github.com/xiazhi88/Desic-Terminal/releases) for r
 | 🤖 [**AI Automation Guide**](docs/ai-automation-guide.en.md) | Profiles, wake conditions, Skill versioning, multi-agent orchestration, reviews and iteration |
 | 📈 [**Systematic Strategy Guide**](docs/systematic-strategy-guide.en.md) | Python strategy programming, backtesting, parameter tuning and live Profiles |
 | 🔧 [Strategy Protocol](docs/systematic-python-strategy-protocol.md) | The authoritative runtime protocol, source policy and safety boundary (Chinese) |
+| ❓ [FAQ](docs/faq.en.md) | Automated trading, AI permissions, supported exchanges and models, key storage, and how it compares with other open-source projects |
 | 🏗 [Product Spec](PRODUCT.md) | Product boundaries and key design decisions (Chinese) |
 
 ## Core Capabilities
@@ -179,6 +181,40 @@ src-tauri/crates/            Trading domain, chart DSL, intelligence and automat
 scripts/                     AI sidecar, provider adapters, strategy tests and smoke suites
 docs/                        User guides and development documentation
 ```
+
+## FAQ
+
+**What is Desic Terminal?**
+An open-source (MIT), AI-native quant trading workstation for OKX crypto markets: a Windows and macOS desktop app; trading currently covers OKX USDT perpetual swaps. Charting, order entry, an AI trading assistant, AI trading automation behind code-enforced risk gates, and Python strategy backtesting share one live state and audit trail. Market history, audit records and credentials stay on your machine.
+
+**Can it trade automatically?**
+Yes, but not by default. An AI automation Profile in `limited_auto` mode can submit orders only within its authorized scope, and a backtested Python strategy can run as a live Profile. Start with the read-only `advisor` mode on a demo account.
+
+**Can the AI place orders on its own?**
+Permissions are enforced in code, not prompts — see [Safety](#safety-and-execution-principles). Delegated sub-agents are always read-only, and risk-increasing actions fail closed when an outcome is uncertain.
+
+**Which exchanges are supported?**
+Only OKX USDT linear perpetuals, on demo and live accounts. Multiple exchanges, spot, options and mobile are not supported.
+
+**Do I need to buy a model API key?**
+No. Besides 10 model providers and custom compatible endpoints, you can delegate to the Codex CLI or Claude Code already signed in on your machine.
+
+**Where are API keys stored?**
+In a local `config/accounts.local.json` (mode 0600 on macOS and Linux). It is a plaintext local file, not encrypted storage, and it is never uploaded anywhere. Never grant withdrawal permission to the key.
+
+### How it compares with other open-source projects
+
+| Project | Form | Choose it when you need |
+| --- | --- | --- |
+| **Desic Terminal** | Desktop GUI terminal (Tauri / Rust / React) | One graphical workspace for OKX perpetual charting, trading and strategy research, with AI assisting or executing inside code-enforced limits |
+| [Freqtrade](https://github.com/freqtrade/freqtrade) | Python trading bot | A multi-exchange crypto strategy bot with backtesting and optimization |
+| [Hummingbot](https://github.com/hummingbot/hummingbot) | Python framework | Market making, arbitrage and high-frequency strategies |
+| [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) | Rust-native trading engine | High-performance, production-grade event-driven backtesting and live trading |
+| [Qlib](https://github.com/microsoft/qlib) | Python AI quant research platform | Machine-learning factor and model research |
+| [vn.py](https://github.com/vnpy/vnpy) | Python quant platform framework | Quant trading on Chinese futures and equities |
+| [TradingAgents](https://github.com/TauricResearch/TradingAgents) | Python multi-agent framework | Research into multi-agent LLM trading decisions |
+
+If you need several exchanges, spot, equities or futures, headless server deployment, or mobile, the other projects above suit you better. More answers in the [FAQ](docs/faq.en.md).
 
 ## Development
 

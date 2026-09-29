@@ -6,8 +6,8 @@
   <p><a href="./README.en.md">English</a> · 简体中文（当前）</p>
 
   <p>
-    <strong><a href="https://desicterminal.cn/">官方网站</a></strong>
-    · <a href="https://desicterminal.cn/#download">官网下载</a>
+    <strong><a href="https://desicterminal.com/">官方网站</a></strong>
+    · <a href="https://desicterminal.com/#download">官网下载</a>
     · <a href="https://github.com/xiazhi88/Desic-Terminal/releases">版本发布</a>
     · <a href="docs/getting-started.md">入门教程</a>
   </p>
@@ -21,8 +21,8 @@
     <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-3DA639" />
   </p>
 
-  <p><strong>AI 原生的 OKX USDT 永续合约交易终端</strong><br />
-  行情、图表、下单、市场情报、AI 助手与策略研究共享同一份实时状态与审计链路。</p>
+  <p><strong>开源的 AI 量化交易工作台（对接 OKX）</strong><br />
+  Windows / macOS 桌面应用：看盘、下单、AI 交易助手、带风控闸门的 AI 自动交易与 Python 策略回测，共用一份实时状态与审计链路。</p>
 
   <p>
     <a href="#安装">安装</a> ·
@@ -31,11 +31,12 @@
     <a href="#核心能力">核心能力</a> ·
     <a href="#市场雷达">市场雷达</a> ·
     <a href="#ai-与交易的边界">AI 与交易的边界</a> ·
+    <a href="#常见问题">常见问题</a> ·
     <a href="#开发">开发</a>
   </p>
 </div>
 
-[![Desic Terminal 交易工作台](docs/assets/readme/trading-workspace.png)](docs/assets/readme/trading-workspace.png)
+<p align="center"><img src="docs/assets/readme/hero.gif" width="100%" alt="Desic Terminal 真实界面：订单流、AI 证据天平、市场星图、参数地形图、值守心电图（演示数据）" /></p>
 
 ## 三十秒上手
 
@@ -90,6 +91,7 @@
 | 🤖 [**AI 自动化指南**](docs/ai-automation-guide.md) | Profile、唤醒条件、Skill 版本、Agent 库与勾选制编排、复盘与迭代的完整使用指导 |
 | 📈 [**系统化策略指南**](docs/systematic-strategy-guide.md) | Python 策略编程、回测、参数调优与实盘 Profile 的完整工作流 |
 | 🔧 [策略协议规范](docs/systematic-python-strategy-protocol.md) | 策略运行时协议、源码策略与安全边界的权威规范 |
+| ❓ [常见问题](docs/faq.md) | 能否自动交易、AI 权限、支持的交易所与模型、凭据存储、与同类开源项目的区别 |
 | 🏗 [产品规范](PRODUCT.md) | 产品边界与关键设计决策 |
 
 ## 核心能力
@@ -211,6 +213,40 @@ src-tauri/crates/            交易领域、图表 DSL、情报与自动化领�
 scripts/                     AI Sidecar、Provider 适配、策略测试与 smoke tests
 docs/                        使用文档与开发规范
 ```
+
+## 常见问题
+
+**Desic Terminal 是什么？**
+一个开源（MIT）的 AI 量化交易工作台，对接 OKX：Windows / macOS 桌面应用，交易范围目前是 OKX USDT 永续合约。看盘、下单、AI 交易助手、带风控闸门的 AI 自动交易和 Python 策略回测，都在同一份实时状态与审计链路里；行情历史、审计记录和账户凭据保存在本机。
+
+**能自动交易吗？**
+能，但默认不会。AI 自动化 Profile 在 `limited_auto` 模式下只能在授权范围内提交订单；Python 策略回测通过后可以创建实盘 Profile。建议从只读的 `advisor` 模式和模拟盘开始。
+
+**AI 会不会乱下单？**
+权限由代码决定，不由提示词决定，见 [AI 与交易的边界](#ai-与交易的边界)。被委派的子 Agent 永远只读；结果不确定时，风险增加类操作失败关闭。
+
+**支持哪些交易所？**
+目前只支持 OKX USDT 线性永续合约（模拟盘与实盘）。不支持多交易所、现货、期权和移动端。
+
+**必须买大模型 API Key 吗？**
+不必。除了 10 家模型供应商和自定义接口，也可以直接使用本机已登录的 Codex CLI 或 Claude Code。
+
+**API Key 存在哪里？**
+本机 `config/accounts.local.json`（macOS / Linux 上权限 0600），是本地明文文件而不是加密存储，不会上传到任何服务器。API Key 不要开提现权限。
+
+### 与同类开源项目的区别
+
+| 项目 | 形态 | 适合什么需求 |
+| --- | --- | --- |
+| **Desic Terminal** | 桌面图形终端（Tauri / Rust / React） | 在一个界面里完成 OKX 永续的看盘、下单和策略研究，并让 AI 在代码约束的权限内辅助或执行 |
+| [Freqtrade](https://github.com/freqtrade/freqtrade) | Python 交易机器人 | 多交易所的加密货币策略机器人、回测与参数优化 |
+| [Hummingbot](https://github.com/hummingbot/hummingbot) | Python 框架 | 做市、套利与高频策略 |
+| [vn.py](https://github.com/vnpy/vnpy) | Python 量化交易平台开发框架 | 国内期货、股票量化 |
+| [Qlib](https://github.com/microsoft/qlib) | Python AI 量化研究平台 | 机器学习因子与模型研究 |
+| [NautilusTrader](https://github.com/nautechsystems/nautilus_trader) | Rust 原生交易引擎 | 高性能、生产级的事件驱动回测与实盘 |
+| [TradingAgents](https://github.com/TauricResearch/TradingAgents) | Python 多智能体框架 | 多 Agent 大模型交易决策研究 |
+
+需要多交易所、现货、股票期货、无界面服务器部署或移动端时，上表的其他项目更合适。更多问答见 [常见问题](docs/faq.md)。
 
 ## 开发
 
