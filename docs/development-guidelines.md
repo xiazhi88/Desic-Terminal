@@ -200,6 +200,8 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - OKX K 线时间戳应保持 Unix epoch 事实值，不要为了显示 UTC+8 去改写数据本身。
 - `lightweight-charts` 默认时间轴可能按 UTC 展示；需要通过图表适配器的时间格式化器统一显示 `Asia/Shanghai` / UTC+8。
 - K 线横轴、十字光标、测距/绘图时间读数必须和成交、历史持仓、历史成交等列表的 UTC+8 展示一致。
+- 高周期 K 线聚合禁止用 `JOIN candles ON open_time = MIN(open_time) / MAX(open_time)` 自连接取“桶内首开盘 / 末收盘”。SQLite 的计划器不会把 `open_time` 作为这两次连接的索引条件（`EXPLAIN QUERY PLAN` 里只显示 `symbol=? AND interval=?`），会退化成“每个时间桶扫一遍该交易对的全历史”。2026-09-30 实测：600 行内存数据 3 秒都跑不完、真实库 150 小时窗口 300 秒无返回。统一改用单遍窗口函数聚合（`ROW_NUMBER() OVER (PARTITION BY bucket_start ORDER BY open_time)` + 条件聚合 `MAX(CASE WHEN rn_first = 1 THEN o END)`），实测 19~36 ms 返回 300 根。（2026-10-01）
+- 图表 K 线读取不得依赖“调用方 10 秒超时放弃、后台 `std::thread` 继续跑”的模式：std 线程无法取消，任何一次慢查询都会留下永久占核的 `chart-kline-read-*` 线程，前端每次刷新或切周期就再积一个。上面那条聚合查询病态时，主进程 CPU 从 2 核线性爬到 14 核（整机 88%）。新增或修改读取路径时必须先保证单次读取能在超时内完成，或改为可取消、带并发上限的执行方式。（2026-10-01）
 
 ## 9. AI / Cline SDK
 

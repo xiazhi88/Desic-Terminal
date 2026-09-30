@@ -1166,14 +1166,25 @@ async fn run_public_ws(
                     let frame_wait_ms = frame_arrived_at_ms.saturating_sub(probe_issued_at_ms);
                     last_received = Instant::now();
                     if text != "pong" {
-                        let delay_ms = public_message_delay_ms(&runtime, &text);
-                        if let Some(message) = websocket_event_error(&text) {
+                        // 热路径：整条报文只解析一次，后续判定与业务处理全部复用这一份 Value。
+                        // 解析失败时与原逻辑等价：delay/payload 视为空，业务处理同样不做。
+                        let parsed = serde_json::from_str::<serde_json::Value>(&text).ok();
+                        let delay_ms = parsed
+                            .as_ref()
+                            .and_then(|value| public_message_delay_ms(&runtime, value));
+                        if let Some(message) = parsed
+                            .as_ref()
+                            .and_then(websocket_event_error_value)
+                        {
                             return Err(message);
                         }
-                        let has_payload = public_message_has_payload(&text);
+                        let has_payload = parsed
+                            .as_ref()
+                            .is_some_and(public_message_has_payload_value);
                         if kind == PublicStreamKind::Meta && has_payload {
-                            if let Some((channel, inst_id, newest_ts)) =
-                                public_frame_channel_reading(&text)
+                            if let Some((channel, inst_id, newest_ts)) = parsed
+                                .as_ref()
+                                .and_then(public_frame_channel_reading_value)
                             {
                                 record_public_channel_reading(
                                     &runtime,
@@ -1199,7 +1210,11 @@ async fn run_public_ws(
                         } else if has_payload && delay_ms.is_some() {
                             stale_data_messages = 0;
                         }
-                        if let PublicMessageAction::Resubscribe(symbol) = handle_public_message(&app, &runtime, &text, &mut render_buffer) {
+                        let action = parsed
+                            .as_ref()
+                            .map(|value| handle_public_message(&app, &runtime, value, &mut render_buffer))
+                            .unwrap_or(PublicMessageAction::Continue);
+                        if let PublicMessageAction::Resubscribe(symbol) = action {
                             emit_market(&app, MarketEvent::Status { status: format!("{} {} resubscribing", stream_id, symbol) });
                             let arg = json!({ "channel": "books", "instId": symbol });
                             socket.send(Message::Text(json!({ "op": "unsubscribe", "args": [&arg] }).to_string())).await.map_err(|err| err.to_string())?;
@@ -1394,10 +1409,18 @@ fn data_recovery_action(
     }
 }
 
+#[cfg(test)]
 fn public_message_has_payload(text: &str) -> bool {
     serde_json::from_str::<serde_json::Value>(text)
         .ok()
-        .and_then(|value| value.get("data").and_then(|data| data.as_array()).cloned())
+        .is_some_and(|value| public_message_has_payload_value(&value))
+}
+
+/// 已解析帧版本：热路径上同一条报文只解析一次，这里不再重复解析、也不克隆 data 数组。
+fn public_message_has_payload_value(value: &serde_json::Value) -> bool {
+    value
+        .get("data")
+        .and_then(|data| data.as_array())
         .is_some_and(|data| !data.is_empty())
 }
 
@@ -1975,6 +1998,11 @@ fn private_subscription_succeeded(text: &str) -> bool {
 
 fn websocket_event_error(text: &str) -> Option<String> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    websocket_event_error_value(&value)
+}
+
+/// 已解析帧版本：避免热路径上对同一条报文重复解析。
+fn websocket_event_error_value(value: &serde_json::Value) -> Option<String> {
     if value.get("event").and_then(|event| event.as_str()) != Some("error") {
         return None;
     }
@@ -2032,12 +2060,9 @@ pub async fn send_private_trade_command(
 fn handle_public_message(
     app: &tauri::AppHandle,
     runtime: &MarketRuntime,
-    text: &str,
+    value: &serde_json::Value,
     render_buffer: &mut PublicRenderBuffer,
 ) -> PublicMessageAction {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
-        return PublicMessageAction::Continue;
-    };
     if let Some(event) = value.get("event").and_then(|event| event.as_str()) {
         if event == "error" {
             let message = value
@@ -2071,7 +2096,7 @@ fn handle_public_message(
     match channel {
         "tickers" => {
             if let Some(raw) = data.first() {
-                if let Ok(ticker) = serde_json::from_value::<Ticker>(raw.clone()) {
+                if let Ok(ticker) = <Ticker as serde::Deserialize>::deserialize(raw) {
                     update_public_health(runtime, ticker.ts);
                     if let Ok(mut store) = runtime.store.lock() {
                         store.ticker = Some(ticker.clone());
@@ -2128,7 +2153,7 @@ fn handle_public_message(
         "trades" | "trades-all" => {
             let inst_id = arg_inst_id.clone().unwrap_or_default();
             for raw in data {
-                if let Ok(trade) = serde_json::from_value::<Trade>(raw.clone()) {
+                if let Ok(trade) = <Trade as serde::Deserialize>::deserialize(raw) {
                     update_public_health(runtime, trade.ts);
                     cache_trade(runtime, &inst_id, &trade);
                     if public_render_event_is_fresh(runtime, trade.ts) {
@@ -2139,7 +2164,7 @@ fn handle_public_message(
         }
         "funding-rate" => {
             if let Some(raw) = data.first() {
-                if let Ok(funding) = serde_json::from_value::<FundingRate>(raw.clone()) {
+                if let Ok(funding) = <FundingRate as serde::Deserialize>::deserialize(raw) {
                     let inst_id = if funding.inst_id.is_empty() {
                         arg_inst_id.clone().unwrap_or_default()
                     } else {
@@ -3154,28 +3179,32 @@ fn public_channel_age_is_fresher(
 
 /// Extracts `(channel, instId, newest ts)` from a meta frame. These are the only
 /// meta channels the tooltip reports separately.
+#[cfg(test)]
 fn public_frame_channel_reading(text: &str) -> Option<(String, String, i64)> {
     let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    public_frame_channel_reading_value(&value)
+}
+
+/// 已解析帧版本：避免热路径上对同一条报文重复解析。
+fn public_frame_channel_reading_value(value: &serde_json::Value) -> Option<(String, String, i64)> {
     let channel = value
         .get("arg")
         .and_then(|arg| arg.get("channel"))
-        .and_then(|channel| channel.as_str())?
-        .to_string();
+        .and_then(|channel| channel.as_str())?;
     if channel != "tickers" && channel != "trades" && channel != "trades-all" {
         return None;
     }
     let inst_id = value
         .get("arg")
         .and_then(|arg| arg.get("instId"))
-        .and_then(|inst_id| inst_id.as_str())?
-        .to_string();
+        .and_then(|inst_id| inst_id.as_str())?;
     let newest_ts = value
         .get("data")
         .and_then(|data| data.as_array())?
         .iter()
         .filter_map(public_message_timestamp)
         .max()?;
-    Some((channel, inst_id, newest_ts))
+    Some((channel.to_string(), inst_id.to_string(), newest_ts))
 }
 
 /// Records the newest `ts` and local arrival time for one meta channel. Ages are
@@ -3405,8 +3434,7 @@ fn private_event_timestamp_is_recent(runtime: &MarketRuntime, event_time_ms: i64
         && event_time_ms <= okx_now.saturating_add(60_000)
 }
 
-fn public_message_delay_ms(runtime: &MarketRuntime, text: &str) -> Option<i64> {
-    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+fn public_message_delay_ms(runtime: &MarketRuntime, value: &serde_json::Value) -> Option<i64> {
     let timestamp = value
         .get("data")
         .and_then(|data| data.as_array())?

@@ -23726,21 +23726,33 @@ fn local_candles_aggregated(
     let expected = (step_ms / 60_000).max(1);
     let mut stmt = conn
         .prepare_cached(
-            "WITH buckets AS (
-               SELECT (open_time / ?4) * ?4 AS bucket_start,
-                      MIN(open_time) AS first_open, MAX(open_time) AS last_open,
-                      MAX(CAST(high AS REAL)) AS high, MIN(CAST(low AS REAL)) AS low,
-                      SUM(CAST(volume AS REAL)) AS volume, COUNT(*) AS rows, MIN(confirm) AS all_confirmed
+            // 单遍窗口函数聚合：不再用 `JOIN candles o/c ON open_time = MIN/MAX(open_time)` 取桶内首开/末收。
+            // 那两句自连接的查询计划里 open_time 不作为索引条件（EXPLAIN QUERY PLAN 显示只有
+            // symbol=? AND interval=?），退化成每个桶扫全 symbol 历史，实测连 600 行内存数据都跑不完，
+            // 每次切周期都会留下一个永不返回的 chart-kline-read 线程持续烧 CPU。
+            "WITH src AS (
+               SELECT (open_time / ?4) * ?4 AS bucket_start, open_time,
+                      CAST(open AS REAL) AS o, CAST(high AS REAL) AS h, CAST(low AS REAL) AS l,
+                      CAST(close AS REAL) AS c, CAST(volume AS REAL) AS v, confirm
                FROM candles
                WHERE symbol = ?1 AND interval = '1m' AND open_time >= ?2 AND open_time <= ?3
-               GROUP BY bucket_start
+             ),
+             ranked AS (
+               SELECT bucket_start, open_time, o, h, l, c, v, confirm,
+                      ROW_NUMBER() OVER (PARTITION BY bucket_start ORDER BY open_time ASC)  AS rn_first,
+                      ROW_NUMBER() OVER (PARTITION BY bucket_start ORDER BY open_time DESC) AS rn_last
+               FROM src
              )
-             SELECT b.bucket_start, CAST(o.open AS REAL), b.high, b.low, CAST(c.close AS REAL), b.volume,
-                    b.rows, b.first_open, b.last_open, b.all_confirmed
-             FROM buckets b
-             JOIN candles o ON o.symbol = ?1 AND o.interval = '1m' AND o.open_time = b.first_open
-             JOIN candles c ON c.symbol = ?1 AND c.interval = '1m' AND c.open_time = b.last_open
-             ORDER BY b.bucket_start ASC",
+             SELECT bucket_start,
+                    MAX(CASE WHEN rn_first = 1 THEN o END) AS open,
+                    MAX(h) AS high, MIN(l) AS low,
+                    MAX(CASE WHEN rn_last = 1 THEN c END) AS close,
+                    SUM(v) AS volume, COUNT(*) AS rows,
+                    MIN(open_time) AS first_open, MAX(open_time) AS last_open,
+                    MIN(confirm) AS all_confirmed
+             FROM ranked
+             GROUP BY bucket_start
+             ORDER BY bucket_start ASC",
         )
         .map_err(|err| err.to_string())?;
     let mut scanned = 0usize;
