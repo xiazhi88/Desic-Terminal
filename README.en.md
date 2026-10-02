@@ -279,6 +279,10 @@ QQ group: `781180447`
 
 <img src="docs/assets/readme/qq-group.png" width="280" alt="Desic Terminal QQ group QR code, group 781180447" />
 
+### LINUX DO
+
+This project actively participates in and endorses the [LINUX DO community](https://linux.do).
+
 ### OKX Referral
 
 Register through the **[OKX referral link](https://www.okx.com/zh-hans/join/xiazhi?shortCode=6CngT5)** and meet the campaign rules for up to 15% rebate. Eligibility, ratio and validity are subject to the rules shown on the OKX page.

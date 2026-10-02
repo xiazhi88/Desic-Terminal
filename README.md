@@ -311,6 +311,10 @@ QQ群：`781180447`
 
 <img src="docs/assets/readme/qq-group.png" width="280" alt="Desic Terminal QQ 群二维码，群号 781180447" />
 
+### LINUX DO
+
+本项目积极参与并认可 [LINUX DO 社区](https://linux.do)。
+
 ### OKX 专属邀请
 
 通过 **[OKX 专属注册链接](https://www.okx.com/zh-hans/join/xiazhi?shortCode=6CngT5)** 注册并满足活动规则，可享 15% 返佣。具体资格、比例和有效期以 OKX 页面展示的规则为准。
