@@ -6,23 +6,29 @@
 .chart-orderflow-legend {
   position: absolute;
   z-index: 6;
-  /* 放在主图左上（OHLC 读数下方、绘图工具栏右侧），不遮挡底部的 CVD 副图。 */
-  top: 64px;
+  /* 主图左上（OHLC 读数下方、绘图工具栏右侧）一行小字：只占一条窄带，不再用大面板遮住 K 线。 */
+  top: 56px;
   left: 64px;
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px 12px;
+  gap: 10px;
   max-width: calc(100% - 96px);
-  padding: 6px 10px;
-  border: 1px solid rgba(200, 200, 230, 0.12);
-  border-radius: 6px;
-  background: rgba(6, 7, 11, 0.82);
-  color: var(--muted);
-  font-size: 11px;
-  pointer-events: auto;
-  backdrop-filter: blur(6px);
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: rgba(6, 7, 11, 0.45);
+  color: var(--weak);
+  font-size: 10.5px;
+  line-height: 1.4;
+  white-space: nowrap;
+  overflow: hidden;
+  /* 不拦截鼠标：图表照常拖动、悬停；只有带说明的图例项响应悬停提示。 */
+  pointer-events: none;
+  opacity: 0.8;
+  transition: opacity 0.15s;
 }
+.chart-orderflow-legend__item { pointer-events: auto; }
+.chart-orderflow-legend:hover { opacity: 1; }
 
 .chart-orderflow-legend__item {
   display: inline-flex;
@@ -45,6 +51,8 @@
 
 .chart-orderflow-legend__note {
   color: var(--weak);
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .chart-orderflow-legend__note.is-warn {

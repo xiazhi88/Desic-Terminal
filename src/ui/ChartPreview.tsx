@@ -6,7 +6,7 @@ import { chartPositionLabel, formatChartAction, formatChartOrderLabel, formatCha
 import { DepthProfile } from "./chart/DepthProfile";
 import { buildOrderFlowPreview, buildOrderFlowPreviewCandles, startPreviewOrderBook } from "./chart/orderFlowPreview";
 
-const orderFlowPreviewMode = typeof window !== "undefined" && new URLSearchParams(window.location.search).get("orderflow") === "1";
+const orderFlowPreviewMode = typeof window !== "undefined" && /^(1|dense)$/.test(new URLSearchParams(window.location.search).get("orderflow") ?? "");
 
 export function ChartPreview() {
   const { t, i18n } = useTranslation(["trading", "chart"]);

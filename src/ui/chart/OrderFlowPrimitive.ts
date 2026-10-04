@@ -11,7 +11,7 @@ import type {
   Time
 } from "lightweight-charts";
 import type { OrderBookWall } from "../../lib/orderBookWalls";
-import type { DeltaPoint, Divergence, LiquidationMark } from "./orderFlowModel";
+import { clusterLiquidations, pickLabelledClusters, type DeltaPoint, type Divergence, type LiquidationMark } from "./orderFlowModel";
 
 // 订单流图元（挂在 K 线序列上，与价格轴 / 时间轴同一坐标系）：
 // - 底层：主动买卖差的纵向色柱与底部色带、价值区、双色成交量分布（阳线 / 阴线成交）、POC 光线；
@@ -426,30 +426,39 @@ export class OrderFlowPrimitive implements ISeriesPrimitive<Time> {
     return rest > 0 ? `${hours}${this.labels.hours}${rest}${this.labels.minutes}` : `${hours}${this.labels.hours}`;
   }
 
-  /** 清算：径向光斑 + 光环，面积 ∝ 数量；较大的清算加一道纵向光柱与数量标注，最近几根 K 线内的清算持续扩散冲击波。 */
+  /**
+   * 清算：先把屏幕上挤在一起的合并成簇（高周期下几百条会叠在同一处），再画光斑 + 光环，面积 ∝ 簇内总量；
+   * 只给最重要的少数几簇加纵向光柱与文字标注（数量 + 条数），标注之间保证不重叠；最近几根 K 线内的簇持续扩散冲击波。
+   */
   private drawLiquidations({ context, mediaSize, horizontalPixelRatio: hpr, verticalPixelRatio: vpr }: BitmapScope, mapping: TimeMapping, phase: number) {
     if (this.liquidations.length === 0) return;
-    const sizes = this.liquidations.map((mark) => mark.size).sort((left, right) => left - right);
-    const maxSize = sizes.at(-1) || 1;
-    const bigCut = sizes[Math.floor(sizes.length * 0.8)] ?? maxSize;
-    const liveSince = mapping.lastTime - mapping.interval * LIVE_LIQUIDATION_BARS;
+    const points: Array<{ x: number; y: number; mark: LiquidationMark }> = [];
     for (const mark of this.liquidations) {
       const x = mapping.xAt(mark.time);
       const y = this.y(mark.price);
       if (y === null || x < -20 || x > mediaSize.width + 20) continue;
-      const cx = x * hpr;
-      const cy = y * vpr;
-      const radius = (4 + 10 * Math.sqrt(mark.size / maxSize)) * hpr;
-      const rgb = mark.side === "long" ? ASK_RGB : BID_RGB;
-      const big = mark.size >= bigCut;
-      if (big) {
+      points.push({ x, y, mark });
+    }
+    if (points.length === 0) return;
+    const clusters = clusterLiquidations(points, 16);
+    const maxSize = clusters.reduce((best, cluster) => Math.max(best, cluster.size), 1);
+    const labelled = pickLabelledClusters(clusters, { max: 4, gapX: 120, gapY: 22, minShare: 0.3 });
+    const liveSince = mapping.lastTime - mapping.interval * LIVE_LIQUIDATION_BARS;
+    // 小的先画、大的后画，大簇不会被小簇盖住。
+    for (const cluster of [...clusters].sort((left, right) => left.size - right.size)) {
+      const cx = cluster.x * hpr;
+      const cy = cluster.y * vpr;
+      const radius = (4 + 10 * Math.sqrt(cluster.size / maxSize)) * hpr;
+      const rgb = cluster.side === "long" ? ASK_RGB : BID_RGB;
+      const emphasised = labelled.has(cluster);
+      if (emphasised) {
         const beam = context.createLinearGradient(0, 0, 0, mediaSize.height * vpr);
-        const at = Math.max(0, Math.min(1, y / mediaSize.height));
+        const at = Math.max(0, Math.min(1, cluster.y / mediaSize.height));
         beam.addColorStop(0, `rgba(${rgb}, 0)`);
-        beam.addColorStop(at, `rgba(${rgb}, 0.32)`);
+        beam.addColorStop(at, `rgba(${rgb}, 0.24)`);
         beam.addColorStop(1, `rgba(${rgb}, 0)`);
         context.fillStyle = beam;
-        context.fillRect(cx - 1.5 * hpr, 0, 3 * hpr, mediaSize.height * vpr);
+        context.fillRect(cx - 1 * hpr, 0, 2 * hpr, mediaSize.height * vpr);
       }
       const glow = context.createRadialGradient(cx, cy, 0, cx, cy, radius * 2.4);
       glow.addColorStop(0, `rgba(${rgb}, 0.6)`);
@@ -468,7 +477,7 @@ export class OrderFlowPrimitive implements ISeriesPrimitive<Time> {
       context.beginPath();
       context.arc(cx, cy, Math.max(1.2 * hpr, radius * 0.18), 0, Math.PI * 2);
       context.fill();
-      if (mark.time >= liveSince) {
+      if (cluster.time >= liveSince) {
         for (const offset of [0, 0.5]) {
           const progress = (phase / 1.6 + offset) % 1;
           context.lineWidth = (2 - 1.5 * progress) * hpr;
@@ -478,13 +487,18 @@ export class OrderFlowPrimitive implements ISeriesPrimitive<Time> {
           context.stroke();
         }
       }
-      if (big) {
-        const label = `${mark.side === "long" ? this.labels.longLiquidated : this.labels.shortLiquidated} ${compact(mark.size)}`;
-        const above = mark.side === "short";
-        context.fillStyle = `rgba(${rgb}, 1)`;
-        context.textAlign = "center";
-        context.fillText(label, cx, cy + (above ? -1 : 1) * (radius + 11 * vpr));
-      }
+    }
+    // 文字最后画：不被任何光斑盖住；水平方向夹在画布内。
+    context.textAlign = "center";
+    for (const cluster of labelled) {
+      const rgb = cluster.side === "long" ? ASK_RGB : BID_RGB;
+      const radius = (4 + 10 * Math.sqrt(cluster.size / maxSize)) * hpr;
+      const label = `${cluster.side === "long" ? this.labels.longLiquidated : this.labels.shortLiquidated} ${compact(cluster.size)}${cluster.count > 1 ? ` ×${cluster.count}` : ""}`;
+      const above = cluster.side === "short";
+      const half = context.measureText(label).width / 2 + 4 * hpr;
+      const labelX = Math.max(half, Math.min(mediaSize.width * hpr - half, cluster.x * hpr));
+      context.fillStyle = `rgba(${rgb}, 1)`;
+      context.fillText(label, labelX, cluster.y * vpr + (above ? -1 : 1) * (radius + 11 * vpr));
     }
   }
 

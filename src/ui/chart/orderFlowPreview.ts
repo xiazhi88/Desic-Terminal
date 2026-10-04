@@ -58,6 +58,21 @@ export function buildOrderFlowPreview(candles: readonly Candle[]): OrderFlowPrev
     const bias = Math.max(-0.35, Math.min(0.35, late ? (move / 400) * 0.3 - 0.05 : move / 400));
     taker.push({ ts: slice[0]!.time * 1000, buy: volume * (0.5 + bias), sell: volume * (0.5 - bias) });
   }
+  // `?orderflow=dense`：模拟真实的清算踩踏——500 条记录集中在几次连环爆仓里，用来验证高密度下的聚合与标注。
+  if (typeof window !== "undefined" && new URLSearchParams(window.location.search).get("orderflow") === "dense") {
+    const cascades = [38, 74, 112, 150, 196, 236];
+    const dense: OrderFlowPreviewData["liquidations"] = [];
+    for (let i = 0; i < 500; i += 1) {
+      const cascade = cascades[i % cascades.length]!;
+      const candle = candles[Math.min(candles.length - 1, cascade + ((i * 7) % 5))]!;
+      const long = (Math.floor(i / cascades.length) + cascade) % 3 !== 0;
+      const spread = Math.sin(i * 12.9898) * 43758.5453;
+      const noise = spread - Math.floor(spread);
+      dense.push({ time: candle.time + (i % 60), price: (long ? candle.low : candle.high) + (noise - 0.5) * 60, size: Math.max(1, Math.round(Math.exp(noise * 4.2) * (i % 17 === 0 ? 40 : 3))), side: long ? "long" : "short" });
+    }
+    dense.sort((left, right) => left.time - right.time);
+    return { profile: { bucket, levels, poc: levels[pocIndex] ? levels[pocIndex]![0] + bucket / 2 : null, valueAreaHigh: levels[highIndex] ? levels[highIndex]![0] + bucket : null, valueAreaLow: levels[lowIndex] ? levels[lowIndex]![0] : null }, taker, liquidations: dense };
+  }
   const liquidations = [40, 110, 190, 230, candles.length - 2].map((offset, position) => {
     const candle = candles[Math.min(candles.length - 1, offset)]!;
     return { time: candle.time, price: position % 2 === 0 ? candle.low : candle.high, size: 40 + position * 55, side: position % 2 === 0 ? "long" as const : "short" as const };

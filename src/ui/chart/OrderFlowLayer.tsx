@@ -344,12 +344,11 @@ export function OrderFlowLegend({ layer, text }: { layer: OrderFlowLayerState; t
       data-divergences={layer.divergenceCount}
       data-liquidations={layer.liquidationCount}
     >
-      <span className="chart-orderflow-legend__item" title={text("Volume split by candle direction (close ≥ open), not by taker side", "按 K 线方向（收 ≥ 开）拆分的成交量，不是逐笔主动买卖")}><i className="is-profile" />{text("Volume profile (up / down bars) · POC · value area", "成交量分布（阳 / 阴线）· POC · 价值区")}</span>
-      <span className="chart-orderflow-legend__item"><i className="is-delta" />{text(`Taker delta / CVD (${layer.takerPeriod})`, `主动买卖差 / CVD（${layer.takerPeriod}）`)}</span>
-      <span className="chart-orderflow-legend__item"><i className="is-wall" />{text(`Current walls ${layer.wallCount}`, `当前大单墙 ${layer.wallCount}`)}</span>
-      <span className="chart-orderflow-legend__item"><i className="is-liq" />{text(`Liquidations ${layer.liquidationCount}`, `清算 ${layer.liquidationCount}`)}</span>
-      {layer.divergenceCount > 0 ? <span className="chart-orderflow-legend__item"><i className="is-div" />{text(`Divergences ${layer.divergenceCount}`, `背离 ${layer.divergenceCount}`)}</span> : null}
-      {coverageLabel ? <span className="chart-orderflow-legend__note">{coverageLabel}</span> : null}
+      <span className="chart-orderflow-legend__item" title={`${text("Volume split by candle direction (close ≥ open), not by taker side", "按 K 线方向（收 ≥ 开）拆分的成交量，不是逐笔主动买卖")}${coverageLabel ? ` · ${coverageLabel}` : ""}`}><i className="is-profile" />{text("Profile", "成交分布")}</span>
+      <span className="chart-orderflow-legend__item" title={text(`Taker delta / CVD (${layer.takerPeriod})`, `主动买卖差 / CVD（${layer.takerPeriod}）`)}><i className="is-delta" />{text("Delta", "买卖差")}</span>
+      <span className="chart-orderflow-legend__item" title={text("Current order-book walls", "当前盘口大单墙")}><i className="is-wall" />{text("Walls", "大单墙")} {layer.wallCount}</span>
+      <span className="chart-orderflow-legend__item" title={text("Liquidations read from local data; nearby ones are merged on screen", "读取到的清算条数；屏幕上挤在一起的会合并显示")}><i className="is-liq" />{text("Liq", "清算")} {layer.liquidationCount}</span>
+      {layer.divergenceCount > 0 ? <span className="chart-orderflow-legend__item"><i className="is-div" />{text("Div", "背离")} {layer.divergenceCount}</span> : null}
       {layer.takerNotice ? <span className="chart-orderflow-legend__note is-warn">{layer.takerNotice}</span> : null}
     </div>
   );

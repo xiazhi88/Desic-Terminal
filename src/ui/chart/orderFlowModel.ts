@@ -138,3 +138,42 @@ export function parseLiquidations(items: ReadonlyArray<Record<string, unknown>>)
   }
   return out.sort((left, right) => left.time - right.time);
 }
+
+export type LiquidationCluster = { x: number; y: number; size: number; count: number; side: "long" | "short"; time: number };
+
+/**
+ * 把屏幕上挤在一起的清算合并成簇：同方向、落在同一个 `cell`×`cell`（CSS 像素）格子里的合并，
+ * 位置取按数量加权的重心，数量求和，并记下条数与最近时间。
+ * 高周期（例如 2H）下一个像素对应很长的时间，几百条清算会叠在同一处，逐条绘制只会糊成一团。
+ */
+export function clusterLiquidations(points: ReadonlyArray<{ x: number; y: number; mark: LiquidationMark }>, cell = 16): LiquidationCluster[] {
+  const buckets = new Map<string, { sx: number; sy: number; size: number; count: number; side: "long" | "short"; time: number }>();
+  for (const { x, y, mark } of points) {
+    const key = `${mark.side}|${Math.floor(x / cell)}|${Math.floor(y / cell)}`;
+    const bucket = buckets.get(key) ?? { sx: 0, sy: 0, size: 0, count: 0, side: mark.side, time: 0 };
+    bucket.sx += x * mark.size;
+    bucket.sy += y * mark.size;
+    bucket.size += mark.size;
+    bucket.count += 1;
+    bucket.time = Math.max(bucket.time, mark.time);
+    buckets.set(key, bucket);
+  }
+  return [...buckets.values()].map((bucket) => ({ x: bucket.sx / bucket.size, y: bucket.sy / bucket.size, size: bucket.size, count: bucket.count, side: bucket.side, time: bucket.time }));
+}
+
+/**
+ * 选出值得加文字标注的簇：按数量从大到小，最多 `max` 个，数量不到最大簇的 `minShare` 不标，
+ * 且与已选标注在水平 `gapX` / 垂直 `gapY` 内重叠的不标，避免文字叠成一团。
+ */
+export function pickLabelledClusters(clusters: readonly LiquidationCluster[], options: { max?: number; gapX?: number; gapY?: number; minShare?: number } = {}): Set<LiquidationCluster> {
+  const { max = 4, gapX = 110, gapY = 20, minShare = 0.3 } = options;
+  const chosen: LiquidationCluster[] = [];
+  const top = clusters.reduce((best, cluster) => Math.max(best, cluster.size), 0);
+  for (const cluster of [...clusters].sort((left, right) => right.size - left.size)) {
+    if (chosen.length >= max) break;
+    if (cluster.size < top * minShare) break;
+    if (chosen.some((other) => Math.abs(other.x - cluster.x) < gapX && Math.abs(other.y - cluster.y) < gapY)) continue;
+    chosen.push(cluster);
+  }
+  return new Set(chosen);
+}
