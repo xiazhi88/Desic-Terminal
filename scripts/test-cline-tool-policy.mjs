@@ -695,6 +695,30 @@ if (!copilotTrade.blocked || copilotTrade.policy !== "disabled:ai-direct-trade-r
   failures.push(`copilot direct trade should be denied: ${JSON.stringify(copilotTrade)}`);
 }
 
+// 交易员 Profile：带 traderMode 时，最终复核的候选可以带 setupId；不带时（经典）没有这个字段。
+{
+  const decisionSchema = (config) => {
+    const tool = createDesicTools("policy-test", config).find((item) => item?.name === "market_readDecisionContext");
+    return tool?.inputSchema?.properties?.candidate?.properties ?? {};
+  };
+  const background = { permissionMode: "limited_auto", agentRole: "main", backgroundRun: true, agentProfileId: "p", agentRunId: "r" };
+  expectTrue("trader runs may tag candidates with setupId", Boolean(decisionSchema({ ...background, traderMode: true }).setupId));
+  expectTrue("classic runs never see setupId", !decisionSchema(background).setupId);
+}
+
+// 经典模式隔离：不带 traderMode 的运行拿到的工具定义（描述 + schema）必须与快照逐字一致。
+{
+  const { classicToolSchemaHashes, readClassicToolSchemaFixture } = await import("./classic-tool-schema-snapshot.mjs");
+  const current = await classicToolSchemaHashes();
+  const expected = readClassicToolSchemaFixture();
+  for (const [scenario, tools] of Object.entries(expected)) {
+    const actual = current[scenario] ?? {};
+    for (const name of new Set([...Object.keys(tools), ...Object.keys(actual)])) {
+      if (tools[name] !== actual[name]) failures.push(`classic tool schema changed (${scenario}/${name}): ${tools[name]} -> ${actual[name]}`);
+    }
+  }
+}
+
 if (failures.length) {
   for (const failure of failures) process.stderr.write(`${failure}\n`);
   process.exit(1);

@@ -8555,6 +8555,9 @@ pub struct TradeOpportunityCreateRequest {
     pub duplicate_resolution: Option<String>,
     pub duplicate_resolution_reason: Option<String>,
     pub decision_context_id: Option<String>,
+    /// 交易员 Profile 的开仓形态（交易手册里的形态 id）。不进指纹；经典 Profile 为空。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub setup_id: Option<String>,
     #[serde(default, skip_serializing)]
     max_single_trade_margin_pct: Option<f64>,
     confirmed_live: Option<bool>,
@@ -8661,6 +8664,9 @@ pub struct TradeOpportunitySummary {
     error: Option<String>,
     created_at: i64,
     updated_at: i64,
+    /// 交易员 Profile 的开仓形态（交易手册里的形态 id）；经典 Profile 为空。
+    #[serde(default)]
+    pub setup_id: Option<String>,
     #[serde(skip_deserializing)]
     conflict: Option<TradeOpportunityConflict>,
 }
@@ -8880,6 +8886,21 @@ pub(crate) async fn read_decision_context(
     request.candidate.agent_run_id = Some(run_id.clone());
     request.candidate.decision_context_id = None;
     validate_trade_opportunity_request(&request.candidate)?;
+    // 交易员 Profile：开仓候选必须带交易手册里、未被用户暂停的形态 id（经典运行直接跳过）。
+    {
+        let conn = open_database(&app)?;
+        let reasons = crate::trader_learning::trader_open_setup_reasons(
+            &conn,
+            &run_id,
+            &request.inst_id,
+            &request.candidate.intent,
+            &request.candidate.direction,
+            request.candidate.setup_id.as_deref(),
+        );
+        if !reasons.is_empty() {
+            return Err(reasons.join("；"));
+        }
+    }
     let fingerprint = trade_opportunity_fingerprint(&request.candidate)?;
     let captured_at = now_ms();
     let expires_at = captured_at.saturating_add(DECISION_CONTEXT_TTL_MS);
@@ -10236,6 +10257,7 @@ async fn build_trade_opportunity(
         },
         created_at: now,
         updated_at: now,
+        setup_id: optional_string(request.setup_id),
         conflict: None,
     })
 }
@@ -11127,8 +11149,8 @@ fn save_trade_opportunity(conn: &Connection, item: &TradeOpportunitySummary) -> 
           reason, source_session_id, origin_type, strategy_kind, strategy_id, strategy_version_id,
           strategy_run_id, signal_id, factor_pool_version_id, revision, fingerprint, expires_at, agent_profile_id, agent_run_id,
           related_opportunity_id, duplicate_resolution, duplicate_resolution_reason, decision_context_id, execution_key, status, estimated_margin, estimated_fee, available_usdt, precheck_json,
-          market_snapshot_json, execution_result_json, order_id, client_order_id, algo_id, algo_client_order_id, error, created_at, updated_at, exit_kind, close_fraction
-        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58)",
+          market_snapshot_json, execution_result_json, order_id, client_order_id, algo_id, algo_client_order_id, error, created_at, updated_at, exit_kind, close_fraction, setup_id
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32, ?33, ?34, ?35, ?36, ?37, ?38, ?39, ?40, ?41, ?42, ?43, ?44, ?45, ?46, ?47, ?48, ?49, ?50, ?51, ?52, ?53, ?54, ?55, ?56, ?57, ?58, ?59)",
         params![
             item.id,
             item.account_id,
@@ -11188,6 +11210,7 @@ fn save_trade_opportunity(conn: &Connection, item: &TradeOpportunitySummary) -> 
             item.updated_at,
             item.exit_kind,
             item.close_fraction,
+            item.setup_id,
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -11408,6 +11431,8 @@ fn trade_opportunity_from_row(
         error: row.get("error")?,
         created_at: row.get("created_at")?,
         updated_at: row.get("updated_at")?,
+        // 老库在列迁移前读不到这一列：读不到按空处理。
+        setup_id: row.get::<_, Option<String>>("setup_id").ok().flatten(),
         conflict: None,
     })
 }
@@ -11896,6 +11921,7 @@ mod idempotency_tests {
             duplicate_resolution: None,
             duplicate_resolution_reason: None,
             decision_context_id: Some("decision-1".to_string()),
+            setup_id: None,
             max_single_trade_margin_pct: Some(30.0),
             confirmed_live: None,
         }
@@ -12329,7 +12355,7 @@ mod idempotency_tests {
         conn.execute_batch(
             "CREATE TABLE trade_opportunities (
                id TEXT PRIMARY KEY,account_id TEXT,environment TEXT NOT NULL,inst_id TEXT NOT NULL,
-               td_mode TEXT NOT NULL,intent TEXT NOT NULL,exit_kind TEXT,close_fraction TEXT,direction TEXT NOT NULL,ticket_mode TEXT NOT NULL,
+               td_mode TEXT NOT NULL,intent TEXT NOT NULL,exit_kind TEXT,close_fraction TEXT,setup_id TEXT,direction TEXT NOT NULL,ticket_mode TEXT NOT NULL,
                action TEXT NOT NULL,order_type TEXT NOT NULL,price TEXT,size TEXT NOT NULL,lever TEXT,
                entry_condition TEXT,take_profit_json TEXT,stop_loss_json TEXT,invalidation_price TEXT,
                max_slippage_bps REAL,confidence REAL,time_horizon TEXT,strategy_name TEXT,evidence_json TEXT,

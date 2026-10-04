@@ -318,6 +318,15 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 简报纯渲染在 `crates/agent-automation/src/briefing.rs`（缺失写「不可用」不写 0，超长按优先级整段丢弃，账户与风险预算永不丢）；取数在 `src-tauri/src/ai_briefing.rs`，复用快判纯函数（`structure_view` / `atr14` / `aggregate_bars` / `micro_from_orderbook` / `volatility_regime`）与既有读取函数，整份 8 秒时限、各块独立失败。库里的事实先同步读完再进入异步取数，连接不跨 await。本地衍生品数据超过 30 分钟未更新时不算变化；一小时内没有爆仓样本时写「不可用」（区分不了「没有」和「没采集」）；爆仓只数笔数，不换算金额（样本数量单位不统一）。
 - 工具白名单 `BRIEFING_TOOL_ALLOWLIST` 由 `run_ai_stream` 在后台运行没有显式白名单、且运行模式为 briefing 时套用，侧车 `toolAllowlist` 与 Rust `authorize_ai_tool` 共用同一份；有测试读侧车源码确认名单里都是真实工具。往名单里加工具前先想清楚它会不会把大块数据重新带回上下文（例如 `tradeOpportunity.list` 原样返回全部机会，实测平均约 25 万字符一次）。
 - 简报正文与审计（字符数、生成耗时、缺失块）存在 `initial_market_snapshot_json.briefing`，运行详情直接展示。
+- **经典 AI Profile 隔离（硬性要求）**：交易员 Profile 的任何改动都不能改变经典 Profile 的提示词、技能载荷与工具定义。有两道快照守着：
+  - Rust `classic_profile_run_prompt_is_unchanged`：普通运行的用户提示词已抽成 `profile_run_prompt`，固定输入下比对中英文哈希。
+  - 侧车 `scripts/classic-tool-schema-snapshot.mjs`：经典配置下每个工具的「描述 + schema」哈希，`npm run test:ai-policy` 会比对。
+
+  只有**有意**修改经典模式时，才更新哈希（`node scripts/classic-tool-schema-snapshot.mjs --write`）。交易员专用的工具字段一律通过运行载荷里的 `traderMode` 开关：Rust 只在交易员运行里插入这个键，经典运行和交互会话**不带这个键**，否则会话配置指纹会变，旧会话会报「配置已变化」。
+- 交易员运行的技能载荷由 `trader_learning::apply_trader_skills` 处理：把 `desic-core-operations` 的正文换成 `trader_core_operations`（侧车按这个 id 注入固定规范，所以不用改侧车），并去掉 `trading-philosophy`、情报、雷达、调度这 4 个技能。
+- 交易手册存在 `ai_trader_handbooks` 表，只读最新已发布版本；表里读不到时回退内置 v1，交易员运行不会因为手册缺失而失败。手册的纯逻辑在 `crates/agent-automation/src/handbook.rs`。方向纪律是软规则，代码不拦；只有用户手动暂停的形态才由后端拒绝。
+- `trade_opportunities.setup_id` **不进指纹**，否则所有旧机会都无法复用。形态校验在 `read_decision_context` 里，只对交易员运行的开仓生效（`trader_open_setup_reasons` 用入队时冻结的 `ai_agent_runs.context_mode` 判断）。手写 `trade_opportunities` 建表语句的测试夹具也要带上这一列。
+- 简报的 1h / 4h / 1D 一律用 `local_candles_aggregated` 从本地 1m 聚合（10 / 30 / 200 天）。拼接 1m 窗口的方式只覆盖约 3.5 天，4h EMA50 和日线阶段会一直不可用。历史不够时 `request_history_backfill` 会在后台静默补最近 30 天，同一品种 6 小时内只补一次。日线阶段（上升 / 下降 / 不明）由代码计算并写进审计的 `regimes`，供形态校验和成绩单分组使用。
 - 盘口格式踩坑（2026-10-05 真机）：内存盘口的档位是 `{px, sz, orders}` 字符串对象，REST 是字符串数组，永续的 `sz` 是**张数**；快判的 `micro_from_orderbook` 只认 `[f64, f64]` 且把 `sz` 当币数，导致简报盘口每次都「不可用」。简报用 `book_levels_in_coin` 先统一格式并乘面值；**快判模式开启前必须同样修正**，否则它的盘口门永远不通过、深度金额差 1/ctVal 倍。
 - 简报的事件只留与关注币种相关、或至少两个来源报道的新闻；`importance=high` 的单一来源资讯（模型发布、个人言论）很多，不过滤会挤占简报并误导判断。
 - 真机观察（3 轮）：输入 token 10–30 万、耗时 33–147 秒（经典模式中位数 207 万 / 225 秒）。剩下的大头是 `market.readIndicators`（每次 3.5–3.9 万字符）和 `tradeOpportunity.get`（约 1.7 万字符，已移出白名单）；简报因此补了 EMA / MACD / 布林。新增白名单工具前先看它单次返回多大。

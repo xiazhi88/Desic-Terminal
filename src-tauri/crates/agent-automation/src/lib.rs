@@ -1,6 +1,9 @@
 mod agent_draft;
 mod agents;
 mod briefing;
+mod handbook;
+mod regime;
+mod trader_spec;
 mod builtin_bodies;
 mod draft_content;
 mod usage;
@@ -48,6 +51,12 @@ pub use briefing::{
     BriefingOpportunity, BriefingOrder, BriefingPosition, BriefingSizing, BriefingSymbol,
     BriefingTimeframe, BRIEFING_MAX_CHARS,
 };
+pub use handbook::{
+    default_handbook, direction_policy_flags, find_setup, paused_entry, render_handbook, validate_handbook,
+    Handbook, HandbookRule, HandbookSetup, PausedSetup,
+};
+pub use regime::{change_pct, daily_regime, ema_last, DailyRegime};
+pub use trader_spec::{trader_core_operations, TRADER_CORE_NAME, TRADER_CORE_RULES};
 pub use usage::{
     build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,
     AI_USAGE_SCHEMA_VERSION,

@@ -38,6 +38,7 @@ mod agent_library;
 mod ai_automation;
 mod ai_research_ledger;
 mod ai_briefing;
+mod trader_learning;
 mod ai_risk_gate;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
@@ -14513,6 +14514,14 @@ async fn run_ai_stream(
             "openAgent".to_string(),
             serde_json::Value::Bool(config.open_agent && run_context.is_none()),
         );
+        // 交易员 Profile 的运行才带 traderMode：侧车据此给工具加上交易员专用字段（setupId 等）。
+        // 经典运行与交互会话不带这个键，载荷与工具定义逐字不变。
+        if run_context
+            .as_ref()
+            .is_some_and(|context| context.context_mode == crate::ai_automation::CONTEXT_MODE_BRIEFING)
+        {
+            config_payload.insert("traderMode".to_string(), serde_json::Value::Bool(true));
+        }
         // The sidecar resolves Skill discovery from workspaceRoot while rules and
         // workflows follow cwd, so a per-Run root isolates concurrent Runs'
         // version-locked snapshots without changing anything else. Background
@@ -21824,6 +21833,11 @@ fn ensure_trade_opportunity_exit_columns(conn: &Connection) -> Result<(), String
         "ALTER TABLE trade_opportunities ADD COLUMN close_fraction TEXT",
         [],
     );
+    // 交易员 Profile 的开仓形态（交易手册里的形态 id）；经典 Profile 的行为空。
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN setup_id TEXT",
+        [],
+    );
     Ok(())
 }
 
@@ -22060,6 +22074,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
           intent TEXT NOT NULL,
            exit_kind TEXT,
            close_fraction TEXT,
+           setup_id TEXT,
           direction TEXT NOT NULL,
           ticket_mode TEXT NOT NULL,
           action TEXT NOT NULL,
@@ -22585,6 +22600,10 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE trade_opportunities ADD COLUMN close_fraction TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN setup_id TEXT",
         [],
     );
     conn.execute_batch(

@@ -1169,6 +1169,8 @@ pub(crate) fn default_wake_condition_types() -> Vec<String> {
 }
 
 pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
+    // 交易员 Profile 的交易手册（只给交易员运行用；经典 Profile 不读这些表）。
+    crate::trader_learning::migrate_trader_learning(conn)?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS ai_automation_settings (
@@ -12788,6 +12790,68 @@ fn claim_next_run(
     Ok(Some((run, profile, trigger, template_snapshot_json)))
 }
 
+/// 普通 Profile 运行（非情报简报 / 每日复盘）的用户提示词。
+/// 经典模式的输出必须逐字不变：交易员模式只通过 `multi_agent_instruction` 追加内容（见 `execute_profile_run`），
+/// `classic_profile_run_prompt_is_unchanged` 用固定输入做逐字快照。
+pub(crate) struct ProfileRunPromptParts<'a> {
+    pub response_instruction: &'a str,
+    pub current_time: &'a str,
+    pub current_timestamp_ms: i64,
+    pub profile: &'a AiAgentProfileSummary,
+    pub trigger: &'a Value,
+    pub multi_agent_instruction: &'a str,
+    pub triage_instruction: &'a str,
+    pub decision_workflow_instruction: &'a str,
+}
+
+pub(crate) fn profile_run_prompt(parts: &ProfileRunPromptParts<'_>, chinese_prompt: bool) -> String {
+    if chinese_prompt {
+        format!(
+            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n{}\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
+            parts.response_instruction,
+            parts.current_time,
+            parts.current_timestamp_ms,
+            parts.profile.name,
+            parts.profile.mode,
+            parts.profile.account_id.as_deref().unwrap_or("未绑定"),
+            parts.profile.environment,
+            parts.profile.target_leverage,
+            parts.profile.max_single_trade_margin_pct,
+            crate::ai_risk_gate::risk_prompt(&parts.profile.risk, true),
+            parts.profile.symbols.join(", "),
+            parts.profile.history_lookback_days,
+            parts.trigger,
+            parts.multi_agent_instruction,
+            parts.triage_instruction,
+            PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES,
+            EXISTING_POSITION_MANAGEMENT_RULES,
+            parts.decision_workflow_instruction,
+        )
+    } else {
+        format!(
+            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\n{}\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
+            parts.response_instruction,
+            parts.current_time,
+            parts.current_timestamp_ms,
+            parts.profile.name,
+            parts.profile.mode,
+            parts.profile.account_id.as_deref().unwrap_or("unbound"),
+            parts.profile.environment,
+            parts.profile.target_leverage,
+            parts.profile.max_single_trade_margin_pct,
+            crate::ai_risk_gate::risk_prompt(&parts.profile.risk, false),
+            parts.profile.symbols.join(", "),
+            parts.profile.history_lookback_days,
+            parts.trigger,
+            parts.multi_agent_instruction,
+            parts.triage_instruction,
+            PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN,
+            EXISTING_POSITION_MANAGEMENT_RULES_EN,
+            parts.decision_workflow_instruction,
+        )
+    }
+}
+
 async fn execute_profile_run(
     app: tauri::AppHandle,
     run: AiAgentRunSummary,
@@ -12813,6 +12877,11 @@ async fn execute_profile_run(
     );
     // C24.2：极简模式下**不下发** C21 排版小节（换成一句话规则），从源头消除指令冲突。
     apply_single_agent_mode_to_skill_definitions(&mut skill_definitions, &single_agent_mode);
+    // 交易员 Profile：固定规范换成交易员规范，去掉不适用的技能。经典运行不经过这里，技能载荷保持原样。
+    let mut run_enabled_skills = profile.skill_ids.clone();
+    if briefing_mode {
+        crate::trader_learning::apply_trader_skills(&mut skill_definitions, &mut run_enabled_skills, false);
+    }
     let session_id = format!("background:{}", run.id);
     let message_id = format!("background-message:{}", run.id);
     let shanghai_offset = chrono::FixedOffset::east_opt(8 * 60 * 60)
@@ -12880,6 +12949,15 @@ async fn execute_profile_run(
     } else {
         None
     };
+    // 交易员 Profile 的交易手册（当前发布版本）；经典运行不读。
+    let handbook = if briefing_mode {
+        Some(match open_automation_database(&app) {
+            Ok(conn) => crate::trader_learning::current_handbook(&conn),
+            Err(_) => (1, desic_agent_automation::default_handbook()),
+        })
+    } else {
+        None
+    };
     if let Ok(conn) = open_automation_database(&app) {
         let mut baseline = json!({
             "capturedAt": current_timestamp_ms,
@@ -12890,6 +12968,7 @@ async fn execute_profile_run(
         if let Some(briefing) = briefing.as_ref() {
             let mut audit = briefing.audit.clone();
             audit["text"] = json!(briefing.text);
+            audit["handbookVersion"] = json!(handbook.as_ref().map(|(version, _)| *version));
             baseline["briefing"] = audit;
         }
         let _ = conn.execute(
@@ -13030,8 +13109,13 @@ async fn execute_profile_run(
     // 经典模式的提示词因此逐字不变）。
     let multi_agent_instruction = match briefing.as_ref() {
         Some(briefing) => format!(
-            "\n\n{}\n{}{}",
+            "\n\n{}\n\n{}\n{}{}",
             briefing.text.trim_end(),
+            handbook
+                .as_ref()
+                .map(|(version, handbook)| desic_agent_automation::render_handbook(handbook, *version))
+                .unwrap_or_default()
+                .trim_end(),
             if chinese_prompt { BRIEFING_MODE_RULES } else { BRIEFING_MODE_RULES_EN },
             multi_agent_instruction
         ),
@@ -13085,49 +13169,19 @@ async fn execute_profile_run(
                 DAILY_MARKET_REVIEW_EVIDENCE_RULES_EN,
             )
         }
-    } else if chinese_prompt {
-        format!(
-            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n{}\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
-            response_instruction,
-            current_time,
-            current_timestamp_ms,
-            profile.name,
-            profile.mode,
-            profile.account_id.as_deref().unwrap_or("未绑定"),
-            profile.environment,
-            profile.target_leverage,
-            profile.max_single_trade_margin_pct,
-            crate::ai_risk_gate::risk_prompt(&profile.risk, true),
-            profile.symbols.join(", "),
-            profile.history_lookback_days,
-            trigger,
-            multi_agent_instruction,
-            triage_instruction,
-            PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES,
-            EXISTING_POSITION_MANAGEMENT_RULES,
-            decision_workflow_instruction,
-        )
     } else {
-        format!(
-            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\n{}\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
-            response_instruction,
-            current_time,
-            current_timestamp_ms,
-            profile.name,
-            profile.mode,
-            profile.account_id.as_deref().unwrap_or("unbound"),
-            profile.environment,
-            profile.target_leverage,
-            profile.max_single_trade_margin_pct,
-            crate::ai_risk_gate::risk_prompt(&profile.risk, false),
-            profile.symbols.join(", "),
-            profile.history_lookback_days,
-            trigger,
-            multi_agent_instruction,
-            triage_instruction,
-            PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN,
-            EXISTING_POSITION_MANAGEMENT_RULES_EN,
-            decision_workflow_instruction,
+        profile_run_prompt(
+            &ProfileRunPromptParts {
+                response_instruction: &response_instruction,
+                current_time: &current_time,
+                current_timestamp_ms,
+                profile: &profile,
+                trigger: &trigger,
+                multi_agent_instruction: &multi_agent_instruction,
+                triage_instruction: &triage_instruction,
+                decision_workflow_instruction: &decision_workflow_instruction,
+            },
+            chinese_prompt,
         )
     };
     // v3：旧 Agent 模板（ai_agent_schemes）已删除，方案级 instructions 不再注入；
@@ -13167,7 +13221,7 @@ async fn execute_profile_run(
         symbols: profile.symbols.clone(),
         profile_id: Some(profile.id.clone()),
         run_id: Some(run.id.clone()),
-        enabled_skills: profile.skill_ids.clone(),
+        enabled_skills: run_enabled_skills,
         skill_versions: profile.skill_versions.clone(),
         skill_definitions,
         model: profile.model.clone(),
@@ -16119,6 +16173,51 @@ mod tests {
         snapshot.as_object_mut().unwrap().remove("risk");
         let parsed = serde_json::from_value::<AiAgentProfileSummary>(snapshot).expect("old snapshot parses");
         assert_eq!(parsed.risk, crate::ai_risk_gate::AiProfileRiskSettings::default());
+    }
+
+    /// 经典模式隔离：普通 Profile 运行的用户提示词在固定输入下必须逐字不变（交易员模式的改动不能波及经典模式）。
+    /// 只有有意修改经典提示词时才更新这里的哈希。
+    #[test]
+    fn classic_profile_run_prompt_is_unchanged() {
+        use sha2::{Digest, Sha256};
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let profile = normalize_profile(
+            serde_json::from_value::<AiAgentProfileInput>(json!({
+                "name": "经典快照",
+                "mode": "limited_auto",
+                "accountId": "acc-snapshot",
+                "environment": "demo",
+                "symbols": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+                "targetLeverage": 10,
+                "maxSingleTradeMarginPct": 25,
+                "historyLookbackDays": 7
+            }))
+            .expect("deserialize profile input"),
+        )
+        .expect("normalize profile input");
+        upsert_profile_row(&conn, &profile, "profile-snapshot", 1_000, 2_000).expect("insert profile row");
+        let profile = load_profile(&conn, "profile-snapshot").expect("load profile");
+        assert_eq!(profile.context_mode, CONTEXT_MODE_TOOLS);
+        let trigger = json!({ "type": "schedule", "promptLocale": "zh-CN" });
+        let hash = |chinese: bool| {
+            let prompt = profile_run_prompt(
+                &ProfileRunPromptParts {
+                    response_instruction: "请使用简体中文回答。",
+                    current_time: "2026-10-05 08:00:00 UTC+8",
+                    current_timestamp_ms: 1_791_158_400_000,
+                    profile: &profile,
+                    trigger: &trigger,
+                    multi_agent_instruction: "\n本次未勾选任何专家：可点名专家名单为空，不要尝试点名专家，独立完成本轮。",
+                    triage_instruction: "",
+                    decision_workflow_instruction: "先读取本地情报、行情、账户、挂单和必要的历史。",
+                },
+                chinese,
+            );
+            format!("{:x}", Sha256::digest(prompt.as_bytes()))
+        };
+        assert_eq!(hash(true), "4496b8f999240faa22e08d851bf369a39d8aba876f464901e5a88739fa2e8291", "经典模式中文提示词变了");
+        assert_eq!(hash(false), "71ee2aed99bec6d491943ed1e75949b57d499f59032e3c3bde1738ba52f946d1", "经典模式英文提示词变了");
     }
 
     #[test]

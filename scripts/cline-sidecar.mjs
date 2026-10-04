@@ -1440,6 +1440,23 @@ const DECISION_CONTEXT_SCHEMA = {
   }
 };
 
+// 交易员 Profile（traderMode）专用：候选多一个 setupId（交易手册里的形态 id，后端校验必须存在且未暂停）。
+// 经典运行仍用上面的 schema，工具定义逐字不变（scripts/fixtures/classic-tool-schemas.json 快照）。
+const TRADER_SETUP_ID_PROPERTY = {
+  type: "string",
+  minLength: 1,
+  maxLength: 64,
+  description: "Trader handbook setup id this candidate follows, e.g. trend_pullback. Required for trader-mode opening candidates."
+};
+const TRADER_TRADE_OPPORTUNITY_SCHEMA = {
+  ...TRADE_OPPORTUNITY_SCHEMA,
+  properties: { ...TRADE_OPPORTUNITY_SCHEMA.properties, setupId: TRADER_SETUP_ID_PROPERTY }
+};
+const TRADER_DECISION_CONTEXT_SCHEMA = {
+  ...DECISION_CONTEXT_SCHEMA,
+  properties: { ...DECISION_CONTEXT_SCHEMA.properties, candidate: TRADER_TRADE_OPPORTUNITY_SCHEMA }
+};
+
 const TRADE_OPPORTUNITY_LIST_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -2662,6 +2679,8 @@ function createDesicTools(sessionId, options = {}) {
     latestDecisionContext: null,
     latestOpportunityConflict: null
   };
+  // 交易员 Profile 的运行（Rust 只在交易员运行里下发 traderMode）：工具 schema 加交易员专用字段。
+  const traderMode = boolConfig(policyConfig.traderMode, false);
   const tool = (name, description, inputSchema, extra = {}) => {
     if (String(policyConfig.strategySessionKind || "") === "trading-research"
       && ["strategy.readCurrentSource", "strategy.testCurrentSource", "strategy.applySource"].includes(name)) return null;
@@ -2754,7 +2773,7 @@ function createDesicTools(sessionId, options = {}) {
     tool("market.readRecentTrades", "Read recent OKX public trades for an instrument.", READ_RECENT_TRADES_SCHEMA),
     tool("market.readCandles", "Read candlesticks merged by 1m timestamp from local SQLite and the recent Business WebSocket memory buffer; memory updates override older local values without regressing confirm=true, and non-1m bars aggregate after that merge. Current-window reads verify the confirmed 1m tail, return local evidence immediately and queue one deduplicated per-instrument public OKX background repair when gaps exist. Inspect latestConfirmedAt, expectedLatestConfirmedAt, stale, staleReason and refreshStatus; never describe stale candles as current. All times are Unix epoch milliseconds. confirm=true means the candle is closed; derivative bucketStatus never changes confirmation.", READ_CANDLES_SCHEMA),
     tool("market.readFundingRate", "Read OKX swap funding rate for an instrument.", READ_FUNDING_RATE_SCHEMA),
-    tool("market.readDecisionContext", "Create a unique 60-second final decision context only for a complete, executable candidate about to be submitted via background tradeOpportunity.create. Reads the latest ticker, order book, recent trades, current candle, account state, leverage and open orders, reruns trade.precheck, and returns objective differences from the Run's initial snapshot. Never advises whether to trade and is never shared or cached across calls. Do not call for wait/abandon with no new candidate; never pass size=0 or omit price for limit/trigger. Call again after any candidate change.", DECISION_CONTEXT_SCHEMA),
+    tool("market.readDecisionContext", "Create a unique 60-second final decision context only for a complete, executable candidate about to be submitted via background tradeOpportunity.create. Reads the latest ticker, order book, recent trades, current candle, account state, leverage and open orders, reruns trade.precheck, and returns objective differences from the Run's initial snapshot. Never advises whether to trade and is never shared or cached across calls. Do not call for wait/abandon with no new candidate; never pass size=0 or omit price for limit/trigger. Call again after any candidate change.", traderMode ? TRADER_DECISION_CONTEXT_SCHEMA : DECISION_CONTEXT_SCHEMA),
     tool("market.scanWatchlist", "Scan watchlist or specified OKX swap instruments with ticker, funding, order-book pressure and candle summaries.", MARKET_SCAN_SCHEMA),
     tool("market.readIndicators", "Calculate indicators from local OKX candles. The numeric suffix is the lookback period (1-500), e.g. ema20; unsuffixed defaults are sma20, ema21, rsi14, boll20 and atr14. MACD, VWAP and Volume Profile currently use fixed internal parameters.", READ_INDICATORS_SCHEMA),
     radarEnabled ? tool("radar.readRanking", "Read one persisted Market Radar cross-market ranking. Pair with radar.readBreadth for broad current-market or overview work that does not name one instrument. Latest all-market ranking: omit asOf and category; send savedFilterId null or omit it. Use savedFilterId only with an exact id returned by radar.listSavedFilters; do not synthesize a placeholder. globalRank is the saved all-market composite rank; scopeRank is recomputed for the requested category, saved deterministic filter and rankingBasis. Low-frequency research priority, not a trading signal.", RADAR_RANKING_SCHEMA) : null,

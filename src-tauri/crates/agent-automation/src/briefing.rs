@@ -37,6 +37,10 @@ pub struct BriefingSymbol {
     pub chg_24h_pct: Option<f64>,
     pub high_24h: Option<f64>,
     pub low_24h: Option<f64>,
+    /// 日线阶段（`up` / `down` / `mixed`），由代码按 `regime::daily_regime` 计算；`None` = 不可用。
+    pub regime_daily: Option<String>,
+    pub chg_7d_pct: Option<f64>,
+    pub chg_30d_pct: Option<f64>,
     pub timeframes: Vec<BriefingTimeframe>,
     pub atr_5m: Option<f64>,
     pub atr_1h: Option<f64>,
@@ -404,6 +408,32 @@ fn render_symbol_core(symbol: &BriefingSymbol, tx: &Text) -> String {
         tx.t("低", "low"),
         tx.px(symbol.low_24h),
     ));
+    let daily = symbol.regime_daily.as_deref().map(|value| match (value, tx.zh) {
+        ("up", true) => "上升（收盘 > EMA20 > EMA50）",
+        ("down", true) => "下降（收盘 < EMA20 < EMA50）",
+        ("mixed", true) => "不明",
+        ("up", false) => "up (close > EMA20 > EMA50)",
+        ("down", false) => "down (close < EMA20 < EMA50)",
+        (_, true) => "不明",
+        (_, false) => "mixed",
+    });
+    let four_hour = symbol
+        .timeframes
+        .iter()
+        .find(|frame| frame.label == "4h")
+        .and_then(|frame| frame.trend.as_deref())
+        .map(|trend| tx.trend(trend));
+    out.push_str(&format!(
+        "- {}：{} {}，4h {}；7 {} {}，30 {} {}\n",
+        tx.t("行情阶段", "Regime"),
+        tx.t("日线", "daily"),
+        daily.unwrap_or(tx.na()),
+        four_hour.unwrap_or(tx.na()),
+        tx.t("日", "d"),
+        tx.pct(symbol.chg_7d_pct),
+        tx.t("日", "d"),
+        tx.pct(symbol.chg_30d_pct),
+    ));
     let frames = symbol
         .timeframes
         .iter()
@@ -701,6 +731,8 @@ mod tests {
             chg_24h_pct: Some(0.24),
             high_24h: Some(84_998.0),
             low_24h: Some(83_820.0),
+            regime_daily: Some("up".into()),
+            chg_7d_pct: Some(3.2),
             timeframes: vec![
                 BriefingTimeframe {
                     label: "1h".into(),
@@ -773,6 +805,7 @@ mod tests {
         assert!(text.contains("1h 上升，区间 83800–85500，位于 56%"), "{text}");
         // 4h 不可用、ATR 5m 缺失、盘口缺失：写「不可用」，绝不写 0。
         assert!(text.contains("4h 不可用"), "{text}");
+        assert!(text.contains("行情阶段：日线 上升（收盘 > EMA20 > EMA50），4h 不可用；7 日 +3.20%，30 日 不可用"), "{text}");
         assert!(text.contains("ATR 5m 不可用"), "{text}");
         assert!(text.contains("点差 不可用 bp"), "{text}");
         assert!(text.contains("单笔风险预算内最多 7 张"), "{text}");

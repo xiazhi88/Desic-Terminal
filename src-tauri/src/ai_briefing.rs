@@ -518,6 +518,66 @@ fn book_levels_in_coin(book: &Value, ct_val: Option<f64>) -> Option<Value> {
     (!bids.is_empty() && !asks.is_empty()).then(|| json!({ "bids": bids, "asks": asks }))
 }
 
+/// 1h / 4h / 1D 的本地聚合序列（按 UTC 对齐，最后一根可能是未收盘的当期）。
+#[derive(Default)]
+struct HigherTimeframes {
+    h1: Vec<crate::fastlane::Bar>,
+    h4: Vec<crate::fastlane::Bar>,
+    d1: Vec<crate::fastlane::Bar>,
+}
+
+const HOUR_MS: i64 = 60 * 60_000;
+const DAY_MS: i64 = 24 * HOUR_MS;
+
+async fn read_higher_timeframes(app: &tauri::AppHandle, inst_id: &str, now: i64) -> HigherTimeframes {
+    let app = app.clone();
+    let inst_id = inst_id.to_string();
+    crate::blocking_work::run_blocking(move || {
+        let conn = open_read_database(&app)?;
+        let read = |step_ms: i64, span_ms: i64| -> Vec<crate::fastlane::Bar> {
+            local_candles_aggregated(&conn, &inst_id, step_ms, now - span_ms, now)
+                .map(|(candles, _)| {
+                    candles
+                        .into_iter()
+                        .map(|candle| crate::fastlane::Bar {
+                            t: candle.time * 1000,
+                            o: candle.open,
+                            h: candle.high,
+                            l: candle.low,
+                            c: candle.close,
+                            v: candle.volume,
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        Ok::<_, String>(HigherTimeframes { h1: read(HOUR_MS, 10 * DAY_MS), h4: read(4 * HOUR_MS, 30 * DAY_MS), d1: read(DAY_MS, 200 * DAY_MS) })
+    })
+    .await
+    .unwrap_or_default()
+}
+
+/// 本地历史不够算日线阶段 / 4h EMA50 时，后台静默补最近 30 天的 1m K 线（不阻塞本轮；同一品种 6 小时内只补一次）。
+fn request_history_backfill(app: &tauri::AppHandle, inst_id: &str, now: i64) {
+    static LAST_REQUEST: std::sync::OnceLock<Mutex<HashMap<String, i64>>> = std::sync::OnceLock::new();
+    let requests = LAST_REQUEST.get_or_init(|| Mutex::new(HashMap::new()));
+    {
+        let Ok(mut requests) = requests.lock() else { return };
+        if requests.get(inst_id).is_some_and(|at| now.saturating_sub(*at) < 6 * HOUR_MS) {
+            return;
+        }
+        requests.insert(inst_id.to_string(), now);
+    }
+    let app = app.clone();
+    let inst_id = inst_id.to_string();
+    tauri::async_runtime::spawn(async move {
+        let end = now - now.rem_euclid(60_000);
+        if let Err(error) = sync_kline_window_quiet(&app, &inst_id, "1m", end - 30 * DAY_MS, end).await {
+            crate::boot_log(&format!("trader briefing history backfill failed inst={inst_id}: {error}"));
+        }
+    });
+}
+
 fn last_value(series: Vec<Option<f64>>) -> Option<f64> {
     series.into_iter().last().flatten().filter(|value| value.is_finite())
 }
@@ -574,12 +634,22 @@ async fn symbol_block(
         },
         _ => missing.push(format!("{inst_id}:ticker")),
     }
-    // 结构 / 波动的口径与快判一致（15m 60 根、1h 48 根、4h 24 根；ATR14）。
-    let frame = |minutes: i64, lookback: usize| -> crate::fastlane::StateTimeframe {
-        crate::fastlane::structure_view(&crate::fastlane::aggregate_bars(&bars, minutes), lookback)
-            .unwrap_or_else(crate::fastlane::StateTimeframe::unavailable)
+    // 15m 结构与 5m ATR 用最近的 1m K 线；1h / 4h / 1D 改用本地 1m 按 UTC 对齐聚合的长窗口
+    //（1m 窗口拼接只覆盖约 3.5 天，4h EMA50 与日线阶段会一直不可用）。口径与快判一致：
+    // 15m 60 根、1h 48 根、4h 24 根做结构；ATR14。
+    let higher = within(deadline, read_higher_timeframes(app, inst_id, now)).await.unwrap_or_default();
+    if higher.h4.len() < 50 || higher.d1.len() < 50 {
+        missing.push(format!("{inst_id}:history"));
+        request_history_backfill(app, inst_id, now);
+    }
+    let view = |series: &[crate::fastlane::Bar], lookback: usize| -> crate::fastlane::StateTimeframe {
+        crate::fastlane::structure_view(series, lookback).unwrap_or_else(crate::fastlane::StateTimeframe::unavailable)
     };
-    let structure = crate::fastlane::StateStructure { tf_15m: frame(15, 60), tf_1h: frame(60, 48), tf_4h: frame(240, 24) };
+    let structure = crate::fastlane::StateStructure {
+        tf_15m: view(&crate::fastlane::aggregate_bars(&bars, 15), 60),
+        tf_1h: view(&higher.h1, 48),
+        tf_4h: view(&higher.h4, 24),
+    };
     block.timeframes = [("15m", &structure.tf_15m), ("1h", &structure.tf_1h), ("4h", &structure.tf_4h)]
         .into_iter()
         .map(|(label, view)| BriefingTimeframe {
@@ -592,24 +662,23 @@ async fn symbol_block(
             swing_low: view.last_swing_low,
         })
         .collect();
-    let atr = |minutes: i64| crate::fastlane::atr14(&crate::fastlane::aggregate_bars(&bars, minutes));
-    block.atr_5m = atr(5);
-    block.atr_1h = atr(60);
-    block.atr_4h = atr(240);
-    let regime = crate::fastlane::volatility_regime(&structure, &bars);
+    block.atr_5m = crate::fastlane::atr14(&crate::fastlane::aggregate_bars(&bars, 5));
+    block.atr_1h = crate::fastlane::atr14(&higher.h1);
+    block.atr_4h = crate::fastlane::atr14(&higher.h4);
+    // `volatility_regime` 按 60 分钟聚合传入的序列；传 1h 序列时聚合是恒等变换。
+    let regime = crate::fastlane::volatility_regime(&structure, &higher.h1);
     block.regime = (regime != "unknown").then_some(regime);
-    let rsi = |minutes: i64| {
-        let closes = crate::fastlane::aggregate_bars(&bars, minutes).iter().map(|bar| bar.c).collect::<Vec<_>>();
-        last_value(ai_rsi(&closes, 14))
-    };
-    block.rsi_1h = rsi(60);
-    block.rsi_4h = rsi(240);
-    let closes = |minutes: i64| crate::fastlane::aggregate_bars(&bars, minutes).iter().map(|bar| bar.c).collect::<Vec<_>>();
-    let (closes_1h, closes_4h) = (closes(60), closes(240));
+    let closes_of = |series: &[crate::fastlane::Bar]| series.iter().map(|bar| bar.c).collect::<Vec<_>>();
+    let (closes_1h, closes_4h, closes_1d) = (closes_of(&higher.h1), closes_of(&higher.h4), closes_of(&higher.d1));
+    block.rsi_1h = last_value(ai_rsi(&closes_1h, 14));
+    block.rsi_4h = last_value(ai_rsi(&closes_4h, 14));
     block.ema20_1h = last_value(ai_ema(&closes_1h, 20));
     block.ema50_1h = last_value(ai_ema(&closes_1h, 50));
     block.ema20_4h = last_value(ai_ema(&closes_4h, 20));
     block.ema50_4h = last_value(ai_ema(&closes_4h, 50));
+    block.regime_daily = desic_agent_automation::daily_regime(&closes_1d).map(|regime| regime.as_str().to_string());
+    block.chg_7d_pct = desic_agent_automation::change_pct(&closes_1d, 7);
+    block.chg_30d_pct = desic_agent_automation::change_pct(&closes_1d, 30);
     let series = |value: &Value, key: &str| -> Vec<Option<f64>> {
         value
             .get(key)
@@ -733,6 +802,15 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
         wake_conditions: db.wake_conditions,
         events: db.events,
     };
+    // 行情阶段标签（代码计算）随审计存档：决策日志与开仓形态校验都按它分组 / 匹配。
+    let regimes = doc
+        .symbols
+        .iter()
+        .map(|symbol| {
+            let four_hour = symbol.timeframes.iter().find(|frame| frame.label == "4h").and_then(|frame| frame.trend.clone());
+            (symbol.inst_id.clone(), json!({ "daily": symbol.regime_daily, "h4": four_hour, "volatility": symbol.regime }))
+        })
+        .collect::<serde_json::Map<String, Value>>();
     let text = desic_agent_automation::render_briefing(&doc, chinese, desic_agent_automation::BRIEFING_MAX_CHARS);
     let build_ms = now_ms().saturating_sub(started);
     ProfileBriefing {
@@ -741,6 +819,7 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
             "buildMs": build_ms,
             "missing": missing,
             "timedOut": now_ms() >= deadline,
+            "regimes": regimes,
         }),
         text,
     }
