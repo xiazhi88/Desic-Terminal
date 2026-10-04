@@ -105,7 +105,18 @@ export const logger = {
   }
 };
 
+// lightweight-charts 在图表被销毁后，仍可能执行一次已排队的重绘帧并抛出 "Object is disposed"。
+// 图表已经没了，这次重绘本来就无事可做：降为警告，避免每次快速切换周期 / 合约都弹「前端代码异常」。
+function isDisposedChartFrame(event: ErrorEvent) {
+  const stack = event.error instanceof Error ? event.error.stack ?? "" : "";
+  return /Object is disposed/.test(event.message ?? "") && /lightweight-charts/.test(stack);
+}
+
 window.addEventListener("error", (event) => {
+  if (isDisposedChartFrame(event)) {
+    logger.warn("chart frame after dispose (ignored)", { message: event.message });
+    return;
+  }
   logger.error("window.onerror", event.error ?? event.message, {
     filename: event.filename,
     lineno: event.lineno,

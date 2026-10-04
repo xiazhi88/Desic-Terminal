@@ -239,6 +239,18 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
   volumeSeries.priceScale().applyOptions({ scaleMargins: { top: 0.82, bottom: 0 } });
 
   const paneIds = [MAIN_CHART_PANE_ID];
+  /**
+   * 删除序列。若它所在的副图已被图表自身的布局收走，`removeSeries` 会抛出
+   * "Value is undefined"，整个图表组件随之崩溃（订单流副图 + 语音增删指标时出现过）。
+   * 目标已不存在时，删除应是无操作而不是故障。
+   */
+  const removeSeriesSafely = (series: Parameters<typeof chart.removeSeries>[0]) => {
+    try {
+      chart.removeSeries(series);
+    } catch {
+      // 已被移除。
+    }
+  };
   const lineSeries = new Map<string, ISeriesApi<"Line">>();
   const indicatorSeries = new Map<
     string,
@@ -446,7 +458,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
     removeLine: (key) => {
       const series = lineSeries.get(key);
       if (!series) return false;
-      chart.removeSeries(series);
+      removeSeriesSafely(series);
       lineSeries.delete(key);
       indicatorSeries.delete(key);
       lineLatestTimes.delete(key);
@@ -458,7 +470,11 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
       if (paneId === MAIN_CHART_PANE_ID) return false;
       const paneIndex = paneIds.indexOf(paneId);
       if (paneIndex < 0) return false;
-      chart.removePane(paneIndex);
+      try {
+        chart.removePane(paneIndex);
+      } catch {
+        // 副图已被图表自己的布局收掉时，删除是无操作；只需把本地登记同步掉。
+      }
       paneIds.splice(paneIndex, 1);
       markAllPanes();
       window.requestAnimationFrame(markAllPanes);
@@ -546,7 +562,7 @@ export function createTradingChart(container: HTMLElement, lineConfigs: ChartLin
     removeIndicator: (key) => {
       const indicator = indicatorSeries.get(key);
       if (!indicator || lineSeries.has(key)) return false;
-      chart.removeSeries(indicator.series);
+      removeSeriesSafely(indicator.series);
       indicatorSeries.delete(key);
       indicatorLatestTimes.delete(key);
       return true;
