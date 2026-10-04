@@ -90,6 +90,8 @@ pub struct BriefingPosition {
     pub stop_px: Option<f64>,
     pub take_profit_px: Option<f64>,
     pub liq_px: Option<f64>,
+    /// 归属（本 Profile / 其他 Profile / 非 AI 自动化），已本地化；同一账户被多个 Profile 共用时用来分清是谁的。
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -100,6 +102,8 @@ pub struct BriefingOrder {
     pub px: Option<f64>,
     pub contracts: Option<f64>,
     pub reduce_only: bool,
+    /// 归属，同 `BriefingPosition::owner`；附挂的保护单通常没有。
+    pub owner: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -357,8 +361,9 @@ fn render_account(doc: &BriefingDoc, tx: &Text) -> String {
                 }
             };
             out.push_str(&format!(
-                "- {} {} {} {} {} @ {}，{} {}，{} {}；{}；{}；{}\n",
+                "- {}{} {} {} {} {} @ {}，{} {}，{} {}；{}；{}；{}\n",
                 tx.t("持仓", "Position"),
+                position.owner.as_deref().map(|owner| format!("（{owner}）")).unwrap_or_default(),
                 position.inst_id,
                 side,
                 format_contracts(position.contracts),
@@ -375,8 +380,9 @@ fn render_account(doc: &BriefingDoc, tx: &Text) -> String {
         }
         for order in &account.open_orders {
             out.push_str(&format!(
-                "- {} {} {} {} {} @ {}{}\n",
+                "- {}{} {} {} {} {} @ {}{}\n",
                 tx.t("挂单", "Order"),
+                order.owner.as_deref().map(|owner| format!("（{owner}）")).unwrap_or_default(),
                 order.inst_id,
                 order.kind_label,
                 order.contracts.map(format_contracts).unwrap_or_else(|| tx.na().to_string()),
@@ -784,8 +790,16 @@ mod tests {
                     stop_px: Some(83_500.0),
                     take_profit_px: None,
                     liq_px: Some(70_100.0),
+                    owner: Some("本 Profile".into()),
                 }],
-                open_orders: vec![],
+                open_orders: vec![BriefingOrder {
+                    inst_id: "BTC-USDT-SWAP".into(),
+                    kind_label: "限价 买".into(),
+                    px: Some(84_750.0),
+                    contracts: Some(0.02),
+                    reduce_only: false,
+                    owner: Some("其他 Profile：经典".into()),
+                }],
                 omitted_orders: 0,
             }),
             budget: Some(BriefingBudget {
@@ -811,6 +825,8 @@ mod tests {
         assert!(text.contains("本 Profile 敞口 1/2"), "{text}");
         assert!(text.contains("止损 83500（-1.49%）"), "{text}");
         assert!(text.contains("止盈 未挂"), "{text}");
+        assert!(text.contains("- 持仓（本 Profile） BTC-USDT-SWAP 多 3 张"), "{text}");
+        assert!(text.contains("- 挂单（其他 Profile：经典） BTC-USDT-SWAP 限价 买 0.02 张 @ 84750"), "{text}");
         assert!(text.contains("1h 上升，区间 83800–85500，位于 56%"), "{text}");
         // 4h 不可用、ATR 5m 缺失、盘口缺失：写「不可用」，绝不写 0。
         assert!(text.contains("4h 不可用"), "{text}");

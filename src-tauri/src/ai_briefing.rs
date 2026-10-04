@@ -92,6 +92,101 @@ struct DbFacts {
     wake_conditions: Vec<String>,
     events: Vec<BriefingNote>,
     per_symbol: HashMap<String, SymbolDbFacts>,
+    owners: Owners,
+}
+
+/// 账户里挂单 / 持仓的归属（同一账户可能被多个 Profile 共用）：委托号 → Profile、(品种, 方向) 的未平仓位 → Profile。
+#[derive(Default)]
+struct Owners {
+    /// 委托号 → (所属 Profile, 下单方 `ai` / `user`)。
+    orders: HashMap<String, (Option<String>, Option<String>)>,
+    positions: HashMap<(String, String), String>,
+    names: HashMap<String, String>,
+}
+
+impl Owners {
+    fn label(&self, owner: Option<&String>, current_profile: &str, chinese: bool) -> String {
+        self.label_with_operator(owner, None, current_profile, chinese)
+    }
+
+    fn label_with_operator(&self, owner: Option<&String>, operator: Option<&str>, current_profile: &str, chinese: bool) -> String {
+        match owner {
+            Some(profile_id) if profile_id == current_profile => (if chinese { "本 Profile" } else { "this Profile" }).to_string(),
+            Some(profile_id) => {
+                let name = self.names.get(profile_id).cloned().unwrap_or_else(|| profile_id.clone());
+                if chinese { format!("其他 Profile：{name}") } else { format!("another Profile: {name}") }
+            }
+            None if operator == Some("ai") => (if chinese { "AI 研究" } else { "AI Research" }).to_string(),
+            None => (if chinese { "手动或其他来源" } else { "manual or other source" }).to_string(),
+        }
+    }
+
+    /// 挂单的归属；附挂的只减仓保护单对不上 Profile 时不单独标（它跟着持仓走）。
+    fn order_label(&self, ord_id: &str, algo_id: &str, reduce_only: bool, current_profile: &str, chinese: bool) -> Option<String> {
+        let found = self.orders.get(ord_id).or_else(|| self.orders.get(algo_id));
+        match found {
+            Some((Some(profile_id), _)) => Some(self.label(Some(profile_id), current_profile, chinese)),
+            _ if reduce_only => None,
+            Some((None, operator)) => Some(self.label_with_operator(None, operator.as_deref(), current_profile, chinese)),
+            None => Some(self.label(None, current_profile, chinese)),
+        }
+    }
+}
+
+fn read_owners(conn: &Connection, now: i64) -> Owners {
+    let mut owners = Owners::default();
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT order_id,algo_id,agent_profile_id FROM trade_opportunities
+         WHERE agent_profile_id IS NOT NULL AND created_at>=?1 AND (order_id IS NOT NULL OR algo_id IS NOT NULL)",
+    ) {
+        if let Ok(rows) = stmt.query_map(params![now - 30 * DAY_MS], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, String>(2)?))
+        }) {
+            for (order_id, algo_id, profile_id) in rows.filter_map(Result::ok) {
+                for id in [order_id, algo_id].into_iter().flatten().filter(|id| !id.is_empty()) {
+                    owners.orders.insert(id, (Some(profile_id.clone()), Some("ai".to_string())));
+                }
+            }
+        }
+    }
+    // 本地委托记录里的下单方与机会关联（AI 研究里创建的机会没有 Profile，下单方是 ai）。
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT r.ord_id,o.agent_profile_id,r.operator FROM okx_orders r
+         LEFT JOIN trade_opportunities o ON o.id=r.opportunity_id
+         WHERE r.state IN ('live','partially_filled')",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?, row.get::<_, Option<String>>(2)?))
+        }) {
+            for (ord_id, profile_id, operator) in rows.filter_map(Result::ok) {
+                let entry = owners.orders.entry(ord_id).or_insert((None, None));
+                if entry.0.is_none() {
+                    entry.0 = profile_id;
+                }
+                if entry.1.is_none() {
+                    entry.1 = operator;
+                }
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT e.inst_id,e.episode_side,o.agent_profile_id FROM position_episodes e
+         JOIN position_episode_opportunities p ON p.episode_id=e.id
+         JOIN trade_opportunities o ON o.id=p.opportunity_id
+         WHERE e.status<>'closed' AND o.agent_profile_id IS NOT NULL",
+    ) {
+        if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))) {
+            for (inst_id, side, profile_id) in rows.filter_map(Result::ok) {
+                owners.positions.entry((inst_id, side)).or_insert(profile_id);
+            }
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT id,name FROM ai_agent_profiles") {
+        if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+            owners.names.extend(rows.filter_map(Result::ok));
+        }
+    }
+    owners
 }
 
 #[derive(Default, Clone)]
@@ -113,6 +208,7 @@ fn read_db_facts(app: &tauri::AppHandle, profile: &AiAgentProfileSummary, symbol
         ..DbFacts::default()
     };
     facts.opportunities = read_recent_opportunities(&conn, &profile.id, now, chinese);
+    facts.owners = read_owners(&conn, now);
     facts.recent_runs = read_recent_runs(&conn, &profile.id);
     facts.wake_conditions = read_wake_conditions(&conn, &profile.id, chinese);
     facts.events = read_relevant_events(&conn, symbols, now);
@@ -400,7 +496,7 @@ async fn read_account_snapshot(app: &tauri::AppHandle, market: &MarketRuntime, a
         .ok()
 }
 
-fn account_block(snapshot: &PrivateAccountSnapshot, now: i64, chinese: bool) -> BriefingAccount {
+fn account_block(snapshot: &PrivateAccountSnapshot, now: i64, chinese: bool, owners: &Owners, profile_id: &str) -> BriefingAccount {
     let usdt = snapshot.balances.iter().find(|balance| balance.ccy.eq_ignore_ascii_case("USDT"));
     let protection = |inst_id: &str, long: bool| -> (Option<f64>, Option<f64>) {
         let mut stop = None;
@@ -440,6 +536,11 @@ fn account_block(snapshot: &PrivateAccountSnapshot, now: i64, chinese: bool) -> 
                 stop_px,
                 take_profit_px,
                 liq_px: number(&position.liq_px).filter(|value| *value > 0.0),
+                owner: Some(owners.label(
+                    owners.positions.get(&(position.inst_id.clone(), if long { "long" } else { "short" }.to_string())),
+                    profile_id,
+                    chinese,
+                )),
             })
         })
         .collect::<Vec<_>>();
@@ -478,6 +579,7 @@ fn account_block(snapshot: &PrivateAccountSnapshot, now: i64, chinese: bool) -> 
                 .or_else(|| number(&order.tp_trigger_px)),
             contracts: number(&order.sz),
             reduce_only: order.reduce_only == "true",
+            owner: owners.order_label(&order.ord_id, &order.algo_id, order.reduce_only == "true", profile_id, chinese),
         })
         .collect::<Vec<_>>();
     let omitted_orders = orders.len().saturating_sub(BRIEFING_MAX_ORDERS);
@@ -763,7 +865,7 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
 
     let db = read_db_facts(app, profile, &symbols, started, chinese);
     let account = match within(deadline, read_account_snapshot(app, &market, profile.account_id.as_deref())).await.flatten() {
-        Some(snapshot) => Some(account_block(&snapshot, now_ms(), chinese)),
+        Some(snapshot) => Some(account_block(&snapshot, now_ms(), chinese, &db.owners, &profile.id)),
         None => {
             missing.push("account".to_string());
             None
@@ -1181,6 +1283,24 @@ mod tests {
         assert_eq!(briefing.median_duration_ms, Some(40_000));
         assert_eq!((briefing.opportunities_created, briefing.opportunities_executed), (2, 1));
         assert_eq!((briefing.closed_trades, briefing.net_pnl), (1, Some(2.0)), "未平仓的不计入");
+    }
+
+    #[test]
+    fn order_and_position_owners_are_labelled() {
+        let mut owners = Owners::default();
+        owners.names.insert("classic".into(), "经典".into());
+        owners.orders.insert("o-classic".into(), (Some("classic".into()), Some("ai".into())));
+        owners.orders.insert("o-mine".into(), (Some("trader".into()), Some("ai".into())));
+        owners.orders.insert("o-research".into(), (None, Some("ai".into())));
+        owners.orders.insert("o-manual".into(), (None, Some("user".into())));
+        assert_eq!(owners.order_label("o-mine", "", false, "trader", true).as_deref(), Some("本 Profile"));
+        assert_eq!(owners.order_label("o-classic", "", false, "trader", true).as_deref(), Some("其他 Profile：经典"));
+        assert_eq!(owners.order_label("o-research", "", false, "trader", true).as_deref(), Some("AI 研究"));
+        assert_eq!(owners.order_label("o-manual", "", false, "trader", true).as_deref(), Some("手动或其他来源"));
+        assert_eq!(owners.order_label("unknown", "", false, "trader", true).as_deref(), Some("手动或其他来源"));
+        // 附挂的只减仓保护单对不上 Profile 时不标（跟着持仓走）；对得上就照常标。
+        assert_eq!(owners.order_label("o-manual", "", true, "trader", true), None);
+        assert_eq!(owners.order_label("x", "o-mine", true, "trader", true).as_deref(), Some("本 Profile"));
     }
 
     #[test]

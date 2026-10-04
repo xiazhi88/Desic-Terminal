@@ -337,6 +337,13 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
   - **统计口径**：纯统计在 `agent-automation/src/scorecard.rs`。平均 R 乘 n/(n+10) 向 0 收缩。n ≥ 15 且收缩后 ≤ −0.25 才标「建议暂停」，同一分组只通知一次（记在 `ai_automation_settings`）。
   - **暂停是用户动作**：暂停只能由用户在成绩单页手动操作，操作后生成新的手册版本；后端随后拒绝该范围的开仓，影子记账照常进行。
 - 经典模式的运行详情接口不变：交易员的决策日志走独立命令 `ai_trader_run_decisions`，只在运行带简报时才请求。
+- 同一账户可能被多个 Profile 共用（真机出现过：经典 Profile 的挂单占住保证金，交易员还把它当成「自己已有同方向挂单」而放弃开仓）。所以简报里每个持仓和挂单都要标归属：
+  - 标签分四种：本 Profile / 其他 Profile / AI 研究 / 手动或其他来源。
+  - 归属的来源：
+    - 机会表里的 `order_id` / `algo_id`；
+    - 本地委托记录里的 `opportunity_id` 和 `operator`；
+    - 未平仓位通过 `position_episode_opportunities` 对应。
+  - 附挂的只减仓保护单对不上 Profile 时不标，它跟着持仓走。
 - 方向纪律只评估新的开仓决定：`manage_position` 不打「逆势」标记，也不做影子结算。
 - 盘口格式踩坑（2026-10-05 真机）：内存盘口的档位是 `{px, sz, orders}` 字符串对象，REST 是字符串数组，永续的 `sz` 是**张数**；快判的 `micro_from_orderbook` 只认 `[f64, f64]` 且把 `sz` 当币数，导致简报盘口每次都「不可用」。简报用 `book_levels_in_coin` 先统一格式并乘面值；**快判模式开启前必须同样修正**，否则它的盘口门永远不通过、深度金额差 1/ctVal 倍。
 - 简报的事件只留与关注币种相关、或至少两个来源报道的新闻；`importance=high` 的单一来源资讯（模型发布、个人言论）很多，不过滤会挤占简报并误导判断。
