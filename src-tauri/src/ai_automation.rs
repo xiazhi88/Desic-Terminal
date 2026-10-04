@@ -8507,6 +8507,41 @@ fn unambiguous_round_inst_id(context: &BackgroundRunContext) -> Option<String> {
     symbols.next().is_none().then(|| first.to_string())
 }
 
+/// AI 链路条件的两种形状在**校验前**统一成扁平：`{type, params:{…}}` → `{type, …params}`。
+///
+/// 真机（2026-09-29）：随 `background.finishRun` 工具描述下发的类型规范（`wake_condition_schema`）
+/// 明确要求 `{"type": …, "params": {…}}`，而这里原先直接按扁平 `WakeCondition` 反序列化 ——
+/// `price_cross` 报 `missing field 'direction'`、`timer` 报「必须提供 atMs 或 intervalMinutes」被丢；
+/// 字段全可选的类型（`order_state_changed`）虽能写库，`params.states` 却被静默忽略。
+/// 扁平形状（旧口径 / 模型直接写扁平）原样通过。顶层与 `params` 同名键取值不一致 → 只丢这一条，不猜。
+fn lift_background_wake_condition_params(value: &mut Value) -> Result<(), String> {
+    let Some(object) = value.as_object_mut() else {
+        return Err("唤醒条件必须是对象".to_string());
+    };
+    let Some(params) = object.remove("params") else {
+        return Ok(());
+    };
+    if params.is_null() {
+        return Ok(());
+    }
+    let Value::Object(params) = params else {
+        return Err("params 必须是对象".to_string());
+    };
+    for (key, param) in params {
+        match object.get(&key) {
+            Some(existing) if existing != &param => {
+                return Err(format!("params.{key} 与顶层 {key} 取值不一致"));
+            }
+            Some(_) => {}
+            None if key == "type" => return Err("params 不允许覆盖 type".to_string()),
+            None => {
+                object.insert(key, param);
+            }
+        }
+    }
+    Ok(())
+}
+
 /// ⑥ `nextWakePlan` → 待写库条件（**逐条丢弃、部分接受**；C33）。
 ///
 /// 真机（2026-09-21）：模型**自己发明**了类型 `{"type":"price","direction":"cross","price":84986.4}`
@@ -8572,6 +8607,8 @@ fn partition_background_wake_plan(
             {
                 return Err("类型不在 Profile 白名单".to_string());
             }
+            // 先展平再回填：`params.instId` 必须先上提，否则会被本轮品种抢先占位。
+            lift_background_wake_condition_params(&mut scoped_value)?;
             // `instId` 可省略（下发的类型规范就是这么写的，侧车的条件 schema 也这么写）：
             // **单品种语境**下用本轮品种回填（与快判同一段代码、同一条裁决）。
             // 多品种 Profile 不猜 —— 回填成第一个品种可能把另一个品种的条件变成 BTC 的条件；
@@ -18084,6 +18121,58 @@ mod tests {
     /// `{"type":"price","direction":"cross","instId":"BTC-USDT-SWAP","price":84986.4}`（该写 `price_cross`），
     /// 旧口径把它当**计划级**错误 → 整份校验失败、整份不落库、卡片标红"该计划未落库"，
     /// 而同份计划里另外两条完全合法。现在按快判既有口径降为**条目级**。
+    /// 真机（2026-09-29）：下发的类型规范要求 `{type, params}` 嵌套形状，AI 链路却按扁平解析 →
+    /// `price_cross：条件参数无效：missing field 'direction'`、`timer：timer 必须提供 atMs 或
+    /// intervalMinutes`，4 条只写进 1 条（`order_state_changed` 还丢了 `params.states`）。
+    #[test]
+    fn background_wake_plan_accepts_the_nested_params_shape() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let mut context = test_finish_context("run-ai-wake-nested", Vec::new(), false);
+        context.profile_id = Some("profile-ai-wake".to_string());
+        context.allowed_wake_condition_types = vec![
+            "price_cross".to_string(),
+            "timer".to_string(),
+            "order_state_changed".to_string(),
+        ];
+        let now = 1_800_000_000_000_i64;
+        let plan: BackgroundWakePlanInput = serde_json::from_value(json!({
+            "mode": "any",
+            "conditions": [
+                { "type": "price_cross", "params": { "instId": "BTC-USDT-SWAP", "direction": "up", "price": 83_800.0 } },
+                { "type": "price_cross", "params": { "direction": "down", "price": 82_501.0 } },
+                { "type": "order_state_changed", "params": { "states": ["filled", "canceled"] } },
+                { "type": "timer", "params": { "intervalMinutes": 60 } },
+                // 顶层与 params 同名键打架 → 不猜，只丢这一条。
+                { "type": "price_cross", "instId": "BTC-USDT-SWAP",
+                  "params": { "instId": "ETH-USDT-SWAP", "direction": "up", "price": 3_500.0 } },
+                { "type": "timer", "params": 5 }
+            ]
+        }))
+        .expect("deserialize plan");
+        let write = partition_background_wake_plan(&conn, &context, &plan, now).expect("partition");
+        assert_eq!(write.accepted.len(), 4, "{:?}", write.dropped);
+        assert_eq!(
+            write.dropped,
+            vec![
+                "price_cross：params.instId 与顶层 instId 取值不一致".to_string(),
+                "timer：params 必须是对象".to_string(),
+            ]
+        );
+        let stored = &write.accepted[0].2;
+        assert!(stored.get("params").is_none(), "落库形状必须是扁平：{stored}");
+        assert_eq!(stored["direction"], json!("up"));
+        assert_eq!(write.accepted[1].2["instId"], json!("BTC-USDT-SWAP"), "单品种回填");
+        assert_eq!(write.accepted[2].2["states"], json!(["filled", "canceled"]));
+        assert_eq!(write.accepted[3].2["intervalMinutes"], json!(60));
+        // 扁平形状（旧口径）照旧通过、原样不变。
+        let mut flat = json!({ "type": "timer", "intervalMinutes": 15 });
+        lift_background_wake_condition_params(&mut flat).expect("flat");
+        assert_eq!(flat, json!({ "type": "timer", "intervalMinutes": 15 }));
+        let mut spoof = json!({ "type": "timer", "params": { "type": "price_cross" } });
+        assert!(lift_background_wake_condition_params(&mut spoof).is_err());
+    }
+
     #[test]
     fn background_wake_plan_drops_the_unknown_type_but_keeps_valid_conditions() {
         let conn = Connection::open_in_memory().expect("open in-memory database");
