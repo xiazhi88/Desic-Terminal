@@ -6,7 +6,7 @@
  * 仅供视觉回归与 smoke 使用，所有内容均为合成数据。
  */
 import type { AiAutomationRun, AiAutomationRunDetail, AiRunExpert, AiUsageSummary } from "../../types";
-import { DAY, HOUR, MIN, type WatchPulseProfile } from "./watchPulseModel";
+import { DAY, HOUR, MIN, fHM, type WatchPulseProfile } from "./watchPulseModel";
 
 function rng(seed: number) {
   let a = seed >>> 0;
@@ -288,6 +288,16 @@ export function createWatchPulseFixture(): WatchPulseFixture {
     else if (ac.trade) run.summary = `已执行：${sym} 限价开仓成交，止损已挂出；后续由观察计划跟踪。`;
     else if (ac.opportunity) run.summary = `生成交易机会：${sym} 回踩 ${pf(sym, o.start)} 附近企稳，待确认后执行。`;
     else run.summary = pick([`维持观望：${sym} 结构未破，已更新 ${ac.wake} 条观察条件。`, "无操作：证据不足以支持方向判断，观察位保持不变。", "维持观望：对手盘意见未被推翻，等待确认 K 线。"]);
+    // 真实摘要是五个固定小节的 markdown（`background.finishRun` 的排版要求），抽屉要按 markdown 渲染。
+    run.summary = [
+      "## 结论", run.summary, "",
+      "## 事实与证据",
+      `- 行情（\`market_readTicker\` · ${fHM(run.finishedAt)}）：${sym} 最新价 ${pf(sym, o.start)}`,
+      `- 账户（\`account_readRisk\`）：**无持仓**，保证金充足`, "",
+      "## 冲突与缺口", "- 主动流与盘口方向不一致，暂不追价", "",
+      "## 观察条件", `- ${sym} 突破 / 跌破关键位 · 每 ${p.scanIntervalMinutes} 分钟复核`, "",
+      "## 下一步", "- 等待确认 K 线收盘后再评估"
+    ].join("\n");
     run.nextWakeAt = o.nextWakeAt ?? run.finishedAt + p.scanIntervalMinutes * MIN;
     return run;
   }

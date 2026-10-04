@@ -10,6 +10,7 @@ import clsx from "clsx";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type { AiAutomationPulseRange, AiAutomationPulseTokens } from "../../lib/ai";
 import type { AiAutomationRun, AiAutomationRunDetail } from "../../types";
+import { AiMarkdown, normalizeRunMarkdown } from "../AiMarkdown";
 import { AXIS_H, WatchPulseEngine, type LaneGeom, type PulseHover, type PulseViewState, type PulseWindow } from "./watchPulseEngine";
 import {
   ACTION_KEYS,
@@ -668,7 +669,11 @@ function PulseDrawer({
         {summaryText || errorText ? (
           <div className="sec">
             <h5>{errorText ? pulseText("pulseError", "Error", "错误") : pulseText("pulseSummary", "Summary", "摘要")}</h5>
-            <div className={clsx("summary", errorText && "is-err")} style={{ marginTop: 0 }} data-i18n-skip>{errorText || summaryText}</div>
+            {errorText ? (
+              <div className="summary is-err" style={{ marginTop: 0 }} data-i18n-skip>{errorText}</div>
+            ) : (
+              <div className="summary is-md" style={{ marginTop: 0 }} data-pulse-summary-md><AiMarkdown content={normalizeRunMarkdown(summaryText ?? "")} /></div>
+            )}
           </div>
         ) : null}
         <div className="sec">

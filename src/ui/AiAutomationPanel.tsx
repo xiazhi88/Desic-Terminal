@@ -90,7 +90,7 @@ import type {
 } from "../types";
 import { buildHistoricalFillMarkers } from "../lib/chartTradeSemantics";
 import { expertGrantLabel } from "../lib/aiExpertGrant";
-import { AiMarkdown } from "./AiMarkdown";
+import { AiMarkdown, normalizeRunMarkdown } from "./AiMarkdown";
 import { AgentCollaborationTrace } from "./AgentCollaborationTrace";
 import { AgentLibraryView } from "./agent-library/AgentLibraryView";
 import { ProfileAgentSelector } from "./agent-library/ProfileAgentSelector";
@@ -3211,10 +3211,6 @@ function runStatusTitle(status: string) {
     queued: automationText("runWaiting", "Waiting to run", "等待运行")
   };
   return labels[status] ?? status;
-}
-
-function normalizeRunMarkdown(value: string) {
-  return value.replace(/\s+(#{1,6}\s+)/g, "\n\n$1").trim();
 }
 
 function formatDuration(milliseconds: number) {

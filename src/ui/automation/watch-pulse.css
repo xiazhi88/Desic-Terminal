@@ -321,6 +321,16 @@
 .watch-pulse .wp-drawer .acts div.is-zero b { color: var(--wp-ink-4); font-weight: 400; }
 .watch-pulse .wp-drawer .acts svg { width: 9px; height: 9px; flex: none; }
 .watch-pulse .wp-drawer .summary { margin-top: 8px; padding: 8px 10px; border-radius: var(--wp-r2); background: var(--wp-bg); border: 1px solid var(--wp-hair); font-size: 12px; color: var(--wp-ink-2); line-height: 1.55; overflow-wrap: anywhere; }
+/* 摘要按 markdown 渲染：沿用抽屉的紧凑字号；标题降成小节标签（`.sec h5` 是抽屉节标题，这里要覆盖掉它的 flex 布局）。 */
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown { color: inherit; font-size: inherit; line-height: inherit; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown :is(h3, h4, h5, h6) { display: block; margin: 10px 0 4px; font-size: 12px; font-weight: 600; line-height: 1.4; color: var(--wp-ink); }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown > :is(h3, h4, h5, h6):first-child { margin-top: 0; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown :is(p, ul, ol, blockquote, pre) { margin-bottom: 6px; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown :is(ul, ol) { padding-left: 16px; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown li { margin: 1px 0; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown strong { color: var(--wp-ink); }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown code { padding: 0 3px; border-radius: var(--wp-r1); border-color: var(--wp-hair-2); background: var(--wp-s3); color: var(--wp-ink); font-family: var(--wp-font-num); font-size: 10.5px; }
+.watch-pulse .wp-drawer .summary.is-md .ai-markdown table { font-size: 11px; }
 .watch-pulse .wp-drawer .summary.is-err { color: var(--wp-warn); border-color: color-mix(in oklab, var(--wp-warn) 30%, transparent); }
 .watch-pulse .wp-drawer .df { display: flex; align-items: center; gap: 6px; padding: 10px 14px 12px 16px; border-top: 1px solid var(--wp-hair); }
 .watch-pulse .wp-drawer .df .pos { font: 10.5px var(--wp-font-num); color: var(--wp-ink-4); }

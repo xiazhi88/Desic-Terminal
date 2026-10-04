@@ -1901,6 +1901,13 @@ async function verifyWatchPulse(page, scenario) {
   await drawer.waitFor({ state: "visible", timeout: 5_000 });
   await page.waitForFunction(() => document.querySelector("[data-pulse-drawer] .evi, [data-pulse-drawer] .gantt, [data-pulse-drawer] .reasons"), null, { timeout: 5_000 });
   const firstId = await drawer.getAttribute("data-run-id");
+  // 摘要是 markdown（五个固定小节）：必须渲染成标题/代码，不能把 `## ` 原样露给用户。
+  await page.waitForSelector("[data-pulse-summary-md] .ai-markdown", { timeout: 5_000 });
+  const summaryMd = await page.evaluate(() => {
+    const node = document.querySelector("[data-pulse-summary-md]");
+    return { headings: node.querySelectorAll("h3, h4, h5").length, code: node.querySelectorAll("code").length, raw: /(^|\n)\s*##\s/.test(node.textContent || "") };
+  });
+  if (summaryMd.headings < 3 || !summaryMd.code || summaryMd.raw) throw new Error(`${label}: drawer summary must render as markdown: ${JSON.stringify(summaryMd)}`);
   await page.waitForTimeout(300);
   await page.screenshot({ path: path.join(artifactDir, `watch-pulse-drawer-${scenario.label}.png`) });
   await page.keyboard.press("ArrowRight");

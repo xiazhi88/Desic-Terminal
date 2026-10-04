@@ -29,3 +29,8 @@ const components: Components = {
 export function AiMarkdown({ content }: { content: string }) {
   return <div className="ai-markdown" data-i18n-skip><ReactMarkdown remarkPlugins={[remarkGfm, remarkCjkFriendly]} components={components}>{content}</ReactMarkdown></div>;
 }
+
+/** 运行摘要里模型常把 `## 标题` 挤在上一段同一行；标题前补空行，否则 markdown 不认它是标题。 */
+export function normalizeRunMarkdown(value: string) {
+  return value.replace(/\s+(#{1,6}\s+)/g, "\n\n$1").trim();
+}
