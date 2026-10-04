@@ -933,6 +933,8 @@ struct PublicChannelAge {
 struct MarketRuntime {
     public_tasks: Arc<Mutex<Vec<tauri::async_runtime::JoinHandle<()>>>>,
     public_session_id: Arc<Mutex<Option<String>>>,
+    /// 前端窗口真正会读取的盘口/成交标的（消费者 id → 标的）。其余标的只更新后端缓存，不推给 WebView。
+    render_focus: Arc<Mutex<HashMap<String, Vec<String>>>>,
     market_consumers: Arc<Mutex<chart_consumers::MarketConsumerRegistry>>,
     public_controls: Arc<Mutex<HashMap<String, market_ws::PublicStreamControl>>>,
     candle_repair_locks: Arc<Mutex<HashMap<String, Arc<AsyncMutex<()>>>>>,
@@ -950,6 +952,7 @@ impl Default for MarketRuntime {
         Self {
             public_tasks: Arc::new(Mutex::new(Vec::new())),
             public_session_id: Arc::new(Mutex::new(None)),
+            render_focus: Arc::new(Mutex::new(HashMap::new())),
             market_consumers: Arc::new(Mutex::new(chart_consumers::MarketConsumerRegistry::new())),
             public_controls: Arc::new(Mutex::new(HashMap::new())),
             candle_repair_locks: Arc::new(Mutex::new(HashMap::new())),

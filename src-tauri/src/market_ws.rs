@@ -274,6 +274,8 @@ pub fn start_market_stream(
 ) -> Result<(), String> {
     let consumer_id = normalize_market_consumer_id(session_id.as_deref(), "main-market")?;
     let public_watchlist = normalize_watchlist(watchlist, &inst_id);
+    // 主窗口只展示当前标的的盘口和成交；自选其余标的仍订阅并写入后端缓存，但不再推给前端。
+    set_render_focus(runtime.inner(), &consumer_id, vec![inst_id.clone()]);
     let diff = runtime
         .market_consumers
         .lock()
@@ -299,6 +301,11 @@ pub fn register_market_consumer(
 ) -> Result<MarketConsumerStatus, String> {
     let consumer_id =
         normalize_market_consumer_id(Some(&registration.consumer_id), "chart-consumer")?;
+    if registration.include_orderbook || registration.include_trades {
+        set_render_focus(runtime.inner(), &consumer_id, registration.symbols.clone());
+    } else {
+        clear_render_focus(runtime.inner(), &consumer_id);
+    }
     let request = chart_market_consumer_request(
         registration.symbols,
         registration.orderbook_depth,
@@ -332,6 +339,7 @@ pub fn unregister_market_consumer(
     consumer_id: String,
 ) -> Result<MarketConsumerStatus, String> {
     let consumer_id = normalize_market_consumer_id(Some(&consumer_id), "chart-consumer")?;
+    clear_render_focus(runtime.inner(), &consumer_id);
     let mut consumers = runtime
         .market_consumers
         .lock()
@@ -348,6 +356,26 @@ pub fn unregister_market_consumer(
         added_subscriptions: diff.subscribe.len(),
         removed_subscriptions: diff.unsubscribe.len(),
     })
+}
+
+fn set_render_focus(runtime: &MarketRuntime, consumer_id: &str, symbols: Vec<String>) {
+    if let Ok(mut focus) = runtime.render_focus.lock() {
+        focus.insert(consumer_id.to_string(), symbols);
+    }
+}
+
+fn clear_render_focus(runtime: &MarketRuntime, consumer_id: &str) {
+    if let Ok(mut focus) = runtime.render_focus.lock() {
+        focus.remove(consumer_id);
+    }
+}
+
+fn render_focus_symbols(runtime: &MarketRuntime) -> HashSet<String> {
+    runtime
+        .render_focus
+        .lock()
+        .map(|focus| focus.values().flatten().cloned().collect())
+        .unwrap_or_default()
 }
 
 fn chart_market_consumer_request(
@@ -543,6 +571,7 @@ pub fn stop_market_stream(
     session_id: Option<String>,
 ) -> Result<(), String> {
     let requested = normalize_market_consumer_id(session_id.as_deref(), "main-market")?;
+    clear_render_focus(runtime.inner(), &requested);
     let diff = runtime
         .market_consumers
         .lock()
@@ -2136,7 +2165,9 @@ fn handle_public_message(
                     }
                     match merge_and_cache_orderbook(runtime, &inst_id, raw, action, &book) {
                         Ok(Some(render_book)) => {
-                            if public_render_event_is_fresh(runtime, render_book.ts) {
+                            if public_render_event_is_fresh(runtime, render_book.ts)
+                                && render_focus_symbols(runtime).contains(&inst_id)
+                            {
                                 render_buffer.queue_book(inst_id, render_book);
                             }
                         }
@@ -2152,11 +2183,12 @@ fn handle_public_message(
         }
         "trades" | "trades-all" => {
             let inst_id = arg_inst_id.clone().unwrap_or_default();
+            let rendered = render_focus_symbols(runtime).contains(&inst_id);
             for raw in data {
                 if let Ok(trade) = <Trade as serde::Deserialize>::deserialize(raw) {
                     update_public_health(runtime, trade.ts);
                     cache_trade(runtime, &inst_id, &trade);
-                    if public_render_event_is_fresh(runtime, trade.ts) {
+                    if rendered && public_render_event_is_fresh(runtime, trade.ts) {
                         render_buffer.queue_trade(&inst_id, trade);
                     }
                 }
@@ -2905,21 +2937,27 @@ fn merge_orderbook_side(
             levels.push(update.clone());
         }
     }
-    levels.sort_by(|left, right| {
-        let left_px = left.px.parse::<f64>().unwrap_or(0.0);
-        let right_px = right.px.parse::<f64>().unwrap_or(0.0);
-        if descending {
-            right_px
-                .partial_cmp(&left_px)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        } else {
-            left_px
-                .partial_cmp(&right_px)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        }
-    });
+    sort_levels_by_price(&mut levels, descending);
     levels.truncate(400);
     levels
+}
+
+/// 价格字符串 → 可按整数比较的全序键；整本盘口每次更新都要排序，不能在比较里反复解析字符串。
+fn price_sort_key(px: &str) -> i64 {
+    let bits = px.parse::<f64>().unwrap_or(0.0).to_bits() as i64;
+    if bits < 0 {
+        bits ^ i64::MAX
+    } else {
+        bits
+    }
+}
+
+fn sort_levels_by_price(levels: &mut [OrderBookLevel], descending: bool) {
+    if descending {
+        levels.sort_by_cached_key(|level| !price_sort_key(&level.px));
+    } else {
+        levels.sort_by_cached_key(|level| price_sort_key(&level.px));
+    }
 }
 
 fn trim_orderbook(mut book: OrderBook) -> OrderBook {
@@ -2927,20 +2965,8 @@ fn trim_orderbook(mut book: OrderBook) -> OrderBook {
         .retain(|level| level.sz.parse::<f64>().unwrap_or(0.0) > 0.0);
     book.asks
         .retain(|level| level.sz.parse::<f64>().unwrap_or(0.0) > 0.0);
-    book.bids.sort_by(|left, right| {
-        let left_px = left.px.parse::<f64>().unwrap_or(0.0);
-        let right_px = right.px.parse::<f64>().unwrap_or(0.0);
-        right_px
-            .partial_cmp(&left_px)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    book.asks.sort_by(|left, right| {
-        let left_px = left.px.parse::<f64>().unwrap_or(0.0);
-        let right_px = right.px.parse::<f64>().unwrap_or(0.0);
-        left_px
-            .partial_cmp(&right_px)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sort_levels_by_price(&mut book.bids, true);
+    sort_levels_by_price(&mut book.asks, false);
     book.bids.truncate(400);
     book.asks.truncate(400);
     book
@@ -3778,6 +3804,39 @@ mod tests {
         assert!(business_message_has_candle_payload(
             r#"{"arg":{"channel":"candle1m"},"data":[["1000"]]}"#
         ));
+    }
+
+    #[test]
+    fn orderbook_levels_sort_numerically_not_lexically() {
+        let level = |px: &str, sz: &str| OrderBookLevel {
+            px: px.to_string(),
+            sz: sz.to_string(),
+            orders: None,
+        };
+        let book = OrderBook {
+            bids: vec![level("99.5", "1"), level("100.25", "2"), level("9.75", "3"), level("98", "0")],
+            asks: vec![level("101", "1"), level("100.5", "1"), level("1000", "1")],
+            ts: 0,
+            seq_id: None,
+        };
+        let trimmed = trim_orderbook(book);
+        let bids = trimmed.bids.iter().map(|item| item.px.as_str()).collect::<Vec<_>>();
+        let asks = trimmed.asks.iter().map(|item| item.px.as_str()).collect::<Vec<_>>();
+        assert_eq!(bids, ["100.25", "99.5", "9.75"]);
+        assert_eq!(asks, ["100.5", "101", "1000"]);
+    }
+
+    #[test]
+    fn render_focus_only_lists_symbols_frontend_consumers_registered() {
+        let runtime = MarketRuntime::default();
+        assert!(render_focus_symbols(&runtime).is_empty());
+        set_render_focus(&runtime, "main-market", vec!["BTC-USDT-SWAP".to_string()]);
+        set_render_focus(&runtime, "chart-1", vec!["ETH-USDT-SWAP".to_string()]);
+        let focus = render_focus_symbols(&runtime);
+        assert!(focus.contains("BTC-USDT-SWAP") && focus.contains("ETH-USDT-SWAP"));
+        assert!(!focus.contains("SOL-USDT-SWAP"));
+        clear_render_focus(&runtime, "chart-1");
+        assert!(!render_focus_symbols(&runtime).contains("ETH-USDT-SWAP"));
     }
 
     #[test]
