@@ -175,6 +175,15 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - AI 自动化下单：`operator=ai`。
 - 本地历史里找不到订单归因时，视为用户在 OKX App 或其它渠道手动操作，仍归为 `user`，不显示未归因。
 
+### AI 自动化硬风控（风控官）
+
+- 只作用于 AI 自动化 Profile 产生的**开仓**机会（沿用 `automation_opportunity_requires_decision_context` 的判定）；平仓 / 撤单 / 改单、手动下单、系统化策略都不受影响——风控不能挡住止损。
+- 纯规则在 `crates/trade-domain/src/ai_gate.rs`：`ai_open_static_reasons`（必须带止损触发价与止盈、禁止 trigger 开仓）、`evaluate_ai_open_gate`（含费止损风险 ≤ 单笔预算、净盈亏比下限、日亏熔断、并发上限）、`evaluate_ai_execution_guard`（下单那一刻：越过止损、市价偏离、再查日亏）。风险与盈亏比口径取 `evaluate_linear_usdt_perpetual` 的含费值；超预算只**告诉** AI 最多几张（`calculate_linear_usdt_risk_budget`），代码不替模型改数量。
+- 编排在 `src-tauri/src/ai_risk_gate.rs`：今日已实现盈亏（账户级、Asia/Shanghai 自然日）、本 Profile 并发敞口、Run 冻结快照里的限额。`TradePrecheckRequest.ai_gate` 是 `#[serde(skip)]` 的服务端注入字段，模型传什么都不生效。
+- 一律 fail-closed：权益、最新价、并发数任何一项拿不到就拒绝开仓，不能用 `unwrap_or(0.0)` 之类默认值静默放行。执行守卫拒绝时机会记为 `failed`，`error` 以 `execution_guard：` 开头。
+- Profile 设置存在 `ai_agent_profiles.risk_json`（JSON blob，迁移是幂等 `ADD COLUMN … DEFAULT '{}'`）；`null` / 缺字段 / 越界都在 `normalized()` 里回落默认或夹取，老快照必须能解析。新增字段照这个模式加，不要再为每个数字新增一列。
+- 唤醒：`load_active_condition_models` 同时评估 `source IN ('agent','user')`，`finishRun` 只替换 `agent` 条件。强制升级的「止损距离 / 保证金率」在条件配置缺省时从内存账户快照推导（`ai_triage::derive_account_escalation_inputs`）；OKX `mgnRatio` 按比值 ×100 换算成百分比，这一单位假设尚未用真实账户核对。
+
 ## 8. K 线完整性
 
 - 启动时必须检查观察交易对的所有要求周期。
@@ -282,6 +291,7 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 前端必须在启动和 scope 切换时读取后端持久化 guard，不能只依赖组件内存。`unknown/reconciling/blocked` 状态要独立于最近一次成功结果展示；损坏或身份绑定不一致的 `blocked` 记录继续参与风险拦截，但不能进入自动恢复循环，用户可触发的恢复动作只能做只读查询。
 - 账号环境由 API Key 自动识别时，不得直接把旧账号从 demo 改写为 live 或反向改写。账号配置写入和所有普通/策略/紧急执行预留必须在 SQLite `IMMEDIATE` 事务内重新校验账号快照，读取既有执行、抢占重试状态和落库必须处于同一事务，形成跨进程先后关系；账号执行指纹（环境、凭据、读取/交易权限）变化和删除账号前按 `account_id` 跨全部环境检查未决普通/策略执行、`accepted` 但投影未完成的记录和当前合约紧急操作。OKX 远端账户身份以只读 `/account/config` 返回的 `environment + uid` 为准并持久化 `mainUid`；同一 API Key 或同一远端身份不得配置到第二个 `account_id`。旧版多账号只要任一凭据账号缺少 UID，就必须要求逐个连接测试并失败关闭新的交易执行，防止通过同环境换 Key、环境变化、删除重建或重复账号让持久化 guard 从新 scope 消失。前端首次实盘确认必须按 `account_id + environment` 记录，环境自动变化时在确认前失败关闭交易账号。
 - 后台唤醒条件必须类型化并有资源上限，禁止把任意脚本或表达式作为触发器。
+- 下发给模型的观察条件规范是 `{type, params:{…}}` 嵌套形状，而 `WakeCondition` 按扁平字段反序列化：每个写库入口都必须先把 `params` 上提再校验（快判 `wake_condition_value`、AI 链路 `lift_background_wake_condition_params`），否则会出现“界面显示正常、实际报 missing field 被丢弃”。
 - 每个后台 Run 必须固定 Profile、权限和 Skill 版本；运行中配置变化不能改变当前 Run。
 - 非空 Profile snapshot 解析失败必须使 Run 失败，不能回退到后来修改的 Profile；仅明确没有 snapshot 的旧记录可走单独兼容路径。旧快照里的协作字段只做只读兜底（`enabledAgents` → 旧 `multiAgents` → 旧 `multiAgentMode` 读法），勾选列内容损坏按"未勾选"处理、名单里未知 id 直接忽略，两者都不得让 Run 失败关闭。
 - AI 复盘的章节名称属于输出引导，不得作为 `finishRun` 的事务硬门槛；完成校验应只约束安全边界、必需结构化参数和非空正文，避免模型合并或改写标题导致整次复盘失败。
@@ -300,6 +310,51 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - AI 工具执行闸门（`src-tauri/src/ai_tool_gate.rs`）：只读工具走"全局许可 → 域许可 → 共享读锁"，写工具仍走独占写锁串行。**不得**为了提速把写工具改成并发。全局只读许可缺省 12，可按机器用 `toolReadConcurrency` 覆盖；每个域另有上限（缺省 market 6 / intelligence 4 / account 4 / radar 4 / strategy 4 / local 12），用 `toolDomainConcurrency` 覆盖。提并发的**前置条件**是上游限流层仍然生效：OKX 公共 REST 继续受 `OKX_PUBLIC_REST_SEMAPHORE` 与按路径最小间隔约束，去掉或放宽这些上游限流时不得同时提高闸门上限。
 - 闸门与许可一律**每个 turn 创建一次**、随 turn 结束释放；改成跨 turn 常驻会泄漏许可，禁止。
 - 排查"工具排队"必须把 `requestedAt → executionStartedAt` 拆成两段看：`receivedAt - requestedAt` 是**投递**（sidecar 发事件 → Rust 事件循环真正处理），`executionStartedAt - receivedAt` 才是**许可/锁排队**。每轮的 `tool_json` 在 `turnTiming.toolGate` 里记录当轮生效的并发上限。只读工具排队不等于闸门太窄——先看第二段是否非零，再决定是否动上限。
+
+### 导演模式（语音指令与 `ui.*` 界面工具）
+
+- 导演模式只做**显示层的可逆操作**：切工作区 / 合约 / 周期、增删指标、开关订单流。语音与 AI 都**不能直接下单、改仓位或改账户 / Profile / 策略**；`directorCommands` 对含买卖开平仓动词的整句一律拒绝（`trade-refused`），认不出的整句交给 AI，**整句要么全部认得、要么全部交出，不执行一半**。新增指令类型时必须仍满足「可逆、非交易」，并补 `scripts/test-voice-director.mjs` 的正反例。
+- 语音指令与 AI 的 `ui.*` 工具共用同一个执行器（`src/lib/voice/directorExecutor.ts`）：推演状态、跳过无变化的步骤、返回撤销函数。不得为 AI 另写一条绕过撤销与步骤展示的路径。
+- `ui.*` 工具**只授予语音导演会话**：请求必须显式带 `uiControl: true`（只有 `askVoiceAgent` 会发），再加显式主 Agent + `strategySessionKind=trading-research`；普通 AI 研究会话、后台 / 复盘 Run、策略编辑器、指标会话与委派专家一律拒绝（用户反馈过「在 AI 研究里提问却自动切了合约和周期」），且**不随权限模式变化**（它不是交易副作用）。侧车策略（`cline-tool-policy.mjs`）与 Rust `ai_ui_control::authorize` 两层都校验；前端监听 `ai:ui-action` 时还要核对事件的 `sessionId` 就是语音会话（`getVoiceSessionId`），别的会话发来的事件直接忽略。改动侧车策略后要重建 sidecar（`npm run prepare:sidecar`）并重启应用才生效。Rust 侧 `ai_ui_control::authorize` 是不可绕过的第二道闸：任何 `ui.` 前缀的未登记工具都 fail-closed，入参用 `deny_unknown_fields` 加精确白名单校验。工作区、周期、指标三份枚举（侧车 schema、Rust 白名单、前端校验）必须一致，Rust 有读取 `cline-sidecar.mjs` 源码的比对测试；改动任一处后运行 `npm run test:ai-policy`、`cargo test --lib ai_ui_control` 与 `npm run test:voice-director`。
+- `ui.*` 工具回给模型的结果只代表「请求已发出」：Rust 看不到界面是否真的变化，前端还会按当前合约 / 指标目录再校验一遍。提示词与工具描述不得让模型据此声称「已经显示」。
+- 主图表的指标外部控制走 `externalIndicatorCommands` 队列（`src/lib/chartIndicatorCommands.ts`），**不要**复用 `indicatorIds` 属性：后者每次变化都会把全部实例重置成默认参数。`add` 优先重新显示已隐藏的同类实例，`remove` 只隐藏、不删除，因此撤销不丢用户参数；默认指标里有隐藏实例（EMA21、VWAP），「是否已显示」必须按可见实例计算。
+- 录音是隐私数据：只在用户按住快捷键时采集，松开立即释放麦克风；只发到用户在「设置 → 通用 → 语音」明确选定的转写服务，服务地址必须 https（仅本机回环地址允许 http），不落盘、不写日志。转写服务的 API Key 保存在 `voice.local.json`（敏感文件、0600、不回传前端，只回 `hasKey`），已纳入更新前备份清单。不要依赖浏览器内置的 `webkitSpeechRecognition`，WKWebView / WebView2 里不可靠。
+- 本机离线识别（`voice_local.rs` 负责安装，`voice_stream.rs` 负责识别，纯数据与逻辑在 `desic-voice::local`）会**加载下载来的第三方动态库**，边界不能放松：只从资源表里写死的官方发布地址下载；每个文件都必须通过写死的 sha256 与大小校验才会解压（校验不符、超大、不完整、被取消都删除半成品）；解压只认白名单里的固定文件，`..`、绝对路径、反斜杠、白名单外的文件一律忽略；安装后真实加载库与模型并对静音识别一次，失败即回滚到旧版本。升级引擎或模型时必须同时改 `ENGINE_VERSION` / `INSTALL_ID` 与三个平台的 url、sha256、size、顶层目录名，旧安装会因标记不一致自动判为未安装；`every_asset_is_pinned_*` 测试会拦住不完整的资源表。目前只支持 macOS（arm64 / x64）与 Windows x64，**Windows 与 Intel Mac 没有在真机验证过**，Linux 暂不支持。
+- 流式识别在**进程内**调用 sherpa-onnx 的 C API（`libloading` 动态加载，结构体按 1.13.8 的 `c-api.h` 手写 `#[repr(C)]`，升级版本时必须对照头文件重新核对字段顺序）；识别器由一个专用线程独占，空闲 5 分钟释放。**不要改用官方自带的 websocket 服务端**：它监听所有网卡且没有鉴权，首次运行还会触发系统防火墙弹窗。结束时要补足够的尾部静音（现为 1.5 秒），否则模型会丢掉最后一两个字。Windows 上加载 DLL 用 `LOAD_WITH_ALTERED_SEARCH_PATH` 让同目录的 onnxruntime 能被找到，这一路径没有真机验证。
+- 本机识别的前端不解码 MediaRecorder 的 webm / mp4（WKWebView 与 WebView2 支持不一致），而是用 AudioWorklet 直接采原始 PCM，由 `StreamingResampler` 增量重采样成 16kHz（与整段重采样结果一致，有测试），约 160ms 一块以 16bit PCM 推给 Rust，推送按调用顺序串行；不支持 AudioWorklet 时本机识别不可用并提示改用云端。识别过程不写盘、不记录识别文本。
+- 真实资源的端到端测试默认忽略：在装有官方两个 tar.bz2 的目录起 `python3 -m http.server`，再运行 `DESIC_VOICE_LOCAL_TEST_BASE=… DESIC_VOICE_LOCAL_TEST_WAV=… cargo test --lib real_assets_install_and_recognise -- --ignored --nocapture`。
+- 识别不准时的原则：**宁可转给语音指挥或请用户重说，也不要猜着执行**。解析器要求整句全部认得才直接执行；说完后有可配置的停顿（默认 2 秒）展示「识别文字 + 将要做的事」，用户可按 Esc 取消，这是对识别错误的最后一道保险——不要为了「更聪明」缩短或取消这段停顿，也不要给解析器加大量近音字纠错。静音时识别引擎常吐出的口头禅（okay、嗯、thank you 等）由 `isLikelyNoise` 拦下，不会进入任何流程。
+- 「语音指挥」是一个标题固定的普通 AI 会话：用 `permissionMode: "advisor"`、`reasoningDepth: "low"` 发送，并带会话级 `extraRules`（Rust 侧追加在全局规则之后、限长 1200 字符、只对携带它的会话生效）。同一会话的模型 / 权限 / 账户 / 规则要保持不变，否则侧车会因会话指纹变化报错。工具调用只在对应专门工作区（radar / intelligence / strategy / tradeOpportunity）时才让界面跳转，行情与账户读取只在气泡里回答。
+- 像素伙伴的引擎（`pixelBuddy.ts`）与 React 渲染分离：所有绘制落在整数网格、角色 12fps、睡在边缘不空转；每次新的移动用令牌取消旧的移动，否则「回去」和「过来」的动画会同时抢位置（出现过角色停在边缘不过来的缺陷）。系统开启「减少动态效果」时不冒头、不跳跃。
+- macOS 打包需要 `src-tauri/Info.plist` 的 `NSMicrophoneUsageDescription` 和 `entitlements.plist` 的 `com.apple.security.device.audio-input`（`hardenedRuntime` 为 true）。`tauri dev` 下麦克风权限弹窗归属启动它的终端，**必须用打包后的应用验证权限弹窗**；当前安装包未公证，用户侧首次弹窗行为开发机无法复现。Windows 的 WebView2 对麦克风使用默认的按来源弹窗，需在真机确认。
+- 按住说话的快捷键用 `KeyboardEvent.code`（与键盘布局、输入法无关），要避开 `Alt+字母` 的交易热键和 `⌘K` / `⌘.`，在输入框与可见弹窗里不触发；窗口失焦、标签页隐藏时丢弃录音而不是发送。高频变化的音量只放进独立存储（`useSyncExternalStore`），不要进 `App` 的 state，否则每秒会重绘整个应用几十次。
+- 词库纠错（`lexicon.ts` / `lexiconStore.ts`）与上面「不要给解析器加大量近音字纠错」不冲突：它是**用户自己确认过的、可见可删的个人词表**，在解析前对识别文字做整词替换；默认词表只放产品内的专有名词（合约、指标、工作区名）。确认停顿里按 Tab 进入编辑，改完后的差异会被学成新条目。不要把词库做成静默的模糊匹配，也不要让它改写数字与买卖动词。
+- 疑问句（`QUESTION_MARKERS`：「该不该」「能不能」「吗」等）即使含买卖动词也**交给语音指挥回答而不是拒绝**；祈使句仍按 `trade-refused` 拒绝。改动这个判断必须在 `test-voice-director.mjs` 同时补正例（「该不该做多」）与反例（「做多 BTC」）。
+- 语音分析的证据卡来自证据账本工具（`research.recordEvidence / recordDecision`）的真实调用结果，`voiceAgentModel` 的 reducer 只展示被记录的数据与来源；会话级规则 `VOICE_AGENT_RULES` 要求多步分析先查再记。不要让界面凭模型的文字自行拼「证据」。
+- `ai_stop` 不论会话是否在运行都会广播 `done / cancelled`。`askVoiceAgent` 只在**自己要求停止**（`handle.stop()`）时才把 cancelled 当结果，开始新一轮前也只打断确实还没结束的上一轮；否则会把刚发出的这一轮当成已取消，气泡被静默收起（出现过「说了就跑回侧边、但 AI 研究里其实有记录」的缺陷）。语音会话的 id 记在本地，复用前必须确认标题仍是「语音指挥」，否则新建一个，保证用户在 AI 研究里能按名字找到。「在 AI 研究中查看」通过 `OPEN_AI_SESSION_EVENT` 让工作区直接定位到该会话。
+- 证据卡不要一次性铺开：卡片宽度固定、数量不定，铺开会向上顶出窗口遮住行情（出现过 4 张卡 + 长回答顶到窗口外）。现在由 `EvidenceStage` 单槽位自动编排——一次只演一张，按字数停留 2.2–4.2 秒（`cardHoldMs`）后换下一张，进度点可点击跳转并暂停自动播放；新卡晚到时停够了的会立刻接上。气泡留存时间必须覆盖整段编排（`stagePlanMs`）。
+- 回答文字进气泡前先过 `plainSpeech`（去 Markdown）和 `splitLead`（先显示开头一两句，其余「展开全文」折叠）；`VOICE_AGENT_RULES` 同时要求模型用纯文本、证据 / 理由各不超过 40 字、收尾不超过 2 句且不重复卡片里的数字。气泡与舞台都有高度上限，新增内容时要在小窗口（约 720 高）下确认不出窗口。
+- 沙箱会校验已有会话的「策略 / 账户 / 权限 / 规则」指纹，不一致就拒绝续用（报「配置已变化，请创建新会话」）。语音会话会因此失效：修改 `VOICE_AGENT_RULES`、切换账户或权限都会触发。`askVoiceAgent` 遇到这个错误会自动新建一个「语音指挥」会话并重试一次，用户看不到报错；以后改语音规则不需要手动清理旧会话。
+- AI 通过 `ui.*` 工具改界面时，一律走 `AiActionOverlay`（全屏边缘流光 + 暗角 + 顶部胶囊），**与语音伙伴是否开启无关**：先亮起 600ms 再执行，多条动作串行，改完保留约 3 秒并提供撤销，Esc 关闭；整层 `pointer-events: none`，只有胶囊上的按钮可点。用户反馈过「界面变了却没感知到 AI 在动手」，不要把这层提示做成可选或只在语音开启时出现。
+- 回答已结束但没收到结果的工具调用必须收尾（`settleUnfinishedTools`，在 `done` 事件和历史消息恢复时都调用），显示「未返回结果」，不能一直是「运行中」。AI 回答里的交易机会编号（`opp…`）在 `AiMarkdown` 里渲染成可点击入口，通过已有的 `desic:open-trade-opportunity` 事件跳到「交易机会」。
+- AI 研究 v2（`ai-research-v2.css` 最后加载，只改外观不动数据流）：对话居中单列 760px；过程区（`ai-process`）收成一行胶囊；输入框的模型 / 深度 / 权限收进一个弹层（`ai-composer-options.is-popover`，所以输入框相关容器必须 `overflow: visible`，否则弹层被裁掉）；会话列表按 置顶 / 今天 / 昨天 / 更早 / 语音指挥 分组并带搜索（`src/lib/aiSessionGroups.ts`）；研究抽屉默认收起、从右侧**盖在对话上**滑出（存储键换成 `…inspector-open.v2`，让老用户也先看到新默认）。
+- 回答顶部的**结论卡**（`AiVerdictCard` + `src/lib/aiVerdict.ts`）只从本轮真实的 `tradeOpportunity.create` / `research.recordDecision` 结果取数据；普通问答不出卡，也不要从正文里猜价位。盈亏比是毛值（不含手续费与滑点），卡上要说明。新增字段先在 `scripts/test-ai-verdict.mjs` 补用例。预览页（`/ai-preview`）的假数据里有一轮完整样例，改 UI 先在那里看。
+- 磷光外观下 AI 研究的紫色分两层压低：变量层（`phosphor.css` 里 `.ai-research-shell` 的 `--ai-calm*`）和写死颜色层（`src/theme/phosphor-ai-calm.css`，由 `scripts/generate-phosphor-ai-calm.mjs` 生成，改了 AI 研究样式后要重新运行）。自动化与 Agent 库不在范围内，仍用 `--ai` 紫。新写 AI 研究样式时不要再写死 `rgba(149,92,255,…)`，用 `var(--accent)` 系列。
+- AI 研究的版式细节：输入框在文档流里，对话区底部不要再为它预留大块留白（出现过一屏空白）；结论卡放在回答**正文之后**（回答完成时用户视角停在最底部，卡片放开头会被滚走）；输入框焦点只保留外框一圈，不要给里层 `textarea` 再画焦点框；字体统一走 `--v2-font`，小字不低于 12px，工具结果卡标题不用大写等宽。
+- 改 AI 研究外观时**必须用真实会话验收，不能只看 `/ai-preview` 的内置假数据**：旧样式里 `.ai-message.user`（2px 左边框 + 底色）、`.ai-process`（左竖线）、摘要 10px 小字、页脚原始状态词等，假数据里不明显，真实会话里一眼可见（出现过「改完被用户一句话打回：这太丑了」）。做法：把会话导出成 JSON，页面里注入 `window.__aiPreviewSnapshot`（消息）与 `window.__aiPreviewSessions`（会话列表），预览页会用它们渲染；旧样式权重高于 `.ai-research-shell .x` 时，用 `.ai-research-host .ai-research-shell .x` 覆盖，不要上 `!important`。
+- AI 研究字号阶梯（`ai-research-v2.css` 末尾的 `--t-*`）：正文 14 / 用户气泡 13.5 / 界面 13 / 小字 12 / 极小 11.5，不要再出现 9–10px 的字，也不要把正文放回 15px 以上（用户反馈过「字号过大」）。工具读取类内联卡片一轮可能几十张，`AiInlineEvidenceCards` 默认只显示最近 3 张，其余折叠；没有交易计划的结论卡（只是「持有 / 观望」）用 `is-slim` 收成一条。
+- 订单流图层的清算（`OrderFlowPrimitive.drawLiquidations`）**不能逐条绘制**：查询上限 500 条，高周期（如 2H）下一个像素对应很长的时间，几百条会叠在同一处，逐条加标签就会糊成一团（出现过满屏「多头爆仓 / 空头爆仓」叠字）。现在先 `clusterLiquidations` 按 16px 格子合并（同方向、数量求和、记条数），再 `pickLabelledClusters` 最多标注 4 个、互不重叠、数量不足最大簇 30% 的不标；纵向光柱也只给被标注的簇。改动绘制前先用 `/chart-preview?orderflow=dense`（500 条集中在 6 次连环爆仓）看效果，逻辑测试是 `npm run test:orderflow`。
+- 设置页的语音面板（`VoiceSettings.tsx`）使用与其他设置一致的卡片化布局；本机引擎的下载 / 校验 / 卸载状态必须来自 Rust 的 `voice_local_status`，不要在前端缓存「已安装」。
+
+### 数据面板与交易复盘
+
+- 账户绩效是**联动筛选工作台**（`PerformanceExplorer.tsx` + `performance-explorer.css`，纯逻辑在 `src/lib/performanceExplorer.ts`，测试在 `scripts/test-performance-explorer.mjs`）。来源 / 品种 / 时间三个维度共用一份 `Filters`；每个面板的统计**不受自己这一维筛选影响、受其余维度影响**（`groupBy` 的 skip 语义），所以才能交叉联动，并且已选中的取值即使交叉后没有交易也要保留，否则用户找不到取消的地方。工具栏的账户 / 合约 / 时间范围一变，面板内筛选清空。配色从 `--up/--down` 派生并压低饱和度，不要换成固定色，否则用户反转红涨绿跌后会错。上一版（单页战绩单、翻页讲故事）都被用户否掉：前者「卡片汤」，后者不可交互；翻页版原型保留在 `design/performance-story/`，只作为以后「导出战报」的参考。后端 `position_episodes` 单次最多 200 条，超出时界面必须提示，不能静默截断。
+
+- 数据页三个视图：账户绩效（`src/ui/data/PerformanceBody.tsx` + `performance.css`，`data-pro.css` 只留交易复盘共用的部分）、交易复盘（`TradeReviewView.tsx` / `TradeReviewChart.tsx` + `trade-review.css`）、AI 用量。图表全部是自绘 SVG，不引入图表库；需要按容器宽度绘制的组件用**回调 ref** 测宽（容器可能在 loading / 空数据时不渲染，`useRef` + 只在挂载时测量会永远测不到，出现过权益曲线整块空白的缺陷）。
+- 交易复盘的统计逻辑只放在 `src/lib/tradeReviewModel.ts`（纯函数，`scripts/test-trade-review.mjs` 覆盖）：结论最多 3 条，每条样本量不足 `MIN_SAMPLE`（5）不出；「追单」= 上一笔亏损平仓后 30 分钟内再开仓；热力图样本少于 2 笔的格子不着色。新增结论类型必须有样本门槛、能点开对应交易、措辞不下投资建议。
+- 持久化只有 `trade_review_notes`（`trade_review.rs`，键为 账户 + 环境 + 仓位 ID，标签与笔记有数量 / 长度上限校验），笔记只存本机、不进 AI 上下文、不进日志。止损 / 止盈来自 `okx_orders` 的条件单历史匹配（`trade_review_protection`），**是估计**：界面必须标注「估计」，K 线图对离开仓价超过 25% 的价位直接忽略，避免匹配错误把图压扁。
+- K 线回放复用 `ai_automation_review_detail` 的本地 K 线（time 为秒，仓位时间为毫秒，换算要显式写出）；没有本地 K 线时给出提示而不是报错。交易复盘不提供任何下单 / 平仓入口。
+
 
 ## 10. 应用品牌与标识
 
