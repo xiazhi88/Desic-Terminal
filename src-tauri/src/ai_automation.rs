@@ -48,9 +48,9 @@ const REQUIRED_PROFILE_SKILL_IDS: [&str; 6] = [
     "desic-agent-orchestration",
 ];
 const DAILY_MARKET_REVIEW_EVIDENCE_RULES: &str = "历史 Smart Money 日内证据必须优先使用 intelligence.smartMoney.readSignalTrendByFilter：instId 使用完整永续交易对，granularity=1h，ts 使用 windowEnd-1 的 13 位毫秒字符串，limit 按窗口小时数设置；后端会把 ts 转成 OKX UTC+8 小时 dataVersion，绝不向上游发送 ts。readSignalOverviewByFilter 是当前小时快照且不得传 ts/dataVersion，只能作为明确标注的复盘后补充，不能归入目标日期或用于制造历史证据冲突。Daily Briefing 是可选的预生成产物；未启用或返回空列表不属于原始市场数据缺口，不得单独据此否决结论。System Stress 应按返回时间桶和 coverage 披露实际覆盖范围；ADL unknown 只表示没有可确认的警告状态。accountId 是不透明稳定标识，其中的 demo/live 字样不代表环境；只以独立 environment 字段和后端账户绑定校验为准。";
-const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES: &str = "永续合约的张数、币数量、名义敞口、保证金、止损和 ATR 风险只使用 account.readRisk 的 instrumentEvaluations、trade.evaluatePlan 或 trade.precheck 返回的结构化字段，不得自行手算。effectiveExposureMultiple=名义敞口÷USDT权益，notionalPctOfEquity=effectiveExposureMultiple×100%；例如 notionalPctOfEquity=47.58% 等于 effectiveExposureMultiple=0.4758X，表示标的反向波动1%时，忽略费用、资金费和滑点，权益约损失0.4758%，不是占用47.58%保证金。notionalPctOfEquity不超过100%表示有效敞口不超过1X；不得仅凭账户余额绝对值、minSz或名义敞口比例称为高风险、高杠杆、账户太小、容错空间有限或不适合开仓。账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。trade.precheck返回blocked=false时必须称为账户可行；没有明确用户风险预算时只报告结构化数值，不自行发明风险阈值。";
+const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES: &str = "永续合约的张数、币数量、名义敞口、保证金、止损和 ATR 风险只使用 account.readRisk 的 instrumentEvaluations、trade.evaluatePlan 或 trade.precheck 返回的结构化字段，不得自行手算。effectiveExposureMultiple=名义敞口÷USDT权益，notionalPctOfEquity=effectiveExposureMultiple×100%；例如 notionalPctOfEquity=47.58% 等于 effectiveExposureMultiple=0.4758X，表示标的反向波动1%时，忽略费用、资金费和滑点，权益约损失0.4758%，不是占用47.58%保证金。notionalPctOfEquity不超过100%表示有效敞口不超过1X；不得仅凭账户余额绝对值、minSz或名义敞口比例称为高风险、高杠杆、账户太小、容错空间有限或不适合开仓。账户容错只能结合stopRiskPctOfEquity、oneAtrRiskPctOfEquity、marginPctOfEquity、剩余保证金、强平距离、已有持仓和组合总风险判断。trade.precheck返回blocked=false时必须称为账户可行；Profile 的硬风控就是明确的风险预算，按它判断；除此之外只报告结构化数值，不自行发明风险阈值。";
 const DAILY_MARKET_REVIEW_EVIDENCE_RULES_EN: &str = "For historical intraday Smart Money evidence, prefer intelligence.smartMoney.readSignalTrendByFilter. Use the complete perpetual instId, granularity=1h, a 13-digit millisecond ts equal to windowEnd-1, and a limit matching the window hours. The backend converts ts to the OKX UTC+8 hourly dataVersion and never forwards ts upstream. readSignalOverviewByFilter is a current-hour snapshot and must not receive ts/dataVersion; it may only be cited as a clearly labelled post-review supplement and must not be attributed to the target date or used to fabricate a historical evidence conflict. Daily Briefing is an optional pre-generated artifact; disabled or empty briefing results are not an original market-data gap and cannot independently invalidate a conclusion. Report the actual System Stress time buckets and coverage. ADL unknown only means that no warning state was confirmed. accountId is an opaque stable identifier; demo/live text inside it does not define the environment. Use only the separate environment field and backend account binding validation.";
-const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN: &str = "For perpetual contracts, use only structured fields returned by account.readRisk instrumentEvaluations, trade.evaluatePlan, or trade.precheck for contract quantity, base quantity, notional exposure, margin, stop risk, and ATR risk. Never recompute them manually. effectiveExposureMultiple equals notional exposure divided by USDT equity, and notionalPctOfEquity equals effectiveExposureMultiple multiplied by 100%. For example, notionalPctOfEquity=47.58% means effectiveExposureMultiple=0.4758X: ignoring fees, funding, and slippage, an adverse 1% move in the instrument implies about a 0.4758% equity loss; it does not mean 47.58% margin usage. notionalPctOfEquity at or below 100% means effective exposure at or below 1X. Do not label an account high-risk, highly leveraged, too small, low-tolerance, or unsuitable solely from absolute balance, minSz, or notional exposure percentage. Judge account tolerance only with stopRiskPctOfEquity, oneAtrRiskPctOfEquity, marginPctOfEquity, remaining margin, liquidation distance, existing positions, and portfolio risk. If trade.precheck returns blocked=false, describe the account as feasible. Without an explicit user risk budget, report structured values and do not invent thresholds.";
+const PERPETUAL_ACCOUNT_RISK_LANGUAGE_RULES_EN: &str = "For perpetual contracts, use only structured fields returned by account.readRisk instrumentEvaluations, trade.evaluatePlan, or trade.precheck for contract quantity, base quantity, notional exposure, margin, stop risk, and ATR risk. Never recompute them manually. effectiveExposureMultiple equals notional exposure divided by USDT equity, and notionalPctOfEquity equals effectiveExposureMultiple multiplied by 100%. For example, notionalPctOfEquity=47.58% means effectiveExposureMultiple=0.4758X: ignoring fees, funding, and slippage, an adverse 1% move in the instrument implies about a 0.4758% equity loss; it does not mean 47.58% margin usage. notionalPctOfEquity at or below 100% means effective exposure at or below 1X. Do not label an account high-risk, highly leveraged, too small, low-tolerance, or unsuitable solely from absolute balance, minSz, or notional exposure percentage. Judge account tolerance only with stopRiskPctOfEquity, oneAtrRiskPctOfEquity, marginPctOfEquity, remaining margin, liquidation distance, existing positions, and portfolio risk. If trade.precheck returns blocked=false, describe the account as feasible. The Profile's hard risk rules are the explicit risk budget; judge against them, and otherwise report structured values without inventing thresholds.";
 const EXISTING_POSITION_MANAGEMENT_RULES: &str = "每轮必须把关注品种的现有持仓、当前普通和策略委托、已保存交易机会逐一核对，并把止损保护与止盈退出分开评估。每个仓位都必须在本轮输出 stopLossStatus、takeProfitStatus 和 positionDecision；已有止损不等于已经完成退出管理。止损用于失效或风险失控，止盈用于已验证的目标、阻力/支撑到达、剩余收益不足或有利动量衰减。没有证据支持的目标可以不创建止盈单，但必须明确说明暂无可验证止盈目标和下一次复评条件，不能编造目标价。有效目标应通过正常最终复核和 tradeOpportunity.create 创建 intent=close、exitKind=take_profit、orderType=limit、price=目标价、size=要平的张数；目标已达到且立即执行更安全时使用 exitKind=take_profit、orderType=market。止损使用 intent=close、exitKind=stop_loss：market 是立即风险退出，trigger 是保护性止损。所有 close 机会都必须填写 exitKind，closeFraction 只是可选元数据，size 才是权威平仓张数；已有仓位不得填写 takeProfit/stopLoss 字段。创建任何新退出前，必须按精确订单 ID 和语义角色与当前委托、已保存机会匹配；如果已有止盈或止损只需要移动价格，应使用带精确订单身份和新价格的 intent=amend 管理机会，不得再创建另一笔 close 委托。同一退出角色的活动平仓数量不得超过可平仓数量；如果已经存在重复委托，除非是数量互不重叠且有明确理由的分段退出，否则必须按精确订单身份取消或改单冗余委托。部分止盈后必须重新确认剩余仓位仍有有效止损。在 long/short 模式下同时持有反向仓位可以是对冲，但新开反向仓前必须明确说明对冲目标、规模关系、期限、解除/失效条件、双方退出机制和组合总风险；缺少这些组合层理由时优先管理已有敞口。";
 const EXISTING_POSITION_MANAGEMENT_RULES_EN: &str = "On every run, reconcile each watched instrument's existing positions, current ordinary and algo orders, and saved trade opportunities, then evaluate stop-loss protection and take-profit exit separately. Every position must produce stopLossStatus, takeProfitStatus, and positionDecision; having a stop-loss does not complete exit management. Stop loss handles invalidation or unacceptable risk. Take profit handles a validated target, resistance/support reached, reward consumed, or favorable momentum decay. A target order is optional when no evidence-based target exists, but the run must explicitly state that no verifiable target exists and name the next reevaluation condition; never invent a target price. When a target is valid, use the normal final review and tradeOpportunity.create workflow with intent=close, exitKind=take_profit, orderType=limit, price equal to the target, and size equal to the contracts to close. If the target is already reached and immediate execution is safer, use exitKind=take_profit with orderType=market. For stop loss use intent=close and exitKind=stop_loss: market is an immediate risk exit and trigger is a protective stop. Every close opportunity must include exitKind; closeFraction is optional metadata and size is the authoritative close quantity. Existing-position close opportunities must not include takeProfit/stopLoss fields. Before creating any new exit, match it against current orders and saved opportunities by exact IDs and semantic role. If an existing take-profit or stop-loss should move, create an order-management opportunity with intent=amend, the exact order identity, and the new price; do not create another close order. For each exit role, active close quantity must not exceed the closable position size. If duplicates already exist, preserve only a documented staged plan with disjoint quantities and otherwise cancel or amend the redundant orders through their exact identities. After a partial take-profit, verify that the remaining position still has a valid stop loss. Opposite positions in long/short mode may be a hedge, but before opening the opposite side state its objective, size relationship, duration, unwind/invalidation condition, exits for both sides, and combined portfolio risk. Without that portfolio-level rationale, manage the existing exposure first.";
 
@@ -157,6 +157,9 @@ pub(crate) struct AiAgentProfileSummary {
     pub target_leverage: u32,
     #[serde(default = "default_max_single_trade_margin_pct")]
     pub max_single_trade_margin_pct: u32,
+    /// AI 自动化开仓的硬风控预算（单笔风险、盈亏比、日亏损、并发、追价）。缺字段 = 默认值。
+    #[serde(default, deserialize_with = "crate::ai_risk_gate::deserialize_risk_settings")]
+    pub risk: crate::ai_risk_gate::AiProfileRiskSettings,
     pub min_wake_interval_seconds: u32,
     pub max_runs_per_hour: u32,
     pub feishu_enabled: bool,
@@ -250,6 +253,8 @@ pub(crate) struct AiAgentProfileInput {
     pub target_leverage: u32,
     #[serde(default = "default_max_single_trade_margin_pct")]
     pub max_single_trade_margin_pct: u32,
+    #[serde(default, deserialize_with = "crate::ai_risk_gate::deserialize_risk_settings")]
+    pub risk: crate::ai_risk_gate::AiProfileRiskSettings,
     #[serde(default = "default_max_runtime")]
     pub max_runtime_seconds: u32,
     #[serde(default = "default_min_wake_interval")]
@@ -898,6 +903,8 @@ pub(crate) struct BackgroundRunContext {
     pub history_lookback_days: u32,
     pub target_leverage: u32,
     pub max_single_trade_margin_pct: u32,
+    /// Profile 的开仓硬风控预算（由服务端注入交易工具，模型传入的同名字段会被覆盖）。
+    pub risk_limits: desic_trade_domain::AiRiskLimits,
     pub allowed_wake_condition_types: Vec<String>,
     /// 本次运行可点名专家（契约 C4）：Profile 勾选且库中存在的库条目（含正文）。
     /// 顺序按勾选顺序去重；空 = 主 Agent 独立完成（等价旧 off）。
@@ -1155,6 +1162,7 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
           multi_agent_scheme_id TEXT,
           target_leverage INTEGER NOT NULL DEFAULT 20,
           max_single_trade_margin_pct INTEGER NOT NULL DEFAULT 30,
+          risk_json TEXT NOT NULL DEFAULT '{}',
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           deleted_at INTEGER
@@ -1516,6 +1524,10 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE ai_agent_profiles ADD COLUMN max_single_trade_margin_pct INTEGER NOT NULL DEFAULT 30",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE ai_agent_profiles ADD COLUMN risk_json TEXT NOT NULL DEFAULT '{}'",
         [],
     );
     let _ = conn.execute(
@@ -2306,8 +2318,8 @@ fn upsert_profile_row(
           multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
           multi_agent_orchestrator,multi_agent_expert_source,enabled_agent_ids_json,
           collaboration_enabled,triage_json,single_agent_mode,profile_type,fastlane_json,
-          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,NULL,?37,?38)
+          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct,risk_json
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,NULL,?37,?38,?39)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,enabled=excluded.enabled,mode=excluded.mode,account_id=excluded.account_id,
           environment=excluded.environment,symbols_json=excluded.symbols_json,
@@ -2335,6 +2347,7 @@ fn upsert_profile_row(
           fastlane_json=excluded.fastlane_json,
           target_leverage=excluded.target_leverage,
           max_single_trade_margin_pct=excluded.max_single_trade_margin_pct,
+          risk_json=excluded.risk_json,
           updated_at=excluded.updated_at,deleted_at=NULL",
         params![
             id,
@@ -2384,6 +2397,7 @@ fn upsert_profile_row(
             now,
             profile.target_leverage,
             profile.max_single_trade_margin_pct,
+            to_json(&profile.risk.normalized())?,
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -3911,6 +3925,7 @@ fn normalize_profile(mut profile: AiAgentProfileInput) -> Result<AiAgentProfileI
     profile.entry_tolerance_bps = profile.entry_tolerance_bps.clamp(1, 2_000);
     profile.target_leverage = profile.target_leverage.clamp(1, 125);
     profile.max_single_trade_margin_pct = profile.max_single_trade_margin_pct.clamp(1, 100);
+    profile.risk = profile.risk.normalized();
     // Retain the legacy database column for migration compatibility. Agent Runs no longer
     // use a wall-clock execution limit.
     profile.max_runtime_seconds = default_max_runtime();
@@ -4048,6 +4063,7 @@ fn validate_profile_snapshot(
 ) -> Result<AiAgentProfileSummary, String> {
     profile.target_leverage = profile.target_leverage.clamp(1, 125);
     profile.max_single_trade_margin_pct = profile.max_single_trade_margin_pct.clamp(1, 100);
+    profile.risk = profile.risk.normalized();
     if profile.enabled_agent_ids.is_empty() {
         let plan = desic_agent_automation::plan_legacy_agent_migration(
             &desic_agent_automation::LegacyAgentMigrationInput {
@@ -4189,7 +4205,7 @@ fn load_profiles(conn: &Connection) -> Result<Vec<AiAgentProfileSummary>, String
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,profile_type,fastlane_json
+             single_agent_mode,profile_type,fastlane_json,risk_json
              FROM ai_agent_profiles WHERE deleted_at IS NULL ORDER BY enabled DESC, updated_at DESC",
         )
         .map_err(|err| err.to_string())?;
@@ -4215,7 +4231,7 @@ fn load_profile(conn: &Connection, id: &str) -> Result<AiAgentProfileSummary, St
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,profile_type,fastlane_json
+             single_agent_mode,profile_type,fastlane_json,risk_json
              FROM ai_agent_profiles WHERE id=?1 AND deleted_at IS NULL",
             params![id],
             profile_from_row,
@@ -4451,6 +4467,7 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
     let single_agent_mode: Option<String> = row.get(33)?;
     let profile_type: Option<String> = row.get(34)?;
     let fastlane_json: Option<String> = row.get(35)?;
+    let risk_json: Option<String> = row.get(36)?;
     Ok(AiAgentProfileSummary {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -4470,6 +4487,11 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
         entry_tolerance_bps: row.get::<_, i64>(13)?.max(1) as u32,
         target_leverage: row.get::<_, i64>(21)?.clamp(1, 125) as u32,
         max_single_trade_margin_pct: row.get::<_, i64>(24)?.clamp(1, 100) as u32,
+        risk: risk_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str::<crate::ai_risk_gate::AiProfileRiskSettings>(value).ok())
+            .unwrap_or_default()
+            .normalized(),
         // C29：快判模式的最小触发间隔默认 10 秒 → 读取地板随类型（AI Profile 仍是 15）。
         min_wake_interval_seconds: row.get::<_, i64>(14)?.max(
             if profile_type
@@ -7080,6 +7102,11 @@ fn collect_triage_escalation_inputs(
         .filter(|value| value.is_finite() && *value >= 0.0)
         .collect::<Vec<_>>();
     inputs.min_stop_distance_pct = stop_distances.iter().copied().reduce(f64::min);
+    // 条件配置里一般没有这两项：从账户快照补上，否则「持仓接近止损 / 保证金偏低」永远不会强制升级。
+    let account_inputs = account_escalation_inputs(app, context);
+    if inputs.min_stop_distance_pct.is_none() {
+        inputs.min_stop_distance_pct = account_inputs.as_ref().and_then(|(distance, _)| *distance);
+    }
     if inputs.min_stop_distance_pct.is_none() {
         unavailable.push("minStopDistancePct".to_string());
     }
@@ -7094,6 +7121,11 @@ fn collect_triage_escalation_inputs(
                 .unwrap_or_default()
         })
         .collect::<Vec<_>>();
+    let raw_ratios = if raw_ratios.is_empty() {
+        account_inputs.map(|(_, ratios)| ratios).unwrap_or_default()
+    } else {
+        raw_ratios
+    };
     let (valid, invalid): (Vec<f64>, Vec<f64>) = raw_ratios
         .into_iter()
         .partition(|value| valid_margin_ratio(*value));
@@ -7120,8 +7152,52 @@ fn collect_triage_escalation_inputs(
         condition_ids.len(),
         unavailable
     ));
-    let _ = app;
     (inputs, unavailable)
+}
+
+/// 条件配置里没有止损距离 / 保证金率时，从 Profile 账户的内存快照补上（只读、快照不新鲜就放弃）。
+/// 只看 Profile 关注的品种；结果交给 `ai_triage::derive_account_escalation_inputs`。
+fn account_escalation_inputs(app: &tauri::AppHandle, context: &BackgroundRunContext) -> Option<(Option<f64>, Vec<f64>)> {
+    let runtime = app.state::<MarketRuntime>();
+    let snapshot = crate::ai_read_fresh_memory_account_snapshot(runtime.inner(), context.account_id.as_deref())?;
+    let watched = |inst_id: &str| context.symbols.is_empty() || context.symbols.iter().any(|symbol| symbol == inst_id);
+    let number = |value: &str| value.trim().parse::<f64>().ok();
+    let positions = snapshot
+        .positions
+        .iter()
+        .filter(|position| watched(&position.inst_id))
+        .filter_map(|position| {
+            let size = number(&position.pos).filter(|value| *value != 0.0)?;
+            let long = match position.pos_side.as_str() {
+                "long" => true,
+                "short" => false,
+                _ => size > 0.0,
+            };
+            Some(crate::ai_triage::TriagePositionFact {
+                inst_id: position.inst_id.clone(),
+                long,
+                mark_px: number(&position.mark_px)?,
+                liq_px: number(&position.liq_px),
+                mgn_ratio: number(&position.mgn_ratio),
+            })
+        })
+        .collect::<Vec<_>>();
+    let stops = snapshot
+        .orders
+        .iter()
+        .filter(|order| order.is_algo && watched(&order.inst_id))
+        .filter_map(|order| {
+            // 止损腿（条件单 / OCO）优先；否则把反向的计划委托当作止损。卖出保护多头，买入保护空头。
+            let trigger = number(&order.sl_trigger_px).or_else(|| (order.ord_type == "trigger").then(|| number(&order.trigger_px)).flatten())?;
+            let protects_long = match order.pos_side.as_str() {
+                "long" => true,
+                "short" => false,
+                _ => order.side == "sell",
+            };
+            Some(crate::ai_triage::TriageStopFact { inst_id: order.inst_id.clone(), protects_long, trigger_px: trigger })
+        })
+        .collect::<Vec<_>>();
+    Some(crate::ai_triage::derive_account_escalation_inputs(&positions, &stops))
 }
 
 /// C23.2：取事件里的文本字段（**逐字保留**，不 trim、不截断）；缺失/非字符串 → `None`。
@@ -11223,6 +11299,7 @@ fn fastlane_run_context(
         history_lookback_days: profile.history_lookback_days,
         target_leverage: profile.target_leverage,
         max_single_trade_margin_pct: profile.max_single_trade_margin_pct,
+        risk_limits: profile.risk.limits(),
         allowed_wake_condition_types: profile.allowed_wake_condition_types.clone(),
         enabled_agents: Vec::new(),
         triage: Arc::new(Mutex::new(crate::ai_triage::RunTriageState::default())),
@@ -12109,7 +12186,7 @@ fn load_active_condition_models(
     let mut stmt = conn
         .prepare(
             "SELECT id,profile_id,source,plan_mode,condition_type,config_json,expires_at,last_triggered_at,created_at
-             FROM ai_wake_conditions WHERE source='agent' AND status='active' AND (expires_at IS NULL OR expires_at>?1)
+             FROM ai_wake_conditions WHERE source IN ('agent','user') AND status='active' AND (expires_at IS NULL OR expires_at>?1)
              ORDER BY created_at ASC",
         )
         .map_err(|err| err.to_string())?;
@@ -12886,7 +12963,7 @@ async fn execute_profile_run(
         }
     } else if chinese_prompt {
         format!(
-            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
+            "{}\n你正在执行 Desic Terminal 后台 Agent Profile。\n当前时间: {}\n当前 Unix 毫秒时间戳: {}\nProfile: {}\n模式: {}\n账号: {}\n环境: {}\n目标杠杆: {}X\n最大单笔开仓保证金: USDT 权益的 {}%（且不超过可用 USDT）\n{}\n关注品种: {}\n默认历史回看: 最近 {} 天\n触发原因: {}{}\n{}\n{}\n{}\n{}\n所有工作完成后必须调用 background.finishRun；只提交 summary、语义化 finalDecision（outcome/reason/reasonCodes）和 nextWakePlan。实际机会 ID、最终复核 ID、账户可行/阻断状态和 blockers 均由后端从本 Run 的持久化记录生成，不要自行填写。最终摘要同样必须遵守账户风险字段语义，不能把账户余额、minSz或名义敞口比例写成账户容错不足。最后给出下一组适合当前市场阶段的类型化观察条件；新条件会替换上一轮 Agent 条件。nextWakePlan.expiresAt 和 timer.atMs 必须使用 13 位 Unix 毫秒时间戳（与 Date.now() 相同单位），不能使用 10 位秒级时间戳；不需要过期时间时可以省略 expiresAt。不要在正文中假装完成该工具。",
             response_instruction,
             current_time,
             current_timestamp_ms,
@@ -12896,6 +12973,7 @@ async fn execute_profile_run(
             profile.environment,
             profile.target_leverage,
             profile.max_single_trade_margin_pct,
+            crate::ai_risk_gate::risk_prompt(&profile.risk, true),
             profile.symbols.join(", "),
             profile.history_lookback_days,
             trigger,
@@ -12907,7 +12985,7 @@ async fn execute_profile_run(
         )
     } else {
         format!(
-            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
+            "{}\nYou are running a Desic Terminal background Agent Profile.\nCurrent time: {}\nCurrent Unix timestamp in milliseconds: {}\nProfile: {}\nMode: {}\nAccount: {}\nEnvironment: {}\nTarget leverage: {}X\nMaximum opening margin per trade: {}% of USDT equity, capped by available USDT\n{}\nWatched markets: {}\nDefault history lookback: the latest {} days\nTrigger: {}{}\n{}\n{}\n{}\n{}\nAfter all work is complete, you must call background.finishRun. Submit only summary, semantic finalDecision fields (outcome/reason/reasonCodes), and nextWakePlan. The backend derives actual opportunity IDs, final-review IDs, account feasibility or block status, and blockers from persisted records for this Run; do not fill them yourself. The final summary must follow the same account-risk field semantics and must not describe balance, minSz, or notional exposure percentage as insufficient account tolerance. End with the next typed observation conditions appropriate for the current market regime; the new conditions replace the previous Agent conditions. nextWakePlan.expiresAt and timer.atMs must use 13-digit Unix millisecond timestamps, the same unit as Date.now(), never 10-digit seconds. Omit expiresAt when no expiry is needed. Do not claim in prose that the completion tool was called.",
             response_instruction,
             current_time,
             current_timestamp_ms,
@@ -12917,6 +12995,7 @@ async fn execute_profile_run(
             profile.environment,
             profile.target_leverage,
             profile.max_single_trade_margin_pct,
+            crate::ai_risk_gate::risk_prompt(&profile.risk, false),
             profile.symbols.join(", "),
             profile.history_lookback_days,
             trigger,
@@ -12972,6 +13051,7 @@ async fn execute_profile_run(
         history_lookback_days: profile.history_lookback_days,
         target_leverage: profile.target_leverage,
         max_single_trade_margin_pct: profile.max_single_trade_margin_pct,
+        risk_limits: profile.risk.limits(),
         allowed_wake_condition_types: profile.allowed_wake_condition_types.clone(),
         enabled_agents,
         triage: Arc::new(Mutex::new(triage_state)),
@@ -13204,6 +13284,7 @@ async fn execute_review_run(app: tauri::AppHandle, review: QueuedReview) -> Resu
         history_lookback_days: 0,
         target_leverage: default_target_leverage(),
         max_single_trade_margin_pct: default_max_single_trade_margin_pct(),
+        risk_limits: crate::ai_risk_gate::AiProfileRiskSettings::default().limits(),
         allowed_wake_condition_types: Vec::new(),
         // 复盘 Run 以 episode 为主体，没有 Profile 勾选名单 → 无专家；也不做试判。
         enabled_agents: Vec::new(),
@@ -15881,6 +15962,58 @@ mod tests {
     }
 
     #[test]
+    fn profile_risk_settings_round_trip_with_defaults_and_clamps() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        // 迁移幂等：重复执行不报错，risk_json 列只加一次
+        migrate_ai_automation(&conn).expect("migrate twice");
+        let save = |id: &str, risk: Value| {
+            let profile = normalize_profile(
+                serde_json::from_value::<AiAgentProfileInput>(json!({ "name": id, "symbols": ["BTC-USDT-SWAP"], "risk": risk }))
+                    .expect("deserialize profile input"),
+            )
+            .expect("normalize profile input");
+            upsert_profile_row(&conn, &profile, id, 1_000, 2_000).expect("insert profile row");
+            load_profile(&conn, id).expect("load profile")
+        };
+        // 不传 → 宽松档默认值
+        let defaults = save("risk-default", Value::Null);
+        assert_eq!(defaults.risk, crate::ai_risk_gate::AiProfileRiskSettings::default());
+        assert_eq!(defaults.risk.risk_per_trade_pct, 1.0);
+        assert_eq!(defaults.risk.daily_loss_limit_pct, 3.0);
+        // 自定义值保存后读回；越界值被夹取
+        let custom = save("risk-custom", json!({ "riskPerTradePct": 0.5, "minRewardRisk": 2, "dailyLossLimitPct": 99, "maxOpenPositions": 0, "maxEntryDriftBps": 15 }));
+        assert_eq!(custom.risk.risk_per_trade_pct, 0.5);
+        assert_eq!(custom.risk.min_reward_risk, 2.0);
+        assert_eq!(custom.risk.daily_loss_limit_pct, 20.0);
+        assert_eq!(custom.risk.max_open_positions, 1);
+        assert_eq!(custom.risk.max_entry_drift_bps, 15.0);
+        // 老快照（没有 risk 字段）照样能解析成默认值
+        let mut snapshot = serde_json::to_value(&custom).expect("serialize snapshot");
+        snapshot.as_object_mut().unwrap().remove("risk");
+        let parsed = serde_json::from_value::<AiAgentProfileSummary>(snapshot).expect("old snapshot parses");
+        assert_eq!(parsed.risk, crate::ai_risk_gate::AiProfileRiskSettings::default());
+    }
+
+    #[test]
+    fn user_saved_wake_conditions_are_evaluated_for_ai_profiles() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let condition = json!({ "type": "timer", "atMs": 9_000_000_000_000_i64 }).to_string();
+        conn.execute_batch(&format!(
+            "INSERT INTO ai_wake_conditions (id,profile_id,source,plan_mode,condition_type,config_json,status,created_at,updated_at)
+             VALUES ('agent-1','p1','agent','any','timer','{condition}','active',1,1),
+                    ('user-1','p1','user','any','timer','{condition}','active',2,2),
+                    ('user-old','p1','user','any','timer','{condition}','cancelled',3,3);"
+        ))
+        .expect("insert wake conditions");
+        let loaded = load_active_condition_models(&conn, 5).expect("load active conditions");
+        let mut sources = loaded.iter().map(|item| (item.id.as_str(), item.source.as_str())).collect::<Vec<_>>();
+        sources.sort();
+        assert_eq!(sources, vec![("agent-1", "agent"), ("user-1", "user")], "界面保存的用户条件也必须参与评估");
+    }
+
+    #[test]
     fn profile_save_upsert_keeps_row_visible_and_timestamps_aligned() {
         let conn = Connection::open_in_memory().expect("open in-memory database");
         migrate_ai_automation(&conn).expect("migrate automation schema");
@@ -16993,6 +17126,7 @@ mod tests {
             history_lookback_days: 30,
             target_leverage: 20,
             max_single_trade_margin_pct: 30,
+            risk_limits: crate::ai_risk_gate::AiProfileRiskSettings::default().limits(),
             allowed_wake_condition_types: Vec::new(),
             enabled_agents,
             triage: std::sync::Arc::new(std::sync::Mutex::new(triage)),

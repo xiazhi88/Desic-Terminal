@@ -2091,6 +2091,19 @@ export type AiCodexTemplatePreview = {
   notes: string[];
 };
 
+export type AiProfileRiskSettings = {
+  /** 单笔止损（含双边手续费）最多占权益的百分比。 */
+  riskPerTradePct: number;
+  /** 净盈亏比下限。 */
+  minRewardRisk: number;
+  /** 今日已实现亏损达到权益的这个百分比后停止开仓。 */
+  dailyLossLimitPct: number;
+  /** 本 Profile 同时最多的持仓 + 进行中开仓数。 */
+  maxOpenPositions: number;
+  /** 市价开仓相对决策价允许的最大偏离（基点）。 */
+  maxEntryDriftBps: number;
+};
+
 export type AiAgentProfile = {
   id: string;
   name: string;
@@ -2110,6 +2123,8 @@ export type AiAgentProfile = {
   entryToleranceBps: number;
   targetLeverage: number;
   maxSingleTradeMarginPct: number;
+  /** AI 自动化开仓的硬风控预算（后端强制；缺省 = 宽松档默认值）。 */
+  risk?: AiProfileRiskSettings;
   minWakeIntervalSeconds: number;
   maxRunsPerHour: number;
   feishuEnabled: boolean;

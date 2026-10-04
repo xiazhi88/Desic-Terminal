@@ -1,11 +1,16 @@
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
+mod ai_gate;
 mod numeric;
 mod order;
 mod risk;
 mod status;
 
+pub use ai_gate::{
+    ai_open_static_reasons, daily_loss_reason, evaluate_ai_execution_guard, evaluate_ai_open_gate,
+    AiExecutionGuardInput, AiOpenGateInput, AiRiskLimits, AiSizingInputs, GateReason,
+};
 pub use numeric::{
     normalize_decimal, normalize_price, normalize_size, normalize_trade_input,
     InstrumentDecimalRules, NormalizedTradeInput, TradeDomainError, TradeInputNormalizationRequest,

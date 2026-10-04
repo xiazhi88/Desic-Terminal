@@ -37,6 +37,7 @@ use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 mod agent_library;
 mod ai_automation;
 mod ai_research_ledger;
+mod ai_risk_gate;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
 mod ai_ui_control;
@@ -4148,6 +4149,9 @@ struct TradePrecheckRequest {
     environment: String,
     #[serde(default)]
     max_single_trade_margin_pct: Option<f64>,
+    /// AI 自动化开仓的风控事实（服务端从库里读，**不接受**模型或前端传入）。
+    #[serde(skip)]
+    ai_gate: Option<crate::ai_risk_gate::AiGateContext>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -21408,7 +21412,7 @@ fn ai_memory_snapshot_is_usable(snapshot: &PrivateAccountSnapshot, now: i64) -> 
         && now.saturating_sub(snapshot.synced_at) <= AI_MEMORY_PRIVATE_SNAPSHOT_MAX_AGE_MS
 }
 
-fn ai_read_fresh_memory_account_snapshot(
+pub(crate) fn ai_read_fresh_memory_account_snapshot(
     runtime: &MarketRuntime,
     account_id: Option<&str>,
 ) -> Option<PrivateAccountSnapshot> {
@@ -30027,6 +30031,7 @@ mod tests {
             history_lookback_days: 30,
             target_leverage: 20,
             max_single_trade_margin_pct: 30,
+            risk_limits: crate::ai_risk_gate::AiProfileRiskSettings::default().limits(),
             allowed_wake_condition_types: Vec::new(),
             enabled_agents,
             triage: std::sync::Arc::new(std::sync::Mutex::new(
@@ -30974,6 +30979,7 @@ mod tests {
             history_lookback_days: 30,
             target_leverage: 20,
             max_single_trade_margin_pct: 30,
+            risk_limits: crate::ai_risk_gate::AiProfileRiskSettings::default().limits(),
             allowed_wake_condition_types: Vec::new(),
             enabled_agents: Vec::new(),
             triage: std::sync::Arc::new(std::sync::Mutex::new(

@@ -355,6 +355,57 @@ pub struct TriageEscalationInputs {
     pub important_news: Option<bool>,
 }
 
+/// 从账户快照推导硬升级输入时用到的持仓事实（与 OKX 结构解耦，便于测试）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriagePositionFact {
+    pub inst_id: String,
+    pub long: bool,
+    pub mark_px: f64,
+    pub liq_px: Option<f64>,
+    /// OKX `mgnRatio` 原值（比率，例如 11.73 表示 1173%）。
+    pub mgn_ratio: Option<f64>,
+}
+
+/// 能保护某个持仓的止损触发价（条件单 / OCO 的止损腿 / 反向计划委托）。
+#[derive(Debug, Clone, PartialEq)]
+pub struct TriageStopFact {
+    pub inst_id: String,
+    pub protects_long: bool,
+    pub trigger_px: f64,
+}
+
+/// 由持仓与止损单算出 (最小止损距离 %, 各持仓保证金率 %)：
+/// - 止损距离：每个持仓取「同品种、同方向、在正确一侧」的最近止损；没有止损单的持仓用强平价距离（更危险时才会更小）。
+/// - 保证金率：OKX 比率 ×100 换成百分比，与阈值（默认 150）同口径。
+pub fn derive_account_escalation_inputs(positions: &[TriagePositionFact], stops: &[TriageStopFact]) -> (Option<f64>, Vec<f64>) {
+    let mut min_distance: Option<f64> = None;
+    let mut ratios = Vec::new();
+    for position in positions {
+        if !(position.mark_px.is_finite() && position.mark_px > 0.0) {
+            continue;
+        }
+        if let Some(ratio) = position.mgn_ratio.filter(|value| value.is_finite() && *value > 0.0) {
+            ratios.push(ratio * 100.0);
+        }
+        let stop_distance = stops
+            .iter()
+            .filter(|stop| stop.inst_id == position.inst_id && stop.protects_long == position.long && stop.trigger_px.is_finite() && stop.trigger_px > 0.0)
+            .filter(|stop| if position.long { stop.trigger_px < position.mark_px } else { stop.trigger_px > position.mark_px })
+            .map(|stop| (position.mark_px - stop.trigger_px).abs() / position.mark_px * 100.0)
+            .reduce(f64::min);
+        let distance = stop_distance.or_else(|| {
+            position
+                .liq_px
+                .filter(|value| value.is_finite() && *value > 0.0)
+                .map(|liq| (position.mark_px - liq).abs() / position.mark_px * 100.0)
+        });
+        if let Some(distance) = distance {
+            min_distance = Some(min_distance.map_or(distance, |current| current.min(distance)));
+        }
+    }
+    (min_distance, ratios)
+}
+
 /// 取"最危险"的保证金率：口径固定为"越大越安全"，因此最危险 = **最小值**。
 pub fn riskiest_margin_ratio(ratios: &[f64]) -> Option<f64> {
     let mut iter = ratios.iter().copied().filter(|value| value.is_finite());
@@ -971,5 +1022,45 @@ mod tests {
         assert!(config.skips_trigger("daily_market_review"));
         assert!(!config.skips_trigger("manual"));
         assert!(!config.skips_trigger("timer"));
+    }
+}
+
+#[cfg(test)]
+mod account_escalation_tests {
+    use super::*;
+
+    fn long_btc(mark: f64, liq: Option<f64>, ratio: Option<f64>) -> TriagePositionFact {
+        TriagePositionFact { inst_id: "BTC-USDT-SWAP".into(), long: true, mark_px: mark, liq_px: liq, mgn_ratio: ratio }
+    }
+
+    #[test]
+    fn nearest_protective_stop_wins_and_wrong_side_or_other_markets_are_ignored() {
+        let stops = vec![
+            TriageStopFact { inst_id: "BTC-USDT-SWAP".into(), protects_long: true, trigger_px: 99_000.0 },
+            TriageStopFact { inst_id: "BTC-USDT-SWAP".into(), protects_long: true, trigger_px: 98_000.0 },
+            TriageStopFact { inst_id: "BTC-USDT-SWAP".into(), protects_long: true, trigger_px: 101_000.0 }, // 在价格上方，不是多头止损
+            TriageStopFact { inst_id: "BTC-USDT-SWAP".into(), protects_long: false, trigger_px: 99_900.0 }, // 保护空头
+            TriageStopFact { inst_id: "ETH-USDT-SWAP".into(), protects_long: true, trigger_px: 99_950.0 },
+        ];
+        let (distance, ratios) = derive_account_escalation_inputs(&[long_btc(100_000.0, Some(80_000.0), Some(11.73))], &stops);
+        assert!((distance.unwrap() - 1.0).abs() < 1e-9);
+        assert!((ratios[0] - 1173.0).abs() < 1e-9, "比率换成百分比");
+    }
+
+    #[test]
+    fn positions_without_a_stop_fall_back_to_liquidation_distance() {
+        let (distance, _) = derive_account_escalation_inputs(&[long_btc(100_000.0, Some(99_000.0), None)], &[]);
+        assert!((distance.unwrap() - 1.0).abs() < 1e-9);
+        let short = TriagePositionFact { inst_id: "ETH-USDT-SWAP".into(), long: false, mark_px: 2_000.0, liq_px: None, mgn_ratio: None };
+        let stops = [TriageStopFact { inst_id: "ETH-USDT-SWAP".into(), protects_long: false, trigger_px: 2_020.0 }];
+        let (distance, ratios) = derive_account_escalation_inputs(&[short, long_btc(100_000.0, None, None)], &stops);
+        assert!((distance.unwrap() - 1.0).abs() < 1e-9, "空头止损在上方");
+        assert!(ratios.is_empty());
+    }
+
+    #[test]
+    fn nothing_known_stays_unavailable() {
+        assert_eq!(derive_account_escalation_inputs(&[], &[]), (None, vec![]));
+        assert_eq!(derive_account_escalation_inputs(&[long_btc(0.0, Some(1.0), Some(5.0))], &[]), (None, vec![]));
     }
 }

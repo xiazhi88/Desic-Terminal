@@ -27837,3 +27837,11 @@ button {
 .command-palette-button__kbd {
   display: none;
 }
+
+/* AI 自动化 Profile：硬风控说明 */
+.automation-form-section > .automation-form-note {
+  margin: 2px 0 8px;
+  color: var(--weak);
+  font-size: 11px;
+  line-height: 1.6;
+}

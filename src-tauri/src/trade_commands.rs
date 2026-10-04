@@ -8963,6 +8963,15 @@ pub(crate) async fn read_decision_context(
                         .unwrap_or_else(|| "1".to_string()),
                     environment: request.environment.clone(),
                     max_single_trade_margin_pct: request.max_single_trade_margin_pct,
+                    ai_gate: (request.candidate.intent == "open").then(|| {
+                        crate::ai_risk_gate::load_gate_context(
+                            &conn,
+                            &profile_id,
+                            Some(&account.id),
+                            crate::ai_risk_gate::run_risk_limits(&conn, &run_id),
+                            captured_at,
+                        )
+                    }),
                 },
                 runtime.clone(),
             )
@@ -9053,6 +9062,30 @@ fn automation_opportunity_requires_decision_context(
 ) -> bool {
     optional_string(request.agent_run_id.clone()).is_some()
         && optional_string(request.agent_profile_id.clone()).is_some()
+}
+
+/// AI 自动化开仓在创建时的风控事实（今日盈亏、本 Profile 敞口、Run 冻结的风控预算）；其它机会返回 `None`。
+fn automation_open_gate_context(
+    app: &tauri::AppHandle,
+    request: &TradeOpportunityCreateRequest,
+) -> Result<Option<crate::ai_risk_gate::AiGateContext>, String> {
+    if request.intent != "open" || !automation_opportunity_requires_decision_context(request) {
+        return Ok(None);
+    }
+    let (Some(run_id), Some(profile_id)) = (
+        optional_string(request.agent_run_id.clone()),
+        optional_string(request.agent_profile_id.clone()),
+    ) else {
+        return Ok(None);
+    };
+    let conn = open_database(app)?;
+    Ok(Some(crate::ai_risk_gate::load_gate_context(
+        &conn,
+        &profile_id,
+        request.account_id.as_deref(),
+        crate::ai_risk_gate::run_risk_limits(&conn, &run_id),
+        now_ms(),
+    )))
 }
 
 fn validate_decision_context(
@@ -10117,6 +10150,7 @@ async fn build_trade_opportunity(
             lever: lever.clone(),
             environment: request.environment.clone(),
             max_single_trade_margin_pct: request.max_single_trade_margin_pct,
+            ai_gate: automation_open_gate_context(&app, &request)?,
         };
         trade_precheck(app.clone(), precheck_request, runtime).await?
     };
@@ -10275,7 +10309,7 @@ async fn execute_trade_opportunity(
     confirmed_live: bool,
 ) -> Result<TradeOpportunitySummary, String> {
     let conn = open_database(&app)?;
-    let mut opportunity = load_trade_opportunity(&conn, &id)?;
+    let opportunity = load_trade_opportunity(&conn, &id)?;
     if opportunity.status == "executed" {
         return Ok(opportunity);
     }
@@ -10292,6 +10326,114 @@ async fn execute_trade_opportunity(
     ) {
         return Err(format!("当前交易机会状态不能执行：{}", opportunity.status));
     }
+    // AI 自动化开仓的最后一道检查（风控官）：下单那一刻价格是否已越过止损、市价单是否追价、今日是否已熔断。
+    // 守卫要读账户（可能走网络），不能拿着数据库连接跨 await，所以先释放、检查完再重新打开。
+    if opportunity.intent == "open" && is_ai_automation_opportunity(&opportunity) {
+        drop(conn);
+        let reasons = ai_execution_guard_reasons(&app, runtime.inner(), &opportunity).await;
+        let conn = open_database(&app)?;
+        if !reasons.is_empty() {
+            let message = format!("execution_guard：{}", reasons.join("；"));
+            update_trade_opportunity_status(
+                &conn,
+                &id,
+                "failed",
+                Some(json!({ "executionGuard": reasons })),
+                None,
+                None,
+                None,
+                None,
+            )?;
+            conn.execute(
+                "UPDATE trade_opportunities SET error = ?2, updated_at = ?3 WHERE id = ?1",
+                params![id, message, now_ms()],
+            )
+            .map_err(|err| err.to_string())?;
+            return Err(message);
+        }
+        return execute_trade_opportunity_after_guard(app, runtime, id, confirmed_live, conn, opportunity).await;
+    }
+    execute_trade_opportunity_after_guard(app, runtime, id, confirmed_live, conn, opportunity).await
+}
+
+fn is_ai_automation_opportunity(opportunity: &TradeOpportunitySummary) -> bool {
+    optional_string(opportunity.agent_run_id.clone()).is_some()
+        && optional_string(opportunity.agent_profile_id.clone()).is_some()
+}
+
+/// 下单前的执行守卫：只读事实（最新价、决策时价格、权益、今日盈亏、Run 冻结的风控预算），判定交给领域函数。
+async fn ai_execution_guard_reasons(
+    app: &tauri::AppHandle,
+    runtime: &MarketRuntime,
+    opportunity: &TradeOpportunitySummary,
+) -> Vec<String> {
+    let latest = capture_trade_opportunity_market_snapshot(runtime, &opportunity.inst_id);
+    let last_price = snapshot_number(&latest, "/ticker/last");
+    let reference_price = opportunity
+        .market_snapshot_json
+        .as_ref()
+        .and_then(|snapshot| snapshot_number(snapshot, "/ticker/last"));
+    let stop_price = opportunity
+        .stop_loss
+        .as_ref()
+        .and_then(|order| optional_string(order.trigger_px.clone()))
+        .and_then(|value| value.parse::<f64>().ok());
+    let direction = if opportunity.direction == "short" {
+        desic_trade_domain::LinearUsdtDirection::Short
+    } else {
+        desic_trade_domain::LinearUsdtDirection::Long
+    };
+    // 权益：内存快照新鲜就用它，否则走一次 REST；都拿不到 → None（守卫按拒绝处理）。
+    let equity = match load_local_account_secret(app, opportunity.account_id.as_deref()) {
+        Ok(account) => {
+            let memory = ai_read_memory_account_snapshot(runtime, Some(&account.id)).filter(|snapshot| {
+                normalize_environment(&snapshot.environment) == normalize_environment(&account.environment)
+                    && now_ms().saturating_sub(snapshot.synced_at) <= TRADE_PRECHECK_SNAPSHOT_MAX_AGE_MS
+            });
+            let snapshot = match memory {
+                Some(snapshot) => Some(snapshot),
+                None => fetch_private_account_snapshot(&account).await.ok(),
+            };
+            snapshot.and_then(|data| {
+                data.balances
+                    .iter()
+                    .find(|balance| balance.ccy.eq_ignore_ascii_case("USDT"))
+                    .and_then(|balance| parse_optional_f64(&balance.eq))
+            })
+        }
+        Err(_) => None,
+    };
+    let (limits, today_realized_pnl) = match open_database(app) {
+        Ok(conn) => (
+            crate::ai_risk_gate::run_risk_limits(&conn, opportunity.agent_run_id.as_deref().unwrap_or_default()),
+            crate::ai_risk_gate::account_realized_pnl_today(&conn, opportunity.account_id.as_deref(), now_ms()),
+        ),
+        Err(_) => (crate::ai_risk_gate::AiProfileRiskSettings::default().limits(), None),
+    };
+    let input = desic_trade_domain::AiExecutionGuardInput {
+        direction,
+        order_type: opportunity.order_type.clone(),
+        stop_price,
+        last_price,
+        reference_price,
+        max_slippage_bps: opportunity.max_slippage_bps,
+        equity,
+        today_realized_pnl,
+    };
+    desic_trade_domain::evaluate_ai_execution_guard(&input, &limits)
+        .iter()
+        .map(desic_trade_domain::GateReason::display)
+        .collect()
+}
+
+async fn execute_trade_opportunity_after_guard(
+    app: tauri::AppHandle,
+    runtime: tauri::State<'_, MarketRuntime>,
+    id: String,
+    confirmed_live: bool,
+    conn: Connection,
+    mut opportunity: TradeOpportunitySummary,
+) -> Result<TradeOpportunitySummary, String> {
     let execution_key = opportunity
         .execution_key
         .clone()
@@ -10722,6 +10864,25 @@ fn validate_trade_opportunity_request(
     }
     if request.expires_at.is_some_and(|value| value <= now_ms()) {
         reasons.push("expiresAt 必须晚于当前时间".to_string());
+    }
+    // AI 自动化开仓的静态硬规则（风控官）：必须带止损和止盈，暂不允许计划委托开仓。
+    // 只作用于 AI 自动化 Profile 的开仓；手动下单、平仓、撤单、改单不受影响。
+    if request.intent == "open" && automation_opportunity_requires_decision_context(request) {
+        let has_price = |order: &Option<TradeOpportunityProtectiveOrder>| {
+            order
+                .as_ref()
+                .and_then(|order| optional_string(order.trigger_px.clone()))
+                .is_some()
+        };
+        reasons.extend(
+            desic_trade_domain::ai_open_static_reasons(
+                &request.order_type,
+                has_price(&request.stop_loss),
+                has_price(&request.take_profit),
+            )
+            .iter()
+            .map(desic_trade_domain::GateReason::display),
+        );
     }
     if reasons.is_empty() {
         Ok(())
@@ -11738,6 +11899,45 @@ mod idempotency_tests {
             max_single_trade_margin_pct: Some(30.0),
             confirmed_live: None,
         }
+    }
+
+    #[test]
+    fn ai_automation_opens_need_stop_and_take_profit_but_manual_and_closes_do_not() {
+        let protective = |kind: &str, px: &str| {
+            Some(TradeOpportunityProtectiveOrder {
+                kind: kind.to_string(),
+                trigger_px: Some(px.to_string()),
+                order_px: None,
+                trigger_px_type: Some("last".to_string()),
+                close_fraction: None,
+            })
+        };
+        let bare = decision_context_request();
+        let error = validate_trade_opportunity_request(&bare).expect_err("AI 自动化开仓不带止损必须被拒");
+        assert!(error.contains("stop_required"), "{error}");
+        assert!(error.contains("take_profit_required"), "{error}");
+
+        let mut protected = decision_context_request();
+        protected.stop_loss = protective("stop_loss", "64500");
+        protected.take_profit = protective("take_profit", "66000");
+        validate_trade_opportunity_request(&protected).expect("带止损止盈的 AI 开仓通过静态检查");
+
+        let mut trigger_open = decision_context_request();
+        trigger_open.order_type = "trigger".to_string();
+        let error = validate_trade_opportunity_request(&trigger_open).expect_err("AI 不能用计划委托开仓");
+        assert!(error.contains("trigger_open_not_allowed"), "{error}");
+
+        // 手动机会（没有 Run / Profile）不受影响
+        let mut manual = decision_context_request();
+        manual.agent_run_id = None;
+        manual.agent_profile_id = None;
+        validate_trade_opportunity_request(&manual).expect("手动开仓不要求止损");
+
+        // AI 的平仓不受开仓规则限制（风控不能挡住止损）
+        let mut close = decision_context_request();
+        close.intent = "close".to_string();
+        close.exit_kind = Some("take_profit".to_string());
+        validate_trade_opportunity_request(&close).expect("AI 平仓不要求附带止损");
     }
 
     #[test]
@@ -14323,6 +14523,38 @@ pub async fn trade_precheck(
                 ),
                 _ => {}
             }
+        }
+    }
+    // AI 自动化开仓的账户级硬风控（风控官）：单笔风险、净盈亏比、日亏损、并发。
+    // 事实由调用方从库里读好放进 `ai_gate`（serde 跳过，不接受外部传入）；读不到的一律按拒绝处理。
+    if request.ticket_mode == "open" {
+        if let Some(gate) = request.ai_gate.as_ref() {
+            let sizing = request
+                .stop_price
+                .as_ref()
+                .filter(|value| !value.trim().is_empty() && !request.price.trim().is_empty())
+                .map(|stop| desic_trade_domain::AiSizingInputs {
+                    entry_price: request.price.clone(),
+                    stop_price: stop.clone(),
+                    contract_value: instrument.ct_val.clone(),
+                    entry_fee_rate: trim_float(fee_rate),
+                    exit_fee_rate: trim_float(exit_fee_rate),
+                    min_size: instrument.min_sz.clone(),
+                    lot_size: instrument.lot_sz.clone(),
+                });
+            let input = desic_trade_domain::AiOpenGateInput {
+                equity: usdt_equity,
+                stop_risk_pct_of_equity: stop_loss_pct_of_usdt_equity,
+                net_reward_risk_ratio,
+                today_realized_pnl: gate.today_realized_pnl,
+                open_exposure_count: gate.open_exposure_count,
+                sizing,
+            };
+            reasons.extend(
+                desic_trade_domain::evaluate_ai_open_gate(&input, &gate.limits)
+                    .iter()
+                    .map(desic_trade_domain::GateReason::display),
+            );
         }
     }
     if fee_rate_source == "okx-trade-fee" {

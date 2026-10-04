@@ -1,4 +1,4 @@
-import type { AiAgentProfile } from "../types";
+import type { AiAgentProfile, AiProfileRiskSettings } from "../types";
 import { normalizeTriage } from "../ui/TriageSettings";
 import { normalizeFastlaneConfig, profileTypeOf } from "../ui/fastlane/fastlaneDefaults";
 
@@ -127,6 +127,7 @@ export function buildProfileSaveInput(
     entryToleranceBps: Math.max(0, Math.min(1_000, Math.round(Number(draft.entryToleranceBps) || 30))),
     targetLeverage: Math.max(1, Math.min(125, Math.round(Number(draft.targetLeverage) || 20))),
     maxSingleTradeMarginPct: Math.max(1, Math.min(100, Math.round(Number(draft.maxSingleTradeMarginPct) || 30))),
+    risk: normalizeProfileRisk(draft.risk),
     minWakeIntervalSeconds: Math.max(1, Math.min(86_400, Math.round(Number(draft.minWakeIntervalSeconds) || 60))),
     maxRunsPerHour: Math.max(1, Math.min(720, Math.round(Number(draft.maxRunsPerHour) || 12))),
     // —— 通知与复盘 ——
@@ -173,4 +174,28 @@ export function buildProfileSaveInput(
 /** 保存载荷自检：返回 `null` 表示可安全序列化。 */
 export function checkProfileSaveArgs(args: Record<string, unknown>): SerializationIssue | null {
   return findNonSerializable(args, "args");
+}
+
+/** Profile 硬风控预算的默认值（与后端 `AiProfileRiskSettings::default` 一致：宽松档）。 */
+export const DEFAULT_PROFILE_RISK: AiProfileRiskSettings = {
+  riskPerTradePct: 1,
+  minRewardRisk: 1.2,
+  dailyLossLimitPct: 3,
+  maxOpenPositions: 2,
+  maxEntryDriftBps: 30,
+};
+
+/** 夹取到与后端相同的范围；缺字段或非数字回落默认值。 */
+export function normalizeProfileRisk(risk: Partial<AiProfileRiskSettings> | null | undefined): AiProfileRiskSettings {
+  const pick = (value: unknown, fallback: number, min: number, max: number) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
+  };
+  return {
+    riskPerTradePct: pick(risk?.riskPerTradePct, DEFAULT_PROFILE_RISK.riskPerTradePct, 0.05, 5),
+    minRewardRisk: pick(risk?.minRewardRisk, DEFAULT_PROFILE_RISK.minRewardRisk, 0.5, 5),
+    dailyLossLimitPct: pick(risk?.dailyLossLimitPct, DEFAULT_PROFILE_RISK.dailyLossLimitPct, 0.1, 20),
+    maxOpenPositions: Math.round(pick(risk?.maxOpenPositions, DEFAULT_PROFILE_RISK.maxOpenPositions, 1, 10)),
+    maxEntryDriftBps: pick(risk?.maxEntryDriftBps, DEFAULT_PROFILE_RISK.maxEntryDriftBps, 1, 300),
+  };
 }

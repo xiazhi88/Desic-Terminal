@@ -57,6 +57,7 @@ import { useBump } from "./useBump";
 import type {
   AccountSummary,
   AiAgentProfile,
+  AiProfileRiskSettings,
   AiAgentSummary,
   AiAutomationCounts,
   AiRunTriage,
@@ -102,7 +103,7 @@ import { FASTLANE_TRIGGER_DEFAULTS, fastlaneStylePresetText, profileTypeOf } fro
 // C29.19：快判模式的 UI 总开关（与 Rust `FASTLANE_MODE_ENABLED` 同值）——
 // 本版本不发布快判：所有快判入口 / 卡片都按它隐藏，组件本体保留不删。
 import { FASTLANE_MODE_ENABLED } from "./fastlane/fastlaneMode";
-import { buildProfileSaveInput, checkProfileSaveArgs, describeSerializationIssue, findNonSerializable } from "../lib/profilePayload";
+import { buildProfileSaveInput, checkProfileSaveArgs, DEFAULT_PROFILE_RISK, describeSerializationIssue, findNonSerializable, normalizeProfileRisk } from "../lib/profilePayload";
 import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
@@ -548,6 +549,7 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     scanIntervalMinutes: Math.max(1, Math.min(1_440, Math.round(Number(profile.scanIntervalMinutes) || 30))),
     targetLeverage: Math.max(1, Math.min(125, Math.round(Number(profile.targetLeverage) || 20))),
     maxSingleTradeMarginPct: Math.max(1, Math.min(100, Math.round(Number(profile.maxSingleTradeMarginPct) || 30))),
+    risk: normalizeProfileRisk(profile.risk),
     dailyReviewEnabled: Boolean(profile.dailyReviewEnabled),
     allowedWakeConditionTypes: allowedWakeConditionTypes.length > 0
       ? allowedWakeConditionTypes
@@ -592,6 +594,7 @@ function createProfile(accounts: AccountSummary[], defaultModelId: string): AiAg
     entryToleranceBps: 30,
     targetLeverage: 20,
     maxSingleTradeMarginPct: 30,
+    risk: { ...DEFAULT_PROFILE_RISK },
     minWakeIntervalSeconds: 60,
     maxRunsPerHour: 12,
     feishuEnabled: false,
@@ -1322,6 +1325,10 @@ function ProfileEditor({
       [key]: Number.isFinite(next) ? Math.min(maximum, Math.max(minimum, next)) : minimum
     } as Partial<AiAgentProfile>);
   };
+  const risk = normalizeProfileRisk(draft.risk);
+  const updateRisk = (key: keyof AiProfileRiskSettings, value: string) => {
+    onChange({ risk: normalizeProfileRisk({ ...risk, [key]: Number(value) }) });
+  };
   const toggleSkill = (id: string, checked: boolean) => {
     if (REQUIRED_PROFILE_SKILL_ID_SET.has(id)) return;
     const next = new Set(draft.skillIds);
@@ -1546,6 +1553,18 @@ function ProfileEditor({
           <label><FieldLabel help={t("automation:profileLimitTradeMarginHelp")}>{t("automation:profileLimitTradeMargin")}</FieldLabel><input type="number" min="1" max="100" value={draft.maxSingleTradeMarginPct} onChange={(event) => updateNumber("maxSingleTradeMarginPct", event.target.value, 1, 100)} /></label>
           <label><FieldLabel help={t("automation:profileLimitWakeIntervalHelp")}>{t("automation:profileLimitWakeInterval")}</FieldLabel><input type="number" min="30" max="86400" value={draft.minWakeIntervalSeconds} onChange={(event) => updateNumber("minWakeIntervalSeconds", event.target.value, 30, 86400)} /></label>
           <label><FieldLabel help={t("automation:profileLimitRunsPerHourHelp")}>{t("automation:profileLimitRunsPerHour")}</FieldLabel><input type="number" min="1" max="60" value={draft.maxRunsPerHour} onChange={(event) => updateNumber("maxRunsPerHour", event.target.value, 1, 60)} /></label>
+        </div>
+      </div>
+
+      <div className="automation-form-section">
+        <strong><ShieldCheck size={13} />{t("automation:profileRiskGate")}</strong>
+        <p className="automation-form-note">{t("automation:profileRiskGateNote")}</p>
+        <div className="automation-limit-grid">
+          <label><FieldLabel help={t("automation:profileRiskPerTradeHelp")}>{t("automation:profileRiskPerTrade")}</FieldLabel><input type="number" min="0.05" max="5" step="0.05" value={risk.riskPerTradePct} onChange={(event) => updateRisk("riskPerTradePct", event.target.value)} /></label>
+          <label><FieldLabel help={t("automation:profileRiskRewardHelp")}>{t("automation:profileRiskReward")}</FieldLabel><input type="number" min="0.5" max="5" step="0.1" value={risk.minRewardRisk} onChange={(event) => updateRisk("minRewardRisk", event.target.value)} /></label>
+          <label><FieldLabel help={t("automation:profileRiskDailyLossHelp")}>{t("automation:profileRiskDailyLoss")}</FieldLabel><input type="number" min="0.1" max="20" step="0.5" value={risk.dailyLossLimitPct} onChange={(event) => updateRisk("dailyLossLimitPct", event.target.value)} /></label>
+          <label><FieldLabel help={t("automation:profileRiskMaxPositionsHelp")}>{t("automation:profileRiskMaxPositions")}</FieldLabel><input type="number" min="1" max="10" step="1" value={risk.maxOpenPositions} onChange={(event) => updateRisk("maxOpenPositions", event.target.value)} /></label>
+          <label><FieldLabel help={t("automation:profileRiskDriftHelp")}>{t("automation:profileRiskDrift")}</FieldLabel><input type="number" min="1" max="300" step="1" value={risk.maxEntryDriftBps} onChange={(event) => updateRisk("maxEntryDriftBps", event.target.value)} /></label>
         </div>
       </div>
 
