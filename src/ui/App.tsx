@@ -44,7 +44,8 @@ import {
   Wifi,
   X,
   XCircle,
-  Trash2
+  Trash2,
+  ClipboardList
 } from "lucide-react";
 import { ingestOrderBookForWalls } from "../lib/orderBookWalls";
 import { DepthProfile } from "./chart/DepthProfile";
@@ -299,6 +300,8 @@ import {
   type FirstLaunchStep
 } from "./FirstLaunchOnboarding";
 import { MemoAiResearchWorkspace } from "./ai-research/AiResearchWorkspace";
+import { PerformanceExplorer } from "./data/PerformanceExplorer";
+import { TradeReviewView } from "./data/TradeReviewView";
 import type { AiUiMessage } from "./AiMessageProcess";
 
 export { AiPreview } from "./ai-research/AiPreview";
@@ -5218,6 +5221,7 @@ function TradingTerminal({
               setMainSection("config");
             }}
             onSyncHistory={() => account && triggerPrivateHistorySync(account, "manual")}
+            onOpenAiAutomation={() => setMainSection("automation")}
           />
         ) : mainSection === "config" ? (
           <SettingsWorkspacePage
@@ -8059,7 +8063,7 @@ function NotificationSettingsPane({ onNotify }: { onNotify: (notification: Omit<
 }
 
 type PerformanceRangeKey = "today" | "yesterday" | "7d" | "30d" | "90d" | "all";
-type DataDashboardView = "performance" | "ai_usage";
+type DataDashboardView = "performance" | "review" | "ai_usage";
 
 const performanceRangeOptions: PerformanceRangeKey[] = ["today", "yesterday", "7d", "30d", "90d", "all"];
 
@@ -8071,7 +8075,8 @@ function DataDashboardPage({
   symbol,
   refreshRevision,
   onOpenAccountSettings,
-  onSyncHistory
+  onSyncHistory,
+  onOpenAiAutomation
 }: {
   account: AccountSummary | null;
   accounts: AccountSummary[];
@@ -8081,9 +8086,11 @@ function DataDashboardPage({
   refreshRevision: string;
   onOpenAccountSettings: () => void;
   onSyncHistory: () => void;
+  onOpenAiAutomation: () => void;
 }) {
   const { t } = useTranslation(["common", "trading"]);
   const [dashboardView, setDashboardView] = useState<DataDashboardView>("performance");
+  const [reviewFocusId, setReviewFocusId] = useState<string | null>(null);
   const [range, setRange] = useState<PerformanceRangeKey>("30d");
   const [selectedAccountId, setSelectedAccountId] = useState(account?.id ?? accounts[0]?.id ?? "");
   const [selectedSymbol, setSelectedSymbol] = useState("");
@@ -8134,8 +8141,7 @@ function DataDashboardPage({
     void refresh();
   }, [refresh, refreshRevision]);
 
-  const totals = summary?.totals;
-  const attribution = summary?.attribution ?? [];
+  const reviewWindow = useMemo(() => performanceRangeWindow(range), [range]);
   const warnings = summary?.coverage.warnings ?? [];
   const generatedAtText = summary?.generatedAt ? formatClock(summary.generatedAt) : "--";
 
@@ -8211,47 +8217,29 @@ function DataDashboardPage({
         </div>
       )}
 
-      {/* Cumulative return is the answer this page exists to give, so it leads at
-          display size while the remaining five read as supporting facts. */}
-      <section className="data-headline">
-        <div className={clsx("data-headline__lead", `is-${toneByNumber(totals?.returnPct)}`)}>
-          <span>{t("common:cumulativeReturn")}</span>
-          <strong>{formatSignedPercent(totals?.returnPct)}</strong>
-          <small>{t("common:netPnl", { defaultValue: t("trading:netPnl") })} {formatSignedUsdt(totals?.netPnl)}</small>
-        </div>
-        <div className="data-headline__support">
-          <DataMetric label={t("common:currentAccountEquity")} value={formatPerformanceUsdt(totals?.currentEquity)} />
-          <DataMetric label={t("common:maximumDrawdown")} value={formatPercent(totals?.maxDrawdownPct)} tone={totals?.maxDrawdownPct ? "drawdown" : "neutral"} />
-          <DataMetric label={t("common:winRate")} value={formatPercent(totals?.winRatePct)} />
-          <DataMetric label={t("trading:fees")} value={formatPerformanceUsdt(totals?.fees)} tone="muted" />
-        </div>
-      </section>
-
-      <section className="data-main-grid">
-        <div className="data-panel data-chart-panel">
-          <div className="data-panel-head">
-            <div>
-              <strong>{t("common:accountEquityCurve")}</strong>
-              <span className="data-chart-legend">
-                <i className="equity" />{t("common:accountEquityLeftAxis")}
-                <i className="return" />{t("common:cumulativeReturnRightAxis")}
-                <i className="drawdown" />{t("common:drawdownRightAxis")}
-              </span>
-            </div>
-            <span>{t("common:pointCount", { count: summary?.equityCurve.length ?? 0 })}</span>
-          </div>
-          <PerformanceEquityChart summary={summary} loading={loading} />
-        </div>
-
-        <SourcePerformanceTable summary={summary} attribution={attribution} />
-      </section>
-
-      {/* Two detail slots instead of three: the daily rhythm, and one panel that
-          switches between per-market ranking and position extremes. */}
-      <section className="data-secondary-grid">
-        <MonthlyPnlCalendar items={summary?.dailyPnl ?? []} />
-        <DetailBreakdownPanel items={summary?.symbolBreakdown ?? []} summary={summary} marketAssets={marketAssets} />
-      </section>
+      {dashboardView === "review" ? (
+        <TradeReviewView
+          account={selectedAccount ? { id: selectedAccount.id, environment: selectedAccount.environment } : null}
+          startTime={reviewWindow.startTime}
+          endTime={reviewWindow.endTime}
+          symbol={selectedSymbol}
+          refreshRevision={refreshRevision}
+          focusTradeId={reviewFocusId}
+          onOpenAiResearch={onOpenAiAutomation}
+        />
+      ) : (
+        <PerformanceExplorer
+          account={selectedAccount ? { id: selectedAccount.id, environment: selectedAccount.environment } : null}
+          startTime={reviewWindow.startTime}
+          endTime={reviewWindow.endTime}
+          symbol={selectedSymbol}
+          refreshRevision={refreshRevision}
+          onOpenReview={(tradeId) => {
+            setReviewFocusId(tradeId);
+            setDashboardView("review");
+          }}
+        />
+      )}
 
       <footer className="data-dashboard-footer">
         <span>{t("common:dataUpdatedAt", { time: generatedAtText })}</span>
@@ -8262,11 +8250,15 @@ function DataDashboardPage({
 }
 
 function DataDashboardViewTabs({ value, onChange }: { value: DataDashboardView; onChange: (value: DataDashboardView) => void }) {
-  const { t } = useTranslation("common");
+  const { t, i18n } = useTranslation("common");
+  const chineseUi = (i18n.resolvedLanguage ?? i18n.language).toLowerCase().startsWith("zh");
   return (
     <div className="data-view-tabs" role="tablist" aria-label={t("dataDashboardViews")}>
       <button type="button" role="tab" aria-selected={value === "performance"} className={value === "performance" ? "active" : ""} onClick={() => onChange("performance")}>
         <LayoutDashboard size={14} />{t("accountPerformance")}
+      </button>
+      <button type="button" role="tab" aria-selected={value === "review"} className={value === "review" ? "active" : ""} onClick={() => onChange("review")}>
+        <ClipboardList size={14} />{chineseUi ? "交易复盘" : "Trade review"}
       </button>
       <button type="button" role="tab" aria-selected={value === "ai_usage"} className={value === "ai_usage" ? "active" : ""} onClick={() => onChange("ai_usage")}>
         <Bot size={14} />{t("aiUsage")}
@@ -8399,137 +8391,6 @@ function AiTokenUsageDashboardPage({
   );
 }
 
-function DataMetric({ label, value, tone }: { label: string; value: string; tone?: CellTone }) {
-  return (
-    <div className="data-metric">
-      <span>{label}</span>
-      <strong className={clsx(tone && "cell-tone", tone)}>{value}</strong>
-    </div>
-  );
-}
-
-function PerformanceEquityChart({ summary, loading }: { summary: AccountPerformanceSummary | null; loading: boolean }) {
-  const { t } = useTranslation("common");
-  const [hoverIndex, setHoverIndex] = useState<number | null>(null);
-  const points = summary?.equityCurve ?? [];
-  const width = 1280;
-  const height = 370;
-  const padLeft = 34;
-  const padRight = 36;
-  const padTop = 24;
-  const padBottom = 54;
-  const plotWidth = width - padLeft - padRight;
-  const plotHeight = height - padTop - padBottom;
-  const maxEquity = Math.max(1, ...points.map((item) => item.equity));
-  const pctValues = points.flatMap((item) => [item.cumulativeReturnPct, -item.drawdownPct]);
-  const pctMin = Math.min(-10, ...pctValues);
-  const pctMax = Math.max(10, ...pctValues);
-  const pctRange = Math.max(1, pctMax - pctMin);
-  const x = (index: number) => padLeft + (points.length <= 1 ? 0 : index / (points.length - 1)) * plotWidth;
-  const yEquity = (value: number) => padTop + (1 - value / maxEquity) * plotHeight;
-  const yPct = (value: number) => padTop + ((pctMax - value) / pctRange) * plotHeight;
-  const yZero = yPct(0);
-  const equityCoords = points.map((item, index) => [x(index), yEquity(item.equity)] as [number, number]);
-  const returnCoords = points.map((item, index) => [x(index), yPct(item.cumulativeReturnPct)] as [number, number]);
-  const drawdownCoords = points.map((item, index) => [x(index), yPct(-item.drawdownPct)] as [number, number]);
-  const equityPath = smoothSvgPath(equityCoords);
-  const returnPath = smoothSvgPath(returnCoords);
-  const drawdownLinePath = smoothSvgPath(drawdownCoords);
-  const drawdownAreaPath = points.length
-    ? `M ${x(0)} ${yZero} ${drawdownLinePath.replace(/^M\s*/, "L ")} L ${x(points.length - 1)} ${yZero} Z`
-    : "";
-  const overviewCoords = points.map((item, index) => {
-    const overviewX = padLeft + (points.length <= 1 ? 0 : index / (points.length - 1)) * plotWidth;
-    const overviewY = height - 22 - (item.equity / maxEquity) * 28;
-    return [overviewX, overviewY] as [number, number];
-  });
-  const overviewPath = smoothSvgPath(overviewCoords);
-  const hover = hoverIndex !== null ? points[hoverIndex] : points.at(-1);
-  const latest = points.at(-1);
-  const xTicks = [0, 0.25, 0.5, 0.75, 1].map((ratio) => Math.round(ratio * Math.max(points.length - 1, 0)));
-  const equityTicks = [1, 0.75, 0.5, 0.25, 0].map((ratio) => maxEquity * ratio);
-  const pctTicks = [pctMax, pctMax - pctRange * 0.25, pctMax - pctRange * 0.5, pctMax - pctRange * 0.75, pctMin];
-
-  if (loading) {
-    return <div className="data-chart-empty"><Loader2 className="spin" size={20} />{t("loadingAccountPerformance")}</div>;
-  }
-  if (!points.length) {
-    return <div className="data-chart-empty">{t("accountEquityCurveEmpty")}</div>;
-  }
-
-  return (
-    <div className="data-chart-wrap">
-      <svg
-        viewBox={`0 0 ${width} ${height}`}
-        role="img"
-        aria-label={t("accountEquityCurve")}
-        onMouseMove={(event) => {
-          const rect = event.currentTarget.getBoundingClientRect();
-          const ratio = Math.min(1, Math.max(0, (event.clientX - rect.left) / rect.width));
-          setHoverIndex(Math.round(ratio * (points.length - 1)));
-        }}
-        onMouseLeave={() => setHoverIndex(null)}
-      >
-        <defs>
-          <linearGradient id="dataEquityLine" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stopColor="#8b5cf6" />
-            <stop offset="100%" stopColor="#a78bfa" />
-          </linearGradient>
-          <linearGradient id="dataReturnLine" x1="0" x2="1" y1="0" y2="0">
-            <stop offset="0%" stopColor="#38bdf8" />
-            <stop offset="100%" stopColor="#67e8f9" />
-          </linearGradient>
-          <linearGradient id="dataDrawdownFill" x1="0" x2="0" y1="0" y2="1">
-            <stop offset="0%" stopColor="rgba(248,113,113,0.02)" />
-            <stop offset="100%" stopColor="rgba(248,113,113,0.34)" />
-          </linearGradient>
-        </defs>
-        {equityTicks.map((tick, index) => (
-          <g key={`equity-${index}`}>
-            <line x1={padLeft} x2={width - padRight} y1={yEquity(tick)} y2={yEquity(tick)} />
-            <text className="data-chart-axis left" x={padLeft - 8} y={yEquity(tick) + 4}>{formatAxisNumber(tick)}</text>
-          </g>
-        ))}
-        {pctTicks.map((tick, index) => (
-          <text className="data-chart-axis right" x={width - padRight + 8} y={yPct(tick) + 4} key={`pct-${index}`}>{tick.toFixed(0)}%</text>
-        ))}
-        {xTicks.map((index) => (
-          <text className="data-chart-axis date" x={x(index)} y={height - 42} key={`date-${index}`}>{formatShortMonthDay(points[index]?.time)}</text>
-        ))}
-        <line className="data-chart-zero" x1={padLeft} x2={width - padRight} y1={yZero} y2={yZero} />
-        <path className="data-drawdown-area" d={drawdownAreaPath} />
-        <path className="data-drawdown-line" d={drawdownLinePath} />
-        <path className="data-equity-line" d={equityPath} />
-        <path className="data-return-line" d={returnPath} />
-        <path className="data-overview-line" d={overviewPath} />
-        <rect className="data-overview-window" x={padLeft} y={height - 48} width={plotWidth} height={30} rx={4} />
-        {hover && hoverIndex !== null && (
-          <>
-            <line className="data-chart-cursor" x1={x(hoverIndex)} x2={x(hoverIndex)} y1={padTop} y2={height - padBottom} />
-            <circle className="data-chart-dot" cx={x(hoverIndex)} cy={yEquity(hover.equity)} r={4} />
-            <circle className="data-chart-dot return" cx={x(hoverIndex)} cy={yPct(hover.cumulativeReturnPct)} r={3.5} />
-          </>
-        )}
-        {latest && (
-          <>
-            <text className="data-chart-badge equity" x={width - padRight + 4} y={yEquity(latest.equity)}>{formatAxisNumber(latest.equity)}</text>
-            <text className="data-chart-badge return" x={width - padRight + 4} y={yPct(latest.cumulativeReturnPct)}>{formatSignedPercent(latest.cumulativeReturnPct)}</text>
-            <text className="data-chart-badge drawdown" x={width - padRight + 4} y={yPct(-latest.drawdownPct)}>-{formatPercent(latest.drawdownPct)}</text>
-          </>
-        )}
-      </svg>
-      {hover && (
-        <div className="data-chart-tip">
-          <span>{formatDateTime(hover.time)}</span>
-          <div><i className="equity" />{t("accountEquity")} <strong>{formatPerformanceUsdt(hover.equity)}</strong></div>
-          <div><i className="return" />{t("cumulativeReturn")} <strong>{formatSignedPercent(hover.cumulativeReturnPct)}</strong></div>
-          <div><i className="drawdown" />{t("drawdown")} <strong>-{formatPercent(hover.drawdownPct)}</strong></div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function smoothSvgPath(coords: Array<[number, number]>) {
   if (coords.length === 0) return "";
   if (coords.length === 1) return `M ${coords[0][0]} ${coords[0][1]}`;
@@ -8555,227 +8416,11 @@ function smoothSvgPath(coords: Array<[number, number]>) {
   }, "");
 }
 
-function SourcePerformanceTable({
-  summary,
-  attribution
-}: {
-  summary: AccountPerformanceSummary | null;
-  attribution: AccountPerformanceSummary["attribution"];
-}) {
-  const { t } = useTranslation(["common", "trading"]);
-  const sourceRows = [
-    { label: "AI", item: attribution.find((item) => item.operator === "ai") },
-    { label: t("common:manualOperator"), item: attribution.find((item) => item.operator === "user") },
-    { label: t("common:unattributed"), item: attribution.find((item) => item.operator === "unknown") }
-  ];
-  const totalNetReturnPct = summary?.totals.startEquity && Math.abs(summary.totals.startEquity) > Number.EPSILON
-    ? summary.totals.netPnl / summary.totals.startEquity * 100
-    : null;
-  const totalRow = summary?.totals
-    ? {
-        label: t("common:total"),
-        netPnl: summary.totals.netPnl,
-        returnPct: totalNetReturnPct,
-        winRatePct: summary.totals.winRatePct,
-        tradeCount: summary.totals.tradeCount,
-        fees: summary.totals.fees
-      }
-    : null;
-
-  return (
-    <div className="data-panel data-source-panel">
-      <div className="data-panel-head">
-        <strong>{t("common:performanceBySource")}</strong>
-        <span
-          title={summary?.coverage.attributionComplete ? undefined : t("common:attributionCoveragePartialDescription")}
-        >
-          {summary?.coverage.attributionComplete ? t("common:attributionCoverageComplete") : t("common:attributionCoveragePartial")}
-        </span>
-      </div>
-      <table className="data-table data-table--ranked">
-        <thead>
-          <tr>
-            <th>{t("common:source")}</th>
-            <th>{t("trading:netPnl")}</th>
-            <th className="is-secondary">{t("common:winRate")}</th>
-            <th className="is-secondary">{t("common:tradeCount")}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {sourceRows.map(({ label, item }) => (
-            <tr key={label}>
-              <td>
-                <span className="data-source-name">{label}</span>
-                <small className={clsx("cell-tone", toneByNumber(item?.returnPct))}>{formatSignedPercent(item?.returnPct)}</small>
-              </td>
-              <td className={clsx("is-primary cell-tone", toneByNumber(item?.netPnl))}>{formatSignedUsdt(item?.netPnl)}</td>
-              <td className="is-secondary">{formatPercent(item?.winRatePct)}</td>
-              <td className="is-secondary">{(item?.tradeCount ?? 0).toLocaleString("en-US")}</td>
-            </tr>
-          ))}
-          <tr className="total">
-            <td>
-              <span className="data-source-name">{t("common:total")}</span>
-              <small className={clsx("cell-tone", toneByNumber(totalRow?.returnPct))}>{formatSignedPercent(totalRow?.returnPct)}</small>
-            </td>
-            <td className={clsx("is-primary cell-tone", toneByNumber(totalRow?.netPnl))}>{formatSignedUsdt(totalRow?.netPnl)}</td>
-            <td className="is-secondary">{formatPercent(totalRow?.winRatePct)}</td>
-            <td className="is-secondary">{(totalRow?.tradeCount ?? 0).toLocaleString("en-US")}</td>
-          </tr>
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
 /** Market ranking and position highlights are both drill-down detail, so they
  *  share one panel and one screen slot instead of competing for two. */
-function DetailBreakdownPanel({
-  items,
-  summary,
-  marketAssets
-}: {
-  items: AccountPerformanceSummary["symbolBreakdown"];
-  summary: AccountPerformanceSummary | null;
-  marketAssets: MarketAssetsSummary | null;
-}) {
-  const { t } = useTranslation(["common", "trading"]);
-  const [view, setView] = useState<"markets" | "highlights">("markets");
-  return (
-    <div className="data-panel data-breakdown-panel">
-      <div className="data-panel-head">
-        <div className="data-breakdown-switch" role="tablist" aria-label={t("common:marketRanking")}>
-          <button type="button" role="tab" aria-selected={view === "markets"} className={view === "markets" ? "active" : ""} onClick={() => setView("markets")}>
-            {t("common:marketRanking")}
-          </button>
-          <button type="button" role="tab" aria-selected={view === "highlights"} className={view === "highlights" ? "active" : ""} onClick={() => setView("highlights")}>
-            {t("common:positionHighlights")}
-          </button>
-        </div>
-        <span>
-          {view === "markets"
-            ? t("common:sortedByNetPnl")
-            : t("common:episodeCount", { count: summary?.coverage.episodesCount ?? 0 })}
-        </span>
-      </div>
-      {view === "markets"
-        ? <SymbolRankingBody items={items} marketAssets={marketAssets} />
-        : <PositionHighlightsBody summary={summary} marketAssets={marketAssets} />}
-    </div>
-  );
-}
-
-function SymbolRankingBody({ items, marketAssets }: { items: AccountPerformanceSummary["symbolBreakdown"]; marketAssets: MarketAssetsSummary | null }) {
-  const { t } = useTranslation(["common", "trading"]);
-  return (
-    <>
-      {items.length > 0 ? (
-        <table className="data-table data-table--ranked">
-          <thead>
-            <tr>
-              <th>{t("trading:tradingPair")}</th>
-              <th>{t("trading:netPnl")}</th>
-              <th className="is-secondary">{t("common:winRate")}</th>
-              <th className="is-secondary">{t("common:tradeCount")}</th>
-              <th className="is-secondary">{t("trading:fees")}</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.slice(0, 6).map((item) => (
-              <tr key={item.instId}>
-                <td><SymbolLabel symbol={item.instId} marketAssets={marketAssets} /></td>
-                <td className={clsx("is-primary cell-tone", toneByNumber(item.netPnl))}>{formatSignedUsdt(item.netPnl)}</td>
-                <td className="is-secondary">{formatPercent(item.winRatePct)}</td>
-                <td className="is-secondary">{item.tradeCount.toLocaleString("en-US")}</td>
-                <td className="is-secondary">{formatPerformanceUsdt(item.fees)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      ) : (
-        <div className="data-empty-inline">{t("common:marketRankingEmpty")}</div>
-      )}
-    </>
-  );
-}
-
 /** Daily PnL month grid. Weeks with no trading activity at all are dropped so
  *  the panel does not spend most of its height on empty cells, which was the
  *  original complaint; every day that carries data is still shown in place. */
-function MonthlyPnlCalendar({ items }: { items: AccountPerformanceSummary["dailyPnl"] }) {
-  const { t } = useTranslation("common");
-  const calendar = buildPerformanceCalendar(items);
-  const max = Math.max(1, ...items.map((item) => Math.abs(item.netPnl)));
-  const weekdayLabels = Array.from({ length: 7 }, (_, index) => formatLocalizedDate(new Date(2024, 0, index + 1), { weekday: "short" }));
-  // Group into weeks, then keep only weeks that contain at least one traded day.
-  const weeks: Array<typeof calendar.days> = [];
-  for (let i = 0; i < calendar.days.length; i += 7) weeks.push(calendar.days.slice(i, i + 7));
-  const activeWeeks = weeks.filter((week) => week.some((day) => day.pnl != null));
-  const visibleWeeks = activeWeeks.length > 0 ? activeWeeks : weeks;
-
-  return (
-    <div className="data-panel data-calendar-panel">
-      <div className="data-panel-head">
-        <strong>{t("dailyPnl")} <em>(USDT)</em></strong>
-        <span>{calendar.title}</span>
-      </div>
-      {items.length > 0 ? (
-        <>
-          <div className="data-calendar-weekdays">
-            {weekdayLabels.map((item) => <span key={item}>{item}</span>)}
-          </div>
-          <div className="data-calendar-grid">
-            {visibleWeeks.flat().map((day) => {
-              const intensity = day.pnl == null ? 0 : Math.min(1, Math.abs(day.pnl) / max);
-              return (
-                <div
-                  className={clsx("data-calendar-cell", !day.inMonth && "muted", day.pnl != null && (day.pnl >= 0 ? "positive" : "negative"))}
-                  style={{ "--heat": String(0.12 + intensity * 0.88) } as CSSProperties}
-                  title={day.pnl == null ? day.date : t("dailyPnlTooltip", { date: day.date, pnl: formatSignedUsdt(day.pnl), count: day.tradeCount })}
-                  key={day.date}
-                >
-                  <span>{day.day}</span>
-                  {day.pnl != null && <strong>{formatCalendarPnl(day.pnl)}</strong>}
-                </div>
-              );
-            })}
-          </div>
-          <div className="data-calendar-legend">
-            <span><i className="positive" />{t("profitPositive")}</span>
-            <span><i />{t("pnlZero")}</span>
-            <span><i className="negative" />{t("lossNegative")}</span>
-          </div>
-        </>
-      ) : (
-        <div className="data-empty-inline">{t("dailyPnlEmpty")}</div>
-      )}
-    </div>
-  );
-}
-
-function PositionHighlightsBody({ summary, marketAssets }: { summary: AccountPerformanceSummary | null; marketAssets: MarketAssetsSummary | null }) {
-  const { t } = useTranslation(["common", "trading"]);
-  const items = [
-    { label: t("common:largestProfit"), item: summary?.highlights.bestEpisode ?? null, value: summary?.highlights.bestEpisode ? formatSignedUsdt(summary.highlights.bestEpisode.netPnl) : "--" },
-    { label: t("common:largestLoss"), item: summary?.highlights.worstEpisode ?? null, value: summary?.highlights.worstEpisode ? formatSignedUsdt(summary.highlights.worstEpisode.netPnl) : "--" },
-    { label: t("common:longestHolding"), item: summary?.highlights.longestEpisode ?? null, value: summary?.highlights.longestEpisode ? formatDuration(summary.highlights.longestEpisode.openTime, summary.highlights.longestEpisode.closeTime ?? summary.highlights.longestEpisode.openTime) : "--" },
-    { label: t("common:shortestHolding"), item: summary?.highlights.shortestEpisode ?? null, value: summary?.highlights.shortestEpisode ? formatDuration(summary.highlights.shortestEpisode.openTime, summary.highlights.shortestEpisode.closeTime ?? summary.highlights.shortestEpisode.openTime) : "--" }
-  ];
-  return (
-    <div className="data-highlight-list">
-        {items.map(({ label, item, value }) => (
-          <div className="data-highlight-row" key={label}>
-            <div>
-              <span>{label}</span>
-              <strong className={clsx(item && "cell-tone", item && toneByNumber(item.netPnl))}>{value}</strong>
-            </div>
-            {item ? <SymbolLabel symbol={item.instId} marketAssets={marketAssets} secondary={`${item.side === "short" ? t("trading:short") : t("trading:long")} · ${formatDateTime(item.openTime)}`} /> : <small>{t("common:noClosedPositions")}</small>}
-          </div>
-        ))}
-    </div>
-  );
-}
-
 function localDateKey(time: number) {
   const date = new Date(time);
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
@@ -8799,36 +8444,6 @@ function formatClock(time?: number | null) {
   if (!Number.isFinite(time)) return "--";
   const date = new Date(Number(time));
   return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(date.getSeconds()).padStart(2, "0")}.${String(date.getMilliseconds()).padStart(3, "0")}`;
-}
-
-function buildPerformanceCalendar(items: AccountPerformanceSummary["dailyPnl"]) {
-  const byDate = new Map(items.map((item) => [item.date, item]));
-  const latest = items.at(-1)?.date ?? localDateKey(Date.now());
-  const [yearText, monthText] = latest.split("-");
-  const year = Number(yearText) || new Date().getFullYear();
-  const month = Number(monthText) || new Date().getMonth() + 1;
-  const first = new Date(year, month - 1, 1);
-  const daysInMonth = new Date(year, month, 0).getDate();
-  const leading = (first.getDay() + 6) % 7;
-  const days: Array<{ date: string; day: number; inMonth: boolean; pnl: number | null; tradeCount: number }> = [];
-  for (let i = 0; i < leading; i += 1) {
-    const date = new Date(year, month - 1, 1 - (leading - i));
-    const key = localDateKey(date.getTime());
-    const item = byDate.get(key);
-    days.push({ date: key, day: date.getDate(), inMonth: false, pnl: item?.netPnl ?? null, tradeCount: item?.tradeCount ?? 0 });
-  }
-  for (let day = 1; day <= daysInMonth; day += 1) {
-    const key = `${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
-    const item = byDate.get(key);
-    days.push({ date: key, day, inMonth: true, pnl: item?.netPnl ?? null, tradeCount: item?.tradeCount ?? 0 });
-  }
-  while (days.length % 7 !== 0) {
-    const date = new Date(year, month - 1, daysInMonth + (days.length % 7 === 0 ? 0 : days.length - leading - daysInMonth + 1));
-    const key = localDateKey(date.getTime());
-    const item = byDate.get(key);
-    days.push({ date: key, day: date.getDate(), inMonth: false, pnl: item?.netPnl ?? null, tradeCount: item?.tradeCount ?? 0 });
-  }
-  return { title: formatLocalizedDate(new Date(year, month - 1, 1), { year: "numeric", month: "long" }), days };
 }
 
 function formatCalendarPnl(value?: number | null) {

@@ -67,6 +67,8 @@ import type {
   PrivateHistoryStatusRequest,
   PrivateHistoryStatusResponse,
   PositionEpisode,
+  TradeReviewNote,
+  TradeReviewProtection,
   PositionEpisodesRequest,
   ProxyConfigSummary,
   ProxyConfigUpdate,
@@ -336,6 +338,18 @@ export async function fetchPrivateHistoryStatus(request: PrivateHistoryStatusReq
 
 export async function fetchPositionEpisodes(request: PositionEpisodesRequest): Promise<PositionEpisode[] | null> {
   return invokeDesktop<PositionEpisode[]>("position_episodes", { request });
+}
+
+export async function fetchTradeReviewNotes(accountId?: string): Promise<TradeReviewNote[] | null> {
+  return invokeDesktop<TradeReviewNote[]>("trade_review_notes", { request: { accountId } });
+}
+
+export async function saveTradeReviewNote(request: { accountId?: string; episodeId: string; tags: string[]; note: string }): Promise<TradeReviewNote | null> {
+  return invokeDesktop<TradeReviewNote | null>("trade_review_note_save", { request });
+}
+
+export async function fetchTradeReviewProtection(request: { accountId?: string; episodes: { episodeId: string; instId: string; side: string; openTime: number; closeTime?: number | null }[] }): Promise<TradeReviewProtection[] | null> {
+  return invokeDesktop<TradeReviewProtection[]>("trade_review_protection", { request }, { quiet: true });
 }
 
 export async function fetchAiAutomationReviewDetail(request: AiAutomationReviewDetailRequest): Promise<AiAutomationReviewDetail | null> {

@@ -63,6 +63,7 @@ mod storage_config;
 mod systematic;
 mod trade_commands;
 mod trade_domain;
+mod trade_review;
 mod trade_support;
 use crate::agent_library::{
     ai_agent_delete, ai_agent_duplicate, ai_agent_generate, ai_agent_generate_cancel,
@@ -1764,6 +1765,8 @@ struct PositionEpisodeSummary {
     net_pnl: Option<String>,
     last_trade_id: Option<String>,
     last_fill_time: Option<i64>,
+    initial_lever: Option<String>,
+    final_lever: Option<String>,
     events: Vec<PositionEpisodeEventSummary>,
 }
 
@@ -12250,6 +12253,8 @@ fn map_position_episode_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Positio
         net_pnl: row.get(23)?,
         last_trade_id: row.get(24)?,
         last_fill_time: row.get(25)?,
+        initial_lever: row.get(26)?,
+        final_lever: row.get(27)?,
         events: Vec::new(),
     })
 }
@@ -12263,7 +12268,7 @@ fn load_position_episode_by_id(
     conn.query_row(
         "SELECT id, account_id, environment, inst_type, inst_id, episode_side, status, primary_origin,
           strategy_id, signal_id, trade_plan_id, open_time, close_time, open_qty, max_qty, closed_qty,
-          remaining_qty, avg_open_px, avg_close_px, realized_pnl, fees, funding_fee, liq_penalty, net_pnl, last_trade_id, last_fill_time
+          remaining_qty, avg_open_px, avg_close_px, realized_pnl, fees, funding_fee, liq_penalty, net_pnl, last_trade_id, last_fill_time, initial_lever, final_lever
          FROM position_episodes
          WHERE account_id = ?1 AND environment = ?2 AND id = ?3",
         params![account_id, environment, episode_id],
@@ -12282,7 +12287,7 @@ fn load_position_episodes(
 ) -> Result<Vec<PositionEpisodeSummary>, String> {
     let mut sql = "SELECT id, account_id, environment, inst_type, inst_id, episode_side, status, primary_origin,
         strategy_id, signal_id, trade_plan_id, open_time, close_time, open_qty, max_qty, closed_qty,
-        remaining_qty, avg_open_px, avg_close_px, realized_pnl, fees, funding_fee, liq_penalty, net_pnl, last_trade_id, last_fill_time
+        remaining_qty, avg_open_px, avg_close_px, realized_pnl, fees, funding_fee, liq_penalty, net_pnl, last_trade_id, last_fill_time, initial_lever, final_lever
         FROM position_episodes
         WHERE account_id = ?1 AND environment = ?2"
         .to_string();
@@ -21709,6 +21714,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
             ensure_trade_opportunity_exit_columns(conn)?;
             repair_triggered_order_attribution(conn)?;
             crate::ai_automation::migrate_ai_automation(conn)?;
+            crate::trade_review::migrate_trade_review(conn)?;
             crate::systematic::migrate_systematic(conn)?;
             crate::market_radar_workspace::migrate_market_radar_workspace(conn)?;
             remove_database_v1_obsolete_objects(conn)?;
@@ -21722,6 +21728,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
     let result = (|| {
         migrate_database(conn)?;
         crate::ai_automation::migrate_ai_automation(conn)?;
+        crate::trade_review::migrate_trade_review(conn)?;
         desic_intelligence::migrate_intelligence(conn)?;
         crate::systematic::migrate_systematic(conn)?;
         crate::market_radar_workspace::migrate_market_radar_workspace(conn)?;
@@ -26236,6 +26243,9 @@ pub fn run() {
             data_root_bootstrap_state,
             pick_data_root_directory,
             finalize_data_root_bootstrap,
+            trade_review::trade_review_notes,
+            trade_review::trade_review_note_save,
+            trade_review::trade_review_protection,
             data_root_migration::data_root_overview,
             data_root_migration::request_data_root_migration,
             data_root_migration::cancel_data_root_migration,

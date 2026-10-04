@@ -689,8 +689,15 @@ export type PositionEpisode = {
   netPnl?: string | null;
   lastTradeId?: string | null;
   lastFillTime?: number | null;
+  initialLever?: string | null;
+  finalLever?: string | null;
   events: PositionEpisodeEvent[];
 };
+
+export type TradeReviewNote = { episodeId: string; tags: string[]; note: string; updatedAt: number };
+
+/** 这笔仓位有没有挂止损 / 止盈（从条件单历史里匹配出来的估计，找不到不等于没挂过）。 */
+export type TradeReviewProtection = { episodeId: string; hadStop: boolean; stopPx?: number | null; tpPx?: number | null; stopTriggered: boolean };
 
 export type OkxInstrumentSummary = {
   instId: string;

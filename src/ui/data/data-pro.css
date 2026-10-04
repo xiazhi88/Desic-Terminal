@@ -1,0 +1,23 @@
+/* 数据面板共享样式：交易复盘使用 .dp-card / .dp-empty 与红涨绿跌配色；账户绩效工作台的样式在 performance-explorer.css。 */
+.dp, .tr { --dp-card: linear-gradient(180deg, rgba(12, 16, 24, 0.96), rgba(6, 8, 12, 0.98)); }
+.dp .is-pos, .tr .is-pos { color: var(--up); }
+.dp .is-neg, .tr .is-neg { color: var(--down); }
+.dp .is-flat, .tr .is-flat { color: var(--muted); }
+.dp .is-warn, .tr .is-warn { color: var(--warn); }
+
+.dp { display: grid; gap: 16px; padding: 4px 0 18px; }
+
+.dp-card {
+  min-width: 0;
+  border: 1px solid rgba(142, 155, 175, 0.17);
+  border-radius: 10px;
+  background: var(--dp-card);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.035), 0 14px 36px rgba(0, 0, 0, 0.18);
+  overflow: hidden;
+}
+.dp-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; padding: 13px 18px 10px; }
+.dp-card > header strong { font-size: 13.5px; letter-spacing: 0.02em; }
+.dp-card > header span { color: var(--weak); font-size: 11.5px; }
+
+.dp-empty { display: grid; place-items: center; min-height: 240px; padding: 24px; color: var(--weak); font-size: 13px; text-align: center; }
+.dp-empty.is-small { min-height: 120px; }

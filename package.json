@@ -37,6 +37,7 @@
     "test:market-radar": "node --experimental-strip-types scripts/test-market-radar-workspace.mjs",
     "test:orderflow": "node --experimental-strip-types scripts/test-orderflow-liquidations.mjs",
     "test:ai-research-ui": "node --experimental-strip-types scripts/test-ai-verdict.mjs && node --experimental-strip-types scripts/test-ai-session-groups.mjs",
+    "test:trade-review": "node scripts/test-trade-review.mjs && node --experimental-strip-types scripts/test-performance-explorer.mjs",
     "smoke:i18n-preview": "node scripts/smoke-i18n-preview.mjs",
     "smoke:terminal-preview": "node scripts/smoke-terminal-preview.mjs",
     "smoke:trade-ticket-preview": "node scripts/smoke-trade-ticket-preview.mjs",
