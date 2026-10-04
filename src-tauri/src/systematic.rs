@@ -4959,6 +4959,7 @@ pub(crate) async fn systematic_strategy_ai_send_message(
             ),
         }];
         let options = AiStreamOptions {
+            extra_rules: None,
             model_id: None,
             permission_mode: Some("advisor".to_string()),
             reasoning_depth: None,
@@ -5012,6 +5013,7 @@ pub(crate) async fn systematic_strategy_ai_send_message(
                 "strategyId": strategy_id,
             })),
             strategy_session_kind: Some("editor".to_string()),
+            ui_control: false,
             fastlane: None,
         };
         if let Err(message) = run_ai_stream(

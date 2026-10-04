@@ -39,6 +39,7 @@ mod ai_automation;
 mod ai_research_ledger;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
+mod ai_ui_control;
 mod ai_triage;
 mod app_updater;
 mod chart_alerts;
@@ -65,6 +66,9 @@ mod trade_commands;
 mod trade_domain;
 mod trade_review;
 mod trade_support;
+mod voice;
+mod voice_local;
+mod voice_stream;
 use crate::agent_library::{
     ai_agent_delete, ai_agent_duplicate, ai_agent_generate, ai_agent_generate_cancel,
     ai_agent_read, ai_agent_save, ai_agents_list,
@@ -1291,6 +1295,14 @@ struct AiSendRequest {
     permission_mode: Option<String>,
     reasoning_depth: Option<String>,
     delivery: Option<String>,
+    /// 会话级附加规则（例如语音指挥的简短回答要求）。追加在全局规则之后，不替换它们；
+    /// 只影响携带它的会话，普通 AI 研究从不发送。
+    #[serde(default)]
+    extra_rules: Option<String>,
+    /// 仅语音导演会话为真：允许 `ui.*` 工具在用户眼前切合约 / 周期 / 工作区。
+    /// 普通 AI 研究会话不发送，也不会被授予这些工具。
+    #[serde(default)]
+    ui_control: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1309,6 +1321,8 @@ struct AiStreamOptions {
     reasoning_depth: Option<String>,
     system_prompt: Option<String>,
     custom_rules: Option<String>,
+    /// 追加到（而不是替换）全局 customRules 的会话级规则。
+    extra_rules: Option<String>,
     enabled_skills: Option<Vec<String>>,
     runtime_scoped_skills: Vec<crate::storage_config::AiSkillBundle>,
     clear_skill_definitions: bool,
@@ -1323,6 +1337,8 @@ struct AiStreamOptions {
     preserve_cline_conversation: bool,
     conversation_scope: Option<Value>,
     strategy_session_kind: Option<String>,
+    /// 语音导演会话专属：授予 `ui.*` 界面指挥工具（见 [`ai_ui_control::authorize`]）。
+    ui_control: bool,
     /// C29 快判轮：下发键（config 扩展 + 顶层键）、回传捕获槽与本轮冻结事实。
     fastlane: Option<Box<FastlaneStreamOptions>>,
 }
@@ -3153,6 +3169,12 @@ async fn ai_send_message(
                 "accountId": request.account_id,
             })),
             strategy_session_kind: Some("trading-research".to_string()),
+            ui_control: request.ui_control,
+            extra_rules: request
+                .extra_rules
+                .as_deref()
+                .map(sanitize_extra_rules)
+                .filter(|value| !value.is_empty()),
             ..Default::default()
         };
         if let Err(message) = run_ai_stream(
@@ -3268,6 +3290,7 @@ fn ai_generate_chart_indicator_blocking(
             },
         );
         let options = AiStreamOptions {
+            extra_rules: None,
             model_id: None,
             permission_mode: Some("advisor".to_string()),
             reasoning_depth: None,
@@ -3293,6 +3316,7 @@ fn ai_generate_chart_indicator_blocking(
             preserve_cline_conversation: false,
             conversation_scope: None,
             strategy_session_kind: None,
+            ui_control: false,
             fastlane: None,
         };
         if let Err(message) = run_ai_stream(
@@ -14254,6 +14278,11 @@ async fn run_ai_stream(
         .trim()
         .to_string();
     }
+    if let Some(extra) = options.as_ref().and_then(|value| value.extra_rules.as_deref()) {
+        config.custom_rules = format!("{}\n\n{}", config.custom_rules.trim(), extra.trim())
+            .trim()
+            .to_string();
+    }
     // Background Runs now read their locked snapshots through this tool, so it
     // stays available unless a caller explicitly disables it.
     let disable_skills_tool = options
@@ -14444,6 +14473,7 @@ async fn run_ai_stream(
             "preserveClineConversation": options.as_ref().map(|value| value.preserve_cline_conversation).unwrap_or(false),
             "conversationScope": options.as_ref().and_then(|value| value.conversation_scope.clone()).unwrap_or_else(|| json!({})),
             "strategySessionKind": strategy_session_kind_payload,
+            "uiControl": options.as_ref().map(|value| value.ui_control).unwrap_or(false),
             "toolAllowlist": tool_allowlist.clone(),
             "systemPrompt": config.system_prompt.clone(),
             "customRules": config.custom_rules.clone(),
@@ -14982,6 +15012,7 @@ async fn run_ai_stream(
                     account_context_id: account_context_id.clone(),
                     run_context: run_context.clone(),
                     strategy_session_kind: strategy_session_kind.clone(),
+                    ui_control: options.as_ref().map(|value| value.ui_control).unwrap_or(false),
                 };
                 let task_app = app.clone();
                 let task_runtime = runtime.clone();
@@ -16770,6 +16801,7 @@ struct AiToolExecutionContext {
     account_context_id: Option<String>,
     run_context: Option<BackgroundRunContext>,
     strategy_session_kind: String,
+    ui_control: bool,
 }
 
 /// 图表指标会话（tool allowlist 仅 `script.createOrUpdate` + `research.webSearch`）的上限。
@@ -17025,6 +17057,16 @@ fn authorize_ai_tool(name: &str, context: &AiToolExecutionContext) -> Result<(),
             ));
         }
         return Ok(());
+    }
+    // 界面指挥（ui.*）：显示层可逆操作，仅主 Agent + 交互式 AI 研究会话；未登记的 ui.* 一律拒绝。
+    if ai_ui_control::is_ui_control_tool(canonical) {
+        return ai_ui_control::authorize(
+            canonical,
+            is_main,
+            context.run_context.is_some(),
+            &context.strategy_session_kind,
+            context.ui_control,
+        );
     }
     if canonical.starts_with("research.record") {
         return ai_research_ledger::authorize(
@@ -18125,6 +18167,9 @@ async fn execute_ai_tool(
     if ai_research_ledger::is_ledger_tool(canonical_name) {
         return ai_research_ledger::execute(canonical_name, input, session_id, now_ms());
     }
+    if ai_ui_control::is_ui_control_tool(canonical_name) {
+        return ai_ui_control::execute(&app, canonical_name, input, session_id, now_ms());
+    }
     // Agent 库函数（`crate::agent_library`），lib.rs 里不再重复实现。
     if canonical_name.starts_with("agent.") {
         ensure_ai_run_is_active(&app, context).await?;
@@ -18792,6 +18837,17 @@ async fn execute_ai_tool(
         }
         _ => Err(format!("未知 AI 工具：{}", tool_name)),
     }
+}
+
+/// 会话级附加规则只是一段提示文字：去掉控制字符并限长，避免被拿来塞入超大载荷。
+fn sanitize_extra_rules(value: &str) -> String {
+    value
+        .chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .take(1200)
+        .collect::<String>()
+        .trim()
+        .to_string()
 }
 
 fn canonical_ai_tool_name(name: &str) -> &str {
@@ -26243,6 +26299,17 @@ pub fn run() {
             data_root_bootstrap_state,
             pick_data_root_directory,
             finalize_data_root_bootstrap,
+            voice::voice_config_summary,
+            voice::voice_save_config,
+            voice::voice_transcribe,
+            voice_stream::voice_stream_start,
+            voice_stream::voice_stream_push,
+            voice_stream::voice_stream_finish,
+            voice_stream::voice_stream_cancel,
+            voice_local::voice_local_status,
+            voice_local::voice_local_install,
+            voice_local::voice_local_cancel,
+            voice_local::voice_local_remove,
             trade_review::trade_review_notes,
             trade_review::trade_review_note_save,
             trade_review::trade_review_protection,
@@ -29902,6 +29969,7 @@ mod tests {
             account_context_id: None,
             run_context: None,
             strategy_session_kind: "none".to_string(),
+            ui_control: false,
         }
     }
 
@@ -30443,6 +30511,64 @@ mod tests {
         assert!(authorize_ai_tool("trade.placeOrder", &subagent).is_err());
         assert!(authorize_ai_tool("trade.setLeverage", &subagent).is_err());
         assert!(authorize_ai_tool("market.readDecisionContext", &subagent).is_err());
+    }
+
+    #[test]
+    fn ui_control_tools_are_limited_to_the_interactive_research_main_agent() {
+        const UI_TOOLS: [&str; 6] = [
+            "ui.openWorkspace",
+            "ui.setInstrument",
+            "ui.setTimeframe",
+            "ui.addIndicator",
+            "ui.removeIndicator",
+            "ui.setOrderFlow",
+        ];
+        // 语音导演会话（ui_control = true）：三种权限模式下都放行（它不是交易副作用）。
+        for mode in ["advisor", "copilot", "limited_auto"] {
+            let mut voice = test_ai_tool_context(mode, "main", false);
+            voice.strategy_session_kind = "trading-research".to_string();
+            voice.ui_control = true;
+            for tool in UI_TOOLS {
+                assert!(authorize_ai_tool(tool, &voice).is_ok(), "{mode} {tool}");
+            }
+            assert!(authorize_ai_tool("ui.placeOrder", &voice).is_err(), "未登记的 ui.* 必须拒绝");
+            // 普通 AI 研究会话（没有 ui_control）：拒绝，不会自动切合约 / 周期 / 工作区。
+            let mut research = test_ai_tool_context(mode, "main", false);
+            research.strategy_session_kind = "trading-research".to_string();
+            for tool in UI_TOOLS {
+                assert!(authorize_ai_tool(tool, &research).is_err(), "普通研究会话必须拒绝 {mode} {tool}");
+            }
+        }
+        // 非研究会话（默认 / 策略编辑器 / 指标）：拒绝。
+        for kind in ["none", "editor", "indicator"] {
+            let mut other = test_ai_tool_context("advisor", "main", false);
+            other.strategy_session_kind = kind.to_string();
+            other.ui_control = true;
+            for tool in UI_TOOLS {
+                assert!(authorize_ai_tool(tool, &other).is_err(), "{kind} {tool}");
+            }
+        }
+        // 委派 / 子 Agent：拒绝。
+        let mut delegated = test_ai_tool_context("limited_auto", "subagent", true);
+        delegated.strategy_session_kind = "trading-research".to_string();
+        delegated.ui_control = true;
+        for tool in UI_TOOLS {
+            assert!(authorize_ai_tool(tool, &delegated).is_err(), "delegated {tool}");
+        }
+        // 后台 / 复盘 Run：拒绝。
+        let mut background = test_ai_tool_context("limited_auto", "main", false);
+        background.strategy_session_kind = "trading-research".to_string();
+        background.ui_control = true;
+        background.run_context = Some(test_background_run_context(None, Vec::new()));
+        for tool in UI_TOOLS {
+            assert!(authorize_ai_tool(tool, &background).is_err(), "background {tool}");
+        }
+        // 会话白名单是否决权：不在名单里就拒绝。
+        let mut allowlisted = test_ai_tool_context("advisor", "main", false);
+        allowlisted.strategy_session_kind = "trading-research".to_string();
+        allowlisted.ui_control = true;
+        allowlisted.tool_allowlist.insert("script.createOrUpdate".to_string());
+        assert!(authorize_ai_tool("ui.setInstrument", &allowlisted).is_err());
     }
 
     #[test]

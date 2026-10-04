@@ -54,6 +54,7 @@ import {
   stopAiMessage,
   updateAiPendingPrompt
 } from "../../lib/ai";
+import { OPEN_AI_SESSION_EVENT } from "../../lib/voice/voiceAgent";
 import { logger } from "../../lib/logger";
 import { createDeferredCleanupSlot } from "../../lib/deferredCleanup";
 import { isTauriRuntime } from "../../lib/tauri";
@@ -964,6 +965,16 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
       setSessionsStatus(error instanceof Error ? error.message : t("automation:switchSessionFailed"));
     }
   }, [clearAiTimers, preview, refreshPendingPromptsForSession, refreshSessions]);
+
+  // 语音气泡里的「在 AI 研究中查看」：定位到那次语音会话。
+  useEffect(() => {
+    const handler = (event: Event) => {
+      const target = (event as CustomEvent<{ sessionId?: string }>).detail?.sessionId;
+      if (target) void refreshSessions().then(() => switchSession(target));
+    };
+    window.addEventListener(OPEN_AI_SESSION_EVENT, handler);
+    return () => window.removeEventListener(OPEN_AI_SESSION_EVENT, handler);
+  }, [refreshSessions, switchSession]);
 
   const startRenameSession = useCallback((session: AiSession) => {
     setRenamingSessionId(session.id);

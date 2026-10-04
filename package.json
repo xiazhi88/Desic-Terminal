@@ -35,6 +35,7 @@
     "test:release-version": "node scripts/check-release-version.mjs",
     "test:kline-merge": "node --experimental-strip-types scripts/test-kline-merge-semantics.mjs",
     "test:market-radar": "node --experimental-strip-types scripts/test-market-radar-workspace.mjs",
+    "test:voice-director": "node --experimental-strip-types scripts/test-voice-director.mjs && node --experimental-strip-types scripts/test-chart-indicator-commands.mjs && node --experimental-strip-types scripts/test-voice-wav.mjs",
     "test:orderflow": "node --experimental-strip-types scripts/test-orderflow-liquidations.mjs",
     "test:ai-research-ui": "node --experimental-strip-types scripts/test-ai-verdict.mjs && node --experimental-strip-types scripts/test-ai-session-groups.mjs",
     "test:trade-review": "node scripts/test-trade-review.mjs && node --experimental-strip-types scripts/test-performance-explorer.mjs",

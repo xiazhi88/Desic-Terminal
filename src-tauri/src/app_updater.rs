@@ -701,6 +701,7 @@ fn create_update_backup_blocking(app: &tauri::AppHandle) -> Result<AppUpdateBack
             "notification.local.json",
             "ui.local.json",
             "watchlist.local.json",
+            "voice.local.json",
         ] {
             let path = config_root.join(file_name);
             if path.exists() {

@@ -37,6 +37,7 @@ import {
   type IndicatorInstance,
   type IndicatorResult
 } from "../lib/chartIndicators";
+import { applyIndicatorCommands, maxCommandToken, visibleIndicatorIds, type IndicatorCommand } from "../lib/chartIndicatorCommands";
 import {
   createTradingChart,
   MAIN_CHART_PANE_ID,
@@ -130,6 +131,11 @@ type Props = {
   onChartContextTrade?: (payload: ChartContextTradeIntent) => void;
   indicatorIds?: readonly string[];
   onIndicatorIdsChange?: (ids: readonly string[]) => void;
+  /** 导演模式 / AI 界面工具下发的指标增删指令（队列，按 token 递增）；用完后通过回调通知上层清除。 */
+  externalIndicatorCommands?: readonly IndicatorCommand[] | null;
+  onExternalIndicatorCommandsHandled?: (token: number) => void;
+  /** 当前可见的指标种类；挂载时和每次变化后上报，供上层判断「已经有了」。 */
+  onIndicatorInventory?: (ids: readonly string[]) => void;
   toolbarPlacement?: "floating" | "external";
   externalIndicatorTrigger?: HTMLElement | null;
   externalToolbarAction?: { token: number; action: "indicators" | "alerts" | "undo" | "redo" } | null;
@@ -454,7 +460,7 @@ const DEFAULT_INDICATOR_INSTANCES: readonly IndicatorInstance[] = [
   { id: "builtin-vwap", definitionId: "vwap", paneId: "main", visible: false, parameters: {} }
 ];
 
-export function KlineChart({ candles, orderFlowMode = false, orderFlowPreview = null, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
+export function KlineChart({ candles, orderFlowMode = false, orderFlowPreview = null, ticker, symbol = "BTC-USDT-SWAP", timeframe = "30m", orderBook = null, recentTrades = EMPTY_TRADES, fundingRate = null, orderLines = EMPTY_ORDER_LINES, signals = EMPTY_SIGNALS, fills = EMPTY_FILLS, positionRanges = EMPTY_POSITION_RANGES, variant = "full", workspaceId = "main-chart", persistWorkspace, onNeedMoreHistory, onChartCrosshairTime, onChartCrosshairPosition, onChartVisibleRange, synchronizedCrosshairTime, synchronizedCrosshairPosition, followSynchronizedCrosshair = false, synchronizedVisibleRange, snapshotRevision, onPriceAlert, onCreateChartAlert, onDeletePriceAlert, onOrderLineEdit, onOrderLineCancel, onPositionLineTradeIntent, onPositionLineCloseRequest, onChartContextTrade, onRiskRewardTradeIntent, indicatorIds, onIndicatorIdsChange, externalIndicatorCommands = null, onExternalIndicatorCommandsHandled, onIndicatorInventory, toolbarPlacement = "floating", externalIndicatorTrigger = null, externalToolbarAction = null, externalLayerCommand = null, tradeSources = null, onLayerVisibilityChange, onDrawingHistoryChange }: Props) {
   const { t } = useTranslation(["trading", "chart", "common"]);
   const localizedTradeAction = useCallback((action: ReturnType<typeof resolveChartTradeAction>) => {
     if (action === "open-long") return t("trading:long");
@@ -1191,6 +1197,32 @@ export function KlineChart({ candles, orderFlowMode = false, orderFlowPreview = 
     setIndicatorInstances(next);
     onIndicatorIdsChange?.(next.map((item) => item.definitionId));
   }, [onIndicatorIdsChange]);
+
+  const handledIndicatorCommandTokenRef = useRef(0);
+  useEffect(() => {
+    if (!externalIndicatorCommands?.length) return;
+    const pending = externalIndicatorCommands.filter((command) => command.token > handledIndicatorCommandTokenRef.current);
+    if (pending.length === 0) return;
+    const handledToken = maxCommandToken(pending);
+    handledIndicatorCommandTokenRef.current = handledToken;
+    setIndicatorInstances((items) => applyIndicatorCommands(items, pending, (definitionId, token) => {
+      const definition = INDICATOR_DEFINITIONS[definitionId as keyof typeof INDICATOR_DEFINITIONS];
+      if (!definition) return null;
+      const id = `command-${definitionId}-${token}`;
+      return {
+        id,
+        definitionId: definition.id,
+        paneId: definition.pane === "main" ? "main" : `pane-${id}`,
+        visible: true,
+        parameters: Object.fromEntries(definition.parameters.map((parameter) => [parameter.key, parameter.defaultValue])),
+      } satisfies IndicatorInstance;
+    }));
+    onExternalIndicatorCommandsHandled?.(handledToken);
+  }, [externalIndicatorCommands, onExternalIndicatorCommandsHandled]);
+
+  useEffect(() => {
+    onIndicatorInventory?.(visibleIndicatorIds(indicatorInstances));
+  }, [indicatorInstances, onIndicatorInventory]);
 
   useEffect(() => {
     onRiskRewardTradeIntentRef.current = onRiskRewardTradeIntent;

@@ -1012,10 +1012,14 @@ function buildSystemPrompt(config, permissionMode) {
   const researchLedgerRule = describeToolPolicy("research.recordEvidence", { ...config, permissionMode, agentRole: "main" }).allowed
     ? "证据账本：本会话的工具结果带有 evidenceRef（如 E3）。凡是给出交易方向判断的回合，边取证边用 research.recordEvidence 记录关键证据（每拿到 2–3 条相关结果就记录一次，不要攒到最后一次性记录，界面的证据天平会随之实时变化）：claim 写一句可核对的事实，stance 取 bull/bear/neutral/constraint，weight 0–3 表示你赋予的重要程度，sourceRefs 只能引用本轮真实出现过的 evidenceRef。反方审查或新证据改变判断时，用相同 id 重新记录并写 revisionNote。最后用 research.recordDecision 记录 outcome（long/short/abstain/hold）和理由；不交易也是有效决策。这是用户主动发起的对话，不要设置或输出“唤醒条件”（唤醒只属于后台自动化）。账本只用于界面展示与复盘，不会下单。纯问答或不涉及方向判断的回合不需要记录。"
     : "";
+  const uiControlRule = describeToolPolicy("ui.setInstrument", { ...config, permissionMode, agentRole: "main" }).allowed
+    ? "界面指挥：你可以用 ui.setInstrument / ui.setTimeframe / ui.addIndicator / ui.removeIndicator / ui.setOrderFlow / ui.openWorkspace 在用户眼前调整图表与工作区（例如分析 ETH 4 小时结构时先切到对应合约与周期，再加需要的指标）。这些只是显示层的可逆操作，用户能看到每一步并可一键撤销；不要为了展示而频繁切换，只在确实有助于用户核对你的结论时使用。工具结果只代表请求已发出，不保证界面已变化，不要据此声称“已经显示”。它们不能下单、改仓位或改任何账户与策略设置；交易仍必须走 tradeOpportunity 与用户审批流程。"
+    : "";
   const runRules = [
     modeRule,
     marketRadarRoutingRule,
     researchLedgerRule,
+    uiControlRule,
     "后台 Run 只有形成字段完整、准备通过 tradeOpportunity.create 提交的可执行候选时，主 Agent 才调用 market.readDecisionContext 获取当场行情、账户状态、预检和相对本轮初始快照的客观差异。若结论是 wait 或 abandon 且本轮没有新交易候选，不调用 market.readDecisionContext，直接通过 background.finishRun 结束；不得使用 size=0、缺失 price 或其它占位参数伪造候选。open/close 的 size 必须大于 0，limit/trigger 必须提供 price。上下文 60 秒有效且不可跨 Run、账户、环境、标的或候选参数复用；revise 后必须使用修改后的完整候选参数重新调用。",
     "tradeOpportunity.create 在 copilot 中只保存交易机会；advisor 不能创建机会；limited_auto 由后端按 Profile 权限自动批准并执行。后台运行采用两阶段事务：先把完整候选提交给 market.readDecisionContext；确认复核结果后，只调用 tradeOpportunity.create 提交系统冻结的最后一份候选，不要再次抄写候选参数或 decisionContextId。开仓/平仓 orderType=limit 或 trigger 必须在复核候选中提供 price；撤单/改单使用 intent=cancel/amend 并提供目标订单 ID。",
     "后台 Run 不调用 tradeOpportunity.reuse 或 tradeOpportunity.revise。遇到重复机会时仍调用 tradeOpportunity.create，并只提交 conflict.existingOpportunityId、duplicateResolution 和 duplicateResolutionReason。exact 冲突可直接 reuse；similar 冲突若要 reuse，必须先读取原机会，再用原机会的完整参数重新调用 market.readDecisionContext。若要 revise，则用修改后的完整候选重新复核后提交 duplicateResolution=revise。",
@@ -1936,6 +1940,43 @@ const CHART_TOOL_SCHEMA = {
   }
 };
 
+// 界面指挥（ui.*）：严格枚举，不接受额外字段。取值范围与前端 src/lib/voice/uiToolActions.ts、
+// Rust execute_ai_tool 的白名单三处保持一致（scripts/test-cline-tool-policy.mjs 有一致性断言）。
+export const UI_WORKSPACE_IDS = ["ai", "terminal", "radar", "opportunities", "automation", "intelligence", "systematic", "data", "config"];
+export const UI_TIMEFRAME_IDS = ["1m", "3m", "5m", "15m", "30m", "1H", "2H", "4H", "6H", "12H", "1D"];
+export const UI_INDICATOR_IDS = ["ma", "ema", "vwap", "boll", "donchian", "keltner", "psar", "supertrend", "ichimoku", "rsi", "macd", "kdj", "atr", "adx", "stochastic", "cci", "roc", "aroon", "trix", "williams-r", "mfi", "cmf", "obv", "volume-ma"];
+
+const UI_OPEN_WORKSPACE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["section"],
+  properties: { section: { type: "string", enum: UI_WORKSPACE_IDS } }
+};
+const UI_SET_INSTRUMENT_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["instId"],
+  properties: { instId: { type: "string", pattern: "^[A-Za-z0-9]{1,20}-USDT-SWAP$", description: "OKX USDT perpetual instrument id, e.g. ETH-USDT-SWAP." } }
+};
+const UI_SET_TIMEFRAME_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["bar"],
+  properties: { bar: { type: "string", enum: UI_TIMEFRAME_IDS } }
+};
+const UI_INDICATOR_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["indicator"],
+  properties: { indicator: { type: "string", enum: UI_INDICATOR_IDS } }
+};
+const UI_SET_ORDER_FLOW_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["enabled"],
+  properties: { enabled: { type: "boolean" } }
+};
+
 const ALERT_TOOL_SCHEMA = {
   type: "object",
   additionalProperties: true,
@@ -2804,6 +2845,12 @@ function createDesicTools(sessionId, options = {}) {
     tool("chart.createDrawing", "Create a local chart drawing such as a trend line, horizontal line, vertical line or rectangle.", CHART_TOOL_SCHEMA),
     tool("chart.updateDrawing", "Update a local chart drawing.", CHART_TOOL_SCHEMA),
     tool("chart.deleteDrawing", "Delete a local chart drawing by id.", CHART_TOOL_SCHEMA),
+    tool("ui.openWorkspace", "Switch the user's visible workspace. Display only and reversible: it never reads or changes accounts, orders, Profiles or strategies. The user sees every step and can undo it. The request is queued for the UI; the result only confirms it was sent, not that the screen changed.", UI_OPEN_WORKSPACE_SCHEMA),
+    tool("ui.setInstrument", "Switch the main chart and terminal to one OKX USDT perpetual (e.g. ETH-USDT-SWAP) and open the terminal. Display only and reversible. Use it when your analysis is about a specific instrument and the user would benefit from seeing its chart. The result only confirms the request was sent.", UI_SET_INSTRUMENT_SCHEMA),
+    tool("ui.setTimeframe", "Change the main chart timeframe (1m, 3m, 5m, 15m, 30m, 1H, 2H, 4H, 6H, 12H, 1D). Display only and reversible. The result only confirms the request was sent.", UI_SET_TIMEFRAME_SCHEMA),
+    tool("ui.addIndicator", "Show one built-in indicator on the main chart (ma, ema, vwap, boll, rsi, macd, ...). Display only and reversible; an indicator that is already visible is left unchanged. The result only confirms the request was sent.", UI_INDICATOR_SCHEMA),
+    tool("ui.removeIndicator", "Hide one built-in indicator on the main chart. Display only and reversible; user parameters are kept. The result only confirms the request was sent.", UI_INDICATOR_SCHEMA),
+    tool("ui.setOrderFlow", "Turn the main chart's order-flow mode (volume profile, taker delta/CVD, walls, liquidations) on or off. Display only and reversible. The result only confirms the request was sent.", UI_SET_ORDER_FLOW_SCHEMA),
     tool("alert.createPriceAlert", "Create a local chart price alert.", ALERT_TOOL_SCHEMA),
     tool("alert.updatePriceAlert", "Update a local chart price alert.", ALERT_TOOL_SCHEMA),
     tool("alert.deletePriceAlert", "Delete a local chart price alert.", ALERT_TOOL_SCHEMA),

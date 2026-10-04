@@ -109,7 +109,7 @@ export async function sendAiMessage(
   sessionId: string,
   messages: AiChatMessage[],
   accountId?: string,
-  options?: { modelId?: string; permissionMode?: AiPermissionMode; reasoningDepth?: AiReasoningDepth; delivery?: AiPromptDelivery }
+  options?: { modelId?: string; permissionMode?: AiPermissionMode; reasoningDepth?: AiReasoningDepth; delivery?: AiPromptDelivery; extraRules?: string; uiControl?: boolean }
 ) {
   return invokeDesktop("ai_send_message", {
     request: { sessionId, messages, accountId, ...options }

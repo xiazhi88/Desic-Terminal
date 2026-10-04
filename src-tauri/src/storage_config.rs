@@ -2688,6 +2688,16 @@ fn ai_connection_probe_protocol(provider: &str) -> AiConnectionProbeProtocol {
     }
 }
 
+/// 该供应商是否走 OpenAI 风格的 HTTP 接口（可能提供 `/audio/transcriptions`）。
+/// 本机 CLI、Anthropic、Gemini 一类不适用。
+pub(crate) fn ai_provider_speaks_openai_http(provider: &str) -> bool {
+    !ai_provider_uses_local_cli(provider)
+        && matches!(
+            ai_connection_probe_protocol(provider),
+            AiConnectionProbeProtocol::OpenAiChat | AiConnectionProbeProtocol::OpenAiResponses
+        )
+}
+
 fn ai_provider_uses_local_cli(provider: &str) -> bool {
     matches!(
         provider.trim().to_ascii_lowercase().as_str(),
@@ -4136,7 +4146,7 @@ fn redact_sensitive_text(value: &str) -> String {
     value.to_string()
 }
 
-fn write_sensitive_config_file(path: &PathBuf, content: &str) -> Result<(), String> {
+pub(crate) fn write_sensitive_config_file(path: &PathBuf, content: &str) -> Result<(), String> {
     write_file_atomically_internal(path, content.as_bytes(), true)?;
     if let Err(err) = harden_sensitive_file_permissions(path) {
         eprintln!(

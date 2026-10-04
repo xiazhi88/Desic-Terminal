@@ -197,6 +197,20 @@ export const RESEARCH_LEDGER_TOOLS = new Set([
   "research.recordDecision"
 ]);
 
+// 界面指挥（导演模式）：让语音导演会话在用户眼前切合约 / 周期 / 指标 / 工作区。普通 AI 研究会话不授予。
+// 全部是可逆的界面操作：不读写账户与订单、不写库、不改 Profile 与策略。边界 = 显式声明的
+// 主 Agent + 交互式 AI 研究会话（strategySessionKind=trading-research）；后台 / 复盘 Run、
+// 策略编辑器、指标会话与委派专家一律拒绝（Rust authorize_ai_tool 同口径复核）。
+// 不随权限模式（advisor / copilot / limited_auto）变化：它不是交易副作用。
+export const UI_CONTROL_TOOLS = new Set([
+  "ui.openWorkspace",
+  "ui.setInstrument",
+  "ui.setTimeframe",
+  "ui.addIndicator",
+  "ui.removeIndicator",
+  "ui.setOrderFlow"
+]);
+
 export const DISABLED_SUBAGENT_WRAPPER_TOOLS = new Set([
   "subagent_readonly_analyst"
 ]);
@@ -271,7 +285,8 @@ export function allKnownToolNames() {
     ...PROHIBITED_TOOLS,
     ...DISABLED_SUBAGENT_WRAPPER_TOOLS,
     ...AGENT_AUTHORING_TOOLS,
-    ...RESEARCH_LEDGER_TOOLS
+    ...RESEARCH_LEDGER_TOOLS,
+    ...UI_CONTROL_TOOLS
   ]));
 }
 
@@ -352,6 +367,21 @@ export function resolveToolPolicy(name, config = {}) {
       return disabledPolicy("disabled:research-ledger-research-session-only");
     }
     return enabledPolicy("auto-approved:main-research-ledger");
+  }
+
+  // 界面指挥同样要求 config 显式声明 main（deny-by-default），且只限交互式研究会话。
+  if (UI_CONTROL_TOOLS.has(canonicalName)) {
+    const declaredRole = String(config?.agentRole ?? "").trim().toLowerCase();
+    if (declaredRole !== "main") return disabledPolicy("disabled:ui-control-main-only");
+    if (boolConfig(config.backgroundRun, false) || boolConfig(config.reviewRun, false)) {
+      return disabledPolicy("disabled:ui-control-interactive-only");
+    }
+    if (String(config.strategySessionKind || "") !== "trading-research") {
+      return disabledPolicy("disabled:ui-control-research-session-only");
+    }
+    // 只有语音导演会话（请求显式带 uiControl）才能指挥界面；普通 AI 研究不会自动切合约 / 周期 / 工作区。
+    if (!boolConfig(config.uiControl, false)) return disabledPolicy("disabled:ui-control-voice-only");
+    return enabledPolicy("auto-approved:main-ui-control");
   }
 
   // C19：试判结论只能由后台 Run 的主 Agent 提交。

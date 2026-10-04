@@ -58,6 +58,11 @@ import { requestAiResearchPrompt } from "../lib/shellEvents";
 import { useRadarSnapshotRecorder } from "../lib/useRadarSnapshotRecorder";
 import { detectDesktopPlatform } from "../lib/platform";
 import { readVisualPreference, saveVisualPreference, subscribeVisualPreference, type VisualPreference } from "../lib/visualPreference";
+import { BUILT_IN_INDICATORS } from "../lib/chartIndicators";
+import type { IndicatorCommand } from "../lib/chartIndicatorCommands";
+import type { DirectorCatalog } from "../lib/voice/directorCommands";
+import type { DirectorController } from "../lib/voice/directorExecutor";
+import { readVoicePreference, subscribeVoicePreference, type VoicePreference } from "../lib/voice/voicePreference";
 import clsx from "clsx";
 import type { TFunction } from "i18next";
 import defaultAiConfig from "../../shared/default-ai-config.json";
@@ -300,8 +305,11 @@ import {
   type FirstLaunchStep
 } from "./FirstLaunchOnboarding";
 import { MemoAiResearchWorkspace } from "./ai-research/AiResearchWorkspace";
+import { DirectorHost } from "./voice/DirectorHost";
+import { OPEN_AI_SESSION_EVENT } from "../lib/voice/voiceAgent";
 import { PerformanceExplorer } from "./data/PerformanceExplorer";
 import { TradeReviewView } from "./data/TradeReviewView";
+import { VoiceSettings } from "./voice/VoiceSettings";
 import type { AiUiMessage } from "./AiMessageProcess";
 
 export { AiPreview } from "./ai-research/AiPreview";
@@ -2113,6 +2121,18 @@ function TradingTerminal({
   // 订单流模式：成交量分布、主动买卖差 / CVD、当前大单墙、清算与背离；任何周期可用（数据不依赖盘口历史）。
   const [chartOrderFlowMode, setChartOrderFlowMode] = useState(() => window.localStorage.getItem("desic.chart.order-flow.v1") === "1");
   const orderFlowActive = chartOrderFlowMode && chartPresentation === "chart";
+  // 导演模式（语音 / AI 界面工具）：偏好、指标指令队列，以及界面当前状态的只读引用。
+  const [voicePreference, setVoicePreference] = useState<VoicePreference>(() => readVoicePreference());
+  useEffect(() => subscribeVoicePreference(setVoicePreference), []);
+  const [chartIndicatorCommands, setChartIndicatorCommands] = useState<readonly IndicatorCommand[]>([]);
+  const chartIndicatorTokenRef = useRef(0);
+  const chartIndicatorInventoryRef = useRef<readonly string[]>(["ma"]);
+  const handleChartIndicatorInventory = useCallback((ids: readonly string[]) => { chartIndicatorInventoryRef.current = ids; }, []);
+  const handleChartIndicatorCommandsHandled = useCallback((token: number) => {
+    setChartIndicatorCommands((items) => items.filter((item) => item.token > token));
+  }, []);
+  const orderFlowActiveRef = useRef(orderFlowActive);
+  orderFlowActiveRef.current = orderFlowActive;
   const [chartUtilitiesOpen, setChartUtilitiesOpen] = useState(false);
   const chartUtilitiesRef = useRef<HTMLDivElement | null>(null);
   const [pendingOrderLineEdit, setPendingOrderLineEdit] = useState<ChartOrderLineEdit | null>(null);
@@ -4827,6 +4847,45 @@ function TradingTerminal({
     return items;
   }, [orderFlowActive, marketAssets?.instruments, marketTickerMap, openDetachedChart, setMainSection, shortcutModifier, t, uiText, visualPreference, watchlist]);
 
+  const directorController = useMemo<DirectorController>(() => {
+    const queueIndicator = (op: IndicatorCommand["op"], id: string) => {
+      chartIndicatorTokenRef.current += 1;
+      const command: IndicatorCommand = { token: chartIndicatorTokenRef.current, op, id };
+      setChartIndicatorCommands((items) => [...items, command]);
+    };
+    return {
+      snapshot: () => ({
+        section: mainSectionRef.current,
+        symbol: symbolRef.current,
+        bar: barRef.current,
+        orderFlow: orderFlowActiveRef.current,
+        indicatorIds: chartIndicatorInventoryRef.current,
+      }),
+      setSection: (section) => setMainSection(section),
+      setInstrument: (instId) => {
+        setSymbol(instId);
+        setMainSection("terminal");
+      },
+      setTimeframe: (next) => setBar(next),
+      setOrderFlow: (enabled) => {
+        if (enabled) setChartPresentation("chart");
+        window.localStorage.setItem("desic.chart.order-flow.v1", enabled ? "1" : "0");
+        setChartOrderFlowMode(enabled);
+      },
+      addIndicator: (id) => queueIndicator("add", id),
+      removeIndicator: (id) => queueIndicator("remove", id),
+    };
+  }, [setMainSection]);
+  const directorCatalog = useMemo<DirectorCatalog>(() => ({
+    instruments: (marketAssets?.instruments ?? []).map((item) => ({ instId: item.instId, baseCcy: item.baseCcy })),
+    indicatorIds: BUILT_IN_INDICATORS.map((item) => item.id),
+  }), [marketAssets?.instruments]);
+  const directorHints = useMemo(() => {
+    const bases = new Set(["BTC", "ETH", "SOL", "DOGE", "XRP"]);
+    for (const instId of watchlist) bases.add(instId.split("-")[0]);
+    return [...bases, "EMA", "MACD", "RSI", "布林带", "订单流", "止损", "周期", "指标", "雷达", "撤销"];
+  }, [watchlist]);
+
   const overviewTiles = useMemo<OverviewTile[]>(() => {
     const iconFor = (id: string) => {
       const item = navItems.find((entry) => entry.id === id);
@@ -5374,6 +5433,9 @@ function TradingTerminal({
                   <ErrorBoundary label={t("chart:chart")}>
                     <HotKlineChart
                       orderFlowMode={orderFlowActive}
+                      externalIndicatorCommands={chartIndicatorCommands}
+                      onExternalIndicatorCommandsHandled={handleChartIndicatorCommandsHandled}
+                      onIndicatorInventory={handleChartIndicatorInventory}
                       tradeSources={chartTradeSources}
                       symbol={symbol}
                       timeframe={bar}
@@ -5727,6 +5789,23 @@ function TradingTerminal({
           window.setTimeout(() => requestAiResearchPrompt(query), 0);
         }}
         onClose={() => setCommandPaletteOpen(false)}
+      />
+      <DirectorHost
+        preference={voicePreference}
+        controller={directorController}
+        catalog={directorCatalog}
+        hints={directorHints}
+        paused={commandPaletteOpen || workspaceOverviewOpen || helpCenterOpen || firstLaunchOnboarding.open}
+        uiText={uiText}
+        accountId={selectedAccountId ?? undefined}
+        onOpenAiResearch={(sessionId) => {
+          setMainSection("ai");
+          if (sessionId) window.setTimeout(() => window.dispatchEvent(new CustomEvent(OPEN_AI_SESSION_EVENT, { detail: { sessionId } })), 0);
+        }}
+        onOpenVoiceSettings={() => {
+          setSettingsActiveTab("general");
+          setMainSection("config");
+        }}
       />
       <WorkspaceOverview
         open={workspaceOverviewOpen}
@@ -8623,6 +8702,7 @@ function GeneralSettingsPane({ onNotify }: { onNotify: (notification: Omit<AppNo
         <small>{t("settings:fallbackNotice")}</small>
       </div>
       <AppearanceSettings />
+      <VoiceSettings />
       <section className="settings-section">
         <div>
           <strong>{t("settings:about")}</strong>

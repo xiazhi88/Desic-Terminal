@@ -10,7 +10,7 @@ import {
   toProviderToolReferences
 } from "./cline-tool-policy.mjs";
 import { toClineRuntimeSessionId } from "./cline-session-id.mjs";
-import { attachEvidenceRef, buildSystemPrompt, canRehydrateClineConversation, createDesicTools, createEvidenceRefAllocator, loadClineSdk, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, normalizeProviderToolInput, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
+import { UI_INDICATOR_IDS, UI_TIMEFRAME_IDS, UI_WORKSPACE_IDS, attachEvidenceRef, buildSystemPrompt, canRehydrateClineConversation, createDesicTools, createEvidenceRefAllocator, loadClineSdk, canResumeClineConversation, clineConversationFingerprint, isTransientAiNetworkError, normalizeProviderToolInput, preservesClineConversation, validateTradeOpportunityInput } from "./cline-sidecar.mjs";
 
 const failures = [];
 
@@ -412,6 +412,47 @@ const researchPrompt = buildSystemPrompt({ systemPrompt: "test", strategySession
 expectTrue("research prompt carries ledger rule", researchPrompt.includes("research_recordEvidence") && researchPrompt.includes("evidenceRef"));
 const editorPrompt = buildSystemPrompt({ systemPrompt: "test", strategySessionKind: "editor" }, "advisor");
 expectTrue("non-research prompt omits ledger rule", !editorPrompt.includes("research_recordEvidence"));
+// 界面指挥（ui.*）：与证据账本同口径——只对显式主 Agent 的交互式 AI 研究会话开放；
+// 后台 / 复盘 Run、其它会话类型、委派角色与缺省角色一律拒绝；权限模式不影响（它不是交易副作用）。
+const UI_TOOLS = ["ui.openWorkspace", "ui.setInstrument", "ui.setTimeframe", "ui.addIndicator", "ui.removeIndicator", "ui.setOrderFlow"];
+// 只有语音导演会话（uiControl=true）才授予；普通 AI 研究会话（没有 uiControl）一律拒绝，不会自动切合约 / 周期 / 工作区。
+const voiceMain = { ...researchMain, uiControl: true };
+for (const tool of UI_TOOLS) {
+  expectPolicy(researchMain, tool, disabled);
+  expectEqual(`${tool} 普通研究会话`, describeToolPolicy(tool, researchMain).policy, "disabled:ui-control-voice-only");
+  expectPolicy({ ...researchMain, uiControl: false }, tool, disabled);
+  for (const permissionMode of ["advisor", "copilot", "limited_auto"]) expectPolicy({ ...voiceMain, permissionMode }, tool, enabled);
+  expectPolicy({ ...voiceMain, backgroundRun: true }, tool, disabled);
+  expectPolicy({ ...voiceMain, reviewRun: true }, tool, disabled);
+  for (const strategySessionKind of ["editor", "indicator", "none"]) expectPolicy({ ...voiceMain, strategySessionKind }, tool, disabled);
+  expectPolicy({ permissionMode: "advisor", agentRole: "main" }, tool, disabled);
+  expectPolicy({ ...voiceMain, toolAllowlist: ["script.createOrUpdate"] }, tool, disabled);
+  for (const agentRole of ["subagent", "team"]) expectPolicy({ ...voiceMain, agentRole }, tool, disabled);
+  expectEqual(`${tool} 缺省角色`, describeToolPolicy(tool, { permissionMode: "advisor", strategySessionKind: "trading-research" }).policy, "disabled:ui-control-main-only");
+  expectEqual(`${tool} 后台 Run`, describeToolPolicy(tool, { ...voiceMain, backgroundRun: true }).policy, "disabled:ui-control-interactive-only");
+  expectEqual(`${tool} 非研究会话`, describeToolPolicy(tool, { ...voiceMain, strategySessionKind: "editor" }).policy, "disabled:ui-control-research-session-only");
+}
+// 未登记的 ui.* 不是已知工具：不会被默认放行。
+expectEqual("未登记 ui.placeOrder 不属于已知工具", allKnownToolNames().includes("ui.placeOrder"), false);
+expectTrue("已知工具包含全部 ui.*", UI_TOOLS.every((tool) => allKnownToolNames().includes(tool)));
+const uiToolNames = createDesicTools("policy-test", voiceMain).map((tool) => tool.name);
+expectTrue("普通研究会话不暴露任何 ui 工具", !createDesicTools("policy-test", researchMain).some((tool) => tool.name.startsWith("ui_")));
+expectTrue("语音导演会话暴露 ui 工具（provider 名为下划线形式）", UI_TOOLS.every((tool) => uiToolNames.includes(toProviderToolName(tool))));
+expectTrue("后台 Run 隐藏 ui 工具", !createDesicTools("policy-test", { ...voiceMain, backgroundRun: true }).some((tool) => tool.name.startsWith("ui_")));
+expectTrue("策略编辑器会话隐藏 ui 工具", !createDesicTools("policy-test", { ...voiceMain, strategySessionKind: "editor" }).some((tool) => tool.name.startsWith("ui_")));
+expectTrue("子 Agent 隐藏 ui 工具", !createDesicTools("policy-test", { ...voiceMain, agentRole: "subagent" }).some((tool) => tool.name.startsWith("ui_")));
+const voicePrompt = buildSystemPrompt({ systemPrompt: "test", strategySessionKind: "trading-research", uiControl: true }, "advisor");
+expectTrue("语音导演提示词携带界面指挥规则", voicePrompt.includes("ui_setInstrument") && voicePrompt.includes("可逆"));
+expectTrue("普通研究提示词不携带界面指挥规则", !researchPrompt.includes("ui_setInstrument"));
+expectTrue("非研究提示词不携带界面指挥规则", !editorPrompt.includes("ui_setInstrument"));
+// 枚举与前端校验保持一致（Rust 侧有对应的源码比对测试）。
+expectEqual("ui 工作区清单长度", UI_WORKSPACE_IDS.length, 9);
+expectTrue("ui 周期清单含 4H 与 1D", UI_TIMEFRAME_IDS.includes("4H") && UI_TIMEFRAME_IDS.includes("1D") && !UI_TIMEFRAME_IDS.includes("4h"));
+expectTrue("ui 指标清单含 williams-r 与 volume-ma", UI_INDICATOR_IDS.includes("williams-r") && UI_INDICATOR_IDS.includes("volume-ma"));
+const uiSchemas = Object.fromEntries(createDesicTools("policy-test", researchMain).filter((tool) => tool.name.startsWith("ui_")).map((tool) => [tool.name, tool.inputSchema]));
+for (const [name, schema] of Object.entries(uiSchemas)) {
+  expectEqual(`${name} 不接受额外字段`, schema?.additionalProperties, false);
+}
 const allocate = createEvidenceRefAllocator();
 expectEqual("first evidence ref", attachEvidenceRef({ ok: true }, allocate).evidenceRef, "E1");
 expectEqual("failed results are not numbered", attachEvidenceRef({ ok: false, error: "x" }, allocate).evidenceRef, undefined);
