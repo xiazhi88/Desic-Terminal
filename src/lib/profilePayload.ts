@@ -23,6 +23,22 @@ export const REQUIRED_PROFILE_SKILL_IDS = [
   "desic-agent-orchestration"
 ] as const;
 
+/** 交易员 Profile 不加载的技能（与 Rust `trader_learning::TRADER_EXCLUDED_SKILLS` 一致）：交易规则来自交易手册。 */
+export const TRADER_EXCLUDED_PROFILE_SKILL_IDS = [
+  "trading-philosophy",
+  "okx-market-intelligence",
+  "market-radar-research",
+  "desic-agent-orchestration"
+] as const;
+
+/** 保存时写回的技能：经典 Profile 带全部必选技能；交易员 Profile 去掉不适用的 4 个。 */
+export function profileSkillIdsForSave(contextMode: string | undefined, skillIds: readonly unknown[] | undefined): string[] {
+  const merged = Array.from(new Set([...REQUIRED_PROFILE_SKILL_IDS, ...(skillIds ?? []).map((item) => String(item ?? "").trim()).filter(Boolean)]));
+  if (contextMode !== "briefing") return merged;
+  const excluded = new Set<string>(TRADER_EXCLUDED_PROFILE_SKILL_IDS);
+  return merged.filter((id) => !excluded.has(id));
+}
+
 export type SerializationIssue = {
   /** 出问题的键路径，例如 `profile.triage.escalate`。 */
   path: string;
@@ -116,7 +132,7 @@ export function buildProfileSaveInput(
     scanIntervalMinutes: Math.max(1, Math.min(1_440, Math.round(Number(draft.scanIntervalMinutes) || 30))),
     // —— 技能与模型 ——
     // 必需技能始终带上（与面板里的 withRequiredProfileSkills 同一语义，避免两处漂移）。
-    skillIds: Array.from(new Set([...REQUIRED_PROFILE_SKILL_IDS, ...(draft.skillIds ?? []).map((item) => String(item ?? "").trim()).filter(Boolean)])),
+    skillIds: profileSkillIdsForSave(draft.contextMode, draft.skillIds),
     skillVersions: { ...(draft.skillVersions ?? {}) },
     skillVersionModes: { ...(draft.skillVersionModes ?? {}) },
     model: draft.model ?? null,

@@ -104,7 +104,7 @@ import { FASTLANE_TRIGGER_DEFAULTS, fastlaneStylePresetText, profileTypeOf } fro
 // C29.19：快判模式的 UI 总开关（与 Rust `FASTLANE_MODE_ENABLED` 同值）——
 // 本版本不发布快判：所有快判入口 / 卡片都按它隐藏，组件本体保留不删。
 import { FASTLANE_MODE_ENABLED } from "./fastlane/fastlaneMode";
-import { buildProfileSaveInput, checkProfileSaveArgs, DEFAULT_PROFILE_RISK, describeSerializationIssue, findNonSerializable, normalizeProfileRisk } from "../lib/profilePayload";
+import { buildProfileSaveInput, checkProfileSaveArgs, DEFAULT_PROFILE_RISK, describeSerializationIssue, findNonSerializable, normalizeProfileRisk, TRADER_EXCLUDED_PROFILE_SKILL_IDS } from "../lib/profilePayload";
 import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
@@ -529,10 +529,14 @@ const REQUIRED_PROFILE_SKILL_IDS = [
   "desic-agent-orchestration"
 ] as const;
 const REQUIRED_PROFILE_SKILL_ID_SET = new Set<string>(REQUIRED_PROFILE_SKILL_IDS);
+/** 交易员 Profile：系统必选只剩固定规范（运行时换成交易员规范）与交易操作；其余 4 个不加载。 */
+const TRADER_EXCLUDED_SKILL_ID_SET = new Set<string>(TRADER_EXCLUDED_PROFILE_SKILL_IDS);
+const TRADER_REQUIRED_SKILL_ID_SET = new Set<string>(REQUIRED_PROFILE_SKILL_IDS.filter((id) => !TRADER_EXCLUDED_SKILL_ID_SET.has(id)));
 const PROFILE_SYMBOL_LIMIT = 3;
 
-function withRequiredProfileSkills(skillIds: string[] | undefined): string[] {
-  return [...new Set([...REQUIRED_PROFILE_SKILL_IDS, ...(skillIds ?? []).map((skillId) => skillId.trim()).filter(Boolean)])];
+function withRequiredProfileSkills(skillIds: string[] | undefined, trader = false): string[] {
+  const merged = [...new Set([...REQUIRED_PROFILE_SKILL_IDS, ...(skillIds ?? []).map((skillId) => skillId.trim()).filter(Boolean)])];
+  return trader ? merged.filter((id) => !TRADER_EXCLUDED_SKILL_ID_SET.has(id)) : merged;
 }
 
 function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
@@ -543,7 +547,7 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     ...profile,
     mode: normalizePermissionMode(profile.mode),
     symbols: Array.isArray(profile.symbols) ? profile.symbols : [],
-    skillIds: withRequiredProfileSkills(Array.isArray(profile.skillIds) ? profile.skillIds : []),
+    skillIds: withRequiredProfileSkills(Array.isArray(profile.skillIds) ? profile.skillIds : [], profile.contextMode === "briefing"),
     skillVersions: profile.skillVersions ?? {},
     skillVersionModes: profile.skillVersionModes ?? {},
     reasoningDepth: profile.reasoningDepth ?? "medium",
@@ -1317,7 +1321,14 @@ function ProfileEditor({
     setSymbolQuery("");
     setSymbolPickerOpen(false);
   };
-  const selectedSkills = useMemo(() => skills.filter((skill) => skillIds.has(skill.id)), [skillIds, skills]);
+  // 交易员 Profile 不显示不加载的 4 个技能；固定规范在运行时换成交易员规范，版本选择对它无意义。
+  const traderProfile = draft.contextMode === "briefing";
+  const requiredSkillIds = traderProfile ? TRADER_REQUIRED_SKILL_ID_SET : REQUIRED_PROFILE_SKILL_ID_SET;
+  const visibleSkills = useMemo(() => (traderProfile ? skills.filter((skill) => !TRADER_EXCLUDED_SKILL_ID_SET.has(skill.id)) : skills), [skills, traderProfile]);
+  const selectedSkills = useMemo(
+    () => visibleSkills.filter((skill) => skillIds.has(skill.id) && !(traderProfile && skill.id === "desic-core-operations")),
+    [skillIds, traderProfile, visibleSkills]
+  );
   const publishedVersions = useMemo(() => {
     const grouped = new Map<string, AiSkillVersion[]>();
     for (const version of skillVersions) {
@@ -1340,7 +1351,7 @@ function ProfileEditor({
     onChange({ risk: normalizeProfileRisk({ ...risk, [key]: Number(value) }) });
   };
   const toggleSkill = (id: string, checked: boolean) => {
-    if (REQUIRED_PROFILE_SKILL_ID_SET.has(id)) return;
+    if (requiredSkillIds.has(id)) return;
     const next = new Set(draft.skillIds);
     if (checked) next.add(id);
     else next.delete(id);
@@ -1594,14 +1605,15 @@ function ProfileEditor({
       <div className="automation-form-section">
         <strong><ShieldCheck size={13} />{t("automation:profileSkillsTitle")}</strong>
         <div className="automation-section-headline">
-          <p className="automation-field-note">{t("automation:profileSkillsVersionNote")}</p>
+          <p className="automation-field-note">{traderProfile ? t("automation:profileTraderSkillsNote") : t("automation:profileSkillsVersionNote")}</p>
           <button type="button" onClick={() => openSettingsTab("skills")}><Pencil size={13} />{t("automation:profileSkillsEdit")}</button>
         </div>
         <div className="automation-skill-grid">
-          {skills.length === 0 ? (
+          {visibleSkills.length === 0 ? (
             <span className="automation-inline-empty">{t("automation:profileSkillsEmpty")}</span>
-          ) : skills.map((skill) => {
-            const required = REQUIRED_PROFILE_SKILL_ID_SET.has(skill.id);
+          ) : visibleSkills.map((skill) => {
+            const required = requiredSkillIds.has(skill.id);
+            const traderCore = traderProfile && skill.id === "desic-core-operations";
             return (
               <label
                 className={clsx("automation-skill-option", skillIds.has(skill.id) && "selected", required && "required")}
@@ -1614,7 +1626,10 @@ function ProfileEditor({
                   disabled={required}
                   onChange={(event) => toggleSkill(skill.id, event.target.checked)}
                 />
-                <span><strong>{skill.name || skill.id}</strong><small>{skill.description || t("automation:profileSkillsFallbackDescription")}</small></span>
+                <span>
+                  <strong>{traderCore ? t("automation:profileTraderCoreSkill") : skill.name || skill.id}</strong>
+                  <small>{traderCore ? t("automation:profileTraderCoreSkillNote") : skill.description || t("automation:profileSkillsFallbackDescription")}</small>
+                </span>
                 <em>{required ? t("automation:profileSkillsRequired") : skill.builtin ? t("automation:profileSkillsBuiltin") : t("automation:profileSkillsCustom")}</em>
               </label>
             );
@@ -5601,6 +5616,7 @@ function AiAutomationPanelComponent({
   const createNewProfile = useCallback((contextMode: "tools" | "briefing" = "tools") => {
     const profile = createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || "");
     profile.contextMode = contextMode;
+    profile.skillIds = withRequiredProfileSkills(profile.skillIds, contextMode === "briefing");
     const desired = onboardingActive ? t("automation:profileOnboardingName") : t("automation:profileDefaultName");
     // Two Profiles sharing a name are indistinguishable in the grid, in run
     // records and in notifications, so the default gets the first free suffix.

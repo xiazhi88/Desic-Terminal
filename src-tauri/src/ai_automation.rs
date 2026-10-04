@@ -2309,6 +2309,9 @@ pub(crate) async fn ai_agent_profile_save(
     apply_collaboration_default(&conn, &mut profile, &id);
     apply_single_agent_mode_default(&conn, &mut profile, &id);
     apply_context_mode_default(&conn, &mut profile, &id);
+    if profile.context_mode.as_deref() == Some(CONTEXT_MODE_BRIEFING) {
+        profile.skill_ids = with_trader_profile_skills(std::mem::take(&mut profile.skill_ids));
+    }
     apply_profile_type_default(&conn, &mut profile, &id);
     // C14：旧行（auto/custom/scheme）保存时补上"协作开启"，避免把迁移出来的
     // 协作在首次保存时静默关掉。
@@ -3997,7 +4000,11 @@ fn normalize_profile(mut profile: AiAgentProfileInput) -> Result<AiAgentProfileI
             "每个 Profile 最多配置 {MAX_PROFILE_SYMBOLS} 个关注交易品种"
         ));
     }
-    profile.skill_ids = with_required_profile_skills(profile.skill_ids);
+    profile.skill_ids = if profile.context_mode.as_deref().map(normalize_context_mode).as_deref() == Some(CONTEXT_MODE_BRIEFING) {
+        with_trader_profile_skills(profile.skill_ids)
+    } else {
+        with_required_profile_skills(profile.skill_ids)
+    };
     profile.allowed_wake_condition_types = normalize_strings(profile.allowed_wake_condition_types);
     if profile.allowed_wake_condition_types.is_empty() {
         profile.allowed_wake_condition_types = default_wake_condition_types();
@@ -4087,6 +4094,15 @@ fn normalize_agent_id_list(items: Vec<String>) -> Vec<String> {
         .into_iter()
         .map(|id| desic_agent_automation::resolve_agent_id_alias(&id))
         .filter(|id| seen.insert(id.clone()))
+        .collect()
+}
+
+/// 交易员 Profile 的技能：系统必选只剩固定规范（运行时换成交易员规范）与交易操作；交易哲学、情报、雷达、
+/// 调度不适用（见 `trader_learning::TRADER_EXCLUDED_SKILLS`）。经典 Profile 不经过这里，仍是原来的 6 个必选。
+pub(crate) fn with_trader_profile_skills(items: Vec<String>) -> Vec<String> {
+    with_required_profile_skills(items)
+        .into_iter()
+        .filter(|id| !crate::trader_learning::TRADER_EXCLUDED_SKILLS.contains(&id.as_str()))
         .collect()
 }
 
@@ -4563,7 +4579,11 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
         environment: row.get(5)?,
         symbols: from_json_or_default(&symbols),
         scan_interval_minutes: row.get::<_, i64>(7)?.max(1) as u32,
-        skill_ids: with_required_profile_skills(from_json_or_default(&skill_ids)),
+        skill_ids: if context_mode.as_deref().map(normalize_context_mode).as_deref() == Some(CONTEXT_MODE_BRIEFING) {
+            with_trader_profile_skills(from_json_or_default(&skill_ids))
+        } else {
+            with_required_profile_skills(from_json_or_default(&skill_ids))
+        },
         skill_versions: from_json_or_default(&skill_versions),
         skill_version_modes: from_json_or_default(&row.get::<_, String>(22)?),
         model: row.get(10)?,
@@ -16218,6 +16238,36 @@ mod tests {
         };
         assert_eq!(hash(true), "4496b8f999240faa22e08d851bf369a39d8aba876f464901e5a88739fa2e8291", "经典模式中文提示词变了");
         assert_eq!(hash(false), "71ee2aed99bec6d491943ed1e75949b57d499f59032e3c3bde1738ba52f946d1", "经典模式英文提示词变了");
+    }
+
+    #[test]
+    fn trader_profiles_store_only_trader_skills_and_classic_keeps_all_required() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        let save = |id: &str, mode: &str| {
+            let mut profile = normalize_profile(
+                serde_json::from_value::<AiAgentProfileInput>(json!({
+                    "name": id,
+                    "symbols": ["BTC-USDT-SWAP"],
+                    "contextMode": mode,
+                    "skillIds": ["trading-philosophy", "okx-market-intelligence", "my-own-skill"]
+                }))
+                .expect("deserialize profile input"),
+            )
+            .expect("normalize profile input");
+            apply_context_mode_default(&conn, &mut profile, id);
+            if profile.context_mode.as_deref() == Some(CONTEXT_MODE_BRIEFING) {
+                profile.skill_ids = with_trader_profile_skills(std::mem::take(&mut profile.skill_ids));
+            }
+            upsert_profile_row(&conn, &profile, id, 1_000, 2_000).expect("upsert profile row");
+            load_profile(&conn, id).expect("load profile").skill_ids
+        };
+        let classic = save("classic-skills", "tools");
+        for required in REQUIRED_PROFILE_SKILL_IDS {
+            assert!(classic.iter().any(|id| id == required), "经典 Profile 仍带 {required}");
+        }
+        let trader = save("trader-skills", "briefing");
+        assert_eq!(trader, vec!["desic-core-operations".to_string(), "desic-trade-operations".to_string(), "my-own-skill".to_string()]);
     }
 
     #[test]
