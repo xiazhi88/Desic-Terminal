@@ -280,7 +280,30 @@ export const previewEvidenceLedgerMessage = storedMessageToUiMessage({
   createdAt: ledgerBase
 });
 
+/** 预览：一轮完整的「分析 → 创建交易机会 → 记录决策」，用来看结论卡。 */
+const previewVerdictMessage: AiUiMessage = {
+  id: "preview-verdict-ai",
+  role: "assistant",
+  completed: true,
+  startedAt: ledgerBase - 150_000,
+  completedAt: ledgerBase - 6_000,
+  createdAt: ledgerBase - 150_000,
+  text: "推荐 SOL-USDT-SWAP 做多，用回调限价单而不是追高。\n\n- 4H 站在 EMA20 上方，近三个闭合 4H 桶主动买盘净额为正\n- 资金费率 +0.0068%，没有多头拥挤\n- 现价贴近 24h 高点，所以用 118.00 回调限价而不是市价追\n\n机会已保存为待审批记录 `opp1791049559866866021000e96a11de`，未提交订单。",
+  tools: [
+    { id: "pv-1", name: "market.readCandles", status: "done", ok: true, arguments: { instId: "SOL-USDT-SWAP", bar: "4H" }, result: { instId: "SOL-USDT-SWAP" }, startedAt: ledgerBase - 140_000, endedAt: ledgerBase - 139_000 },
+    {
+      id: "pv-2", name: "tradeOpportunity.create", status: "done", ok: true, startedAt: ledgerBase - 60_000, endedAt: ledgerBase - 58_000,
+      arguments: { direction: "long", instId: "SOL-USDT-SWAP", price: "118", stopLoss: { triggerPx: "116.2" }, takeProfit: { triggerPx: "123.3" }, size: "0.2", lever: "3", expiresAt: Date.now() + 30 * 3_600_000, confidence: 0.5, strategyName: "SOL 区间下沿回调做多（34 小时窗口）" },
+      result: { id: "opp1791049559866866021000e96a11de", instId: "SOL-USDT-SWAP", direction: "long" }
+    },
+    { id: "pv-3", name: "research.recordDecision", status: "done", ok: true, startedAt: ledgerBase - 50_000, endedAt: ledgerBase - 49_000, arguments: { instId: "SOL-USDT-SWAP", outcome: "long", reason: "选 SOL 做多：证据完整。" }, result: { outcome: "long", instId: "SOL-USDT-SWAP", reason: "选 SOL 做多：证据完整。但现价贴近区间上沿，因此不追高。" } }
+  ],
+  approvals: []
+};
+
 export const previewAiMessages: AiUiMessage[] = [
+  { id: "preview-verdict-user", role: "user", text: "100U 开仓推荐：交易对、方向与止盈止损", tools: [], approvals: [], createdAt: ledgerBase - 152_000 },
+  previewVerdictMessage,
   {
     id: "preview-ledger-user",
     role: "user",

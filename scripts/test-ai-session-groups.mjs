@@ -1,0 +1,15 @@
+import assert from "node:assert/strict";
+import { groupSessions } from "../src/lib/aiSessionGroups.ts";
+const now = new Date("2026-10-04T10:00:00").getTime(), H = 3_600_000, D = 86_400_000;
+const s = (id, title, ago) => ({ id, title, updatedAt: now - ago });
+const list = [s("a", "BTC 分析", 1 * H), s("b", "昨天的", 20 * H), s("c", "更早的", 5 * D), s("v", "语音指挥", 2 * H), s("p", "置顶的", 9 * D), s("d", "BTC 复盘", 30 * H)];
+const g = groupSessions(list, new Set(["p"]), now);
+assert.deepEqual(g.map((x) => x.key), ["pinned", "today", "yesterday", "earlier", "voice"]);
+assert.deepEqual(g.find((x) => x.key === "today").items.map((x) => x.id), ["a"]);
+assert.deepEqual(g.find((x) => x.key === "yesterday").items.map((x) => x.id), ["b", "d"], "10-03 凌晨和下午都算昨天，按更新时间倒序");
+assert.deepEqual(g.find((x) => x.key === "earlier").items.map((x) => x.id), ["c"]);
+assert.deepEqual(g.find((x) => x.key === "voice").items.map((x) => x.id), ["v"]);
+assert.deepEqual(groupSessions(list, new Set(), now, "btc").flatMap((x) => x.items.map((y) => y.id)), ["a", "d"], "搜索不区分大小写");
+assert.deepEqual(groupSessions([], new Set(), now), []);
+assert.deepEqual(groupSessions(list, new Set(["v"]), now).find((x) => x.key === "voice").items.map((x) => x.id), ["v"], "语音会话即使被置顶也留在语音组");
+console.log("ai session group tests passed");

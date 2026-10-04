@@ -12,6 +12,16 @@ export function formatAiSessionMeta(session: AiSession, t?: UiTranslation) {
   return `${status} · ${updated}`;
 }
 
+/** 会话列表里的次要信息：空闲不写状态词，只写时间（今天只显示时分，其余显示月-日）；运行 / 失败 / 已停止才带状态。 */
+export function formatAiSessionMetaShort(session: AiSession, t?: UiTranslation, now = Date.now()) {
+  const date = new Date(session.updatedAt);
+  const pad = (n: number) => String(n).padStart(2, "0");
+  const sameDay = new Date(now).toDateString() === date.toDateString();
+  const when = sameDay ? `${pad(date.getHours())}:${pad(date.getMinutes())}` : `${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  const idle = !isAiSessionRunning(session.status) && !["failed", "error", "stopped"].includes(session.status.trim().toLowerCase());
+  return idle ? when : `${statusLabel(session.status, t)} · ${when}`;
+}
+
 export function sortAiSessions(items: AiSession[], pinnedIds: ReadonlySet<string> = new Set()) {
   return [...items].sort((a, b) => {
     const pinnedDelta = Number(pinnedIds.has(b.id)) - Number(pinnedIds.has(a.id));

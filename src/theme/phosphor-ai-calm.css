@@ -1,0 +1,387 @@
+/*
+ * phosphor-ai-calm.css — 由 scripts/generate-phosphor-ai-calm.mjs 生成，请勿手改。
+ * 磷光外观下把 AI 研究里写死的鲜亮紫色压成低饱和灰紫，发光去掉。
+ * 覆盖 106 条规则、146 处声明；样式改动后重新运行脚本。
+ */
+:root[data-visual="phosphor"] .ai-messages,
+:root[data-visual="phosphor"] .ai-session-list {
+    scrollbar-color: rgba(158, 127, 211, 0.22) transparent
+}
+:root[data-visual="phosphor"] .ai-messages::-webkit-scrollbar-thumb,
+:root[data-visual="phosphor"] .ai-session-list::-webkit-scrollbar-thumb {
+    background: rgba(158, 127, 211, 0.2)
+}
+:root[data-visual="phosphor"] .ai-messages::-webkit-scrollbar-thumb:hover,
+:root[data-visual="phosphor"] .ai-session-list::-webkit-scrollbar-thumb:hover {
+    background: rgba(158, 127, 211, 0.34)
+}
+:root[data-visual="phosphor"] .ai-first-setup-mark {
+    border: 1px solid rgba(158, 127, 211, 0.4);
+    background: rgba(158, 127, 211, 0.12);
+    color: rgb(214, 200, 237)
+}
+:root[data-visual="phosphor"] .ai-first-setup-copy > span {
+    color: rgb(180, 165, 205)
+}
+:root[data-visual="phosphor"] .ai-first-setup-action {
+    border: 1px solid rgba(158, 127, 211, 0.38);
+    background: rgba(158, 127, 211, 0.1);
+    color: rgb(222, 213, 237)
+}
+:root[data-visual="phosphor"] .ai-first-setup-action:hover {
+    border-color: rgba(158, 127, 211, 0.62)
+}
+:root[data-visual="phosphor"] .ai-current-model-row > span {
+    border: 1px solid rgba(158, 127, 211, 0.28);
+    background: rgba(158, 127, 211, 0.08);
+    color: rgb(224, 214, 241)
+}
+:root[data-visual="phosphor"] .ai-model-config-list > button:hover {
+    border-color: rgba(158, 127, 211, 0.48);
+    background: rgba(158, 127, 211, 0.08)
+}
+:root[data-visual="phosphor"] .ai-model-config-row.is-selected {
+    border-color: rgba(158, 127, 211, 0.48);
+    background: rgba(158, 127, 211, 0.08)
+}
+:root[data-visual="phosphor"] .ai-model-config-row__use:hover {
+    border-color: rgba(163, 133, 214, 0.6)
+}
+:root[data-visual="phosphor"] .ai-model-config-row__badge {
+    color: rgb(235, 229, 246)
+}
+:root[data-visual="phosphor"] .ai-message.user {
+    border-color: rgba(158, 127, 211, 0.22);
+    background: rgba(158, 127, 211, 0.1)
+}
+:root[data-visual="phosphor"] .ai-agent-tools {
+    border-left: 1px solid rgba(158, 127, 211, 0.28)
+}
+:root[data-visual="phosphor"] .ai-tool-open-strategy {
+    border: 1px solid rgba(140, 117, 179, 0.72);
+    background: rgba(113, 90, 154, 0.2);
+    color: rgba(238, 233, 248, 0.94)
+}
+:root[data-visual="phosphor"] .ai-tool-open-strategy:hover {
+    background: rgba(138, 112, 184, 0.32)
+}
+:root[data-visual="phosphor"] .ai-token-usage > span {
+    color: rgb(156, 141, 183)
+}
+:root[data-visual="phosphor"] .ai-token-usage > small {
+    border-left: 1px solid rgba(158, 127, 211, 0.18)
+}
+:root[data-visual="phosphor"] .ai-skill-menu {
+    border: 1px solid rgba(158, 127, 211, 0.32);
+    box-shadow: 0 18px 44px rgba(0, 0, 0, 0.52), 0 0 28px transparent
+}
+:root[data-visual="phosphor"] .ai-skill-menu button:hover,
+:root[data-visual="phosphor"] .ai-skill-menu button.active {
+    border-color: rgba(158, 127, 211, 0.34);
+    background: rgba(158, 127, 211, 0.12)
+}
+:root[data-visual="phosphor"] .ai-context-meter-trigger:hover,
+:root[data-visual="phosphor"] .ai-context-meter-trigger:focus-visible {
+    border-color: rgba(170, 155, 196, 0.36);
+    background: rgba(170, 155, 196, 0.07)
+}
+:root[data-visual="phosphor"] .ai-context-meter-trigger b {
+    color: rgb(218, 214, 226)
+}
+:root[data-visual="phosphor"] .ai-context-popover-total b {
+    color: rgb(218, 214, 226)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-head {
+    background: linear-gradient(90deg, rgba(163, 133, 214, 0.07), transparent 62%), #0c0e13
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-tabs {
+    background: rgb(17, 15, 21)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-body {
+    background: linear-gradient(180deg, rgb(14, 13, 17), #0a0c10 240px)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-current-research-card {
+    background: rgba(163, 133, 214, 0.08)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-current-research-card > div {
+    background: rgb(18, 16, 21)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-chart-head strong,
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-linechart header strong,
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-depth header strong,
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-sentiment header strong,
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-overview-head strong {
+    color: rgb(199, 194, 208)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-linechart svg,
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-depth svg {
+    background: rgb(15, 12, 19)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-kline-canvas {
+    background: rgb(15, 12, 19)
+}
+:root[data-visual="phosphor"] .ai-research-shell p.ai-inspector-empty,
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-empty {
+    background: rgba(163, 133, 214, 0.035)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-chart-empty {
+    background: rgba(163, 133, 214, 0.035)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-risk-empty {
+    background: rgba(163, 133, 214, 0.035)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-head button:hover {
+    background: rgba(163, 133, 214, 0.12)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-tab-close:hover {
+    background: rgba(163, 133, 214, 0.14)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intel-subtabs button:hover {
+    background: rgba(163, 133, 214, 0.06)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-kline-spark {
+    background: rgb(15, 12, 19)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-kline-spark-dot {
+    stroke: rgb(15, 12, 19)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-depth-marker {
+    stroke: rgb(15, 12, 19)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-evidence-references {
+    border-top-color: rgba(163, 133, 214, 0.1)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-evidence-references button {
+    background: rgba(163, 133, 214, 0.05);
+    color: rgb(183, 176, 196)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-evidence-references button:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-evidence-references button:focus-visible {
+    color: rgb(239, 236, 244)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-panel-head .ai-head-status.is-running::before {
+    box-shadow: 0 0 7px transparent
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message.assistant.is-streaming::before {
+    background: linear-gradient(180deg, var(--accent-bright), rgba(163, 133, 214, 0.28));
+    box-shadow: 0 0 8px transparent
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-jump-latest.has-unread {
+    background: rgba(163, 133, 214, 0.1);
+    color: rgb(212, 203, 227)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-inline-evidence {
+    border-top: 1px solid rgba(163, 133, 214, 0.1)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-inline-evidence-card {
+    background: rgba(163, 133, 214, 0.05)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message .ai-inline-evidence-tool {
+    color: rgb(183, 176, 196)
+}
+:root[data-visual="phosphor"] .ai-markdown .ai-markdown-opportunity span {
+    color: var(--accent-bright, rgb(194, 175, 228))
+}
+:root[data-visual="phosphor"] .ai-markdown .ai-markdown-opportunity:hover code {
+    border-color: rgba(194, 175, 228, 0.6)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-io-toggle:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-io-toggle:focus-visible {
+    border-color: rgba(163, 133, 214, 0.45);
+    background: rgba(163, 133, 214, 0.08);
+    color: rgb(239, 236, 245)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-io-toggle.is-raw {
+    border-color: rgba(163, 133, 214, 0.3)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-verdict-foot button.is-link {
+    color: var(--accent-bright, rgb(188, 179, 204));
+    border-color: rgba(188, 179, 204, 0.4)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-composer:focus-within {
+    border-color: rgba(188, 179, 204, 0.6)
+}
+:root[data-visual="phosphor"] .ai-research-host .ai-research-shell .ai-session-item.has-unread::after {
+    background: var(--accent-bright, rgb(188, 179, 204))
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-research-welcome-quick button:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-research-welcome-quick button:focus-visible {
+    background: rgba(163, 133, 214, 0.09)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-session-list-head button:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-session-actions button:hover {
+    border-color: rgba(163, 133, 214, 0.42);
+    background: rgba(163, 133, 214, 0.12)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-session-item:hover {
+    background: rgba(163, 133, 214, 0.07)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-column-resize:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-column-resize:focus-visible {
+    background: rgb(24, 22, 28)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-tabs > div.active {
+    background: rgb(27, 24, 31)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-open-workspace {
+    background: rgba(163, 133, 214, 0.1)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-open-workspace:hover {
+    background: rgba(163, 133, 214, 0.18)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-open-artifact {
+    border: 1px solid rgba(163, 133, 214, 0.28)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-open-artifact:hover {
+    border-color: rgba(163, 133, 214, 0.52);
+    background: rgba(163, 133, 214, 0.09)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message.user {
+    border-inline-start: 2px solid rgba(163, 133, 214, 0.6)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-task-dock > div,
+:root[data-visual="phosphor"] .ai-research-shell .ai-queue-dock > div {
+    border-top: 1px solid rgba(163, 133, 214, 0.12)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-queue-item {
+    border-bottom: 1px solid rgba(163, 133, 214, 0.12)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-direct-artifact:hover {
+    color: rgb(239, 236, 245)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-session-item.pinned {
+    background: rgba(163, 133, 214, 0.07)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-skill-resources li {
+    border-inline-start: 2px solid rgba(163, 133, 214, 0.4)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-send.is-ready {
+    border-color: rgba(163, 133, 214, 0.48);
+    color: rgb(240, 235, 246)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-send.is-ready::after {
+    border-top-color: rgba(224, 216, 237, 0.48);
+    border-right-color: rgba(163, 133, 214, 0.28)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-send.is-ready:hover {
+    box-shadow: 0 0 0 1px transparent, 0 10px 26px transparent, inset 0 1px rgba(255,255,255,.18)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-command-palette > button.active,
+:root[data-visual="phosphor"] .ai-research-shell .ai-command-palette > button:hover {
+    background: rgba(163, 133, 214, 0.12)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-research-welcome-actions button:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-research-welcome-actions button:focus-visible {
+    border-color: rgba(163, 133, 214, 0.45)
+}
+:root[data-visual="phosphor"] .ai-research-shell .tool-running {
+    border-color: rgba(163, 133, 214, 0.34)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-open-strategy {
+    border: 1px solid rgba(163, 133, 214, 0.3)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intelligence-nav button:hover {
+    background: rgba(163, 133, 214, 0.06)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intelligence-nav button.active {
+    color: rgb(243, 240, 247);
+    border-color: rgba(163, 133, 214, 0.24)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intelligence-head {
+    background: linear-gradient(90deg, rgba(163, 133, 214, 0.08), transparent 66%)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intel-list-item {
+    border-left-color: rgba(163, 133, 214, 0.48)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intel-list-item:hover {
+    border-color: rgba(163, 133, 214, 0.42);
+    background: rgb(27, 24, 31)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intelligence-head > .ai-intelligence-expand {
+    border-color: rgba(163, 133, 214, 0.28)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-intelligence-head > .ai-intelligence-expand:hover {
+    background: rgb(34, 30, 40);
+    color: rgb(240, 235, 246)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-open-trading {
+    border-color: rgba(163, 133, 214, 0.28)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-market-open-trading:hover {
+    background: rgb(34, 30, 40);
+    color: rgb(240, 235, 246)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut:hover {
+    border-color: rgba(163, 133, 214, 0.26);
+    background: rgba(163, 133, 214, 0.07);
+    color: rgb(220, 214, 231)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut:focus-visible {
+    outline-color: rgba(163, 133, 214, 0.68)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-session-actions button:hover {
+    border-color: rgba(163, 133, 214, 0.42);
+    background: rgb(34, 30, 40);
+    color: rgb(233, 228, 242)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-radar-panel-head {
+    background: linear-gradient(90deg, rgba(163, 133, 214, 0.07), transparent 72%)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-radar-tabs button:hover {
+    background: rgba(163, 133, 214, 0.06)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-radar-tabs button.active {
+    border-color: rgba(163, 133, 214, 0.24);
+    color: rgb(243, 240, 247)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut.active,
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut.shortcut-intelligence.active,
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut.shortcut-radar.active {
+    border-color: rgba(163, 133, 214, 0.34);
+    color: rgb(241, 238, 247)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-radar-row:hover {
+    background: rgba(163, 133, 214, 0.045)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-code-surface,
+:root[data-visual="phosphor"] .ai-research-shell .ai-tool-code-preview {
+    border-color: rgba(163, 133, 214, 0.18)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-evidence-references button {
+    border: 1px solid rgba(163, 133, 214, 0.18);
+    color: rgb(205, 199, 214)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-evidence-references button:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-evidence-references button:focus-visible {
+    border-color: rgba(163, 133, 214, 0.44);
+    background: rgb(28, 25, 32);
+    color: rgb(239, 236, 244)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-artifact-reference {
+    border: 1px dashed rgba(163, 133, 214, 0.24)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-artifact-reference:hover,
+:root[data-visual="phosphor"] .ai-research-shell .ai-artifact-reference:focus-visible {
+    border-color: rgba(163, 133, 214, 0.5);
+    background: rgba(163, 133, 214, 0.08);
+    color: rgb(240, 235, 246)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-strategy-plan {
+    border: 1px solid rgba(163, 133, 214, 0.14);
+    background: rgba(163, 133, 214, 0.08)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-strategy-plan strong {
+    color: rgb(223, 220, 229)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-message.ai-message-located::after {
+    border: 1px solid rgba(163, 133, 214, 0.48)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-shortcut.shortcut-artifacts.active {
+    box-shadow: inset 2px 0 var(--accent-bright), 0 0 14px transparent
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-radar-row:focus-visible {
+    outline: 2px solid rgba(163, 133, 214, 0.62)
+}
+:root[data-visual="phosphor"] .ai-research-shell .ai-inspector-tab-group > div > div.active > button:first-child {
+    color: rgb(243, 240, 247)
+}

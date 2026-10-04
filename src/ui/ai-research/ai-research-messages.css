@@ -424,3 +424,23 @@
   font-size: 9px;
   font-variant-numeric: tabular-nums;
 }
+
+/* AI 回答里的交易机会编号：可点击，跳到「交易机会」面板。 */
+.ai-markdown .ai-markdown-opportunity {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+  padding: 1px 4px 1px 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  vertical-align: baseline;
+}
+.ai-markdown .ai-markdown-opportunity code { overflow: hidden; text-overflow: ellipsis; }
+.ai-markdown .ai-markdown-opportunity span { flex: none; color: var(--accent-bright, #b894ff); font-size: 12px; }
+.ai-markdown .ai-markdown-opportunity:hover span { text-decoration: underline; }
+.ai-markdown .ai-markdown-opportunity:hover code { border-color: rgba(184, 148, 255, 0.6); }

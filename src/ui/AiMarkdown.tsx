@@ -23,7 +23,24 @@ const components: Components = {
   h3: ({ children }) => <h5>{children}</h5>,
   table: ({ children }) => <div className="ai-markdown-table-wrap"><table>{children}</table></div>,
   pre: ({ children }) => <pre tabIndex={0}>{children}</pre>,
-  code: ({ children, className }) => <code className={className}>{children}</code>
+  code: ({ children, className }) => {
+    // AI 回答里的交易机会编号（opp + 时间戳 + 纳秒 + 后缀）：点一下跳到「交易机会」并选中它。
+    const text = typeof children === "string" ? children.trim() : "";
+    if (!className && /^opp\d{14,}[0-9a-f]{0,16}$/.test(text)) {
+      return (
+        <button
+          type="button"
+          className="ai-markdown-opportunity"
+          title="在「交易机会」中打开"
+          onClick={() => window.dispatchEvent(new CustomEvent("desic:open-trade-opportunity", { detail: { id: text } }))}
+        >
+          <code>{text}</code>
+          <span aria-hidden="true">→ 交易机会</span>
+        </button>
+      );
+    }
+    return <code className={className}>{children}</code>;
+  }
 };
 
 export function AiMarkdown({ content }: { content: string }) {

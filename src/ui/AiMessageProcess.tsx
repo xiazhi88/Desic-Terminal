@@ -59,6 +59,8 @@ export type AiToolRun = {
   executionStartedAt?: number;
   executionEndedAt?: number;
   status: "pending" | "running" | "done" | "blocked" | "failed";
+  /** 回答已经结束，但这次调用始终没有收到结果（被中断或事件丢失）。不能再显示「运行中」。 */
+  unfinished?: boolean;
 };
 
 export type AiResearchArtifact = {
@@ -688,11 +690,23 @@ export function AiInlineEvidenceCards({ message }: { message: AiUiMessage }) {
   const cards = message.tools
     .map((tool) => aiInlineEvidenceForTool(tool))
     .filter((card): card is AiInlineEvidence => Boolean(card));
+  const [expanded, setExpanded] = useState(false);
   if (cards.length === 0) return null;
   const timeLabel = processText("inlineEvidenceTime", "Data time", "数据时间");
+  // 读取类工具常常一轮几十次，原始键值卡全部铺开只是噪音：默认只显示最近 3 张，其余点开再看。
+  const COLLAPSED_COUNT = 3;
+  const hidden = expanded ? 0 : Math.max(0, cards.length - COLLAPSED_COUNT);
+  const shown = hidden > 0 ? cards.slice(-COLLAPSED_COUNT) : cards;
   return (
     <div className="ai-inline-evidence">
-      {cards.map((card) => (
+      {cards.length > COLLAPSED_COUNT ? (
+        <button type="button" className="ai-inline-evidence-toggle" onClick={() => setExpanded((open) => !open)} aria-expanded={expanded}>
+          {expanded
+            ? processText("inlineEvidenceCollapse", "Collapse tool results", "收起工具读取结果")
+            : processText("inlineEvidenceExpand", "Show {{count}} earlier tool results", "展开更早的 {{count}} 项工具读取结果", { count: hidden })}
+        </button>
+      ) : null}
+      {shown.map((card) => (
         <div className="ai-inline-evidence-card" key={card.key} aria-label={card.label}>
           <span className="ai-inline-evidence-tool" title={card.toolName}>{card.label}</span>
           <dl className="ai-inline-evidence-kv">
@@ -1688,6 +1702,8 @@ export function applyAiEvent(
     setMessages((items) => updateLastAssistant(items, (message) => ({
       ...message,
       completed: true,
+      tools: settleUnfinishedTools(message.tools),
+      agents: message.agents?.map((agent) => ({ ...agent, tools: agent.tools ? settleUnfinishedTools(agent.tools) : agent.tools })),
       finishReason: event.finishReason ?? undefined,
       completedAt: message.completedAt ?? Date.now(),
       error: failed || message.error,
@@ -1717,7 +1733,7 @@ export function storedMessageToUiMessage(message: AiStoredMessage): AiUiMessage 
     reasoning: message.reasoning || undefined,
     completed,
     finishReason: completed ? storedStatus : undefined,
-    tools: metadata.tools,
+    tools: completed ? settleUnfinishedTools(metadata.tools) : metadata.tools,
     approvals: metadata.approvals,
     agents: metadata.agents,
     teamEvents: metadata.teamEvents,
@@ -2193,7 +2209,14 @@ export function updateLastAssistant(items: AiUiMessage[], patch: (message: AiUiM
   return next;
 }
 
+/** 回答结束后仍停在 running 的工具不会再有结果了：收尾成「未返回」，避免界面永远转圈。 */
+export function settleUnfinishedTools(tools: readonly AiToolRun[]): AiToolRun[] {
+  if (!tools.some((tool) => tool.status === "running")) return tools as AiToolRun[];
+  return tools.map((tool) => (tool.status === "running" ? { ...tool, status: "pending" as const, unfinished: true } : tool));
+}
+
 function toolStatusLabel(tool: AiToolRun) {
+  if (tool.unfinished) return processText("toolNoResult", "No result returned", "未返回结果");
   if (tool.blocked || tool.status === "blocked") return processText("toolBlocked", "Blocked", "已阻断");
   if (tool.status === "failed" || tool.ok === false) return processText("failed", "Failed", "失败");
   if (tool.status === "done" || tool.ok === true) return processText("toolReturned", "Returned", "已返回");

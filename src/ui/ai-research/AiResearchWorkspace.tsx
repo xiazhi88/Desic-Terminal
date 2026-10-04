@@ -32,7 +32,8 @@ import {
   Sparkles,
   Square,
   Trash2,
-  X
+  X,
+  ChevronDown
 } from "lucide-react";
 import type { AiChatMessage, AiConfigSummary, AiPendingPrompt, AiPermissionMode, AiPromptDelivery, AiReasoningDepth, AiSession, MarketAssetsSummary, Ticker } from "../../types";
 import {
@@ -93,6 +94,7 @@ import {
   formatAiContextUsage,
   formatAiMessageTimestamp,
   formatAiSessionMeta,
+  formatAiSessionMetaShort,
   formatAiTaskSummary,
   isAiSessionRunning,
   isVisibleAiStoredMessage,
@@ -119,12 +121,31 @@ import {
 } from "./shared";
 import { previewAiMessages, previewAiSessions } from "./fixtures";
 import { AiResearchMessageDuration, AiResearchMessageTimeline, AiThroughputMetric } from "./AiResearchMessageLeaves";
+import { AiVerdictCard } from "./AiVerdictCard";
+import { groupSessions, VOICE_GROUP_TITLE } from "../../lib/aiSessionGroups";
+import "./ai-research-v2.css";
 
 /* AI 对话偏好（模型/权限/思考深度）合法值集合，用于校验持久化读回值 */
 const AI_PERMISSION_MODES = new Set(["advisor", "copilot", "limited_auto"]);
 const AI_REASONING_DEPTHS = new Set(["none", "minimal", "low", "medium", "high", "xhigh"]);
 // 流式事件静默超过这个时长才用整段会话快照兜底对账。
 const AI_RECONCILE_QUIET_MS = 6_000;
+
+/** 预览专用：页面注入 `window.__aiPreviewSnapshot`（真实会话导出的 session + messages）时用它渲染，否则用内置假数据。
+ *  用来拿用户的真实会话核对外观，避免只在假数据里验收。 */
+/** 同上，会话列表。 */
+function previewSessions(): AiSession[] {
+  const injected = (window as unknown as { __aiPreviewSessions?: AiSession[] }).__aiPreviewSessions;
+  return injected ?? previewAiSessions;
+}
+
+function previewMessages(): AiUiMessage[] {
+  const injected = (window as unknown as { __aiPreviewSnapshot?: Parameters<typeof snapshotToUiMessages>[0] }).__aiPreviewSnapshot;
+  return injected ? snapshotToUiMessages(injected) : previewAiMessages;
+}
+
+/** 证据抽屉默认收起、按需滑出（v2 起换键，让所有人先按新默认体验一次）。 */
+const INSPECTOR_OPEN_KEY = "desic.ai-research.inspector-open.v2";
 
 export function AiResearchWorkspace({ active = true, preview, onOpenSettings, onOpenStrategy, onOpenIntelligence, onOpenTrading, onRuntimeStateChange, accountId, accountLabel, accountEnvironment, selectedSymbol, marketAssets, marketTickers, cacheDir }: { active?: boolean; preview?: boolean; onOpenSettings?: () => void; onOpenStrategy?: (strategyId: string, runId?: string, optimizationId?: string) => void; onOpenIntelligence?: () => void; onOpenTrading?: () => void; onRuntimeStateChange?: (state: { status: string; unread: boolean }) => void; accountId?: string; accountLabel?: string; accountEnvironment?: string; selectedSymbol?: string; marketAssets?: MarketAssetsSummary | null; marketTickers?: Ticker[]; cacheDir?: string } = {}) {
   const { t, i18n } = useTranslation(["automation", "common", "settings"]);
@@ -184,10 +205,10 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     }
   }, [config, chatModelId, preview]);
   const [input, setInput] = useState("");
-  const [messages, setMessages] = useState<AiUiMessage[]>(() => preview ? previewAiMessages : []);
-  const [contextUsage, setContextUsage] = useState<AiUiMessage["contextUsage"]>(() => latestAiContextUsage(preview ? previewAiMessages : []) ?? defaultAiContextUsage());
+  const [messages, setMessages] = useState<AiUiMessage[]>(() => preview ? previewMessages() : []);
+  const [contextUsage, setContextUsage] = useState<AiUiMessage["contextUsage"]>(() => latestAiContextUsage(preview ? previewMessages() : []) ?? defaultAiContextUsage());
   const [creatingSession, setCreatingSession] = useState(false);
-  const [sessions, setSessions] = useState<AiSession[]>(preview ? previewAiSessions : []);
+  const [sessions, setSessions] = useState<AiSession[]>(preview ? previewSessions() : []);
   const [pinnedSessionIds, setPinnedSessionIds] = useState<Set<string>>(() => readPinnedAiSessionIds());
   useEffect(() => { setPinnedSessionIds((current) => new Set(Array.from(current).filter((id) => sessions.some((session) => session.id === id)))); }, [sessions]);
 
@@ -205,7 +226,10 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
   const [nearBottom, setNearBottom] = useState(true);
   const [unreadSessionIds, setUnreadSessionIds] = useState<Set<string>>(() => new Set());
   const [copiedMessageId, setCopiedMessageId] = useState<string | null>(null);
-  const [inspectorOpen, setInspectorOpen] = useState(() => preview || window.localStorage.getItem("desic.ai-research.inspector-open") !== "false");
+  const [composerOptionsOpen, setComposerOptionsOpen] = useState(false);
+  const [sessionQuery, setSessionQuery] = useState("");
+  const [voiceGroupOpen, setVoiceGroupOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(() => preview ? false : window.localStorage.getItem(INSPECTOR_OPEN_KEY) === "true");
   const [inspectorSection, setInspectorSection] = useState<InspectorSection>("artifacts");
   const [inspectorArtifact, setInspectorArtifact] = useState<AiResearchArtifact | null>(null);
   // 证据分区跟随的研究回合；null = 最近一条助手回答（流式时实时更新）。
@@ -287,6 +311,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
     () => sessions.filter((session) => session.origin === "user"),
     [sessions]
   );
+  const sessionGroups = useMemo(() => groupSessions(visibleSessions, pinnedSessionIds, Date.now(), sessionQuery), [visibleSessions, pinnedSessionIds, sessionQuery]);
   const aiTasks = useMemo(() => extractAiTasks(messages), [messages]);
   const skillOptions = useMemo(() => {
     const enabled = new Set(config?.enabledSkills ?? []);
@@ -413,7 +438,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
 
   useEffect(() => {
     if (preview) return;
-    window.localStorage.setItem("desic.ai-research.inspector-open", String(inspectorOpen));
+    window.localStorage.setItem(INSPECTOR_OPEN_KEY, String(inspectorOpen));
   }, [inspectorOpen, preview]);
 
   useEffect(() => {
@@ -1324,10 +1349,25 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                </div>
               </div>
               <div className="ai-composer-toolbar">
-                <div className="ai-composer-options">
+                <div className="ai-composer-options-wrap">
+                  <button
+                    type="button"
+                    className={clsx("ai-options-chip", composerOptionsOpen && "is-open")}
+                    aria-expanded={composerOptionsOpen}
+                    title={uiText("本轮使用的模型、思考深度与权限", "Model, reasoning depth and permission for this turn")}
+                    onClick={() => setComposerOptionsOpen((open) => !open)}
+                  >
+                    <Bot size={12} />
+                    <span data-i18n-skip>{[chatModel?.name || chatModel?.model || "—", t(`automation:${({ none: "reasoningNone", minimal: "reasoningMinimal", low: "reasoningLow", medium: "reasoningMedium", high: "reasoningHigh", xhigh: "reasoningXHigh" } as Record<string, string>)[chatReasoningDepth] ?? "reasoningMedium"}`), t(({ advisor: "settings:permissionAdvisor", copilot: "settings:permissionCopilot", limited_auto: "settings:permissionLimitedAutoShort" } as Record<string, string>)[chatPermissionMode] ?? "settings:permissionAdvisor")].join(" · ")}</span>
+                    <ChevronDown size={12} />
+                  </button>
+                  {composerOptionsOpen && (
+                    <div className="ai-composer-options is-popover" role="group" aria-label={uiText("本轮设置", "This turn")}>
                   <label data-i18n-skip title={t("automation:modelForThisTurn")}><Bot size={12} /><TerminalSelect ariaLabel={t("settings:aiModel")} value={chatModelId} disabled={isStreaming} options={(config?.models ?? []).map((model) => ({ value: model.id, label: model.name || model.model }))} onChange={setChatModelId} /></label>
                   <label title={t("automation:reasoningForThisTurn")}><SlidersHorizontal size={12} /><TerminalSelect ariaLabel={t("automation:reasoningDepth")} value={chatReasoningDepth} disabled={isStreaming} options={[{ value: "none", label: t("automation:reasoningNone") }, { value: "minimal", label: t("automation:reasoningMinimal") }, { value: "low", label: t("automation:reasoningLow") }, { value: "medium", label: t("automation:reasoningMedium") }, { value: "high", label: t("automation:reasoningHigh") }, { value: "xhigh", label: t("automation:reasoningXHigh") }]} onChange={(value) => setChatReasoningDepth(value as AiReasoningDepth)} /></label>
                   <label title={t("automation:permissionForThisTurn")}><ShieldCheck size={12} /><TerminalSelect ariaLabel={t("automation:aiPermission")} value={chatPermissionMode} disabled={isStreaming} options={[{ value: "advisor", label: t("settings:permissionAdvisor") }, { value: "copilot", label: t("settings:permissionCopilot") }, { value: "limited_auto", label: t("settings:permissionLimitedAutoShort") }]} onChange={(value) => setChatPermissionMode(value as AiPermissionMode)} /></label>
+                </div>
+                  )}
                 </div>
                 <div
                   className="ai-context-meter legacy"
@@ -1370,12 +1410,24 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                   </button>
                 </div>
               </div>
+              <label className="ai-session-search">
+                <span aria-hidden="true">⌕</span>
+                <input value={sessionQuery} onChange={(event) => setSessionQuery(event.target.value)} placeholder={uiText("搜索会话", "Search sessions")} aria-label={uiText("搜索会话", "Search sessions")} />
+              </label>
               {sessionsStatus && <small>{sessionsStatus}</small>}
               <div className="ai-session-items" role="tabpanel">
                 {visibleSessions.length === 0 ? (
                   <p>{t("automation:noUserSessions")}</p>
+                ) : sessionGroups.length === 0 ? (
+                  <p>{uiText("没有匹配的会话", "No matching sessions")}</p>
                 ) : (
-                  visibleSessions.map((session) => (
+                  sessionGroups.map((group) => (
+                    <div className="ai-session-group" key={group.key}>
+                      <div className="ai-session-group-title">
+                        <span>{{ pinned: uiText("置顶", "Pinned"), today: uiText("今天", "Today"), yesterday: uiText("昨天", "Yesterday"), earlier: uiText("更早", "Earlier"), voice: VOICE_GROUP_TITLE }[group.key]}{group.key === "voice" ? ` · ${group.items.length}` : ""}</span>
+                        {group.key === "voice" && !sessionQuery.trim() ? <button type="button" onClick={() => setVoiceGroupOpen((open) => !open)}>{voiceGroupOpen ? uiText("收起", "Collapse") : uiText("展开", "Expand")}</button> : null}
+                      </div>
+                      {(group.key === "voice" && !voiceGroupOpen && !sessionQuery.trim() ? group.items.filter((session) => session.id === sessionId) : group.items).map((session) => (
                     <div className={clsx("ai-session-item", session.id === sessionId && "active", unreadSessionIds.has(session.id) && "has-unread", pinnedSessionIds.has(session.id) && "pinned", isAiSessionRunning(session.status) && "running")} key={session.id}>
                       {renamingSessionId === session.id ? (
                         <input
@@ -1400,7 +1452,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                             : session.title || t("automation:newSession")}
                         >
                           <span data-i18n-skip title={session.title || t("automation:newSession")}><i className="ai-session-status-dot" aria-hidden="true" />{session.title || t("automation:newSession")}</span>
-                          <small>{formatAiSessionMeta(session, t)}</small>
+                          <small>{formatAiSessionMetaShort(session, t)}</small>
                         </button>
                       )}
                       <div className="ai-session-actions">
@@ -1414,6 +1466,8 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                           <Trash2 size={13} />
                         </button>
                       </div>
+                    </div>
+                  ))}
                     </div>
                   ))
                 )}
@@ -1541,6 +1595,7 @@ export function AiResearchWorkspace({ active = true, preview, onOpenSettings, on
                     {message.role === "assistant" ? <MarkdownMessage content={message.text} /> : <AiMessagePlainText message={message} />}
                   </div>
                 )}
+                {message.role === "assistant" && message.completed ? <AiVerdictCard tools={message.tools} uiText={uiText} onOpenEvidence={() => { setEvidenceMessageId(message.id); openInspectorSection("evidence"); }} /> : null}
                 {/* B2：简单工具（readTicker/readFundingRate/readInstrument）完成后在 footer 上方落地内联证据卡 */}
                 {message.role === "assistant" ? <AiInlineEvidenceCards message={message} /> : null}
                 {message.role === "assistant" ? <AiEvidenceSummaryStrip message={message} uiText={uiText} onOpen={() => { setEvidenceMessageId(message.id); openInspectorSection("evidence"); }} /> : null}

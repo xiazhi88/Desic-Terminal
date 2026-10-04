@@ -1,0 +1,446 @@
+/* AI 研究改版（v2）：答案优先、过程折叠、配色沿用数据页的低饱和体系。
+   只改外观，不动数据流；放在最后加载，用 .ai-research-shell 提高优先级。 */
+.ai-research-shell {
+  --v2-ink: #e6e3de;
+  --v2-ink-2: #a8a49d;
+  --v2-ink-3: #77746d;
+  --v2-line: rgba(233, 230, 225, 0.09);
+  --v2-line-2: rgba(233, 230, 225, 0.17);
+  /* 涨跌色保持应用原色（红涨绿跌随用户设置），只在大面积铺底时才用低透明度。 */
+  --v2-gain: var(--up);
+  --v2-loss: var(--down);
+  --v2-warn: #d8b27a;
+}
+
+/* ── 结论卡 ── */
+.ai-research-shell .ai-verdict {
+  --vt: 216, 178, 122;
+  position: relative;
+  margin: 18px 0 8px;
+  padding: 20px 22px 16px;
+  border: 1px solid var(--v2-line-2);
+  border-radius: 18px;
+  background: linear-gradient(180deg, rgba(var(--vt), 0.1), rgba(11, 13, 18, 0.4));
+  overflow: hidden;
+  animation: ai-v2-rise 0.45s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.ai-research-shell .ai-verdict.is-long { --vt: 217, 149, 155; }
+.ai-research-shell .ai-verdict.is-short { --vt: 141, 187, 168; }
+.ai-research-shell .ai-verdict-top { display: flex; align-items: center; gap: 12px; color: var(--v2-ink-3); font-size: 12px; letter-spacing: 0.14em; }
+.ai-research-shell .ai-verdict-badge { padding: 3px 12px; border: 1px solid currentColor; border-radius: 999px; font-size: 13px; font-weight: 500; letter-spacing: 0.03em; color: var(--v2-warn); }
+.ai-research-shell .ai-verdict.is-long .ai-verdict-badge { color: var(--v2-gain); }
+.ai-research-shell .ai-verdict.is-short .ai-verdict-badge { color: var(--v2-loss); }
+.ai-research-shell .ai-verdict-conf { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; letter-spacing: 0; }
+.ai-research-shell .ai-verdict-conf i { display: block; width: 70px; height: 3px; border-radius: 2px; background: var(--v2-line-2); overflow: hidden; }
+.ai-research-shell .ai-verdict-conf b { display: block; height: 100%; background: var(--v2-ink-2); transition: width 1s cubic-bezier(0.2, 0.7, 0.2, 1) 0.3s; }
+.ai-research-shell .ai-verdict-say { margin: 14px 0 0; font-size: 18px; font-weight: 500; line-height: 1.6; color: var(--v2-ink); }
+.ai-research-shell .ai-verdict-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 14px 24px; margin: 18px 0 0; padding-top: 15px; border-top: 1px solid var(--v2-line); }
+.ai-research-shell .ai-verdict-grid dt { color: var(--v2-ink-3); font-size: 12px; letter-spacing: 0.08em; }
+.ai-research-shell .ai-verdict-grid dd { margin: 4px 0 0; font-size: 17px; color: var(--v2-ink); font-variant-numeric: tabular-nums; }
+.ai-research-shell .ai-verdict-foot { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 15px; }
+.ai-research-shell .ai-verdict-foot button { padding: 6px 14px; border: 1px solid var(--v2-line-2); border-radius: 999px; background: none; color: var(--v2-ink-2); font-size: 12.5px; cursor: pointer; transition: 0.2s; }
+.ai-research-shell .ai-verdict-foot button:hover { background: rgba(233, 230, 225, 0.07); color: var(--v2-ink); }
+.ai-research-shell .ai-verdict-foot button.is-link { color: var(--accent-bright, #b9a9d6); border-color: rgba(185, 169, 214, 0.4); }
+@keyframes ai-v2-rise { from { opacity: 0; transform: translateY(8px); } }
+@media (prefers-reduced-motion: reduce) { .ai-research-shell .ai-verdict, .ai-research-shell .ai-verdict-conf b { animation: none; transition: none; } }
+
+/* ── 对话区：居中单列、答案优先 ── */
+.ai-research-shell .ai-messages {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0;
+  padding: 10px 68px 28px 28px;
+}
+.ai-research-shell .ai-messages > .ai-message {
+  width: min(760px, 100%);
+  max-width: none;
+  padding: 0;
+  border: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.ai-research-shell .ai-messages > .ai-message::before,
+.ai-research-shell .ai-messages > .ai-message::after { display: none; }
+.ai-research-shell .ai-message-role { display: none; }
+
+/* 用户消息：右侧气泡 */
+.ai-research-shell .ai-messages > .ai-message.user { display: flex; flex-direction: column; align-items: flex-end; margin: 26px 0 18px; gap: 6px; }
+.ai-research-shell .ai-message.user .ai-answer {
+  max-width: min(78%, 560px);
+  padding: 10px 16px;
+  border-radius: 16px 16px 4px 16px;
+  background: rgba(233, 230, 225, 0.075);
+  color: var(--v2-ink);
+  font-size: 14.5px;
+  line-height: 1.6;
+}
+.ai-research-shell .ai-message.user p { color: var(--v2-ink); font-size: 14.5px; }
+.ai-research-shell .ai-message.user .ai-message-footer { opacity: 0.55; }
+.ai-research-shell .ai-messages > .ai-message.assistant { margin: 6px 0 34px; gap: 14px; }
+
+/* 回答正文：大行距、轻小标题、细项目符 */
+.ai-research-shell .ai-message.assistant .ai-answer { gap: 0; }
+.ai-research-shell .ai-message.assistant .ai-answer > strong { display: none; }
+.ai-research-shell .ai-message.assistant .ai-markdown { font-size: 15.5px; line-height: 1.95; color: #d4d0ca; }
+.ai-research-shell .ai-message.assistant .ai-markdown p { margin: 0 0 12px; font-size: inherit; line-height: inherit; color: inherit; white-space: normal; }
+.ai-research-shell .ai-message.assistant .ai-markdown strong { color: var(--v2-ink); font-weight: 500; }
+.ai-research-shell .ai-message.assistant .ai-markdown h3,
+.ai-research-shell .ai-message.assistant .ai-markdown h4,
+.ai-research-shell .ai-message.assistant .ai-markdown h5 { margin: 26px 0 8px; font-size: 12px; font-weight: 500; letter-spacing: 0.18em; color: var(--v2-ink-3); }
+.ai-research-shell .ai-message.assistant .ai-markdown ul,
+.ai-research-shell .ai-message.assistant .ai-markdown ol { margin: 0 0 12px; padding-left: 1.2em; }
+.ai-research-shell .ai-message.assistant .ai-markdown li { margin: 6px 0; padding-left: 2px; line-height: 1.85; }
+.ai-research-shell .ai-message.assistant .ai-markdown li::marker { color: var(--v2-ink-3); }
+.ai-research-shell .ai-message.assistant .ai-markdown code { font-size: 0.86em; }
+
+/* 过程：一行胶囊，展开才看明细 */
+.ai-research-shell .ai-message .ai-process { border-top: 0; padding-top: 0; margin: 0; }
+.ai-research-shell .ai-message .ai-process > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px 7px 12px;
+  border: 1px solid var(--v2-line);
+  border-radius: 999px;
+  color: var(--v2-ink-3);
+  font-size: 12.5px;
+  transition: color 0.2s, border-color 0.2s;
+}
+.ai-research-shell .ai-message .ai-process > summary:hover { color: var(--v2-ink); border-color: var(--v2-line-2); }
+.ai-research-shell .ai-message .ai-process > summary strong { color: var(--v2-ink-2); font-size: 12.5px; font-weight: 400; }
+.ai-research-shell .ai-message .ai-process[open] > summary { color: var(--v2-ink-2); }
+.ai-research-shell .ai-message .ai-process-list { margin-top: 14px; padding-left: 14px; border-left: 1px solid var(--v2-line); }
+
+/* 页脚与引用：安静 */
+.ai-research-shell .ai-message-footer { color: var(--v2-ink-3); }
+.ai-research-shell .ai-evidence-references { opacity: 0.85; }
+
+/* ── 输入框：模型 / 深度 / 权限收成一个按钮 + 弹层 ── */
+.ai-research-shell .ai-composer { border-radius: 20px; border-color: var(--v2-line-2); background: rgba(14, 16, 21, 0.94); box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45); }
+.ai-research-shell .ai-composer:focus-within { border-color: rgba(185, 169, 214, 0.6); }
+.ai-research-shell .ai-composer-options-wrap { position: relative; display: inline-flex; min-width: 0; }
+.ai-research-shell .ai-options-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 100%;
+  height: 28px;
+  padding: 0 11px;
+  border: 1px solid var(--v2-line);
+  border-radius: 999px;
+  background: none;
+  color: var(--v2-ink-3);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: color 0.2s, border-color 0.2s;
+}
+.ai-research-shell .ai-options-chip span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ai-research-shell .ai-options-chip:hover,
+.ai-research-shell .ai-options-chip.is-open { color: var(--v2-ink); border-color: var(--v2-line-2); }
+.ai-research-shell .ai-composer-options.is-popover {
+  position: absolute;
+  left: 0;
+  bottom: calc(100% + 10px);
+  z-index: 30;
+  width: 300px;
+  display: grid;
+  gap: 8px;
+  padding: 14px;
+  overflow: visible;
+  border: 1px solid var(--v2-line-2);
+  border-radius: 16px;
+  background: #0e1015;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.55);
+  animation: ai-v2-rise 0.22s ease;
+}
+.ai-research-shell .ai-composer-options.is-popover label { height: 34px; width: 100%; padding: 0 10px; border-radius: 10px; }
+.ai-research-shell .ai-composer-options.is-popover .terminal-select { max-width: none; flex: 1; }
+.ai-research-shell .ai-composer-options.is-popover .terminal-select-trigger { width: 100%; font-size: 12.5px; letter-spacing: 0; color: var(--v2-ink-2); }
+.ai-research-shell .ai-composer-options.is-popover label:first-child .terminal-select { max-width: none; }
+
+/* ── 证据 / 研究抽屉：默认收起，按需从右侧滑出，盖在对话上而不是挤压它 ── */
+.ai-research-host > .ai-panel.ai-research-shell.inspector-open,
+.ai-research-host > .ai-panel.ai-research-shell.inspector-open.sessions-open {
+  grid-template-columns: var(--ai-sessions-width) 8px minmax(0, 1fr);
+}
+.ai-research-shell { position: relative; }
+.ai-research-shell .ai-column-resize-inspector { display: none; }
+.ai-research-shell .ai-research-inspector {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 40;
+  width: min(var(--ai-inspector-width, 480px), 52vw);
+  border-left: 1px solid var(--v2-line-2);
+  background: rgba(11, 13, 18, 0.975);
+  box-shadow: -30px 0 80px rgba(0, 0, 0, 0.5);
+  animation: ai-v2-drawer 0.42s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+@keyframes ai-v2-drawer { from { transform: translateX(40px); opacity: 0; } }
+@media (max-width: 880px) { .ai-research-shell .ai-research-inspector { display: block; width: min(100%, 420px); } }
+@media (prefers-reduced-motion: reduce) { .ai-research-shell .ai-research-inspector { animation: none; } }
+
+/* ── 会话列表：分组、搜索、更安静的条目 ── */
+.ai-research-shell .ai-session-list-head strong { font-size: 13px; font-weight: 500; letter-spacing: 0.04em; color: var(--v2-ink-2); }
+.ai-research-shell .ai-session-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 4px 10px 6px;
+  padding: 7px 10px;
+  border: 1px solid var(--v2-line);
+  border-radius: 10px;
+  color: var(--v2-ink-3);
+  font-size: 13px;
+  transition: border-color 0.2s;
+}
+.ai-research-shell .ai-session-search:focus-within { border-color: var(--v2-line-2); }
+.ai-research-shell .ai-session-search input { flex: 1; min-width: 0; border: 0; outline: 0; background: none; color: var(--v2-ink); font: inherit; }
+.ai-research-shell .ai-session-group-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 14px 12px 4px;
+  color: var(--v2-ink-3);
+  font-size: 11.5px;
+  letter-spacing: 0.14em;
+}
+.ai-research-shell .ai-session-group-title button { border: 0; background: none; color: var(--v2-ink-3); font-size: 11px; letter-spacing: 0; cursor: pointer; }
+.ai-research-shell .ai-session-group-title button:hover { color: var(--v2-ink); }
+.ai-research-shell .ai-session-item { border-radius: 10px; }
+.ai-research-shell .ai-session-main > span { font-size: 13.5px; font-weight: 400; color: var(--v2-ink-2); }
+.ai-research-shell .ai-session-item.active .ai-session-main > span { color: var(--v2-ink); }
+.ai-research-shell .ai-session-main small { color: var(--v2-ink-3); font-size: 11.5px; }
+.ai-research-shell .ai-session-item .ai-session-actions { opacity: 0; transition: opacity 0.15s; }
+.ai-research-shell .ai-session-item:hover .ai-session-actions,
+.ai-research-shell .ai-session-item:focus-within .ai-session-actions { opacity: 1; }
+
+/* 输入区与对话同宽（760），居中 */
+.ai-research-shell .ai-input-row { width: min(calc(100% - 96px), 760px); margin-bottom: 20px; }
+.ai-research-shell .ai-composer-docks { width: min(calc(100% - 96px), 760px); }
+.ai-research-shell .ai-composer { padding: 0 16px 12px; }
+.ai-research-shell .ai-task-dock,
+.ai-research-shell .ai-queue-dock { border-color: var(--v2-line); border-radius: 12px; background: rgba(14, 16, 21, 0.85); }
+
+/* 顶栏：一行标题，次要信息淡出 */
+.ai-research-shell .ai-panel-head { padding: 12px 22px; min-height: 54px; border-bottom: 1px solid var(--v2-line); }
+.ai-research-shell .ai-panel-head > div:first-child { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 12px; min-width: 0; }
+.ai-research-shell .ai-panel-head > div:first-child > strong { font-size: 14px; font-weight: 500; color: var(--v2-ink); }
+.ai-research-shell .ai-panel-head > div:first-child > span { color: var(--v2-ink-3); font-size: 12px; letter-spacing: 0; }
+
+/* 弹层要能伸出输入框之外 */
+.ai-research-shell .ai-input-row,
+.ai-research-shell .ai-composer,
+.ai-research-shell .ai-composer-toolbar,
+.ai-research-shell .ai-composer-options-wrap { overflow: visible; }
+.ai-research-shell .ai-input-row { z-index: 6; }
+.ai-research-shell .ai-composer-options-wrap .ai-composer-options.is-popover { z-index: 60; }
+
+/* ── 输入框焦点：只保留外框一圈，去掉里层文本框自己的焦点框 ── */
+.ai-research-shell .ai-composer textarea,
+.ai-research-shell .ai-composer textarea:focus,
+.ai-research-shell .ai-composer textarea:focus-visible,
+:root[data-visual] .ai-research-shell .ai-composer textarea:focus-visible {
+  outline: none;
+  box-shadow: none;
+  border-color: transparent;
+}
+.ai-research-shell .ai-composer-body { outline: none; box-shadow: none; }
+
+/* ── 字体：统一字号阶梯与中文字体栈，去掉终端式大写等宽 ── */
+.ai-research-shell {
+  --v2-font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei UI", "Noto Sans CJK SC", "Segoe UI", sans-serif;
+  --v2-mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  font-family: var(--v2-font);
+}
+.ai-research-shell :where(button, input, textarea, select, summary, label) { font-family: inherit; }
+.ai-research-shell :where(.ai-panel-head, .ai-session-list, .ai-messages, .ai-composer, .ai-research-inspector, .ai-task-dock, .ai-queue-dock) { font-family: var(--v2-font); }
+.ai-research-shell .ai-session-list-head strong { letter-spacing: 0.02em; }
+/* 过程、页脚等“小字”不低于 12px，字距归零 */
+.ai-research-shell .ai-process > summary,
+.ai-research-shell .ai-process > summary strong,
+.ai-research-shell .ai-message-footer,
+.ai-research-shell .ai-message-footer * { font-size: 12px; letter-spacing: 0; }
+.ai-research-shell .ai-composer textarea { font-size: 15px; line-height: 1.6; }
+.ai-research-shell .ai-evidence-references { font-size: 12px; letter-spacing: 0; }
+.ai-research-shell .ai-evidence-references * { font-size: 12px; letter-spacing: 0; }
+/* 工具结果卡：句式大小写、无衬线标题，数值保持等宽 */
+.ai-research-shell .ai-message .ai-inline-evidence-tool { font-family: var(--v2-font); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; color: var(--v2-ink-2); }
+.ai-research-shell .ai-message .ai-inline-evidence-item dt { font-family: var(--v2-font); font-size: 12px; letter-spacing: 0; text-transform: none; }
+.ai-research-shell .ai-message .ai-inline-evidence-item dd { font-family: var(--v2-mono); font-size: 12.5px; }
+.ai-research-shell .ai-message .ai-inline-evidence-time { font-family: var(--v2-font); font-size: 11.5px; letter-spacing: 0; }
+/* 正文里的行内代码：等宽但更克制 */
+.ai-research-shell .ai-markdown code { font-family: var(--v2-mono); font-size: 0.86em; }
+
+/* ═══ 修正：旧样式权重更高，之前的覆盖没生效 ═══ */
+.ai-research-host .ai-research-shell .ai-messages > .ai-message,
+.ai-research-host .ai-research-shell .ai-messages > .ai-message.user,
+.ai-research-host .ai-research-shell .ai-messages > .ai-message.assistant {
+  border: 0;
+  border-left: 0;
+  border-radius: 0;
+  background: none;
+  box-shadow: none;
+}
+.ai-research-host .ai-research-shell .ai-messages > .ai-message.user { padding: 0; }
+
+/* 过程：不要左竖线、不要缩进；一行胶囊，字号统一 */
+.ai-research-host .ai-research-shell .ai-message .ai-process { border: 0; padding: 0; margin: 0; }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary,
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary * { font-size: 12.5px; letter-spacing: 0; }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary { gap: 8px; }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary::before { content: none; }
+/* 分段进度条：回答完成后不再显示，只在运行中作为细线 */
+.ai-research-host .ai-research-shell .ai-message:not(.is-streaming) .ai-process > summary [class*="progress"] { display: none; }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary [class*="progress"] { height: 2px; margin: 0; }
+
+/* 页脚：用户消息不显示 sent 之类的状态词；助手消息的状态词也淡化 */
+.ai-research-host .ai-research-shell .ai-message.user .ai-message-status { display: none; }
+.ai-research-host .ai-research-shell .ai-message.user .ai-message-footer { justify-content: flex-end; opacity: 0.5; }
+
+/* 行内代码：浅底、无描边，不抢正文 */
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown code {
+  padding: 1px 6px;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(233, 230, 225, 0.075);
+  color: var(--v2-ink-2);
+  font-size: 0.84em;
+}
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown pre code { padding: 0; background: none; }
+
+/* 会话列表：当前会话只用淡底，不再描边；标题常规字重 */
+.ai-research-host .ai-research-shell .ai-session-item { border: 0; box-shadow: none; padding-block: 2px; }
+.ai-research-host .ai-research-shell .ai-session-item.active { background: rgba(233, 230, 225, 0.08); }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-main { padding-block: 6px; }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-main > span { font-weight: 400; font-size: 13.5px; }
+.ai-research-host .ai-research-shell .ai-session-item.active .ai-session-main > span { font-weight: 500; }
+
+/* 过程胶囊里的进度线：和文字同一行，细而短 */
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary { flex-wrap: nowrap; white-space: nowrap; }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary [class*="progress"] { flex: 0 0 120px; width: 120px; display: inline-flex; }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h3,
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h4,
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h5 { font-size: 12.5px; }
+
+/* 会话条目：标题与时间左对齐；状态点只在运行中出现，放右侧 */
+.ai-research-host .ai-research-shell .ai-session-item { position: relative; }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-status-dot { display: none; }
+.ai-research-host .ai-research-shell .ai-session-item.running .ai-session-status-dot { display: block; position: absolute; right: 14px; top: 17px; margin: 0; }
+.ai-research-host .ai-research-shell .ai-session-item.has-unread::after { content: ""; position: absolute; right: 14px; top: 17px; width: 6px; height: 6px; border-radius: 50%; background: var(--accent-bright, #b9a9d6); }
+.ai-research-host .ai-research-shell .ai-session-item.has-unread { box-shadow: none; }
+
+/* ═══ v2.1：紧凑字号阶梯 + 配色/元素/布局收敛 ═══
+   字号：正文 14 / 用户气泡 13.5 / 界面 12–13 / 次要 11–11.5（不再有 9–10px 的字）。 */
+.ai-research-host .ai-research-shell {
+  --t-body: 14px;
+  --t-ui: 13px;
+  --t-small: 12px;
+  --t-tiny: 11.5px;
+  --col: 720px;
+}
+
+/* 页眉 */
+.ai-research-host .ai-research-shell .ai-panel-head { padding: 10px 22px; min-height: 48px; }
+.ai-research-host .ai-research-shell .ai-panel-head > div:first-child > strong { font-size: 13.5px; }
+.ai-research-host .ai-research-shell .ai-panel-head > div:first-child > span { font-size: var(--t-tiny); }
+
+/* 对话列宽与间距 */
+.ai-research-host .ai-research-shell .ai-messages > .ai-message { width: min(var(--col), 100%); }
+.ai-research-host .ai-research-shell .ai-input-row,
+.ai-research-host .ai-research-shell .ai-composer-docks { width: min(calc(100% - 96px), var(--col)); }
+.ai-research-host .ai-research-shell .ai-messages > .ai-message.user { margin: 22px 0 14px; }
+.ai-research-host .ai-research-shell .ai-messages > .ai-message.assistant { margin: 4px 0 30px; gap: 12px; }
+
+/* 正文 */
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown { font-size: var(--t-body); line-height: 1.85; color: #cfcbc5; }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown p { margin: 0 0 10px; }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown li { margin: 4px 0; line-height: 1.8; }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown strong { font-weight: 600; color: #ebe8e3; }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h3,
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h4,
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown h5 { margin: 22px 0 6px; font-size: var(--t-tiny); letter-spacing: 0.12em; color: var(--v2-ink-3); }
+.ai-research-host .ai-research-shell .ai-message.assistant .ai-markdown code { font-size: 0.86em; }
+.ai-research-host .ai-research-shell .ai-message.user .ai-answer,
+.ai-research-host .ai-research-shell .ai-message.user p { font-size: 13.5px; line-height: 1.6; }
+.ai-research-host .ai-research-shell .ai-message.user .ai-answer { padding: 8px 14px; background: rgba(233, 230, 225, 0.06); }
+
+/* 过程胶囊、页脚、引用 */
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary,
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary * { font-size: var(--t-small); }
+.ai-research-host .ai-research-shell .ai-message .ai-process > summary { padding: 5px 12px; }
+.ai-research-host .ai-research-shell .ai-message-footer,
+.ai-research-host .ai-research-shell .ai-message-footer * { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-evidence-references { gap: 6px; padding-top: 4px; border-top: 0; }
+.ai-research-host .ai-research-shell .ai-evidence-references > span:first-child { font-size: var(--t-tiny); color: var(--v2-ink-3); }
+.ai-research-host .ai-research-shell .ai-evidence-references button,
+.ai-research-host .ai-research-shell .ai-evidence-references span:not(:first-child) { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-evidence-references button { padding: 2px 9px; border: 0; border-radius: 999px; background: rgba(233, 230, 225, 0.06); color: var(--v2-ink-2); }
+.ai-research-host .ai-research-shell .ai-evidence-references button:hover { background: rgba(233, 230, 225, 0.11); color: var(--v2-ink); }
+
+/* 工具结果卡：无描边的浅底，数值等宽 */
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence { gap: 6px; padding-top: 4px; border-top: 0; }
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence-card { border: 0; border-radius: 10px; background: rgba(233, 230, 225, 0.04); padding: 9px 12px; }
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence-tool { font-size: var(--t-small); }
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence-item dt { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence-item dd { font-size: var(--t-small); color: var(--v2-ink-2); }
+.ai-research-host .ai-research-shell .ai-message .ai-inline-evidence-time { font-size: 11px; }
+
+/* 证据天平迷你条 */
+.ai-research-host .ai-research-shell .ai-evidence-strip { border: 0; border-radius: 999px; background: rgba(233, 230, 225, 0.05); padding: 4px 12px; font-size: var(--t-small); }
+
+/* 结论卡：更紧凑 */
+.ai-research-host .ai-research-shell .ai-verdict { padding: 16px 18px 14px; border-radius: 14px; }
+.ai-research-host .ai-research-shell .ai-verdict-top { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-verdict-badge { padding: 2px 10px; font-size: var(--t-small); }
+.ai-research-host .ai-research-shell .ai-verdict-say { margin-top: 12px; font-size: 15.5px; line-height: 1.6; }
+.ai-research-host .ai-research-shell .ai-verdict-grid { gap: 12px 20px; margin-top: 14px; padding-top: 12px; }
+.ai-research-host .ai-research-shell .ai-verdict-grid dt { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-verdict-grid dd { margin-top: 3px; font-size: 14.5px; }
+.ai-research-host .ai-research-shell .ai-verdict-foot { margin-top: 12px; }
+.ai-research-host .ai-research-shell .ai-verdict-foot button { padding: 4px 12px; font-size: var(--t-small); }
+
+/* 会话列表 */
+.ai-research-host .ai-research-shell .ai-session-list-head strong { font-size: var(--t-ui); }
+.ai-research-host .ai-research-shell .ai-session-search { margin: 2px 10px 4px; padding: 6px 10px; font-size: var(--t-small); }
+.ai-research-host .ai-research-shell .ai-session-group-title { margin: 12px 12px 3px; font-size: 11px; letter-spacing: 0.1em; }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-main { padding-block: 5px; }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-main > span { font-size: var(--t-ui); line-height: 1.4; }
+.ai-research-host .ai-research-shell .ai-session-item .ai-session-main small { margin-top: 1px; font-size: 11px; }
+
+/* 输入区 */
+.ai-research-host .ai-research-shell .ai-composer textarea { font-size: var(--t-body); line-height: 1.6; }
+.ai-research-host .ai-research-shell .ai-composer { border-radius: 16px; }
+.ai-research-host .ai-research-shell .ai-send { width: 34px; height: 34px; }
+.ai-research-host .ai-research-shell .ai-send svg { width: 14px; height: 14px; }
+.ai-research-host .ai-research-shell .ai-options-chip { height: 26px; font-size: var(--t-small); }
+.ai-research-host .ai-research-shell .ai-composer-toolbar { font-size: var(--t-tiny); }
+.ai-research-host .ai-research-shell .ai-task-dock > button,
+.ai-research-host .ai-research-shell .ai-queue-dock > button { font-size: var(--t-small); }
+
+/* 右侧快捷图标：更淡更小 */
+.ai-research-host .ai-research-shell .ai-inspector-shortcuts { opacity: 0.8; }
+.ai-research-host .ai-research-shell .ai-inspector-shortcut { color: var(--v2-ink-3); }
+.ai-research-host .ai-research-shell .ai-inspector-shortcut:hover { color: var(--v2-ink); }
+
+/* 没有交易计划的结论卡（只是「持有 / 观望」）：收成一条，不再占一整块 */
+.ai-research-host .ai-research-shell .ai-verdict.is-slim { padding: 12px 16px 12px; border-radius: 12px; }
+.ai-research-host .ai-research-shell .ai-verdict.is-slim .ai-verdict-say { margin-top: 8px; font-size: 14px; font-weight: 400; line-height: 1.65; color: var(--v2-ink-2); }
+.ai-research-host .ai-research-shell .ai-verdict.is-slim .ai-verdict-foot { margin-top: 10px; }
+/* 引用证据的标签与定位按钮 */
+.ai-research-host .ai-research-shell .ai-evidence-references > :first-child:not(button) { font-size: var(--t-tiny); letter-spacing: 0; color: var(--v2-ink-3); }
+.ai-research-host .ai-research-shell .ai-evidence-references .ai-evidence-anchor { border: 1px dashed var(--v2-line-2); background: none; font-size: var(--t-tiny); }
+
+/* 工具读取结果：默认只显示最近 3 张，其余折叠 */
+.ai-research-host .ai-research-shell .ai-inline-evidence-toggle { justify-self: start; padding: 3px 11px; border: 1px solid var(--v2-line); border-radius: 999px; background: none; color: var(--v2-ink-3); font-size: var(--t-tiny); cursor: pointer; transition: 0.2s; }
+.ai-research-host .ai-research-shell .ai-inline-evidence-toggle:hover { color: var(--v2-ink); border-color: var(--v2-line-2); }
+
+/* 结论卡：涨跌底色用原色的淡层，不是灰 */
+.ai-research-host .ai-research-shell .ai-verdict.is-long { --vt: 255, 77, 106; }
+.ai-research-host .ai-research-shell .ai-verdict.is-short { --vt: 25, 217, 154; }
+.ai-research-host .ai-research-shell .ai-verdict.is-hold,
+.ai-research-host .ai-research-shell .ai-verdict.is-abstain { --vt: 216, 178, 122; }
+.ai-research-host .ai-research-shell .ai-verdict { background: linear-gradient(180deg, rgba(var(--vt), 0.1), rgba(11, 13, 18, 0.35)); border-color: rgba(var(--vt), 0.28); }

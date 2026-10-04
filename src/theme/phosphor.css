@@ -98,6 +98,25 @@
   --line-tinted-strong: color-mix(in oklab, var(--ai) 38%, transparent);
 }
 
+/* AI 研究在磷光外观下再压一档：强调色换成中等饱和、稍偏冷的紫（--ai-calm），比鲜亮的 AI 紫收敛，但仍有颜色。
+   自动化与 Agent 库仍用上面的 AI 紫。写死的紫色由 phosphor-ai-calm.css（脚本生成）覆盖。 */
+:root[data-visual="phosphor"] {
+  --ai-calm: #8f7bd8;
+  --ai-calm-bright: #b7a7f0;
+  --ai-calm-soft: rgba(143, 123, 216, 0.14);
+}
+:root[data-visual="phosphor"] .ai-research-shell {
+  --accent: var(--ai-calm);
+  --accent-bright: var(--ai-calm-bright);
+  --purple: var(--ai-calm);
+  --purple-2: color-mix(in oklab, var(--ai-calm) 80%, black);
+  --accent-dim: color-mix(in oklab, var(--ai-calm) 55%, transparent);
+  --focus: var(--ai-calm-bright);
+  --surface-selected: var(--ai-calm-soft);
+  --line-tinted: color-mix(in oklab, var(--ai-calm) 20%, transparent);
+  --line-tinted-strong: color-mix(in oklab, var(--ai-calm) 34%, transparent);
+}
+
 /* ============================================================
  * 1. 页面底色：平涂，不再叠加紫色光晕与暗角
  * ============================================================ */
