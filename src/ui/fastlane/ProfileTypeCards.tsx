@@ -1,12 +1,15 @@
 import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import clsx from "clsx";
-import { ChevronDown, Gauge, Sparkles, Zap } from "lucide-react";
+import { ChevronDown, Crosshair, Gauge, Sparkles, Zap } from "lucide-react";
 import { FASTLANE_MODE_ENABLED } from "./fastlaneMode";
 import "./fastlane.css";
 
 /**
- * C29.5 / §9.1：新建 Profile 的两张卡片。
+ * C29.5 / §9.1：新建 Profile 的卡片（经典 AI / 交易员 / 快判）。
+ *
+ * 交易员卡片创建的仍是 AI 类型 Profile，只是运行模式为 `briefing`（代码先算简报，AI 只做判断）；
+ * 调用方据 `onPick("trader")` 设置 `contextMode`。
  *
  * 两张卡等宽并列、键盘可达（原生 button），各含 3 条原理与一个"查看原理"展开（不跳转）。
  * 钩子：`[data-profile-card="ai"]` / `[data-profile-card="fastlane"]`。
@@ -15,8 +18,10 @@ import "./fastlane.css";
  * 组件与卡片定义**原样保留**，下个版本把 `FASTLANE_MODE_ENABLED` 翻 `true` 即可恢复两张卡。
  */
 
+export type ProfileCardKind = "ai" | "trader" | "fastlane";
+
 type ProfileTypeCardsProps = {
-  onPick: (type: "ai" | "fastlane") => void;
+  onPick: (type: ProfileCardKind) => void;
   disabled?: boolean;
   /**
    * 是否渲染快判卡片。**默认跟总开关**（`FASTLANE_MODE_ENABLED`）——
@@ -44,10 +49,10 @@ export function ProfileTypeCards({
   fastlaneEnabled = FASTLANE_MODE_ENABLED
 }: ProfileTypeCardsProps) {
   const { t } = useTranslation(["automation", "common"]);
-  const [openDetail, setOpenDetail] = useState<"ai" | "fastlane" | null>(null);
+  const [openDetail, setOpenDetail] = useState<ProfileCardKind | null>(null);
 
   const cards: Array<{
-    type: "ai" | "fastlane";
+    type: ProfileCardKind;
     icon: ReactNode;
     title: string;
     subtitle: string;
@@ -67,6 +72,19 @@ export function ProfileTypeCards({
         [t("profileCardAiPoint3Title"), t("profileCardAiPoint3Detail")]
       ],
       detail: <p>{t("profileCardAiDetail")}</p>
+    },
+    {
+      type: "trader",
+      icon: <Crosshair size={18} />,
+      title: t("profileCardTraderTitle"),
+      subtitle: t("profileCardTraderSubtitle"),
+      fit: t("profileCardTraderFit"),
+      points: [
+        [t("profileCardTraderPoint1Title"), t("profileCardTraderPoint1Detail")],
+        [t("profileCardTraderPoint2Title"), t("profileCardTraderPoint2Detail")],
+        [t("profileCardTraderPoint3Title"), t("profileCardTraderPoint3Detail")]
+      ],
+      detail: <p>{t("profileCardTraderDetail")}</p>
     },
     {
       type: "fastlane",
@@ -105,6 +123,10 @@ export function ProfileTypeCards({
                   <span className="fastlane-card__sparkline">
                     <i style={{ height: "26%" }} /><i style={{ height: "48%" }} /><i style={{ height: "36%" }} /><i style={{ height: "72%" }} /><i style={{ height: "58%" }} /><i style={{ height: "88%" }} />
                   </span>
+                ) : card.type === "trader" ? (
+                  <span className="fastlane-card__brief">
+                    <i style={{ width: "72%" }} /><i style={{ width: "54%" }} /><i style={{ width: "86%" }} /><i style={{ width: "40%" }} />
+                  </span>
                 ) : (
                   <span className="fastlane-card__nodes">
                     <i /><i /><i /><i />
@@ -125,7 +147,7 @@ export function ProfileTypeCards({
                   disabled={disabled}
                   onClick={() => onPick(card.type)}
                 >
-                  {card.type === "fastlane" ? <Zap size={13} /> : <Sparkles size={13} />}
+                  {card.type === "fastlane" ? <Zap size={13} /> : card.type === "trader" ? <Crosshair size={13} /> : <Sparkles size={13} />}
                   {t("profileCardCreate", { name: card.title })}
                 </button>
                 <button

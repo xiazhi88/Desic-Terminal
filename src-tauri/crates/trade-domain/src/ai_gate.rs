@@ -115,7 +115,7 @@ fn trim(value: f64) -> String {
 }
 
 /// 风险预算下最多能开多少张；`None` 表示信息不足算不出。第二个值为 true 表示连最小张数都超出预算。
-fn max_size_within_budget(sizing: &AiSizingInputs, equity: f64, risk_pct: f64) -> Option<(String, bool)> {
+pub fn max_size_within_budget(sizing: &AiSizingInputs, equity: f64, risk_pct: f64) -> Option<(String, bool)> {
     let budget = equity * risk_pct / 100.0;
     if !(budget.is_finite() && budget > 0.0) {
         return None;

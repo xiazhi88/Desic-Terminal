@@ -1,5 +1,6 @@
 mod agent_draft;
 mod agents;
+mod briefing;
 mod builtin_bodies;
 mod draft_content;
 mod usage;
@@ -41,6 +42,11 @@ pub use agents::{
     AGENT_SCOPE_INTELLIGENCE, AGENT_SCOPE_MARKET, AGENT_SOURCES, AGENT_SOURCE_AI,
     AGENT_SOURCE_BUILTIN, AGENT_SOURCE_CUSTOM, AGENT_SUMMARY_MAX_CHARS, BUILTIN_AGENT_SPECS,
     REMOVED_BUILTIN_AGENTS, RemovedBuiltinAgent,
+};
+pub use briefing::{
+    format_price, render_briefing, BriefingAccount, BriefingBudget, BriefingDoc, BriefingNote,
+    BriefingOpportunity, BriefingOrder, BriefingPosition, BriefingSizing, BriefingSymbol,
+    BriefingTimeframe, BRIEFING_MAX_CHARS,
 };
 pub use usage::{
     build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,

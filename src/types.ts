@@ -2091,6 +2091,8 @@ export type AiCodexTemplatePreview = {
   notes: string[];
 };
 
+export type AiProfileContextMode = "tools" | "briefing";
+
 export type AiProfileRiskSettings = {
   /** 单笔止损（含双边手续费）最多占权益的百分比。 */
   riskPerTradePct: number;
@@ -2180,6 +2182,8 @@ export type AiAgentProfile = {
    * `minimal` = 只调工具、不输出任何正文，收尾 summary 一句话（≤160 字符）。
    */
   singleAgentMode: AiSingleAgentMode;
+  /** 运行模式：`tools` = 经典模式（AI 自己查数据）；`briefing` = 交易员模式（代码先算好简报，AI 只做判断）。 */
+  contextMode?: AiProfileContextMode;
   /** 勾选的 Agent 库 id（顺序即勾选顺序；重复/不存在的 id 由 Rust 侧丢弃）。 */
   enabledAgentIds: string[];
   /**

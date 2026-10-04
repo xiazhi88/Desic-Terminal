@@ -1,0 +1,29 @@
+/* AI 自动化 · 运行记录：经典模式 vs 交易员模式（只在出现过交易员模式的运行时显示） */
+.mode-compare {
+  margin: 0 0 12px;
+  padding: 12px 14px;
+  border: 1px solid #25252a;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.mode-compare header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.mode-compare header strong { color: #e4e4e8; font-size: 12px; font-weight: 650; }
+.mode-compare header span { flex: 1 1 auto; min-width: 0; color: var(--weak); font-size: 11px; }
+
+.mode-compare table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.mode-compare th, .mode-compare td { padding: 6px 8px; text-align: right; white-space: nowrap; }
+.mode-compare thead th { color: var(--weak); font-size: 11px; font-weight: 500; border-bottom: 1px solid #25252a; }
+.mode-compare tbody th { text-align: left; color: #c9c9cf; font-weight: 600; }
+.mode-compare tbody td { color: #d8d8dc; }
+.mode-compare tbody td small { color: var(--weak); font-size: 11px; }
+.mode-compare tbody tr + tr th, .mode-compare tbody tr + tr td { border-top: 1px solid rgba(255, 255, 255, 0.04); }
+.mode-compare tr.is-trader th { color: #f1cf8a; }
+.mode-compare td.is-up { color: var(--up); }
+.mode-compare td.is-down { color: var(--down); }

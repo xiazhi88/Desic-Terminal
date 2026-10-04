@@ -14,6 +14,7 @@ import { gsap } from "gsap";
 import { useTranslation } from "react-i18next";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { WakeConditionList, wakeConditionsOf, useViewText } from "./wakeConditionView";
+import { ModeComparison } from "./automation/ModeComparison";
 import {
   Activity,
   AlertTriangle,
@@ -558,6 +559,8 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
     triage: normalizeTriage(profile.triage),
     // C24：缺字段/非法值一律回落 standard。
     singleAgentMode: profile.singleAgentMode === "minimal" ? "minimal" : "standard",
+    // 缺字段 / 非法值 = 经典模式（与 Rust 默认一致）。
+    contextMode: profile.contextMode === "briefing" ? "briefing" : "tools",
     // C29：旧 Profile / 缺字段 = "ai"，行为完全不变；快判字段仅在 fastlane 下被使用。
     profileType: profile.profileType === "fastlane" ? "fastlane" : "ai",
     // 迁移（老 multiAgentMode / 老模板）由 Rust 读侧完成；这里只做缺字段兜底。
@@ -608,6 +611,7 @@ function createProfile(accounts: AccountSummary[], defaultModelId: string): AiAg
     profileType: "ai",
     // C24：单 Agent 模式默认 standard（极简需用户显式选择）。
     singleAgentMode: "standard",
+    contextMode: "tools",
     enabledAgentIds: [],
     createdAt: now,
     updatedAt: now
@@ -1097,11 +1101,17 @@ function ProfileCard({
         <div className="automation-profile-card__identity">
           <strong title={profile.name}>{profile.name}</strong>
           <div className="automation-profile-card__tags">
+            {profile.profileType !== "fastlane" ? (
+              <em className={profile.contextMode === "briefing" ? "is-trader" : "is-classic"} data-profile-kind={profile.contextMode === "briefing" ? "trader" : "classic"}>
+                {profile.contextMode === "briefing" ? t("automation:profileContextModeBriefing") : t("automation:profileContextModeTools")}
+              </em>
+            ) : null}
             <em>{t(permissionModeI18nKey(profile.mode))}</em>
             <em className={profile.environment === "live" ? "is-live" : "is-demo"}>
               {profile.environment === "live" ? t("common:live") : t("common:demo")}
             </em>
-            <em className="is-quiet">{collaboration}</em>
+            {/* 交易员 Profile 只用单个交易员，协作说明不适用。 */}
+            {profile.contextMode === "briefing" ? null : <em className="is-quiet">{collaboration}</em>}
           </div>
         </div>
         {/* Enabling is the one setting changed often enough to belong on the card. */}
@@ -1353,13 +1363,20 @@ function ProfileEditor({
     onChange({ skillVersions: next, skillVersionModes: nextModes });
   };
 
+  const trader = draft.contextMode === "briefing";
   return (
     <div className="automation-profile-editor">
       <div className="automation-editor-head">
         <div className="automation-editor-title">
-          <span className="automation-editor-mark"><Bot size={16} /></span>
+          <span className={clsx("automation-editor-mark", trader && "is-trader")}>{trader ? <Crosshair size={16} /> : <Bot size={16} />}</span>
           <div>
-            <strong>{draft.name || t("automation:profileUnnamed")}</strong>
+            <strong>
+              {draft.name || t("automation:profileUnnamed")}
+              {/* 类型在创建时决定、不可修改：这里只读展示。 */}
+              <em className={clsx("automation-editor-type", trader && "is-trader")} data-profile-kind={trader ? "trader" : "classic"}>
+                {trader ? t("automation:profileCardTraderTitle") : t("automation:profileCardAiTitle")}
+              </em>
+            </strong>
             <span>{t(permissionModeHintI18nKey(normalizePermissionMode(draft.mode)))}</span>
           </div>
         </div>
@@ -1520,6 +1537,10 @@ function ProfileEditor({
       {/* C20.1（改写版）/ C31：迁移提示的**唯一渲染点**（预览夹具共用同一组件，见 ProfileMigrationNotes）。 */}
       <ProfileMigrationNotes notes={draft.migrationNotes} />
 
+      {trader ? (
+        <TraderSettingsSection />
+      ) : (
+      <>
       <ProfileAgentSelector
         agents={agents}
         responsibilities={agentResponsibilities}
@@ -1541,6 +1562,8 @@ function ProfileEditor({
         disabled={busy}
         onChange={(triage) => onChange({ triage })}
       />
+      </>
+      )}
 
       <div className="automation-form-section">
         <strong><Gauge size={13} />{t("automation:profileBackgroundLimits")}</strong>
@@ -2115,6 +2138,7 @@ function RunsView({
   if (viewMode === "pulse") {
     return (
       <div className="automation-runs-view automation-runs-view--pulse" data-runs-view-mode="pulse">
+        <ModeComparison refreshKey={items.length} />
         <WatchPulse
           profiles={pulseProfiles ?? [...profiles.values()]}
           liveRuns={items}
@@ -2132,6 +2156,7 @@ function RunsView({
 
   return (
     <div className="automation-runs-view" data-runs-view-mode="list">
+      <ModeComparison refreshKey={items.length} />
       <div className="automation-run-audit-head">
         <div className="automation-run-stat-strip">
           <div><span>{automationText("runCurrentRange", "Current range", "当前范围")}</span><strong>{stats.total}</strong><small>{i18n.t("automation:runs")}</small></div>
@@ -2508,6 +2533,24 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
           </div>
         ) : null}
       </section>
+
+      {/* 交易员模式：本轮开始时代码生成的简报（与提示词里的一致），默认折叠。 */}
+      {runBriefing(detail.initialMarketSnapshot) ? (() => {
+        const briefing = runBriefing(detail.initialMarketSnapshot)!;
+        return (
+          <details className="automation-run-briefing" data-run-briefing>
+            <summary>
+              <Layers size={13} aria-hidden="true" />
+              <span>{i18n.t("automation:runBriefing")}</span>
+              <small>{i18n.t("automation:runBriefingMeta", { chars: briefing.chars, ms: briefing.buildMs })}</small>
+            </summary>
+            {briefing.missing.length > 0 ? (
+              <p className="automation-run-briefing__missing">{i18n.t("automation:runBriefingMissing", { items: briefing.missing.join("、") })}</p>
+            ) : null}
+            <pre data-i18n-skip>{briefing.text}</pre>
+          </details>
+        );
+      })() : null}
 
       {/* C27 本轮决策（默认区）：等待观察 / 交易落地状态 —— 字段与组件原样未动，
           只是上移到"结果 + 关键数字"之后，让默认视图三块连读（原来它被夹在折叠区之后）。 */}
@@ -3218,6 +3261,35 @@ function runStatusTone(status: string) {
   if (status === "skipped") return "skipped";
   if (status === "failed" || status === "cancelled") return "danger";
   return "running";
+}
+
+/** 交易员模式运行存进初始快照的简报（`initialMarketSnapshot.briefing`）；经典模式没有。 */
+function runBriefing(snapshot: unknown): { text: string; chars: number; buildMs: number; missing: string[] } | null {
+  const briefing = snapshot && typeof snapshot === "object" ? (snapshot as { briefing?: unknown }).briefing : null;
+  if (!briefing || typeof briefing !== "object") return null;
+  const value = briefing as { text?: unknown; chars?: unknown; buildMs?: unknown; missing?: unknown };
+  if (typeof value.text !== "string" || !value.text.trim()) return null;
+  return {
+    text: value.text,
+    chars: typeof value.chars === "number" ? value.chars : value.text.length,
+    buildMs: typeof value.buildMs === "number" ? value.buildMs : 0,
+    missing: Array.isArray(value.missing) ? value.missing.filter((item): item is string => typeof item === "string") : []
+  };
+}
+
+/** 交易员 Profile 的专属设置区：说明简报内容、可用工具与决策方式（经典 Profile 的专家 / 试判在这里不适用）。 */
+function TraderSettingsSection() {
+  const { t } = useTranslation("automation");
+  return (
+    <div className="automation-form-section automation-trader-settings" data-trader-settings>
+      <strong><Crosshair size={13} />{t("profileTraderSettings")}</strong>
+      <ul>
+        <li><span>{t("profileTraderBriefingTitle")}</span>{t("profileTraderBriefingDetail")}</li>
+        <li><span>{t("profileTraderToolsTitle")}</span>{t("profileTraderToolsDetail")}</li>
+        <li><span>{t("profileTraderDecisionTitle")}</span>{t("profileTraderDecisionDetail")}</li>
+      </ul>
+    </div>
+  );
 }
 
 function runStatusTitle(status: string) {
@@ -4818,6 +4890,7 @@ function AiAutomationPanelComponent({
     onConfirm: () => void;
   } | null>(null);
   const [profileQuery, setProfileQuery] = useState("");
+  const [profileKindFilter, setProfileKindFilter] = useState<"all" | "classic" | "trader">("all");
   const [loading, setLoading] = useState(true);
   const [sectionLoading, setSectionLoading] = useState<AiAutomationTab | null>(null);
   const [automationCounts, setAutomationCounts] = useState<AiAutomationCounts>(() => automationOverviewCache?.counts ?? EMPTY_AUTOMATION_COUNTS);
@@ -5524,8 +5597,9 @@ function AiAutomationPanelComponent({
     setProfileEditorOpen(true);
   }, [accounts, aiConfig?.activeModelId, aiConfig?.models, onNotify, summary?.profiles, t]);
 
-  const createNewProfile = useCallback(() => {
+  const createNewProfile = useCallback((contextMode: "tools" | "briefing" = "tools") => {
     const profile = createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || "");
+    profile.contextMode = contextMode;
     const desired = onboardingActive ? t("automation:profileOnboardingName") : t("automation:profileDefaultName");
     // Two Profiles sharing a name are indistinguishable in the grid, in run
     // records and in notifications, so the default gets the first free suffix.
@@ -5601,9 +5675,12 @@ function AiAutomationPanelComponent({
     ? (summary?.optimizationSuggestions ?? []).filter((item) => profileUsesSkill(scopeProfile, item.currentSkillId))
     : (summary?.optimizationSuggestions ?? []);
   const normalizedProfileQuery = profileQuery.trim().toLowerCase();
-  const filteredProfiles = normalizedProfileQuery
-    ? profiles.filter((item) => [item.name, item.accountId, item.environment, ...item.symbols].some((value) => String(value ?? "").toLowerCase().includes(normalizedProfileQuery)))
-    : profiles;
+  // 两种 Profile 都存在时才显示类型筛选；只剩一种时筛选自动失效，避免列表被一个看不见的条件清空。
+  const hasBothProfileKinds = profiles.some((item) => item.contextMode === "briefing") && profiles.some((item) => item.contextMode !== "briefing");
+  const kindFilter = hasBothProfileKinds ? profileKindFilter : "all";
+  const filteredProfiles = profiles
+    .filter((item) => kindFilter === "all" || (kindFilter === "trader") === (item.contextMode === "briefing"))
+    .filter((item) => !normalizedProfileQuery || [item.name, item.accountId, item.environment, ...item.symbols].some((value) => String(value ?? "").toLowerCase().includes(normalizedProfileQuery)));
   const runningProfileIds = new Set((summary?.runs ?? []).filter((item) => ["queued", "running"].includes(item.status)).map((item) => item.profileId));
   const activeProfiles = profiles.filter((item) => item.enabled).length;
   const running = loadedSections.has("runs")
@@ -5746,6 +5823,15 @@ function AiAutomationPanelComponent({
                 <input value={profileQuery} onChange={(event) => setProfileQuery(event.target.value)} placeholder={t("automation:profileSearchPlaceholder")} />
                 {profileQuery ? <button type="button" onClick={() => setProfileQuery("")} title={t("automation:profileClearSearch")}><X size={12} /></button> : null}
               </label>
+              {hasBothProfileKinds ? (
+                <div className="automation-segmented compact" role="tablist" aria-label={t("automation:profileKindFilter")} data-profile-kind-filter>
+                  {(["all", "classic", "trader"] as const).map((kind) => (
+                    <button type="button" role="tab" key={kind} aria-selected={kindFilter === kind} className={kindFilter === kind ? "active" : ""} onClick={() => setProfileKindFilter(kind)}>
+                      {kind === "all" ? t("automation:profileKindAll") : kind === "trader" ? t("automation:profileContextModeBriefing") : t("automation:profileContextModeTools")}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
               <button className="automation-create-profile" onClick={openProfileTypePicker} title={t("automation:profileNew")}><Plus size={14} />{t("automation:profileCreate")}</button>
             </div>
             {profiles.length === 0 ? (
@@ -5787,7 +5873,7 @@ function AiAutomationPanelComponent({
                       onPick={(type) => {
                         setProfileTypePickerOpen(false);
                         if (type === "fastlane") createFastlaneProfile();
-                        else createNewProfile();
+                        else createNewProfile(type === "trader" ? "briefing" : "tools");
                       }}
                     />
                   </div>
@@ -6750,6 +6836,29 @@ const AUTOMATION_PREVIEW_MODEL_ERROR_DETAIL: AiAutomationRunDetail = {
 
 const AUTOMATION_PREVIEW_SINGLE_RUN_DETAIL: AiAutomationRunDetail = {
   ...AUTOMATION_PREVIEW_RUN_DETAIL,
+  // 交易员模式：运行详情里可折叠的简报（与 Rust `render_briefing` 的输出格式一致）。
+  initialMarketSnapshot: {
+    briefing: {
+      chars: 1046,
+      buildMs: 412,
+      missing: ["BTC-USDT-SWAP:orderbook"],
+      text: [
+        "【交易员简报】生成于 2026-10-04 21:30:05 UTC+8。以下数字由代码根据本地行情与账户计算；标「不可用」的数据不要猜。",
+        "## 账户与风险预算",
+        "- 权益 1520.30 U，可用 1210.00 U，快照 3 秒前",
+        "- 今日已实现 -12.40 U；今天还能亏 33.21 U（日亏线 3%）",
+        "- 单笔风险预算 15.20 U（1%）；净盈亏比下限 1.2；本 Profile 敞口 1/2",
+        "- 持仓 BTC-USDT-SWAP 多 3 张 @ 84210.5，标记 84760，浮盈亏 +16.50 U；止损 83500（-1.49%）；止盈 未挂；强平 70100（-17.30%）",
+        "## BTC-USDT-SWAP",
+        "- 价格 84763.3；5m +0.05%，1h -0.31%，24h +0.24%（24h 高 84998 / 低 83820）",
+        "- 结构：15m 震荡，区间 84500–85000，位于 53%；1h 上升，区间 83800–85500，位于 56%，摆动高 85500 / 低 84100；4h 上升，区间 82100–85500，位于 78%",
+        "- 波动：ATR 5m 45.2 / 1h 210.5 / 4h 620；状态 趋势；RSI 1h 56.2，4h 61.0",
+        "- 仓位参考：按 1×ATR(1h) 止损（距离 210.5），单笔风险预算内最多 7 张（每张 0.01 BTC，最小 0.01 张）",
+        "- 盘口：点差 不可用 bp，一档失衡 不可用，±5bp 深度 不可用",
+        "- 衍生品：资金费率 +0.0100%（下次 10-05 00:00）；持仓量 1h +0.80%，24h -2.10%；近 1h 主动买占比 54%；近 1h 爆仓 不可用"
+      ].join("\n")
+    }
+  },
   run: {
     ...AUTOMATION_PREVIEW_RUN_DETAIL.run,
     id: "run-preview-single-agent",
@@ -6990,6 +7099,7 @@ export function AutomationPreview() {
   const [previewTriage, setPreviewTriage] = useState(createDefaultTriage);
   // C24：两个独立夹具状态 —— config 视图默认「标准」（契约默认值），minimal 视图固定演示「极简」。
   const [previewSingleAgentMode, setPreviewSingleAgentMode] = useState<AiSingleAgentMode>("standard");
+  const [previewContextMode, setPreviewContextMode] = useState<"tools" | "briefing">("tools");
   const [previewMinimalAgentMode, setPreviewMinimalAgentMode] = useState<AiSingleAgentMode>("minimal");
   // C29：卡片选择页与快判配置窗口的夹具状态。
   // `?view=fastlane-config&legacy=1` → 以历史 `advisor` 快判 Profile 起步，覆盖老数据兜底路径。
@@ -7247,6 +7357,16 @@ export function AutomationPreview() {
                     渲染走产品同一条路径（`ProfileMigrationNotes`），预览页因此能回归
                     「剔除已删 id → migrationNotes → 可见提示」这条链路，而不是只靠真机数据。 */}
                 <ProfileMigrationNotes notes={AUTOMATION_PREVIEW_PROFILE_MIGRATION_NOTES} />
+                {/* 预览专用：切换两种 Profile 的编辑器差异（真实编辑器里类型创建后不可改）。 */}
+                <div className="automation-segmented compact" role="tablist" data-preview-profile-kind>
+                  {(["tools", "briefing"] as const).map((mode) => (
+                    <button type="button" role="tab" key={mode} aria-selected={previewContextMode === mode} className={previewContextMode === mode ? "active" : ""} onClick={() => setPreviewContextMode(mode)} data-preview-kind={mode}>
+                      {mode === "briefing" ? automationText("profileCardTraderTitle", "Trader Profile", "交易员 Profile") : automationText("profileCardAiTitle", "Classic AI Profile", "经典 AI Profile")}
+                    </button>
+                  ))}
+                </div>
+                {previewContextMode === "briefing" ? <TraderSettingsSection /> : (
+                <>
                 <ProfileAgentSelector
                   agents={AUTOMATION_PREVIEW_AGENTS}
                   responsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}
@@ -7260,6 +7380,8 @@ export function AutomationPreview() {
                   onReload={() => undefined}
                 />
                 <TriageSettings value={previewTriage} onChange={setPreviewTriage} />
+                </>
+                )}
               </div>
             </div>
           ) : (

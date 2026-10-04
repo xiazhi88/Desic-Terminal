@@ -1366,6 +1366,15 @@ async function verifyFastlaneWithdrawn(page, scenario) {
   if (aiBullets < 3) {
     throw new Error(`${scenario.label}/fastlane-off: AI Profile 卡片应至少有 3 条原理（实际 ${aiBullets}）`);
   }
+  // 交易员卡片（AI 类型 + briefing 运行模式）与经典 AI 卡片等宽并列。
+  if (await page.locator('[data-profile-card="trader"]').count() !== 1) {
+    throw new Error(`${scenario.label}/fastlane-off: 新建 Profile 必须有 1 张交易员卡片`);
+  }
+  const classicBox = await page.locator(".fastlane-card.is-ai").first().boundingBox();
+  const traderBox = await page.locator(".fastlane-card.is-trader").first().boundingBox();
+  if (!classicBox || !traderBox || Math.abs(classicBox.y - traderBox.y) > 2 || Math.abs(classicBox.width - traderBox.width) > 2) {
+    throw new Error(`${scenario.label}/fastlane-off: 经典与交易员两张卡片应等宽并列同一行`);
+  }
   if (await page.locator('[data-profile-card="fastlane"]').count() !== 0) {
     throw new Error(`${scenario.label}/fastlane-off: 开关关闭时快判卡片不得出现在选择器里`);
   }

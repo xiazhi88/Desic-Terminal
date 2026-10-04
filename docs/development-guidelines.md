@@ -311,6 +311,17 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 闸门与许可一律**每个 turn 创建一次**、随 turn 结束释放；改成跨 turn 常驻会泄漏许可，禁止。
 - 排查"工具排队"必须把 `requestedAt → executionStartedAt` 拆成两段看：`receivedAt - requestedAt` 是**投递**（sidecar 发事件 → Rust 事件循环真正处理），`executionStartedAt - receivedAt` 才是**许可/锁排队**。每轮的 `tool_json` 在 `turnTiming.toolGate` 里记录当轮生效的并发上限。只读工具排队不等于闸门太窄——先看第二段是否非零，再决定是否动上限。
 
+### AI 自动化的两种运行模式（经典 / 交易员）
+
+- Profile 字段 `context_mode`：`tools`（经典，默认）| `briefing`（交易员）。**创建时决定、之后不可修改**（`apply_context_mode_default`：已存在的行一律沿用库中值，忽略传入值），这样每个 Profile 的运行记录只属于一种模式，对比才成立；界面上两种 Profile 只在共享部分（基本信息、硬风控、后台限制）复用组件，不要再加「切换模式」入口。新建时未知值归为 `tools`，`ai_agent_runs.context_mode` 在入队时冻结（`run_context_mode`：情报简报 / 每日复盘 / 快判运行恒为 `tools`）。对比统计读这一列，**不要**用 `json_extract(profile_snapshot_json)`——快照列很大，按时间范围扫会沿溢出页读。
+- **经典模式的提示词必须逐字不变**：简报与模式规则借用 `multi_agent_instruction` 的位置注入，交易员模式以外不改任何格式串。改提示词时两种模式分别核对。
+- 简报纯渲染在 `crates/agent-automation/src/briefing.rs`（缺失写「不可用」不写 0，超长按优先级整段丢弃，账户与风险预算永不丢）；取数在 `src-tauri/src/ai_briefing.rs`，复用快判纯函数（`structure_view` / `atr14` / `aggregate_bars` / `micro_from_orderbook` / `volatility_regime`）与既有读取函数，整份 8 秒时限、各块独立失败。库里的事实先同步读完再进入异步取数，连接不跨 await。本地衍生品数据超过 30 分钟未更新时不算变化；一小时内没有爆仓样本时写「不可用」（区分不了「没有」和「没采集」）；爆仓只数笔数，不换算金额（样本数量单位不统一）。
+- 工具白名单 `BRIEFING_TOOL_ALLOWLIST` 由 `run_ai_stream` 在后台运行没有显式白名单、且运行模式为 briefing 时套用，侧车 `toolAllowlist` 与 Rust `authorize_ai_tool` 共用同一份；有测试读侧车源码确认名单里都是真实工具。往名单里加工具前先想清楚它会不会把大块数据重新带回上下文（例如 `tradeOpportunity.list` 原样返回全部机会，实测平均约 25 万字符一次）。
+- 简报正文与审计（字符数、生成耗时、缺失块）存在 `initial_market_snapshot_json.briefing`，运行详情直接展示。
+- 盘口格式踩坑（2026-10-05 真机）：内存盘口的档位是 `{px, sz, orders}` 字符串对象，REST 是字符串数组，永续的 `sz` 是**张数**；快判的 `micro_from_orderbook` 只认 `[f64, f64]` 且把 `sz` 当币数，导致简报盘口每次都「不可用」。简报用 `book_levels_in_coin` 先统一格式并乘面值；**快判模式开启前必须同样修正**，否则它的盘口门永远不通过、深度金额差 1/ctVal 倍。
+- 简报的事件只留与关注币种相关、或至少两个来源报道的新闻；`importance=high` 的单一来源资讯（模型发布、个人言论）很多，不过滤会挤占简报并误导判断。
+- 真机观察（3 轮）：输入 token 10–30 万、耗时 33–147 秒（经典模式中位数 207 万 / 225 秒）。剩下的大头是 `market.readIndicators`（每次 3.5–3.9 万字符）和 `tradeOpportunity.get`（约 1.7 万字符，已移出白名单）；简报因此补了 EMA / MACD / 布林。新增白名单工具前先看它单次返回多大。
+
 ### 导演模式（语音指令与 `ui.*` 界面工具）
 
 - 导演模式只做**显示层的可逆操作**：切工作区 / 合约 / 周期、增删指标、开关订单流。语音与 AI 都**不能直接下单、改仓位或改账户 / Profile / 策略**；`directorCommands` 对含买卖开平仓动词的整句一律拒绝（`trade-refused`），认不出的整句交给 AI，**整句要么全部认得、要么全部交出，不执行一半**。新增指令类型时必须仍满足「可逆、非交易」，并补 `scripts/test-voice-director.mjs` 的正反例。

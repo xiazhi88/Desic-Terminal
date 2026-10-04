@@ -8,7 +8,7 @@ mod risk;
 mod status;
 
 pub use ai_gate::{
-    ai_open_static_reasons, daily_loss_reason, evaluate_ai_execution_guard, evaluate_ai_open_gate,
+    ai_open_static_reasons, daily_loss_reason, evaluate_ai_execution_guard, evaluate_ai_open_gate, max_size_within_budget,
     AiExecutionGuardInput, AiOpenGateInput, AiRiskLimits, AiSizingInputs, GateReason,
 };
 pub use numeric::{

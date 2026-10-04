@@ -37,6 +37,7 @@ use tokio_tungstenite::{client_async, tungstenite::Message, WebSocketStream};
 mod agent_library;
 mod ai_automation;
 mod ai_research_ledger;
+mod ai_briefing;
 mod ai_risk_gate;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
@@ -14313,10 +14314,21 @@ async fn run_ai_stream(
     // 缺省不下发 `maxIterations` 键；只有显式请求才带）。
     let max_iterations =
         ai_session_max_iterations(options.as_ref().and_then(|value| value.max_iterations));
-    let tool_allowlist = options
+    let mut tool_allowlist = options
         .as_ref()
         .map(|value| value.tool_allowlist.clone())
         .unwrap_or_default();
+    // 交易员模式的后台运行：没有显式白名单时套用 `BRIEFING_TOOL_ALLOWLIST`（侧车与 authorize_ai_tool 共用这一份）。
+    if tool_allowlist.is_empty()
+        && run_context
+            .as_ref()
+            .is_some_and(|context| context.context_mode == crate::ai_automation::CONTEXT_MODE_BRIEFING)
+    {
+        tool_allowlist = crate::ai_briefing::BRIEFING_TOOL_ALLOWLIST
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+    }
     let strategy_session_kind = options
         .as_ref()
         .and_then(|value| value.strategy_session_kind.clone())
@@ -26342,6 +26354,7 @@ pub fn run() {
             ai_automation_run_statuses,
             ai_automation_run_detail,
             crate::ai_automation::ai_automation_runs_in_range,
+            crate::ai_briefing::ai_automation_mode_comparison,
             ai_automation_save_master_enabled,
             ai_agent_profile_save,
             ai_agent_profile_systematic_conflicts,
@@ -30049,6 +30062,7 @@ mod tests {
                 crate::ai_automation::FinishGateState::default(),
             )),
             single_agent_mode: crate::ai_automation::SINGLE_AGENT_MODE_MINIMAL.to_string(),
+            context_mode: crate::ai_automation::CONTEXT_MODE_TOOLS.to_string(),
             trigger: json!({}),
             review_id: None,
             episode_id: None,
@@ -30577,6 +30591,25 @@ mod tests {
     }
 
     #[test]
+    fn briefing_mode_allowlist_blocks_heavy_reads_for_background_runs() {
+        let mut context = test_ai_tool_context("limited_auto", "main", false);
+        context.run_context = Some(test_background_run_context(None, Vec::new()));
+        context.tool_allowlist = crate::ai_briefing::BRIEFING_TOOL_ALLOWLIST
+            .iter()
+            .map(|name| name.to_string())
+            .collect();
+        for denied in ["tradeOpportunity.list", "intelligence.news.list", "radar.readRanking", "market.scanWatchlist"] {
+            assert!(authorize_ai_tool(denied, &context).is_err(), "{denied}");
+        }
+        for allowed in ["market.readCandles", "market.readTicker", "market.readOrderBook"] {
+            assert!(authorize_ai_tool(allowed, &context).is_ok(), "{allowed}");
+        }
+        // 经典模式（没有白名单）不受影响。
+        context.tool_allowlist.clear();
+        assert!(authorize_ai_tool("tradeOpportunity.list", &context).is_ok());
+    }
+
+    #[test]
     fn account_tools_fail_closed_for_unbound_background_profiles() {
         let mut context = test_ai_tool_context("advisor", "main", false);
         context.account_context_id = Some("ui-current-account".to_string());
@@ -30997,6 +31030,7 @@ mod tests {
                 crate::ai_automation::FinishGateState::default(),
             )),
             single_agent_mode: crate::ai_automation::SINGLE_AGENT_MODE_MINIMAL.to_string(),
+            context_mode: crate::ai_automation::CONTEXT_MODE_TOOLS.to_string(),
             trigger: json!({}),
             review_id: None,
             episode_id: None,

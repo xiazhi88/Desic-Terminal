@@ -138,6 +138,7 @@ export function buildProfileSaveInput(
     collaborationEnabled: Boolean(draft.collaborationEnabled),
     triage: normalizeTriage(draft.triage),
     singleAgentMode: draft.singleAgentMode === "minimal" ? "minimal" : "standard",
+    contextMode: draft.contextMode === "briefing" ? "briefing" : "tools",
     // C20.5（改写版）：勾选名单原样回传（迁移由 Rust 强制完成）。
     enabledAgentIds: [...(draft.enabledAgentIds ?? [])],
     // —— C29 快判（AI Profile 下 Rust 忽略这些字段）——

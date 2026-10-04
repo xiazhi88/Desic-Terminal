@@ -1090,7 +1090,7 @@ pub fn assemble_snapshot(inputs: &SnapshotInputs, as_of_ms: i64) -> FastlaneSnap
     }
 }
 
-fn volatility_regime(structure: &StateStructure, bars_1m: &[Bar]) -> String {
+pub fn volatility_regime(structure: &StateStructure, bars_1m: &[Bar]) -> String {
     if !structure.tf_1h.is_available() {
         return "unknown".to_string();
     }

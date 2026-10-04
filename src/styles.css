@@ -27845,3 +27845,63 @@ button {
   font-size: 11px;
   line-height: 1.6;
 }
+
+/* AI 自动化 Profile：类型（经典 / 交易员）在创建时决定，编辑器标题旁只读展示 */
+.automation-editor-type {
+  margin-left: 8px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(139, 92, 246, 0.14);
+  color: #d6c9ff;
+  font-size: 10.5px;
+  font-style: normal;
+  font-weight: 600;
+  vertical-align: 2px;
+}
+
+.automation-editor-type.is-trader { background: rgba(232, 176, 74, 0.14); color: #f1cf8a; }
+.automation-editor-mark.is-trader { color: #f1cf8a; }
+
+/* 交易员 Profile 的专属设置区 */
+.automation-trader-settings > strong svg { color: #e8b04a; }
+.automation-trader-settings ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
+.automation-trader-settings li { display: grid; gap: 2px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+.automation-trader-settings li span { color: #d8d8dc; font-size: 11.5px; font-weight: 600; }
+
+.automation-profile-card__tags em.is-classic { color: #d6c9ff; background: rgba(139, 92, 246, 0.14); }
+.automation-profile-card__tags em.is-trader { color: #f1cf8a; background: rgba(232, 176, 74, 0.14); }
+
+/* 运行详情：交易员简报（默认折叠） */
+.automation-run-briefing {
+  margin: 10px 0 0;
+  border: 1px solid #25252a;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.automation-run-briefing summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+  color: #d8d8dc;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.automation-run-briefing summary svg { color: #9380bd; }
+.automation-run-briefing summary small { margin-left: auto; color: var(--weak); font-size: 11px; }
+.automation-run-briefing__missing { margin: 0 12px 6px; color: var(--warn); font-size: 11px; }
+
+.automation-run-briefing pre {
+  margin: 0;
+  max-height: 360px;
+  overflow: auto;
+  padding: 10px 12px 12px;
+  border-top: 1px solid #25252a;
+  color: #c9c9cf;
+  font-size: 11.5px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  word-break: break-word;
+}

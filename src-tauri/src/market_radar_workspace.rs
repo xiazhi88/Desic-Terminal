@@ -1340,6 +1340,16 @@ struct AiRadarSnapshotMeta {
     universe_size: usize,
 }
 
+/// 交易员模式简报用：某个品种在最新小时快照里的（排名, 总数, 综合分, 快照时间）。没有快照或不在榜上 → `None`。
+pub(crate) fn radar_rank_for_briefing(conn: &Connection, inst_id: &str) -> Option<(usize, usize, f64, i64)> {
+    let meta = latest_radar_snapshot(conn, None).ok()??;
+    let row = load_ai_radar_rows(conn, meta.snapshot_at)
+        .ok()?
+        .into_iter()
+        .find(|row| row.inst_id == inst_id)?;
+    Some((row.global_rank, meta.universe_size, row.composite_score, meta.snapshot_at))
+}
+
 pub(crate) async fn execute_market_radar_ai_tool(
     app: tauri::AppHandle,
     tool_name: &str,

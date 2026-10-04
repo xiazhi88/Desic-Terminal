@@ -48,6 +48,27 @@ export async function loadAiAutomationRunsInRange(fromMs: number, toMs: number, 
   }, { quiet: true });
 }
 
+/** 两种运行模式（经典 / 交易员）在一段时间内的对比（`ai_automation_mode_comparison`）。 */
+export type AiAutomationModeComparisonRow = {
+  mode: "tools" | "briefing";
+  runs: number;
+  failedRuns: number;
+  medianInputTokens: number | null;
+  medianTotalTokens: number | null;
+  medianDurationMs: number | null;
+  opportunitiesCreated: number;
+  opportunitiesExecuted: number;
+  closedTrades: number;
+  netPnl: number | null;
+};
+
+export async function loadAiAutomationModeComparison(fromMs: number, toMs: number): Promise<AiAutomationModeComparisonRow[] | null> {
+  return invokeDesktop<AiAutomationModeComparisonRow[]>("ai_automation_mode_comparison", {
+    fromMs: Math.floor(fromMs),
+    toMs: Math.ceil(toMs)
+  }, { quiet: true });
+}
+
 export async function saveAiConfig(update: AiConfigUpdate): Promise<AiConfigSummary | null> {
   const summary = await invokeOptional<AiConfigSummary>("ai_save_config", { update });
   if (summary) {
