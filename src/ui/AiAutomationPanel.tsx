@@ -17,6 +17,7 @@ import { WakeConditionList, wakeConditionsOf, useViewText } from "./wakeConditio
 import { ModeComparison } from "./automation/ModeComparison";
 import type { TraderDecisionRow, TraderHandbook, TraderScorecardData } from "../lib/ai";
 import { TraderRunDecisionLoader, TraderScorecard } from "./automation/TraderScorecard";
+import { RiskPreviewPanel } from "./automation/RiskPreviewPanel";
 import {
   Activity,
   AlertTriangle,
@@ -1604,6 +1605,14 @@ function ProfileEditor({
           <label><FieldLabel help={t("automation:profileRiskMaxPositionsHelp")}>{t("automation:profileRiskMaxPositions")}</FieldLabel><input type="number" min="1" max="10" step="1" value={risk.maxOpenPositions} onChange={(event) => updateRisk("maxOpenPositions", event.target.value)} /></label>
           <label><FieldLabel help={t("automation:profileRiskDriftHelp")}>{t("automation:profileRiskDrift")}</FieldLabel><input type="number" min="1" max="300" step="1" value={risk.maxEntryDriftBps} onChange={(event) => updateRisk("maxEntryDriftBps", event.target.value)} /></label>
         </div>
+        <RiskPreviewPanel
+          accountId={draft.accountId}
+          symbols={draft.symbols}
+          riskPerTradePct={risk.riskPerTradePct}
+          dailyLossLimitPct={risk.dailyLossLimitPct}
+          maxSingleTradeMarginPct={draft.maxSingleTradeMarginPct}
+          targetLeverage={draft.targetLeverage}
+        />
       </div>
 
       <div className="automation-form-section">
@@ -7485,6 +7494,28 @@ export function AutomationPreview() {
                 <TriageSettings value={previewTriage} onChange={setPreviewTriage} />
                 </>
                 )}
+                {/* 预览：硬风控「按当前账户换算」（示例账户：权益 9.31 U、可用 0.15 U）。 */}
+                <RiskPreviewPanel
+                  accountId="preview-account"
+                  symbols={["BTC-USDT-SWAP", "SOL-USDT-SWAP"]}
+                  riskPerTradePct={5}
+                  dailyLossLimitPct={10}
+                  maxSingleTradeMarginPct={30}
+                  targetLeverage={20}
+                  previewFacts={{
+                    accountId: "preview-account",
+                    accountError: null,
+                    equityUsdt: 9.31,
+                    availableUsdt: 0.15,
+                    snapshotAgeSeconds: 3,
+                    todayRealizedPnl: 0,
+                    assumedTakerFeePct: 0.05,
+                    symbols: [
+                      { instId: "BTC-USDT-SWAP", last: 85_300, ctVal: 0.01, ctValCcy: "BTC", minSz: 0.01, lotSz: 0.01, atr1h: 196.4 },
+                      { instId: "SOL-USDT-SWAP", last: 118, ctVal: 1, ctValCcy: "SOL", minSz: 0.01, lotSz: 0.01, atr1h: 1.2 }
+                    ]
+                  }}
+                />
               </div>
             </div>
           ) : (

@@ -1854,6 +1854,18 @@ async function verifyOptimizationDiff(page, scenario) {
  */
 // 运行记录的列表视图是「筛选区 + 列表」两行网格：顶部的两种模式对比表必须放在筛选区里，
 // 否则筛选区会被挤成 0 高并与列表重叠（出现过）。
+// 硬风控「按当前账户换算」：百分比换成金额与张数；开不了最小仓位时写明原因。
+async function verifyRiskPreview(page, scenario) {
+  await page.goto(`${baseUrl}?view=config&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-risk-preview] table", { timeout: 20_000 });
+  const statuses = await page.locator("[data-risk-preview-row]").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-risk-preview-row")));
+  if (JSON.stringify(statuses) !== JSON.stringify(["available_too_low", "ok"])) {
+    throw new Error(`${scenario.label}/risk-preview: 状态应为 [available_too_low, ok]（实际 ${JSON.stringify(statuses)}）`);
+  }
+  const text = await page.locator("[data-risk-preview]").first().innerText();
+  if (!/0\.47 U/.test(text) || !/0\.93 U/.test(text)) throw new Error(`${scenario.label}/risk-preview: 缺少单笔 / 日亏金额`);
+}
+
 // 交易员成绩单：分组表（含「建议暂停」与暂停 / 恢复按钮）、最近决策、交易手册。
 async function verifyTraderScorecard(page, scenario) {
   await page.goto(`${baseUrl}?view=scorecard&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
@@ -2028,6 +2040,7 @@ async function verifyScenario(browser, scenario) {
   await verifyWatchPulse(page, scenario);
   await verifyRunsListLayout(page, scenario);
   await verifyTraderScorecard(page, scenario);
+  await verifyRiskPreview(page, scenario);
 
   // 浏览器预览没有 Tauri 命令通道：Agent 库的正文读取按设计抛 AGENT_LIBRARY_DESKTOP_ONLY，
   // 编辑器于是渲染错误态（预览的既定行为，不是缺陷）。这类日志与网络噪声一起排除。

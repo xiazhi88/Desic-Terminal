@@ -310,6 +310,11 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - AI 工具执行闸门（`src-tauri/src/ai_tool_gate.rs`）：只读工具走"全局许可 → 域许可 → 共享读锁"，写工具仍走独占写锁串行。**不得**为了提速把写工具改成并发。全局只读许可缺省 12，可按机器用 `toolReadConcurrency` 覆盖；每个域另有上限（缺省 market 6 / intelligence 4 / account 4 / radar 4 / strategy 4 / local 12），用 `toolDomainConcurrency` 覆盖。提并发的**前置条件**是上游限流层仍然生效：OKX 公共 REST 继续受 `OKX_PUBLIC_REST_SEMAPHORE` 与按路径最小间隔约束，去掉或放宽这些上游限流时不得同时提高闸门上限。
 - 闸门与许可一律**每个 turn 创建一次**、随 turn 结束释放；改成跨 turn 常驻会泄漏许可，禁止。
 - 排查"工具排队"必须把 `requestedAt → executionStartedAt` 拆成两段看：`receivedAt - requestedAt` 是**投递**（sidecar 发事件 → Rust 事件循环真正处理），`executionStartedAt - receivedAt` 才是**许可/锁排队**。每轮的 `tool_json` 在 `turnTiming.toolGate` 里记录当轮生效的并发上限。只读工具排队不等于闸门太窄——先看第二段是否非零，再决定是否动上限。
+- Profile 配置页的「按当前账户换算」：
+  - **数据来源**：`ai_profile_risk_facts` 只读取事实：绑定账户的权益、可用余额、今日已实现盈亏，以及品种的价格、面值、最小张数、张数步长、1h ATR。张数与金额由 `src/lib/riskPreview.ts` 按正在编辑的参数实时计算（测试：`npm run test:risk-preview`）。
+  - **口径必须与下单风控一致**：单笔风险 = 止损亏损 + 来回手续费，按权益封顶；保证金 ≤ 权益 × 最大单笔开仓占比，且不超过可用余额；杠杆只影响保证金。
+  - **估算假设要写清楚**：止损按 1×ATR(1h) 估算，手续费按吃单 0.05% 估算，并在界面上注明。这块只用于展示，判定仍以下单前的预检为准。
+  - **开不了最小仓位要说清原因**：按最先卡住的那一条（可用余额 → 保证金上限 → 风险预算）给出原因。
 
 ### AI 自动化的两种运行模式（经典 / 交易员）
 

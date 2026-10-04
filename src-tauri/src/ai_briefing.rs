@@ -933,6 +933,85 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
     }
 }
 
+/// Profile 配置页「按当前账户换算」需要的事实：绑定账户的权益 / 可用 / 今日已实现，以及每个关注品种的价格、
+/// 合约面值、最小张数、张数步长与 1h ATR。具体张数、金额由前端按正在编辑的参数实时计算（`src/lib/riskPreview.ts`）。
+#[tauri::command]
+pub(crate) async fn ai_profile_risk_facts(app: tauri::AppHandle, account_id: Option<String>, symbols: Vec<String>) -> Result<Value, String> {
+    let now = now_ms();
+    let market = app.state::<MarketRuntime>().inner().clone();
+    let account_id = account_id.map(|value| value.trim().to_string()).filter(|value| !value.is_empty());
+    let (account, account_error) = match account_id.as_deref() {
+        None => (None, None),
+        Some(account_id) => match read_account_snapshot(&app, &market, Some(account_id)).await {
+            Some(snapshot) => (Some(snapshot), None),
+            None => (None, Some("读不到账户快照（账户未连接或 API 不可用）".to_string())),
+        },
+    };
+    let usdt = account
+        .as_ref()
+        .and_then(|snapshot| snapshot.balances.iter().find(|balance| balance.ccy.eq_ignore_ascii_case("USDT")).cloned());
+    let today_realized_pnl = match account_id.as_deref() {
+        Some(account_id) => {
+            let app = app.clone();
+            let account_id = account_id.to_string();
+            crate::blocking_work::run_blocking(move || {
+                let conn = open_read_database(&app)?;
+                Ok::<_, String>(crate::ai_risk_gate::account_realized_pnl_today(&conn, Some(&account_id), now))
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        None => None,
+    };
+    let mut rows = Vec::new();
+    for inst_id in symbols.iter().map(|value| value.trim().to_ascii_uppercase()).filter(|value| !value.is_empty()).take(BRIEFING_MAX_SYMBOLS) {
+        let instrument = crate::trade_support::fetch_instrument(&app, &inst_id).await.ok();
+        let last = match ai_read_ticker(&market, &inst_id).await {
+            Ok(ticker) => crate::fastlane::normalize_ticker_block(&ticker, &[]).and_then(|(price, _)| value_number(&price, "last")),
+            Err(_) => None,
+        };
+        let atr_1h = {
+            let app = app.clone();
+            let inst = inst_id.clone();
+            crate::blocking_work::run_blocking(move || {
+                let conn = open_read_database(&app)?;
+                let bars = local_candles_aggregated(&conn, &inst, HOUR_MS, now - 3 * DAY_MS, now)
+                    .map(|(candles, _)| {
+                        candles
+                            .into_iter()
+                            .map(|candle| crate::fastlane::Bar { t: candle.time * 1000, o: candle.open, h: candle.high, l: candle.low, c: candle.close, v: candle.volume })
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                Ok::<_, String>(crate::fastlane::atr14(&bars))
+            })
+            .await
+            .ok()
+            .flatten()
+        };
+        rows.push(json!({
+            "instId": inst_id,
+            "last": last,
+            "ctVal": instrument.as_ref().and_then(|item| number(&item.ct_val)),
+            "ctValCcy": instrument.as_ref().map(|item| item.ct_val_ccy.clone()),
+            "minSz": instrument.as_ref().and_then(|item| number(&item.min_sz)),
+            "lotSz": instrument.as_ref().and_then(|item| number(&item.lot_sz)),
+            "atr1h": atr_1h,
+        }));
+    }
+    Ok(json!({
+        "accountId": account_id,
+        "accountError": account_error,
+        "equityUsdt": usdt.as_ref().and_then(|balance| number(&balance.eq)),
+        "availableUsdt": usdt.as_ref().and_then(|balance| number(&balance.avail_eq).or_else(|| number(&balance.avail_bal))),
+        "snapshotAgeSeconds": account.as_ref().map(|snapshot| now.saturating_sub(snapshot.synced_at).max(0) / 1000),
+        "todayRealizedPnl": today_realized_pnl,
+        "assumedTakerFeePct": 0.05,
+        "symbols": rows,
+    }))
+}
+
 /// 「两种模式对比」的一行：按模式汇总所选时间范围内的运行与交易结果。
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]

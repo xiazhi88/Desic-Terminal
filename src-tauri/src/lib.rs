@@ -26374,6 +26374,7 @@ pub fn run() {
             ai_automation_run_detail,
             crate::ai_automation::ai_automation_runs_in_range,
             crate::ai_briefing::ai_automation_mode_comparison,
+            crate::ai_briefing::ai_profile_risk_facts,
             crate::trader_learning::ai_trader_scorecard,
             crate::trader_learning::ai_trader_run_decisions,
             crate::trader_learning::ai_trader_set_setup_pause,
