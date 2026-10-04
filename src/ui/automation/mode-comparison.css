@@ -27,3 +27,7 @@
 .mode-compare tr.is-trader th { color: #f1cf8a; }
 .mode-compare td.is-up { color: var(--up); }
 .mode-compare td.is-down { color: var(--down); }
+
+/* 列表视图里放在筛选区内（网格自带间距）；心电图视图里在顶部，留出与时间轴的间距。 */
+.automation-run-audit-head > .mode-compare { margin: 0; }
+.automation-runs-view--pulse > .mode-compare { flex: 0 0 auto; }

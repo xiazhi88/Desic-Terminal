@@ -1852,6 +1852,20 @@ async function verifyOptimizationDiff(page, scenario) {
  * 值守心电图（运行记录 Tab 的时间轴视图）：画布非空且按 DPR 缩放、悬停提示、点击脉冲打开抽屉、
  * ←/→ 同泳道切换、完整运行详情弹层与抽屉的 Esc 分层、24h/7d 切换、S 显示跳过、滚轮缩放与双击复位、列表视图可达。
  */
+// 运行记录的列表视图是「筛选区 + 列表」两行网格：顶部的两种模式对比表必须放在筛选区里，
+// 否则筛选区会被挤成 0 高并与列表重叠（出现过）。
+async function verifyRunsListLayout(page, scenario) {
+  await page.goto(`${baseUrl}?view=pulse&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-mode-comparison]", { timeout: 20_000 });
+  await page.locator('[data-runs-view="list"]').first().click();
+  await page.waitForSelector('[data-runs-view-mode="list"] .automation-run-audit-head [data-mode-comparison]', { timeout: 15_000 });
+  const head = await page.locator('[data-runs-view-mode="list"] .automation-run-audit-head').first().boundingBox();
+  const list = await page.locator('[data-runs-view-mode="list"] .automation-run-list').first().boundingBox();
+  if (!head || !list || head.y + head.height > list.y + 1) {
+    throw new Error(`${scenario.label}/runs-list: 筛选区与列表重叠（head ${JSON.stringify(head)} / list ${JSON.stringify(list)}）`);
+  }
+}
+
 async function verifyWatchPulse(page, scenario) {
   const label = `${scenario.label}/watch pulse`;
   await page.goto(`${baseUrl}?view=pulse`, { waitUntil: "networkidle", timeout: 60_000 });
@@ -1995,6 +2009,7 @@ async function verifyScenario(browser, scenario) {
   await verifyRunRefresh(page, scenario);
   await verifyOptimizationDiff(page, scenario);
   await verifyWatchPulse(page, scenario);
+  await verifyRunsListLayout(page, scenario);
 
   // 浏览器预览没有 Tauri 命令通道：Agent 库的正文读取按设计抛 AGENT_LIBRARY_DESKTOP_ONLY，
   // 编辑器于是渲染错误态（预览的既定行为，不是缺陷）。这类日志与网络噪声一起排除。

@@ -864,7 +864,7 @@ pub(crate) fn mode_comparison(conn: &Connection, from_ms: i64, to_ms: i64) -> Re
     {
         let mut stmt = conn
             .prepare(
-                "SELECT DISTINCT e.id,o.agent_run_id,e.net_pnl FROM position_episodes e
+                "SELECT DISTINCT e.id,o.agent_run_id,CAST(e.net_pnl AS REAL) FROM position_episodes e
                  JOIN position_episode_opportunities p ON p.episode_id=e.id
                  JOIN trade_opportunities o ON o.id=p.opportunity_id
                  WHERE e.status='closed' AND o.intent='open' AND o.agent_run_id IS NOT NULL AND o.created_at>=?1",
@@ -1057,7 +1057,7 @@ mod tests {
             "CREATE TABLE ai_agent_runs (id TEXT, profile_id TEXT, context_mode TEXT, status TEXT, token_usage_json TEXT,
                started_at INTEGER, finished_at INTEGER, record_kind TEXT);
              CREATE TABLE trade_opportunities (id TEXT, agent_run_id TEXT, status TEXT, intent TEXT, created_at INTEGER);
-             CREATE TABLE position_episodes (id TEXT, status TEXT, net_pnl REAL);
+             CREATE TABLE position_episodes (id TEXT, status TEXT, net_pnl TEXT);
              CREATE TABLE position_episode_opportunities (episode_id TEXT, opportunity_id TEXT);",
         )
         .unwrap();
@@ -1079,7 +1079,7 @@ mod tests {
         conn.execute("INSERT INTO ai_agent_runs VALUES ('fl','p1','tools','completed',NULL,6000,7000,'fastlane')", []).unwrap();
         conn.execute_batch(
             "INSERT INTO trade_opportunities VALUES ('o1','r3','executed','open',3500),('o2','r4','failed','open',4500),('o3','r1','executed','open',1500);
-             INSERT INTO position_episodes VALUES ('e1','closed',-1.5),('e2','closed',2.0),('e3','open',9.0);
+             INSERT INTO position_episodes VALUES ('e1','closed','-1.5'),('e2','closed','2.0'),('e3','open','9.0');
              INSERT INTO position_episode_opportunities VALUES ('e1','o3'),('e2','o1'),('e3','o1');",
         )
         .unwrap();

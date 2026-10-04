@@ -2156,8 +2156,9 @@ function RunsView({
 
   return (
     <div className="automation-runs-view" data-runs-view-mode="list">
-      <ModeComparison refreshKey={items.length} />
+      {/* 列表视图是「筛选区 + 列表」两行网格：对比表放进筛选区里，不能作为第三个子元素（会把筛选区挤成 0 高并与列表重叠）。 */}
       <div className="automation-run-audit-head">
+        <ModeComparison refreshKey={items.length} />
         <div className="automation-run-stat-strip">
           <div><span>{automationText("runCurrentRange", "Current range", "当前范围")}</span><strong>{stats.total}</strong><small>{i18n.t("automation:runs")}</small></div>
           <div><span>{i18n.t("common:success")}</span><strong>{stats.success}</strong><small>completed</small></div>

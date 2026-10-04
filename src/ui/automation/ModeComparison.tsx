@@ -47,9 +47,14 @@ export function ModeComparison({ refreshKey, previewRows }: { refreshKey?: unkno
     }
     let cancelled = false;
     const now = Date.now();
-    void loadAiAutomationModeComparison(now - days * DAY_MS, now).then((result) => {
-      if (!cancelled) setRows(result);
-    });
+    // 统计失败只影响这张对比表：不显示，也不向上抛（否则会变成未处理的 promise 拒绝）。
+    loadAiAutomationModeComparison(now - days * DAY_MS, now)
+      .then((result) => {
+        if (!cancelled) setRows(result);
+      })
+      .catch(() => {
+        if (!cancelled) setRows(null);
+      });
     return () => {
       cancelled = true;
     };
