@@ -2039,6 +2039,7 @@ export type AiAutomationTab =
   | "profiles"
   | "agents"
   | "runs"
+  | "scorecard"
   | "wake_conditions"
   | "reviews"
   | "optimization"

@@ -704,6 +704,9 @@ if (!copilotTrade.blocked || copilotTrade.policy !== "disabled:ai-direct-trade-r
   const background = { permissionMode: "limited_auto", agentRole: "main", backgroundRun: true, agentProfileId: "p", agentRunId: "r" };
   expectTrue("trader runs may tag candidates with setupId", Boolean(decisionSchema({ ...background, traderMode: true }).setupId));
   expectTrue("classic runs never see setupId", !decisionSchema(background).setupId);
+  const finishSchema = (config) => createDesicTools("policy-test", config).find((item) => item?.name === "background_finishRun")?.inputSchema?.properties ?? {};
+  expectTrue("trader runs log decisions in finishRun", Boolean(finishSchema({ ...background, traderMode: true }).decisionLog));
+  expectTrue("classic finishRun has no decisionLog", !finishSchema(background).decisionLog);
 }
 
 // 经典模式隔离：不带 traderMode 的运行拿到的工具定义（描述 + schema）必须与快照逐字一致。

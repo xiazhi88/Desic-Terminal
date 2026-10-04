@@ -1,0 +1,126 @@
+/* AI 自动化 · 交易员成绩单（只在存在交易员 Profile 时出现） */
+.trader-scorecard {
+  display: grid;
+  gap: 12px;
+  min-height: 0;
+  overflow: auto;
+  padding-bottom: 12px;
+}
+
+.trader-scorecard__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.trader-scorecard__title { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; justify-items: start; column-gap: 6px; row-gap: 4px; max-width: 760px; }
+.trader-scorecard__title svg { color: #e8b04a; }
+.trader-scorecard__title strong { color: #e4e4e8; font-size: 13px; font-weight: 650; }
+.trader-scorecard__title span { grid-column: 1 / -1; color: var(--weak); font-size: 11px; line-height: 1.5; }
+
+.trader-scorecard__controls { display: flex; align-items: center; gap: 8px; }
+.trader-scorecard__controls select {
+  height: 28px;
+  padding: 0 8px;
+  border: 1px solid #2a2a30;
+  border-radius: 7px;
+  background: #121216;
+  color: #d8d8dc;
+  font-size: 12px;
+}
+
+.trader-scorecard__empty { display: flex; align-items: center; gap: 8px; padding: 24px; color: var(--weak); font-size: 12px; }
+
+.trader-scorecard__stats {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  border: 1px solid #25262c;
+  border-radius: 10px;
+  overflow: hidden;
+}
+
+.trader-scorecard__stats > div { display: grid; gap: 2px; padding: 10px 14px; }
+.trader-scorecard__stats > div + div { border-left: 1px solid #25262c; }
+.trader-scorecard__stats span { color: var(--weak); font-size: 11px; }
+.trader-scorecard__stats strong { color: #e4e4e8; font-size: 17px; font-variant-numeric: tabular-nums; }
+
+.trader-scorecard__block {
+  min-width: 0;
+  padding: 12px 14px;
+  border: 1px solid #25262c;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.trader-scorecard__block h4 { margin: 0 0 8px; color: #d8d8dc; font-size: 12px; font-weight: 600; }
+.trader-scorecard__note { margin: 0; color: var(--weak); font-size: 11.5px; }
+
+.trader-scorecard__grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+
+.trader-scorecard table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.trader-scorecard th, .trader-scorecard td { padding: 6px 8px; text-align: right; white-space: nowrap; }
+.trader-scorecard thead th { color: var(--weak); font-size: 11px; font-weight: 500; border-bottom: 1px solid #25262c; }
+.trader-scorecard tbody th { text-align: left; color: #d8d8dc; font-weight: 600; }
+.trader-scorecard tbody td:first-child { text-align: left; }
+.trader-scorecard tbody tr + tr > * { border-top: 1px solid rgba(255, 255, 255, 0.04); }
+.trader-scorecard tbody em {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(232, 176, 74, 0.16);
+  color: #f1cf8a;
+  font-size: 10.5px;
+  font-style: normal;
+}
+.trader-scorecard tr.is-flagged > th { color: #f1cf8a; }
+.trader-scorecard tr.is-paused > * { opacity: 0.55; }
+.trader-scorecard tr.is-paused > td:last-child { opacity: 1; }
+.trader-scorecard .is-up { color: var(--up); }
+.trader-scorecard .is-down { color: var(--down); }
+
+.trader-scorecard__pause {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #2f2f36;
+  border-radius: 6px;
+  background: transparent;
+  color: #c9c9cf;
+  font-size: 11px;
+  cursor: pointer;
+}
+.trader-scorecard__pause:hover:not(:disabled) { border-color: rgba(232, 176, 74, 0.5); color: #f1cf8a; }
+.trader-scorecard__pause:disabled { opacity: 0.5; cursor: default; }
+
+.trader-scorecard dl { display: grid; gap: 6px; margin: 0; }
+.trader-scorecard dl > div { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.trader-scorecard dt { color: var(--weak); }
+.trader-scorecard dd { margin: 0; color: #d8d8dc; font-variant-numeric: tabular-nums; }
+
+.trader-scorecard__recent td:nth-child(2), .trader-scorecard__recent td:nth-child(3), .trader-scorecard__recent td:nth-child(4) { text-align: left; }
+.trader-scorecard__recent tr.is-against td:nth-child(3) { color: #f1cf8a; }
+
+.trader-scorecard__handbook {
+  padding: 10px 14px;
+  border: 1px solid #25262c;
+  border-radius: 10px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.6;
+}
+.trader-scorecard__handbook summary { display: flex; align-items: center; gap: 6px; color: #d8d8dc; font-size: 12px; cursor: pointer; }
+.trader-scorecard__handbook summary svg { color: #e8b04a; }
+.trader-scorecard__handbook p { margin: 8px 0 0; }
+.trader-scorecard__handbook strong { color: #d8d8dc; }
+.trader-scorecard__setup { display: grid; gap: 2px; margin-top: 8px; padding-left: 10px; border-left: 2px solid rgba(232, 176, 74, 0.35); }
+
+/* 运行详情里的决策日志 */
+.trader-run-decisions { display: grid; gap: 6px; margin-top: 10px; padding: 10px 12px; border: 1px solid #25252a; border-radius: 8px; font-size: 12px; }
+.trader-run-decisions > strong { color: #d8d8dc; font-size: 12px; }
+.trader-run-decisions__row { display: flex; flex-wrap: wrap; gap: 4px 12px; color: #c9c9cf; font-variant-numeric: tabular-nums; }
+.trader-run-decisions__row small { flex-basis: 100%; color: var(--weak); font-size: 11px; }
+.trader-run-decisions__row.is-against > span:nth-child(2) { color: #f1cf8a; }

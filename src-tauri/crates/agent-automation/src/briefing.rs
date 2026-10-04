@@ -154,6 +154,8 @@ pub struct BriefingDoc {
     pub recent_runs: Vec<BriefingNote>,
     pub wake_conditions: Vec<String>,
     pub events: Vec<BriefingNote>,
+    /// 交易员成绩单（已渲染好的几行，见 `scorecard::render_scorecard_brief`）。
+    pub scorecard: Option<String>,
 }
 
 /// 简报默认的字符上限（3 个品种的完整简报约 3–4 千字符，留出余量）。
@@ -615,6 +617,13 @@ pub fn render_briefing(doc: &BriefingDoc, chinese: bool, max_chars: usize) -> St
     let tx = Text { zh: chinese };
     let mut sections: Vec<Section> = Vec::new();
     sections.push(Section { priority: 0, name: "account", body: render_account(doc, &tx) });
+    if let Some(scorecard) = doc.scorecard.as_deref().filter(|text| !text.trim().is_empty()) {
+        sections.push(Section {
+            priority: 1,
+            name: "scorecard",
+            body: format!("## {}\n{}\n", tx.t("你的成绩单", "Your scorecard"), scorecard.trim_end()),
+        });
+    }
     for (index, symbol) in doc.symbols.iter().enumerate() {
         sections.push(Section { priority: 1, name: "symbol", body: render_symbol_core(symbol, &tx) });
         // 第一个品种的细节比后面品种的更重要。
@@ -809,6 +818,10 @@ mod tests {
         assert!(text.contains("ATR 5m 不可用"), "{text}");
         assert!(text.contains("点差 不可用 bp"), "{text}");
         assert!(text.contains("单笔风险预算内最多 7 张"), "{text}");
+        assert!(!text.contains("你的成绩单"), "没有成绩单时不出这一段");
+        let mut with_card = doc();
+        with_card.scorecard = Some("已结算 3 条决策".into());
+        assert!(render_briefing(&with_card, true, BRIEFING_MAX_CHARS).contains("## 你的成绩单\n已结算 3 条决策"));
         assert!(text.contains("1h EMA20 85120 / EMA50 84890.5，MACD 柱 +12.30（前一根 +18.00，收缩），布林位置 82%；4h EMA20 不可用"), "{text}");
         assert!(!text.contains("5m +0.00%"));
     }

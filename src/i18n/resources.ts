@@ -277,7 +277,7 @@ const enUS: LocaleCatalog = {
     indicatorDescriptionVolumeMa: "Volume moving average smooths volume changes to identify expansion, contraction, and unusual activity."
   },
   automation: {
-    title: "AI Automation", profiles: "Profiles", runs: "Runs", wakeConditions: "Watch plans", reviews: "Reviews",
+    title: "AI Automation", profiles: "Profiles", runs: "Runs", scorecard: "Scorecard", wakeConditions: "Watch plans", reviews: "Reviews",
     suggestions: "Optimization suggestions", notifications: "Notifications", loadingWorkspace: "Loading AI Automation",
     running: "Running", completed: "Completed", failed: "Failed", pending: "Pending", stopped: "Stopped",
     analysisResult: "Analysis result", mainAgent: "Main Agent", profileModel: "Profile model", noProfiles: "No Profiles yet",
@@ -1300,7 +1300,7 @@ const zhCN: LocaleCatalog = {
     indicatorDescriptionObv: "能量潮将成交量按涨跌方向累计，用于观察量价确认和背离。",
     indicatorDescriptionVolumeMa: "成交量均线平滑成交量变化，辅助识别放量、缩量和异常活跃。" },
   automation: {
-    title: "AI 自动化", profiles: "Profiles", runs: "运行记录", wakeConditions: "观察计划", reviews: "复盘", suggestions: "优化建议", notifications: "通知",
+    title: "AI 自动化", profiles: "Profiles", runs: "运行记录", scorecard: "成绩单", wakeConditions: "观察计划", reviews: "复盘", suggestions: "优化建议", notifications: "通知",
     loadingWorkspace: "正在加载 AI 自动化工作台", running: "运行中", completed: "已完成", failed: "失败", pending: "待处理", stopped: "已停止",
     analysisResult: "分析结果", mainAgent: "主 Agent", profileModel: "Profile 模型", noProfiles: "暂无 Profile",
     opportunityExitKind: "退出角色", opportunityTakeProfitExit: "止盈退出", opportunityStopLossExit: "止损保护", opportunityStrategyExit: "策略退出", opportunityEmergencyExit: "紧急退出", opportunityCloseFraction: "平仓比例", loadingSection: "正在加载", review: "复盘", preview: "预览", adopt: "采用", reject: "拒绝",

@@ -670,6 +670,7 @@ function normalizeAutomationTab(tab: string | null | undefined): AiAutomationTab
   switch (tab) {
     case "profiles":
     case "runs":
+    case "scorecard":
     case "wake_conditions":
     case "reviews":
     case "optimization":
@@ -2603,7 +2604,9 @@ function TradingTerminal({
           ? "error"
         : event.type === "runCompleted"
           ? "success"
-          : "info";
+          : event.type === "scorecardWarning"
+            ? "warning"
+            : "info";
       const title = event.type === "reviewCreated"
         ? uiText("新的交易复盘", "New trade review")
         : event.type === "suggestionCreated"
@@ -2624,6 +2627,8 @@ function TradingTerminal({
                 ? uiText("策略信号恢复失败", "Strategy signal recovery failed")
               : event.type === "runCompleted"
                 ? uiText("AI 自动化完成", "AI Automation completed")
+              : event.type === "scorecardWarning"
+                ? uiText("交易员成绩单提醒", "Trader scorecard alert")
                 : uiText("AI 自动化通知", "AI Automation notification");
       pushNotification({
         kind,

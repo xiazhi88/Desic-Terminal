@@ -1618,6 +1618,34 @@ const BACKGROUND_FINISH_RUN_SCHEMA = {
   }
 };
 
+// 交易员 Profile（traderMode）专用：finishRun 多一个 decisionLog（每个评估过的品种一条），供影子记账与成绩单使用。
+// 经典运行仍用上面的 schema，工具定义逐字不变。
+const TRADER_DECISION_LOG_ENTRY_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  required: ["instId", "action"],
+  properties: {
+    instId: { type: "string", minLength: 1, maxLength: 64 },
+    setupId: { type: "string", minLength: 1, maxLength: 64, description: "Trader handbook setup id, or none when no setup applied." },
+    side: { type: "string", enum: ["long", "short", "none"] },
+    action: { type: "string", enum: ["enter_now", "limit_order", "wait_condition", "no_trade", "manage_position"] },
+    entry: { type: "number", exclusiveMinimum: 0 },
+    stop: { type: "number", exclusiveMinimum: 0 },
+    target: { type: "number", exclusiveMinimum: 0 },
+    probability: { type: "number", minimum: 0, maximum: 1, description: "Your probability that the target is reached before the stop." },
+    validUntil: { type: "integer", description: "13-digit Unix milliseconds until which the entry is valid." },
+    reason: { type: "string", maxLength: 300 },
+    considered: { type: "boolean", description: "For no_trade / wait_condition: whether entry/stop/target describe a candidate you considered." }
+  }
+};
+const TRADER_BACKGROUND_FINISH_RUN_SCHEMA = {
+  ...BACKGROUND_FINISH_RUN_SCHEMA,
+  properties: {
+    ...BACKGROUND_FINISH_RUN_SCHEMA.properties,
+    decisionLog: { type: "array", maxItems: 3, items: TRADER_DECISION_LOG_ENTRY_SCHEMA }
+  }
+};
+
 const REVIEW_COMPLETE_SCHEMA = {
   type: "object",
   additionalProperties: false,
@@ -2842,8 +2870,9 @@ function createDesicTools(sessionId, options = {}) {
       "Finish a background agent run with a durable summary, semantic outcome/reason/reasonCodes and next wake plan; must be the final successful tool call. On validation rejection, correct the reported fields and call again. Never submit opportunity ids, accountAssessment or decision context ids — the backend derives them from this Run's persisted tool results and prechecks. The summary must not infer narrow account tolerance from balance, minSz or gross notional exposure; use effectiveExposureMultiple, stop/ATR risk, margin buffer and authoritative blockers. Absolute times such as nextWakePlan.expiresAt and timer.atMs are 13-digit Unix epoch milliseconds (Date.now() units), never 10-digit seconds. The summary must follow the “Analysis-result formatting” section of desic-core-operations: lead with the conclusion, then exactly the five fixed sections (Conclusion / Facts and evidence / Conflicts and gaps / Observation conditions / Next steps, or 结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步 for Chinese runs), every evidence item carrying its observation time plus a record id or tool name, and never paste raw JSON or whole tool outputs. 摘要必须按 desic-core-operations 的 “Analysis-result formatting” 小节排版：首屏先结论，随后五个固定小节（结论 / 事实与证据 / 冲突与缺口 / 观察条件 / 下一步；英文运行用对应英文标题），证据条目带观测时间与记录 ID 或工具名，不要粘贴原始 JSON 或整段工具输出。 If this run is in minimal mode (singleAgentMode=minimal): the summary may only be one sentence of at most 160 display width (no sections, no multiple lines, no markdown), this run must not output any prose either, do not write any acknowledgement or filler sentence either (such as “Done”, “Received”, “the run has ended”): when you are finished, call the finish tool directly, and in minimal mode this instruction wins over the formatting rules above. 若本轮是**极简模式**（singleAgentMode=minimal）：summary 只允许**一句话、不超过 160 显示宽度**（不要小节、不要多行、不要 markdown）；本轮也不要输出任何正文；也不要说任何确认语/过渡语（如“已完成”“收到”“本轮已结束”），要收尾就直接调用工具；极简模式下本条优先于上面的排版要求。"
         // C33：把 Rust 下发的条件类型规范（已按 Profile 白名单过滤）追加到工具描述末尾。
         // 未下发 → 空串 → 描述**逐字**回到基础文案（老 Rust / 交互会话 / 简报与复盘）。
-        + (wakeConditionSchemaSpec ? `\n\n${wakeConditionSchemaSpec}` : ""),
-      BACKGROUND_FINISH_RUN_SCHEMA
+        + (wakeConditionSchemaSpec ? `\n\n${wakeConditionSchemaSpec}` : "")
+        + (traderMode ? "\n\nTrader mode: include decisionLog with one entry per evaluated instrument (setupId, side, action, entry/stop/target, probability that the target is hit before the stop, validUntil, short reason). Every entry is scored automatically against later price action, including candidates you did not take." : ""),
+      traderMode ? TRADER_BACKGROUND_FINISH_RUN_SCHEMA : BACKGROUND_FINISH_RUN_SCHEMA
     ),
     tool(
       "background.reportTriage",

@@ -15,6 +15,8 @@ import { useTranslation } from "react-i18next";
 import { WorkspaceFrame } from "./WorkspaceFrame";
 import { WakeConditionList, wakeConditionsOf, useViewText } from "./wakeConditionView";
 import { ModeComparison } from "./automation/ModeComparison";
+import type { TraderDecisionRow, TraderHandbook, TraderScorecardData } from "../lib/ai";
+import { TraderRunDecisionLoader, TraderScorecard } from "./automation/TraderScorecard";
 import {
   Activity,
   AlertTriangle,
@@ -181,6 +183,8 @@ const AUTOMATION_TABS: Array<{ id: AiAutomationTab; icon: typeof Bot }> = [
   { id: "profiles", icon: Bot },
   { id: "agents", icon: Layers },
   { id: "runs", icon: Activity },
+  // 只在存在交易员 Profile 时显示（见标签渲染处的过滤）。
+  { id: "scorecard", icon: Crosshair },
   { id: "wake_conditions", icon: Radio },
   { id: "reviews", icon: ClipboardCheck },
   { id: "optimization", icon: Lightbulb },
@@ -2567,6 +2571,8 @@ function RunDetailPanel({ detail, onForceDeep }: { detail: AiAutomationRunDetail
           </details>
         );
       })() : null}
+      {/* 交易员运行的决策日志（含影子 / 真实结果）；经典运行没有。 */}
+      {runBriefing(detail.initialMarketSnapshot) ? <TraderRunDecisionLoader runId={detail.run.id} /> : null}
 
       {/* C27 本轮决策（默认区）：等待观察 / 交易落地状态 —— 字段与组件原样未动，
           只是上移到"结果 + 关键数字"之后，让默认视图三块连读（原来它被夹在折叠区之后）。 */}
@@ -5424,6 +5430,8 @@ function AiAutomationPanelComponent({
     // the layout stays stable, while a forced reload replaces it with current
     // data; only the uncached first load shows the loading state.
     if (id === "profiles") return;
+    // 成绩单自己加载（ai_trader_scorecard），不走 ai_automation_section。
+    if (id === "scorecard") return;
     // agents 不走 ai_automation_section：它读的是 Agent 库目录。
     if (id === "agents") { void loadAgentLibrary(); return; }
     void loadSection(id, Boolean(automationSectionCache.get(id)), true);
@@ -5660,6 +5668,7 @@ function AiAutomationPanelComponent({
   }, [summary?.profilePerformance]);
 
   const profiles = summary?.profiles ?? [];
+  const traderProfiles = profiles.filter((profile) => profile.contextMode === "briefing");
   // 库列表只在挂载时读一次（数量级 10–50 个小文件）；切到 agents tab 或库有变动时再校验。
   useEffect(() => {
     void loadAgentLibrary();
@@ -5712,13 +5721,14 @@ function AiAutomationPanelComponent({
     // Agent 库总数（内置 + 自定义 + AI 创建）；库读不到时显示 0。
     agents: agents.length,
     runs: useOverviewCounts ? automationCounts.runs : scopeRuns.length,
+    scorecard: traderProfiles.length,
     wake_conditions: useOverviewCounts ? automationCounts.activeWakeConditions : scopeWakeConditions.filter((item) => item.status === "active").length,
     reviews: automationCounts.reviews,
     optimization: useOverviewCounts ? automationCounts.pendingOptimizationSuggestions : scopeOptimizationSuggestions.filter((item) => ["pending", "pending_review", "validating", "ready"].includes(item.status)).length,
     notifications: useOverviewCounts ? automationCounts.notifications : scopeNotificationDeliveries.length
   };
   const activeTabLabel = t(automationTabI18nKey(activeTab));
-  const activeSectionLoaded = activeTab === "profiles" || activeTab === "agents" || loadedSections.has(activeTab);
+  const activeSectionLoaded = activeTab === "profiles" || activeTab === "agents" || activeTab === "scorecard" || loadedSections.has(activeTab);
 
   useGSAP(() => {
     if (!hasMountedMotionRef.current) {
@@ -5778,7 +5788,7 @@ function AiAutomationPanelComponent({
       </header>
 
       <nav className="automation-tabs" role="tablist" aria-label={t("automation:workbenchAria")}>
-        {AUTOMATION_TABS.map(({ id, icon: Icon }) => (
+        {AUTOMATION_TABS.filter(({ id }) => id !== "scorecard" || traderProfiles.length > 0).map(({ id, icon: Icon }) => (
           <button key={id} className={activeTab === id ? "active" : ""} role="tab" aria-selected={activeTab === id} onClick={() => handleTabClick(id)}>
             <Icon size={14} />
             <span>{t(automationTabI18nKey(id))}</span>
@@ -5787,7 +5797,7 @@ function AiAutomationPanelComponent({
         ))}
       </nav>
 
-      {summary && activeTab !== "profiles" && activeTab !== "reviews" && activeTab !== "agents" ? (
+      {summary && activeTab !== "profiles" && activeTab !== "reviews" && activeTab !== "agents" && activeTab !== "scorecard" ? (
         <div className="automation-scope-bar">
           <div>
             <span>{t("automation:workbenchViewScope")}</span>
@@ -5973,6 +5983,8 @@ function AiAutomationPanelComponent({
             pulseProfiles={pulseLaneProfiles}
             loadPulseRange={loadScopedPulseRange}
           />
+        ) : activeTab === "scorecard" ? (
+          <TraderScorecard profiles={traderProfiles.map((profile) => ({ id: profile.id, name: profile.name }))} />
         ) : activeTab === "wake_conditions" ? (
           <WakeConditionsView
             items={scopeWakeConditions}
@@ -6851,6 +6863,77 @@ const AUTOMATION_PREVIEW_MODEL_ERROR_DETAIL: AiAutomationRunDetail = {
   ]
 };
 
+/** 预览：交易员成绩单（数字为示例，结构与 `ai_trader_scorecard` 一致）。 */
+const AUTOMATION_PREVIEW_SCORECARD: TraderScorecardData = (() => {
+  const t0 = Date.UTC(2026, 9, 5, 2, 0);
+  const decision = (index: number, patch: Partial<TraderDecisionRow>): TraderDecisionRow => ({
+    id: `decision-preview-${index}`,
+    runId: `run-preview-${index}`,
+    instId: "BTC-USDT-SWAP",
+    createdAt: t0 - index * 3_600_000,
+    setupId: "trend_pullback",
+    side: "long",
+    action: "limit_order",
+    entry: 84_750,
+    stop: 84_450,
+    target: 85_350,
+    probability: 0.55,
+    validUntil: null,
+    reason: "日线上升，回踩 1h EMA20 出现长下影",
+    regimeDaily: "up",
+    regime4h: "up",
+    againstDirection: false,
+    regimeMismatch: false,
+    shadowStatus: "resolved",
+    shadowNote: null,
+    shadowR: 1.9,
+    exitKind: "target",
+    realR: null,
+    opportunityId: null,
+    handbookVersion: 1,
+    ...patch
+  });
+  const handbook: TraderHandbook = {
+    directionPolicy: "日线上升只做多、日线下降只做空；日线不明时只用 breakout_retest 或 range_edge。",
+    setups: [
+      { id: "trend_pullback", name: "顺势回踩", regimes: ["up", "down"], direction: "with_trend", entry: "回撤到 1h / 4h 结构位或 EMA20 附近并出现拒绝信号后入场。", stop: "结构位之外，至少 1×ATR(1h)。", target: "前高 / 前低，且至少 2R。", invalidation: "收盘有效跌破结构位。" },
+      { id: "range_edge", name: "区间边缘", regimes: ["mixed"], direction: "both", entry: "区间上沿拒绝做空、下沿拒绝做多。", stop: "区间外，至少 1×ATR(1h)。", target: "中轴，再看对侧。", invalidation: "收盘突破区间边缘。" }
+    ],
+    noTradeRules: [{ id: "no_data", text: "简报里的结构、ATR 或行情阶段有任何一项不可用。" }, { id: "mid_range", text: "价格处于区间中部（40%–60%）。" }],
+    managementRules: [{ id: "breakeven", text: "浮盈达到 1R 后，可以把止损移到保本。" }],
+    paused: [{ setupId: "range_edge", regime: "up", side: "short", reason: "在成绩单页手动暂停", pausedAt: t0 }]
+  };
+  return {
+    profileId: null,
+    fromMs: t0 - 30 * 86_400_000,
+    pending: 3,
+    scorecard: {
+      decisions: 48,
+      resolved: 41,
+      executed: 9,
+      groups: [
+        { setupId: "trend_pullback", regime: "up", side: "long", n: 22, wins: 10, avgR: 0.42, shrunkAvgR: 0.29, totalR: 9.2, realN: 6, realAvgR: 0.31, flagged: false },
+        { setupId: "range_edge", regime: "up", side: "short", n: 16, wins: 3, avgR: -0.52, shrunkAvgR: -0.32, totalR: -8.3, realN: 2, realAvgR: -1.0, flagged: true },
+        { setupId: "breakout_retest", regime: "mixed", side: "long", n: 3, wins: 2, avgR: 0.8, shrunkAvgR: 0.18, totalR: 2.4, realN: 1, realAvgR: 1.6, flagged: false }
+      ],
+      calibration: [
+        { lo: 0.45, hi: 0.6, n: 18, predicted: 0.54, realized: 0.44 },
+        { lo: 0.6, hi: 0.75, n: 12, predicted: 0.66, realized: 0.33 }
+      ],
+      waits: { n: 19, missedR: 6.4, avoidedR: 9.1 },
+      compliance: { againstN: 16, againstAvgR: -0.52, alignedN: 25, alignedAvgR: 0.47, regimeMismatchN: 4 },
+      versions: [{ version: 1, n: 41, avgR: 0.04 }]
+    },
+    recent: [
+      decision(0, {}),
+      decision(1, { setupId: "range_edge", side: "short", entry: 85_390, stop: 85_500, target: 85_040, againstDirection: true, shadowR: -1.05, exitKind: "stop", realR: -1.05, opportunityId: "opp-preview" }),
+      decision(2, { action: "no_trade", setupId: "trend_pullback", probability: 0.4, shadowR: 1.95, exitKind: "target", reason: "等待回踩确认，最终没有执行" }),
+      decision(3, { shadowStatus: "pending", shadowR: null, exitKind: null })
+    ],
+    handbook: { version: 2, content: handbook }
+  };
+})();
+
 const AUTOMATION_PREVIEW_SINGLE_RUN_DETAIL: AiAutomationRunDetail = {
   ...AUTOMATION_PREVIEW_RUN_DETAIL,
   // 交易员模式：运行详情里可折叠的简报（与 Rust `render_briefing` 的输出格式一致）。
@@ -7090,7 +7173,7 @@ const AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES: Record<string, string> = {
 
 export function AutomationPreview() {
   const requestedView = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
-  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run", "pulse"];
+  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run", "pulse", "scorecard"];
   const initialView = requestedView && previewViews.includes(requestedView) ? requestedView : "config";
   const [view, setView] = useState<string>(initialView);
   // P0：点击保存时实际传给回调的参数个数（0 = 正确；>=1 说明事件被当参数传进去了）。
@@ -7154,6 +7237,7 @@ export function AutomationPreview() {
             <button type="button" role="tab" aria-selected={view === "agents"} className={view === "agents" ? "active" : ""} onClick={() => setView("agents")}>{automationText("agents", "Agent library", "Agent 库")}</button>
             <button type="button" role="tab" aria-selected={view === "triage"} className={view === "triage" ? "active" : ""} onClick={() => setView("triage")}>{automationText("triageTitle", "Triage", "试判")}</button>
             <button type="button" role="tab" aria-selected={view === "pulse"} className={view === "pulse" ? "active" : ""} onClick={() => setView("pulse")} data-preview-tab="pulse">{automationText("runViewPulse", "Pulse", "心电图")}</button>
+            <button type="button" role="tab" aria-selected={view === "scorecard"} className={view === "scorecard" ? "active" : ""} onClick={() => setView("scorecard")} data-preview-tab="scorecard">{automationText("scorecard", "Scorecard", "成绩单")}</button>
             <button type="button" role="tab" aria-selected={view === "minimal"} className={view === "minimal" ? "active" : ""} onClick={() => setView("minimal")}>{automationText("singleAgentMode", "Single-Agent mode", "单 Agent 模式")}</button>
             <button type="button" role="tab" aria-selected={view === "new-profile"} className={view === "new-profile" ? "active" : ""} onClick={() => setView("new-profile")}>{automationText("profileNewPickerTitle", "New Profile", "新建 Profile")}</button>
             <button type="button" role="tab" aria-selected={view === "fastlane-config"} className={view === "fastlane-config" ? "active" : ""} onClick={() => setView("fastlane-config")}>{automationText("fastlaneConfigTitle", "Fastlane configuration", "快判配置")}</button>
@@ -7227,6 +7311,8 @@ export function AutomationPreview() {
             </div>
           ) : view === "pulse" ? (
             <AutomationPulsePreview />
+          ) : view === "scorecard" ? (
+            <TraderScorecard profiles={[{ id: "profile-trader", name: "BTC 交易员" }]} previewData={AUTOMATION_PREVIEW_SCORECARD} />
           ) : view === "triage" ? (
             <div className="automation-preview-triage">
               <RunsView

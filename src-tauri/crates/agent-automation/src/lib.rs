@@ -3,6 +3,7 @@ mod agents;
 mod briefing;
 mod handbook;
 mod regime;
+mod scorecard;
 mod trader_spec;
 mod builtin_bodies;
 mod draft_content;
@@ -56,6 +57,10 @@ pub use handbook::{
     Handbook, HandbookRule, HandbookSetup, PausedSetup,
 };
 pub use regime::{change_pct, daily_regime, ema_last, DailyRegime};
+pub use scorecard::{
+    build_scorecard, render_scorecard_brief, shrink, CalibrationBucket, ComplianceStats, DecisionOutcome, GroupStat, Scorecard,
+    VersionStat, WaitStats, FLAG_MAX_SHRUNK_R, FLAG_MIN_SAMPLES,
+};
 pub use trader_spec::{trader_core_operations, TRADER_CORE_NAME, TRADER_CORE_RULES};
 pub use usage::{
     build_ai_usage_summary, AiTokenUsage, AiUsageCoverage, AiUsageQuality, AiUsageSummary,

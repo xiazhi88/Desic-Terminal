@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::{Notify, Semaphore};
 
-const AUTOMATION_EVENT: &str = "ai:automation-event";
+pub(crate) const AUTOMATION_EVENT: &str = "ai:automation-event";
 
 /// 单次 provider 请求的空闲上限（毫秒），随每条 AI 命令 config 显式下发给侧车。
 ///
@@ -892,6 +892,8 @@ pub(crate) fn ai_fastlane_kill_switch_blocking(
 pub(crate) struct FinishGateState {
     /// 已因"升级深度却零专家且未填 `selfAnalysisReason`"打回过的次数（C22.3-B）。
     pub self_analysis_pushbacks: u8,
+    /// 交易员运行：已因缺少 `decisionLog` 打回过的次数（最多一次，之后照常收尾并记为缺失）。
+    pub decision_log_pushbacks: u8,
 }
 
 /// C22.3-B：软校验最多打回的次数。**软校验的边界**：打回一次之后必须接受，
@@ -970,6 +972,9 @@ pub(crate) struct BackgroundFinishRunInput {
     /// 记 `selfAnalysisUnjustified: true`（**只标记，不失败**）。
     #[serde(default)]
     pub self_analysis_reason: Option<String>,
+    /// 交易员运行的决策日志（侧车只在 traderMode 下暴露这个字段；经典运行恒为空）。
+    #[serde(default)]
+    pub decision_log: Vec<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3502,7 +3507,7 @@ pub(crate) fn automation_master_enabled_with_conn(conn: &Connection) -> bool {
         .unwrap_or(false)
 }
 
-fn load_setting(conn: &Connection, key: &str) -> Option<Value> {
+pub(crate) fn load_setting(conn: &Connection, key: &str) -> Option<Value> {
     conn.query_row(
         "SELECT value_json FROM ai_automation_settings WHERE key=?1",
         params![key],
@@ -3514,7 +3519,7 @@ fn load_setting(conn: &Connection, key: &str) -> Option<Value> {
     .and_then(|value| serde_json::from_str(&value).ok())
 }
 
-fn set_setting(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
+pub(crate) fn set_setting(conn: &Connection, key: &str, value: Value) -> Result<(), String> {
     conn.execute(
         "INSERT INTO ai_automation_settings(key,value_json,updated_at) VALUES(?1,?2,?3)
          ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json,updated_at=excluded.updated_at",
@@ -8144,6 +8149,12 @@ pub(crate) fn background_finish_run(
     if let Some(pushback) = pushback {
         return Ok(pushback);
     }
+    // 交易员运行：缺决策日志时打回一次（同样在任何写入之前）。经典运行不经过这里。
+    if context.context_mode == CONTEXT_MODE_BRIEFING {
+        if let Some(pushback) = crate::trader_learning::decision_log_pushback(&context.finish_gate, &input.decision_log) {
+            return Ok(pushback);
+        }
+    }
     // 打回之后才真正收尾：试判状态快照（与软校验里那份是同一个状态，重新取一次即可）。
     let triage_final = {
         let state = context.triage.lock().map_err(|error| error.to_string())?;
@@ -8209,6 +8220,19 @@ pub(crate) fn background_finish_run(
         ],
     )
     .map_err(|err| err.to_string())?;
+    // 交易员运行：决策日志落库，供影子记账与成绩单使用。记账失败只记日志，不影响本轮收尾。
+    if context.context_mode == CONTEXT_MODE_BRIEFING {
+        if let Err(error) = crate::trader_learning::record_run_decisions(
+            &tx,
+            run_id,
+            profile_id,
+            &input.decision_log,
+            final_decision_json.as_deref(),
+            now,
+        ) {
+            crate::boot_log(&format!("trader decision log not recorded run={run_id}: {error}"));
+        }
+    }
     // C19 记账：triage 块（含分阶段 token）+ 反饥饿计数（深度正常完成 → 清零并记时间）。
     if triage_final.config.mode != crate::ai_triage::TRIAGE_MODE_OFF {
         let triage_usage = triage_final.triage_usage.clone().unwrap_or(Value::Null);
@@ -11926,6 +11950,8 @@ async fn automation_tick(
     enqueue_missing_reviews(&conn)?;
     queue_due_daily_market_reviews(&conn)?;
     queue_due_profile_runs(&conn, now)?;
+    // 交易员 Profile：每 5 分钟结算一批影子决策（只处理交易员的决策日志，经典 Profile 没有这类数据）。
+    crate::trader_learning::spawn_shadow_settlement(&app);
     // C29 / B1：活跃快判 Profile 的常驻快照采集器（幂等；也是崩溃/异常后的自愈点）。
     // 名单先同步读出来（`&Connection` 不是 `Send`，不能跨 await）。
     let fastlane_collectors = fastlane_collector_plan(&conn)?;
@@ -12900,7 +12926,7 @@ async fn execute_profile_run(
     // 交易员 Profile：固定规范换成交易员规范，去掉不适用的技能。经典运行不经过这里，技能载荷保持原样。
     let mut run_enabled_skills = profile.skill_ids.clone();
     if briefing_mode {
-        crate::trader_learning::apply_trader_skills(&mut skill_definitions, &mut run_enabled_skills, false);
+        crate::trader_learning::apply_trader_skills(&mut skill_definitions, &mut run_enabled_skills, true);
     }
     let session_id = format!("background:{}", run.id);
     let message_id = format!("background-message:{}", run.id);

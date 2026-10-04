@@ -558,7 +558,7 @@ async fn read_higher_timeframes(app: &tauri::AppHandle, inst_id: &str, now: i64)
 }
 
 /// 本地历史不够算日线阶段 / 4h EMA50 时，后台静默补最近 30 天的 1m K 线（不阻塞本轮；同一品种 6 小时内只补一次）。
-fn request_history_backfill(app: &tauri::AppHandle, inst_id: &str, now: i64) {
+pub(crate) fn request_history_backfill(app: &tauri::AppHandle, inst_id: &str, now: i64) {
     static LAST_REQUEST: std::sync::OnceLock<Mutex<HashMap<String, i64>>> = std::sync::OnceLock::new();
     let requests = LAST_REQUEST.get_or_init(|| Mutex::new(HashMap::new()));
     {
@@ -792,6 +792,11 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
             symbol_block(app, &market, inst_id, facts, equity, limits.risk_per_trade_pct, deadline, chinese, &mut missing).await,
         );
     }
+    // 成绩单（交易员决策的历史结果）：按第一个关注品种当前的日线阶段挑相关分组。
+    let current_regime = symbol_blocks.first().and_then(|symbol| symbol.regime_daily.clone());
+    let scorecard = crate::ai_automation::open_automation_database(app)
+        .ok()
+        .map(|conn| crate::trader_learning::scorecard_brief(&conn, &profile.id, current_regime.as_deref(), now_ms(), chinese));
     let doc = BriefingDoc {
         generated_at_label: shanghai_label(started, true),
         account,
@@ -801,6 +806,7 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
         recent_runs: db.recent_runs,
         wake_conditions: db.wake_conditions,
         events: db.events,
+        scorecard,
     };
     // 行情阶段标签（代码计算）随审计存档：决策日志与开仓形态校验都按它分组 / 匹配。
     let regimes = doc

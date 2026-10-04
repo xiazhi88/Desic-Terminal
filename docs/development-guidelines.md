@@ -327,6 +327,17 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - 交易手册存在 `ai_trader_handbooks` 表，只读最新已发布版本；表里读不到时回退内置 v1，交易员运行不会因为手册缺失而失败。手册的纯逻辑在 `crates/agent-automation/src/handbook.rs`。方向纪律是软规则，代码不拦；只有用户手动暂停的形态才由后端拒绝。
 - `trade_opportunities.setup_id` **不进指纹**，否则所有旧机会都无法复用。形态校验在 `read_decision_context` 里，只对交易员运行的开仓生效（`trader_open_setup_reasons` 用入队时冻结的 `ai_agent_runs.context_mode` 判断）。手写 `trade_opportunities` 建表语句的测试夹具也要带上这一列。
 - 简报的 1h / 4h / 1D 一律用 `local_candles_aggregated` 从本地 1m 聚合（10 / 30 / 200 天）。拼接 1m 窗口的方式只覆盖约 3.5 天，4h EMA50 和日线阶段会一直不可用。历史不够时 `request_history_backfill` 会在后台静默补最近 30 天，同一品种 6 小时内只补一次。日线阶段（上升 / 下降 / 不明）由代码计算并写进审计的 `regimes`，供形态校验和成绩单分组使用。
+- 决策日志：
+  - **存储与开关**：侧车只在 `traderMode` 下给 `background.finishRun` 加 `decisionLog`。Rust 侧缺日志时打回一次（`FinishGateState.decision_log_pushbacks`，在任何写入之前），之后照常收尾。日志在 finishRun 的同一事务里写进 `ai_trader_decisions`；写失败只记日志，不让整轮失败。
+  - **行情阶段与手册版本**：一律取本轮简报审计（代码计算），不取模型自报。开仓机会从 `createdOpportunityIds` / `reusedOpportunityIds` 关联。
+- 影子记账：
+  - **纯规则**：在 `trade-domain/src/outcome.rs`，全部取保守口径：成交那根 K 线只认止损、同一根 K 线同时碰到止损和目标按止损算、跳空越过止损按开盘价成交、72 小时超时。往返手续费按 0.1% 换算成 R，真实 R 用同一口径（由仓位记录的开 / 平均价换算；这两列存的是文本，要先解析）。
+  - **运行时机**：由 `spawn_shadow_settlement` 挂在自动化 worker 节拍上，每 5 分钟一批，最多 50 条。本地 K 线缺失时请求补数，下一轮再试。只有自动化总开关打开时才会运行。
+- 成绩单：
+  - **统计口径**：纯统计在 `agent-automation/src/scorecard.rs`。平均 R 乘 n/(n+10) 向 0 收缩。n ≥ 15 且收缩后 ≤ −0.25 才标「建议暂停」，同一分组只通知一次（记在 `ai_automation_settings`）。
+  - **暂停是用户动作**：暂停只能由用户在成绩单页手动操作，操作后生成新的手册版本；后端随后拒绝该范围的开仓，影子记账照常进行。
+- 经典模式的运行详情接口不变：交易员的决策日志走独立命令 `ai_trader_run_decisions`，只在运行带简报时才请求。
+- 方向纪律只评估新的开仓决定：`manage_position` 不打「逆势」标记，也不做影子结算。
 - 盘口格式踩坑（2026-10-05 真机）：内存盘口的档位是 `{px, sz, orders}` 字符串对象，REST 是字符串数组，永续的 `sz` 是**张数**；快判的 `micro_from_orderbook` 只认 `[f64, f64]` 且把 `sz` 当币数，导致简报盘口每次都「不可用」。简报用 `book_levels_in_coin` 先统一格式并乘面值；**快判模式开启前必须同样修正**，否则它的盘口门永远不通过、深度金额差 1/ctVal 倍。
 - 简报的事件只留与关注币种相关、或至少两个来源报道的新闻；`importance=high` 的单一来源资讯（模型发布、个人言论）很多，不过滤会挤占简报并误导判断。
 - 真机观察（3 轮）：输入 token 10–30 万、耗时 33–147 秒（经典模式中位数 207 万 / 225 秒）。剩下的大头是 `market.readIndicators`（每次 3.5–3.9 万字符）和 `tradeOpportunity.get`（约 1.7 万字符，已移出白名单）；简报因此补了 EMA / MACD / 布林。新增白名单工具前先看它单次返回多大。

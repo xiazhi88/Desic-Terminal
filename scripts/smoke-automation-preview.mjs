@@ -1854,6 +1854,23 @@ async function verifyOptimizationDiff(page, scenario) {
  */
 // 运行记录的列表视图是「筛选区 + 列表」两行网格：顶部的两种模式对比表必须放在筛选区里，
 // 否则筛选区会被挤成 0 高并与列表重叠（出现过）。
+// 交易员成绩单：分组表（含「建议暂停」与暂停 / 恢复按钮）、最近决策、交易手册。
+async function verifyTraderScorecard(page, scenario) {
+  await page.goto(`${baseUrl}?view=scorecard&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-trader-scorecard] [data-scorecard-groups]", { timeout: 20_000 });
+  const groups = await page.locator("[data-scorecard-group]").count();
+  if (groups !== 3) throw new Error(`${scenario.label}/scorecard: 分组行应为 3（实际 ${groups}）`);
+  if (await page.locator("tr.is-flagged").count() !== 1) throw new Error(`${scenario.label}/scorecard: 应有 1 个「建议暂停」分组`);
+  if (await page.locator(".trader-scorecard__pause").count() !== 3) throw new Error(`${scenario.label}/scorecard: 每个分组都要有暂停 / 恢复按钮`);
+  if (await page.locator("tr.is-paused").count() !== 1) throw new Error(`${scenario.label}/scorecard: 手册里暂停的范围要标出来`);
+  const recent = await page.locator("[data-scorecard-recent] tbody tr").count();
+  if (recent !== 4) throw new Error(`${scenario.label}/scorecard: 最近决策应为 4（实际 ${recent}）`);
+  if (await page.locator("[data-scorecard-handbook]").count() !== 1) throw new Error(`${scenario.label}/scorecard: 缺少交易手册查看区`);
+  const box = await page.locator("[data-trader-scorecard]").first().boundingBox();
+  const viewport = page.viewportSize();
+  if (!box || !viewport || box.width > viewport.width + 1) throw new Error(`${scenario.label}/scorecard: 成绩单横向溢出`);
+}
+
 async function verifyRunsListLayout(page, scenario) {
   await page.goto(`${baseUrl}?view=pulse&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
   await page.waitForSelector("[data-mode-comparison]", { timeout: 20_000 });
@@ -2010,6 +2027,7 @@ async function verifyScenario(browser, scenario) {
   await verifyOptimizationDiff(page, scenario);
   await verifyWatchPulse(page, scenario);
   await verifyRunsListLayout(page, scenario);
+  await verifyTraderScorecard(page, scenario);
 
   // 浏览器预览没有 Tauri 命令通道：Agent 库的正文读取按设计抛 AGENT_LIBRARY_DESKTOP_ONLY，
   // 编辑器于是渲染错误态（预览的既定行为，不是缺陷）。这类日志与网络噪声一起排除。

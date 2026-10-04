@@ -69,6 +69,83 @@ export async function loadAiAutomationModeComparison(fromMs: number, toMs: numbe
   }, { quiet: true });
 }
 
+/** 交易员 Profile 的成绩单（`ai_trader_scorecard`）。 */
+export type TraderScorecardGroup = {
+  setupId: string;
+  regime: string;
+  side: string;
+  n: number;
+  wins: number;
+  avgR: number;
+  shrunkAvgR: number;
+  totalR: number;
+  realN: number;
+  realAvgR: number | null;
+  flagged: boolean;
+};
+export type TraderDecisionRow = {
+  id: string;
+  runId: string;
+  instId: string;
+  createdAt: number;
+  setupId: string | null;
+  side: string | null;
+  action: string;
+  entry: number | null;
+  stop: number | null;
+  target: number | null;
+  probability: number | null;
+  validUntil: number | null;
+  reason: string | null;
+  regimeDaily: string | null;
+  regime4h: string | null;
+  againstDirection: boolean;
+  regimeMismatch: boolean;
+  shadowStatus: string;
+  shadowNote: string | null;
+  shadowR: number | null;
+  exitKind: string | null;
+  realR: number | null;
+  opportunityId: string | null;
+  handbookVersion: number | null;
+};
+export type TraderHandbook = {
+  directionPolicy: string;
+  setups: Array<{ id: string; name: string; regimes: string[]; direction: string; entry: string; stop: string; target: string; invalidation: string; minNetRr?: number; stopAtrMin?: number; stopAtrMax?: number; sizeNote?: string }>;
+  noTradeRules: Array<{ id: string; text: string }>;
+  managementRules: Array<{ id: string; text: string }>;
+  paused: Array<{ setupId: string; regime?: string; side?: string; reason: string; pausedAt: number }>;
+};
+export type TraderScorecardData = {
+  profileId: string | null;
+  fromMs: number;
+  scorecard: {
+    decisions: number;
+    resolved: number;
+    executed: number;
+    groups: TraderScorecardGroup[];
+    calibration: Array<{ lo: number; hi: number; n: number; predicted: number; realized: number }>;
+    waits: { n: number; missedR: number; avoidedR: number };
+    compliance: { againstN: number; againstAvgR: number | null; alignedN: number; alignedAvgR: number | null; regimeMismatchN: number };
+    versions: Array<{ version: number; n: number; avgR: number }>;
+  };
+  pending: number;
+  recent: TraderDecisionRow[];
+  handbook: { version: number; content: TraderHandbook };
+};
+
+export async function loadTraderScorecard(profileId: string | null, fromMs: number): Promise<TraderScorecardData | null> {
+  return invokeDesktop<TraderScorecardData>("ai_trader_scorecard", { profileId, fromMs: Math.floor(fromMs) }, { quiet: true });
+}
+
+export async function loadTraderRunDecisions(runId: string): Promise<TraderDecisionRow[] | null> {
+  return invokeDesktop<TraderDecisionRow[]>("ai_trader_run_decisions", { runId }, { quiet: true });
+}
+
+export async function setTraderSetupPause(request: { setupId: string; regime?: string | null; side?: string | null; paused: boolean; reason?: string | null }): Promise<{ version: number; content: TraderHandbook } | null> {
+  return invokeDesktop<{ version: number; content: TraderHandbook }>("ai_trader_set_setup_pause", request);
+}
+
 export async function saveAiConfig(update: AiConfigUpdate): Promise<AiConfigSummary | null> {
   const summary = await invokeOptional<AiConfigSummary>("ai_save_config", { update });
   if (summary) {

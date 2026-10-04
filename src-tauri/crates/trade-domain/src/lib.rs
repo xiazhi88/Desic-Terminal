@@ -2,11 +2,13 @@ use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
 mod ai_gate;
+mod outcome;
 mod numeric;
 mod order;
 mod risk;
 mod status;
 
+pub use outcome::{resolve_shadow, OhlcBar, ShadowEntry, ShadowExit, ShadowOutcome, ShadowPlan};
 pub use ai_gate::{
     ai_open_static_reasons, daily_loss_reason, evaluate_ai_execution_guard, evaluate_ai_open_gate, max_size_within_budget,
     AiExecutionGuardInput, AiOpenGateInput, AiRiskLimits, AiSizingInputs, GateReason,
