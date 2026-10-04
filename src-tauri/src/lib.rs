@@ -21724,6 +21724,7 @@ fn initialize_database_v1_with_conn(conn: &Connection) -> Result<(), String> {
         crate::ai_automation::migrate_ai_automation(conn)?;
         desic_intelligence::migrate_intelligence(conn)?;
         crate::systematic::migrate_systematic(conn)?;
+        crate::market_radar_workspace::migrate_market_radar_workspace(conn)?;
         remove_database_v1_obsolete_objects(conn)?;
         scrub_private_exchange_storage(conn)?;
         validate_database_v1(conn)?;
