@@ -68,9 +68,19 @@ debug-*.png
 tmp-*.png
 
 # Local planning and internal specifications
+distribution-kit.md
+pr-review-2-3.md
 docs/completed.md
 docs/pending.md
 docs/okx-perpetual-desktop-spec.md
+
+# Internal engineering docs (developed locally, not published)
+docs/agent-library-contract.md
+docs/agent-library-content-pack.md
+docs/agent-library-acceptance.md
+docs/multi-agent-dispatch-plan-v3.md
+docs/agent-fastlane-design.md
+docs/skill-platform.md
 
 # Personal editor and machine state
 .cline/
