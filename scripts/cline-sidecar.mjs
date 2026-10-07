@@ -1618,7 +1618,8 @@ const BACKGROUND_FINISH_RUN_SCHEMA = {
   }
 };
 
-// 交易员 Profile（traderMode）专用：finishRun 多一个 decisionLog（每个评估过的品种一条），供影子记账与成绩单使用。
+// 交易员 Profile（traderMode）专用：finishRun 多一个 decisionLog（每个评估过的品种一条主决策，观察中的形态另记一条，最多 6 条），
+// 供影子记账与成绩单使用。
 // 经典运行仍用上面的 schema，工具定义逐字不变。
 const TRADER_DECISION_LOG_ENTRY_SCHEMA = {
   type: "object",
@@ -1642,7 +1643,7 @@ const TRADER_BACKGROUND_FINISH_RUN_SCHEMA = {
   ...BACKGROUND_FINISH_RUN_SCHEMA,
   properties: {
     ...BACKGROUND_FINISH_RUN_SCHEMA.properties,
-    decisionLog: { type: "array", maxItems: 3, items: TRADER_DECISION_LOG_ENTRY_SCHEMA }
+    decisionLog: { type: "array", maxItems: 6, items: TRADER_DECISION_LOG_ENTRY_SCHEMA }
   }
 };
 
@@ -2871,7 +2872,7 @@ function createDesicTools(sessionId, options = {}) {
         // C33：把 Rust 下发的条件类型规范（已按 Profile 白名单过滤）追加到工具描述末尾。
         // 未下发 → 空串 → 描述**逐字**回到基础文案（老 Rust / 交互会话 / 简报与复盘）。
         + (wakeConditionSchemaSpec ? `\n\n${wakeConditionSchemaSpec}` : "")
-        + (traderMode ? "\n\nTrader mode: include decisionLog with one entry per evaluated instrument (setupId, side, action, entry/stop/target, probability that the target is hit before the stop, validUntil, short reason). Every entry is scored automatically against later price action, including candidates you did not take." : ""),
+        + (traderMode ? "\n\nTrader mode: include decisionLog with one main entry per evaluated instrument (setupId, side, action, entry/stop/target, probability that the target is hit before the stop, validUntil, short reason), plus one entry for each observing setup that fits (scored, never executed); at most six entries. Every entry is scored automatically against later price action, including candidates you did not take." : ""),
       traderMode ? TRADER_BACKGROUND_FINISH_RUN_SCHEMA : BACKGROUND_FINISH_RUN_SCHEMA
     ),
     tool(

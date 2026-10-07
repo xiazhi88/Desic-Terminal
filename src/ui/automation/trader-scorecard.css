@@ -35,7 +35,7 @@
 
 .trader-scorecard__stats {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   border: 1px solid #25262c;
   border-radius: 10px;
   overflow: hidden;
@@ -75,6 +75,18 @@
   font-style: normal;
 }
 .trader-scorecard tr.is-flagged > th { color: #f1cf8a; }
+/* 观察中：只有影子结果，用冷色标出来，和「建议暂停」的琥珀色区分 */
+.trader-scorecard em.is-observing,
+.trader-run-decisions em.is-observing {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(120, 170, 255, 0.13);
+  color: #a9c4ff;
+  font-size: 10.5px;
+  font-style: normal;
+}
+.trader-scorecard__book { margin-left: 6px; color: var(--weak); font-size: 10.5px; font-weight: 400; }
 .trader-scorecard tr.is-paused > * { opacity: 0.55; }
 .trader-scorecard tr.is-paused > td:last-child { opacity: 1; }
 .trader-scorecard .is-up { color: var(--up); }
@@ -104,19 +116,35 @@
 .trader-scorecard__recent td:nth-child(2), .trader-scorecard__recent td:nth-child(3), .trader-scorecard__recent td:nth-child(4) { text-align: left; }
 .trader-scorecard__recent tr.is-against td:nth-child(3) { color: #f1cf8a; }
 
+/* 成绩单底部：一行手册摘要 + 打开交易手册 */
 .trader-scorecard__handbook {
-  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  padding: 9px 14px;
   border: 1px solid #25262c;
   border-radius: 10px;
   color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.6;
+  font-size: 12px;
 }
-.trader-scorecard__handbook summary { display: flex; align-items: center; gap: 6px; color: #d8d8dc; font-size: 12px; cursor: pointer; }
-.trader-scorecard__handbook summary svg { color: #e8b04a; }
-.trader-scorecard__handbook p { margin: 8px 0 0; }
-.trader-scorecard__handbook strong { color: #d8d8dc; }
-.trader-scorecard__setup { display: grid; gap: 2px; margin-top: 8px; padding-left: 10px; border-left: 2px solid rgba(232, 176, 74, 0.35); }
+.trader-scorecard__handbook > svg { flex: none; color: #e8b04a; }
+.trader-scorecard__handbook > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.trader-scorecard__handbook b { color: #d8d8dc; font-weight: 600; }
+.trader-scorecard__link {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #f1cf8a;
+  font-size: 12px;
+  cursor: pointer;
+}
+.trader-scorecard__link:hover { text-decoration: underline; }
 
 /* 运行详情里的决策日志 */
 .trader-run-decisions { display: grid; gap: 6px; margin-top: 10px; padding: 10px 12px; border: 1px solid #25252a; border-radius: 8px; font-size: 12px; }
@@ -124,3 +152,7 @@
 .trader-run-decisions__row { display: flex; flex-wrap: wrap; gap: 4px 12px; color: #c9c9cf; font-variant-numeric: tabular-nums; }
 .trader-run-decisions__row small { flex-basis: 100%; color: var(--weak); font-size: 11px; }
 .trader-run-decisions__row.is-against > span:nth-child(2) { color: #f1cf8a; }
+
+.trader-scorecard__notice { margin: 0; padding: 8px 12px; border-radius: 8px; background: rgba(232, 176, 74, 0.08); color: #f1cf8a; font-size: 12px; }
+.trader-run-decisions__row { align-items: center; }
+.trader-run-decisions__view { color: #f1cf8a !important; }

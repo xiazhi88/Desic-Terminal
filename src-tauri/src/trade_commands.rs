@@ -8886,16 +8886,17 @@ pub(crate) async fn read_decision_context(
     request.candidate.agent_run_id = Some(run_id.clone());
     request.candidate.decision_context_id = None;
     validate_trade_opportunity_request(&request.candidate)?;
-    // 交易员 Profile：开仓候选必须带交易手册里、未被用户暂停的形态 id（经典运行直接跳过）。
+    // 交易员 Profile：开仓候选必须带交易手册里实盘、未被用户暂停的形态 id（经典运行直接跳过）。
     {
         let conn = open_database(&app)?;
-        let reasons = crate::trader_learning::trader_open_setup_reasons(
+        let reasons = crate::trader_learning::trader_open_guard_reasons(
             &conn,
             &run_id,
             &request.inst_id,
             &request.candidate.intent,
             &request.candidate.direction,
             request.candidate.setup_id.as_deref(),
+            now_ms(),
         );
         if !reasons.is_empty() {
             return Err(reasons.join("；"));
@@ -9419,6 +9420,19 @@ fn materialize_trade_opportunity_commit_with_conn(
     request.duplicate_resolution_reason = commit.duplicate_resolution_reason;
     request.max_single_trade_margin_pct = commit.max_single_trade_margin_pct;
     request.source_session_id = Some(source_session_id.to_string());
+    // 交易员 Profile：复核之后（60 秒内）形态可能被改成观察中或暂停；提交时按最新手册再查一次。经典运行直接跳过。
+    let reasons = crate::trader_learning::trader_open_guard_reasons(
+        conn,
+        run_id,
+        &request.inst_id,
+        &request.intent,
+        &request.direction,
+        request.setup_id.as_deref(),
+        now,
+    );
+    if !reasons.is_empty() {
+        return Err(reasons.join("；"));
+    }
     Ok(request)
 }
 
@@ -9493,6 +9507,15 @@ fn commit_reuse_resolution(
     existing.duplicate_resolution_reason = Some(reason.to_string());
     existing.conflict = None;
     Ok(existing)
+}
+
+/// 交易员 Profile 的开仓限价单：挂单有效期（到期未成交由代码撤单，见 `trader_learning::spawn_entry_order_sweep`）。
+/// 只有交易员运行的开仓候选才带 `setupId`，所以经典 Profile、AI 研究与手动下单都返回 `None`。
+pub(crate) fn trader_entry_order_validity(request: &TradeOpportunityCreateRequest, now: i64) -> Option<i64> {
+    let trader_entry = request.setup_id.as_deref().is_some_and(|value| !value.trim().is_empty())
+        && request.intent == "open"
+        && request.order_type == "limit";
+    trader_entry.then(|| crate::trader_learning::entry_order_valid_until(request.expires_at, now))
 }
 
 #[tauri::command]
@@ -10389,6 +10412,21 @@ async fn ai_execution_guard_reasons(
     runtime: &MarketRuntime,
     opportunity: &TradeOpportunitySummary,
 ) -> Vec<String> {
+    // 交易员 Profile：形态观察中 / 已暂停时，自动执行和你手动批准一律拦住（先在交易手册里启用或恢复）。经典运行直接跳过。
+    if let (Some(run_id), Ok(conn)) = (optional_string(opportunity.agent_run_id.clone()), open_database(app)) {
+        let reasons = crate::trader_learning::trader_open_guard_reasons(
+            &conn,
+            &run_id,
+            &opportunity.inst_id,
+            &opportunity.intent,
+            &opportunity.direction,
+            opportunity.setup_id.as_deref(),
+            now_ms(),
+        );
+        if !reasons.is_empty() {
+            return reasons;
+        }
+    }
     let latest = capture_trade_opportunity_market_snapshot(runtime, &opportunity.inst_id);
     let last_price = snapshot_number(&latest, "/ticker/last");
     let reference_price = opportunity

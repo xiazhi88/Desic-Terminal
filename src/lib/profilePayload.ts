@@ -155,6 +155,8 @@ export function buildProfileSaveInput(
     triage: normalizeTriage(draft.triage),
     singleAgentMode: draft.singleAgentMode === "minimal" ? "minimal" : "standard",
     contextMode: draft.contextMode === "briefing" ? "briefing" : "tools",
+    // 交易员 Profile 用的交易手册；经典 Profile 不带（Rust 侧也会清空）。
+    ...(draft.contextMode === "briefing" ? { handbookId: draft.handbookId || "default" } : {}),
     // C20.5（改写版）：勾选名单原样回传（迁移由 Rust 强制完成）。
     enabledAgentIds: [...(draft.enabledAgentIds ?? [])],
     // —— C29 快判（AI Profile 下 Rust 忽略这些字段）——
@@ -209,9 +211,10 @@ export function normalizeProfileRisk(risk: Partial<AiProfileRiskSettings> | null
     return Number.isFinite(number) ? Math.min(max, Math.max(min, number)) : fallback;
   };
   return {
-    riskPerTradePct: pick(risk?.riskPerTradePct, DEFAULT_PROFILE_RISK.riskPerTradePct, 0.05, 5),
+    // 单笔风险与日亏停止线只按权益封顶（100%），与 Rust `AiProfileRiskSettings::normalized` 一致。
+    riskPerTradePct: pick(risk?.riskPerTradePct, DEFAULT_PROFILE_RISK.riskPerTradePct, 0.05, 100),
     minRewardRisk: pick(risk?.minRewardRisk, DEFAULT_PROFILE_RISK.minRewardRisk, 0.5, 5),
-    dailyLossLimitPct: pick(risk?.dailyLossLimitPct, DEFAULT_PROFILE_RISK.dailyLossLimitPct, 0.1, 20),
+    dailyLossLimitPct: pick(risk?.dailyLossLimitPct, DEFAULT_PROFILE_RISK.dailyLossLimitPct, 0.1, 100),
     maxOpenPositions: Math.round(pick(risk?.maxOpenPositions, DEFAULT_PROFILE_RISK.maxOpenPositions, 1, 10)),
     maxEntryDriftBps: pick(risk?.maxEntryDriftBps, DEFAULT_PROFILE_RISK.maxEntryDriftBps, 1, 300),
   };

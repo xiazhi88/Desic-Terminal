@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
 import { useTranslation } from "react-i18next";
-import { BookOpen, Crosshair, Loader2, PauseCircle, PlayCircle } from "lucide-react";
-import { loadTraderRunDecisions, loadTraderScorecard, setTraderSetupPause, type TraderDecisionRow, type TraderHandbook, type TraderScorecardData } from "../../lib/ai";
+import { BookOpen, ChevronRight, Crosshair, Loader2, PauseCircle, PlayCircle } from "lucide-react";
+import { loadTraderHandbook, loadTraderRunDecisions, loadTraderScorecard, setTraderSetupPause, type TraderDecisionRow, type TraderHandbook, type TraderHandbookLibraryEntry, type TraderHandbookSnapshot, type TraderScorecardData } from "../../lib/ai";
+import type { TraderHandbookApi } from "./traderApi";
+import { CorrectionButton, DESKTOP_CORRECTION_API, type CorrectionApi } from "./CorrectionButton";
 import "./trader-scorecard.css";
 
 const DAY_MS = 86_400_000;
@@ -27,35 +29,79 @@ function formatTime(ms: number) {
 }
 
 /**
- * 交易员 Profile 的成绩单：决策日志（含没执行的候选）按之后的 K 线自动结算后，按「形态 × 日线阶段 × 方向」汇总。
- * 「建议暂停」只是提醒；暂停 / 恢复由用户在这里手动操作，会生成新的手册版本。
+ * 交易员 Profile 的成绩单：决策日志（含没执行的候选）按之后的 K 线自动结算后，按「手册 × 形态 × 日线阶段 × 方向」汇总。
+ * 「建议暂停」只是提醒；暂停 / 恢复由用户在这里手动操作，会生成新的手册版次。「观察中」的形态只有影子结果。
  * `previewData` 只给预览页用（浏览器里没有桌面命令）。
  */
-export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOption[]; previewData?: TraderScorecardData }) {
+export function TraderScorecard({
+  profiles,
+  previewData,
+  handbookApi,
+  correctionApi = DESKTOP_CORRECTION_API,
+  focusProfileId,
+  focusNonce,
+  refreshKey,
+  onOpenHandbook
+}: {
+  profiles: ProfileOption[];
+  previewData?: TraderScorecardData;
+  /** 纠正的保存 / 删除；预览页传内存实现。 */
+  correctionApi?: CorrectionApi;
+  /** 读手册库（手册筛选用）；预览页传内存实现。 */
+  handbookApi?: Pick<TraderHandbookApi, "list">;
+  focusProfileId?: string | null;
+  focusNonce?: number;
+  /** 手册改过之后加一，成绩单重新读取（暂停状态、观察中标记跟着变）。 */
+  refreshKey?: number;
+  onOpenHandbook?: (handbookId: string) => void;
+}) {
   const { i18n } = useTranslation();
   const chinese = (i18n.resolvedLanguage ?? i18n.language ?? "").toLowerCase().startsWith("zh");
   const tx = useCallback((zh: string, en: string) => (chinese ? zh : en), [chinese]);
-  const [profileId, setProfileId] = useState<string>("");
+  const [profileId, setProfileId] = useState<string>(focusProfileId ?? "");
+  const [handbookFilter, setHandbookFilter] = useState<string>("");
+  const [handbooks, setHandbooks] = useState<TraderHandbookLibraryEntry[]>([]);
   const [days, setDays] = useState<(typeof RANGES)[number]>(30);
   const [data, setData] = useState<TraderScorecardData | null>(previewData ?? null);
   const [loading, setLoading] = useState(!previewData);
   const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [handbookOpen, setHandbookOpen] = useState(false);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  // 通知或别的页面要求看某个 Profile 的成绩单。
+  useEffect(() => {
+    if (focusProfileId) setProfileId(focusProfileId);
+  }, [focusNonce, focusProfileId]);
+
+  useEffect(() => {
+    if (!handbookApi) return;
+    let cancelled = false;
+    void handbookApi.list(true).then((items) => {
+      if (!cancelled) setHandbooks(items ?? []);
+    }).catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [handbookApi, refreshKey]);
 
   const reload = useCallback(async () => {
     if (previewData) return;
     setLoading(true);
-    const result = await loadTraderScorecard(profileId || null, Date.now() - days * DAY_MS).catch(() => null);
+    const result = await loadTraderScorecard(profileId || null, Date.now() - days * DAY_MS, handbookFilter || null).catch(() => null);
     setData(result);
     setLoading(false);
-  }, [days, previewData, profileId]);
+  }, [days, handbookFilter, previewData, profileId]);
 
   useEffect(() => {
     void reload();
-  }, [reload]);
+  }, [reload, refreshKey]);
 
   const regimeLabel = (value: string | null | undefined) =>
-    value === "up" ? tx("日线上升", "Daily up") : value === "down" ? tx("日线下降", "Daily down") : value === "mixed" ? tx("日线不明", "Daily mixed") : tx("阶段不明", "Regime n/a");
+    value === "up" ? tx("日线上升", "Daily up") : value === "down" ? tx("日线下降", "Daily down") : value === "mixed" ? tx("日线不明", "Daily mixed") : tx("阶段不可用", "Regime unavailable");
+  const handbookName = useCallback((id: string, name?: string | null) => {
+    const entry = handbooks.find((item) => item.id === id);
+    const resolved = name ?? entry?.name ?? null;
+    return resolved && resolved.trim() ? resolved : id === "default" ? tx("我的手册", "My handbook") : id;
+  }, [handbooks, tx]);
   const sideLabel = (value: string | null | undefined) => (value === "long" ? tx("做多", "Long") : value === "short" ? tx("做空", "Short") : "--");
   const actionLabel = (value: string) =>
     ({
@@ -74,19 +120,33 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
           ? tx("未成交", "Unfilled")
           : row.shadowStatus === "skipped"
             ? tx("不结算", "Not settled")
-            : tx("无效", "Invalid");
+            : row.shadowStatus === "duplicate"
+              ? tx("同一计划，不重复结算", "Same plan, not counted twice")
+              : tx("无效", "Invalid");
 
   const handbook: TraderHandbook | null = data?.handbook.content ?? null;
+  const shownHandbookId = data?.handbook.id ?? "default";
+  /** 表格里显示形态的名字（`顺势回踩`），不是内部 id（`trend_pullback`）；手册里找不到时退回 id。 */
+  const setupLabel = (setupId: string | null) => {
+    if (!setupId) return "--";
+    const name = handbook?.setups.find((item) => item.id === setupId)?.name;
+    return name && name.trim() ? name : setupId;
+  };
   const pausedFor = useCallback(
     (setupId: string, regime: string, side: string) =>
       handbook?.paused.find((entry) => entry.setupId === setupId && (entry.regime ?? null) === regime && (entry.side ?? null) === side) ?? null,
     [handbook]
   );
-  const togglePause = useCallback(async (setupId: string, regime: string, side: string, paused: boolean) => {
+  const observing = useCallback(
+    (setupId: string | null | undefined) => Boolean(setupId && handbook?.setups.some((setup) => setup.id === setupId && setup.status !== "live")),
+    [handbook]
+  );
+  const togglePause = useCallback(async (handbookId: string, setupId: string, regime: string, side: string, paused: boolean) => {
     if (previewData) return;
-    const key = `${setupId}|${regime}|${side}`;
+    const key = `${handbookId}|${setupId}|${regime}|${side}`;
     setBusyKey(key);
     await setTraderSetupPause({
+      handbookId,
       setupId,
       regime,
       side,
@@ -111,8 +171,14 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
         <div className="trader-scorecard__controls">
           <select value={profileId} onChange={(event) => setProfileId(event.target.value)} aria-label={tx("交易员 Profile", "Trader Profile")}>
             <option value="">{tx("全部交易员 Profile", "All trader Profiles")}</option>
-            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}
+            {profiles.map((profile) => <option key={profile.id} value={profile.id} data-i18n-skip>{profile.name}</option>)}
           </select>
+          {handbooks.length > 1 ? (
+            <select value={handbookFilter} onChange={(event) => setHandbookFilter(event.target.value)} aria-label={tx("交易手册", "Handbook")} data-scorecard-handbook-filter>
+              <option value="">{tx("全部手册", "All handbooks")}</option>
+              {handbooks.map((item) => <option key={item.id} value={item.id} data-i18n-skip={item.name ? "" : undefined}>{handbookName(item.id, item.name)}</option>)}
+            </select>
+          ) : null}
           <div className="automation-segmented compact" role="tablist">
             {RANGES.map((value) => (
               <button type="button" role="tab" key={value} aria-selected={days === value} className={days === value ? "active" : ""} onClick={() => setDays(value)}>
@@ -123,6 +189,7 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
         </div>
       </header>
 
+      {notice ? <p className="trader-scorecard__notice" role="status" data-scorecard-notice>{notice}</p> : null}
       {loading && !data ? (
         <div className="trader-scorecard__empty"><Loader2 className="spin" size={16} />{tx("正在读取成绩单…", "Loading scorecard…")}</div>
       ) : !card ? (
@@ -134,7 +201,6 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
             <div><span>{tx("已结算", "Settled")}</span><strong>{card.resolved}</strong></div>
             <div><span>{tx("真实成交", "Real fills")}</span><strong>{card.executed}</strong></div>
             <div><span>{tx("待结算", "Pending")}</span><strong>{data?.pending ?? 0}</strong></div>
-            <div><span>{tx("交易手册", "Handbook")}</span><strong>v{data?.handbook.version ?? 1}</strong></div>
           </div>
 
           <div className="trader-scorecard__block">
@@ -158,11 +224,18 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
                 </thead>
                 <tbody>
                   {card.groups.map((group) => {
-                    const paused = pausedFor(group.setupId, group.regime, group.side);
-                    const key = `${group.setupId}|${group.regime}|${group.side}`;
+                    const groupHandbook = group.handbookId || "default";
+                    const ownHandbook = groupHandbook === shownHandbookId;
+                    const paused = ownHandbook ? pausedFor(group.setupId, group.regime, group.side) : null;
+                    const isObserving = ownHandbook && observing(group.setupId);
+                    const key = `${groupHandbook}|${group.setupId}|${group.regime}|${group.side}`;
                     return (
-                      <tr key={key} className={clsx(group.flagged && "is-flagged", paused && "is-paused")} data-scorecard-group={key}>
-                        <th scope="row">{group.setupId}{group.flagged ? <em>{tx("建议暂停", "Suggest pause")}</em> : null}</th>
+                      <tr key={key} className={clsx(group.flagged && !isObserving && "is-flagged", paused && "is-paused", isObserving && "is-observing")} data-scorecard-group={key}>
+                        <th scope="row" title={group.setupId}>
+                          {ownHandbook ? setupLabel(group.setupId) : group.setupId}
+                          {isObserving ? <em className="is-observing" data-scorecard-observing>{tx("观察中", "Observing")}</em> : group.flagged ? <em>{tx("建议暂停", "Suggest pause")}</em> : null}
+                          {!ownHandbook ? <small className="trader-scorecard__book" data-i18n-skip>{handbookName(groupHandbook)}</small> : null}
+                        </th>
                         <td>{regimeLabel(group.regime)}</td>
                         <td>{sideLabel(group.side)}</td>
                         <td>{group.n}</td>
@@ -171,16 +244,18 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
                         <td className={group.shrunkAvgR >= 0 ? "is-up" : "is-down"}>{formatR(group.shrunkAvgR)}</td>
                         <td>{group.realN ? `${group.realN} · ${formatR(group.realAvgR)}` : "--"}</td>
                         <td>
-                          <button
-                            type="button"
-                            className="trader-scorecard__pause"
-                            disabled={busyKey === key}
-                            onClick={() => void togglePause(group.setupId, group.regime, group.side, !paused)}
-                            title={paused ? tx("恢复：重新允许这个范围开仓", "Resume opening in this scope") : tx("暂停：这个范围的开仓会被拒绝，影子记账照常", "Pause: opens in this scope are rejected; shadow scoring continues")}
-                          >
-                            {paused ? <PlayCircle size={13} /> : <PauseCircle size={13} />}
-                            {paused ? tx("恢复", "Resume") : tx("暂停", "Pause")}
-                          </button>
+                          {ownHandbook ? (
+                            <button
+                              type="button"
+                              className="trader-scorecard__pause"
+                              disabled={busyKey === key}
+                              onClick={() => void togglePause(groupHandbook, group.setupId, group.regime, group.side, !paused)}
+                              title={paused ? tx("恢复：重新允许这个范围开仓", "Resume opening in this scope") : tx("暂停：这个范围的开仓会被拒绝，影子记账照常", "Pause: opens in this scope are rejected; shadow scoring continues")}
+                            >
+                              {paused ? <PlayCircle size={13} /> : <PauseCircle size={13} />}
+                              {paused ? tx("恢复", "Resume") : tx("暂停", "Pause")}
+                            </button>
+                          ) : null}
                         </td>
                       </tr>
                     );
@@ -242,19 +317,33 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
                     <th>{tx("把握", "Prob.")}</th>
                     <th>{tx("影子结果", "Shadow")}</th>
                     <th>{tx("真实", "Real")}</th>
+                    <th>{tx("你的意见", "Your view")}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {data.recent.map((row) => (
-                    <tr key={row.id} className={clsx(row.againstDirection && "is-against")} title={row.reason ?? undefined}>
-                      <td>{formatTime(row.createdAt)}</td>
+                    <tr key={row.id} className={clsx(row.againstDirection && "is-against")}>
+                      <td title={row.reason ?? undefined} data-i18n-skip>{formatTime(row.createdAt)}</td>
                       <td>{row.instId.replace("-USDT-SWAP", "")}</td>
-                      <td>{row.setupId ?? "--"}{row.againstDirection ? <em>{tx("逆势", "against")}</em> : null}</td>
+                      <td title={row.setupId ?? undefined}>{setupLabel(row.setupId)}{row.setupStatus === "observing" ? <em className="is-observing">{tx("观察中", "observing")}</em> : null}{row.againstDirection ? <em>{tx("逆势", "against")}</em> : null}</td>
                       <td>{sideLabel(row.side)} · {actionLabel(row.action)}</td>
                       <td>{formatPrice(row.entry)} / {formatPrice(row.stop)} / {formatPrice(row.target)}</td>
                       <td>{row.probability === null ? "--" : `${Math.round(row.probability * 100)}%`}</td>
                       <td className={(row.shadowR ?? 0) >= 0 ? undefined : "is-down"}>{shadowLabel(row)}</td>
                       <td className={(row.realR ?? 0) >= 0 ? undefined : "is-down"}>{formatR(row.realR, 1)}</td>
+                      <td>
+                        <CorrectionButton
+                          row={row}
+                          api={correctionApi}
+                          handbook={data?.handbook ?? null}
+                          onChanged={(correction, suggestionId) => {
+                            setData((current) => (current ? { ...current, recent: current.recent.map((item) => (item.id === row.id ? { ...item, correction } : item)) } : current));
+                            setNotice(suggestionId
+                              ? tx("同一个形态被你纠正了 3 次，已生成一条交易手册修改建议，在「优化建议」里查看。", "This setup has been corrected 3 times; a handbook suggestion is waiting under Optimization.")
+                              : correction ? tx("已记下你的意见，之后几轮的简报里 AI 会看到。", "Saved. The AI sees it in the next briefings.") : null);
+                          }}
+                        />
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -264,25 +353,24 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
             )}
           </div>
 
-          {handbook ? (
-            <details className="trader-scorecard__handbook" open={handbookOpen} onToggle={(event) => setHandbookOpen((event.currentTarget as HTMLDetailsElement).open)} data-scorecard-handbook>
-              <summary><BookOpen size={13} />{tx(`交易手册 v${data?.handbook.version ?? 1}`, `Trader handbook v${data?.handbook.version ?? 1}`)}</summary>
-              <p><strong>{tx("方向纪律：", "Direction policy: ")}</strong>{handbook.directionPolicy}</p>
-              {handbook.setups.map((setup) => (
-                <div key={setup.id} className="trader-scorecard__setup">
-                  <strong>{setup.id} · {setup.name}</strong>
-                  <span>{tx("入场：", "Entry: ")}{setup.entry}</span>
-                  <span>{tx("止损：", "Stop: ")}{setup.stop}</span>
-                  <span>{tx("目标：", "Target: ")}{setup.target}</span>
-                  <span>{tx("失效：", "Invalidation: ")}{setup.invalidation}</span>
-                </div>
-              ))}
-              <p><strong>{tx("不做清单：", "No-trade list: ")}</strong>{handbook.noTradeRules.map((item) => item.text).join(" ")}</p>
-              <p><strong>{tx("持仓管理：", "Management: ")}</strong>{handbook.managementRules.map((item) => item.text).join(" ")}</p>
-              {handbook.paused.length > 0 ? (
-                <p><strong>{tx("已暂停：", "Paused: ")}</strong>{handbook.paused.map((entry) => `${entry.setupId}（${[entry.regime ? regimeLabel(entry.regime) : null, entry.side ? sideLabel(entry.side) : null].filter(Boolean).join(" · ") || tx("全部", "all")}）`).join("，")}</p>
+          {handbook && data ? (
+            <div className="trader-scorecard__handbook" data-scorecard-handbook>
+              <BookOpen size={13} />
+              <span>
+                {tx("交易手册：", "Handbook: ")}
+                <b data-i18n-skip>{handbookName(data.handbook.id, data.handbook.name)}</b>
+                {data.handbook.revision > 0 ? tx(` · 第 ${data.handbook.revision} 版`, ` · rev. ${data.handbook.revision}`) : tx(" · 内置模板", " · built-in template")}
+                {tx(
+                  ` · ${handbook.setups.length} 个形态${handbook.setups.some((setup) => setup.status !== "live") ? `（${handbook.setups.filter((setup) => setup.status !== "live").length} 个观察中）` : ""}${handbook.paused.length > 0 ? ` · ${handbook.paused.length} 个暂停范围` : ""}`,
+                  ` · ${handbook.setups.length} setups${handbook.setups.some((setup) => setup.status !== "live") ? ` (${handbook.setups.filter((setup) => setup.status !== "live").length} observing)` : ""}${handbook.paused.length > 0 ? ` · ${handbook.paused.length} paused scopes` : ""}`
+                )}
+              </span>
+              {onOpenHandbook ? (
+                <button type="button" className="trader-scorecard__link" onClick={() => onOpenHandbook(data.handbook.id)} data-scorecard-open-handbook>
+                  {tx("打开交易手册", "Open handbook")}<ChevronRight size={13} />
+                </button>
               ) : null}
-            </details>
+            </div>
           ) : null}
         </>
       )}
@@ -290,11 +378,18 @@ export function TraderScorecard({ profiles, previewData }: { profiles: ProfileOp
   );
 }
 
-/** 运行详情里的决策日志（只有交易员运行才有）。 */
-export function TraderRunDecisionLog({ rows }: { rows: TraderDecisionRow[] }) {
+/** 运行详情里的决策日志（只有交易员运行才有）。每条可以纠正。 */
+export function TraderRunDecisionLog({ rows: initialRows, correctionApi, handbook }: { rows: TraderDecisionRow[]; correctionApi?: CorrectionApi; handbook?: TraderHandbookSnapshot | null }) {
   const { i18n } = useTranslation();
   const chinese = (i18n.resolvedLanguage ?? i18n.language ?? "").toLowerCase().startsWith("zh");
   const tx = (zh: string, en: string) => (chinese ? zh : en);
+  const [rows, setRows] = useState(initialRows);
+  useEffect(() => setRows(initialRows), [initialRows]);
+  const setupName = (setupId: string | null) => {
+    if (!setupId) return "--";
+    const name = handbook?.content.setups.find((item) => item.id === setupId)?.name;
+    return name && name.trim() ? name : setupId;
+  };
   if (rows.length === 0) return null;
   return (
     <div className="trader-run-decisions" data-run-decision-log>
@@ -302,12 +397,19 @@ export function TraderRunDecisionLog({ rows }: { rows: TraderDecisionRow[] }) {
       {rows.map((row) => (
         <div key={row.id} className={clsx("trader-run-decisions__row", row.againstDirection && "is-against")}>
           <span>{row.instId}</span>
-          <span>{row.setupId ?? "--"}</span>
+          <span title={row.setupId ?? undefined}>{setupName(row.setupId)}{row.setupStatus === "observing" ? <em className="is-observing">{tx("观察中", "observing")}</em> : null}</span>
           <span>{row.side === "long" ? tx("做多", "long") : row.side === "short" ? tx("做空", "short") : "--"} · {row.action}</span>
           <span>{formatPrice(row.entry)} / {formatPrice(row.stop)} / {formatPrice(row.target)}</span>
           <span>{row.probability === null ? "--" : `${Math.round(row.probability * 100)}%`}</span>
           <span>{row.shadowStatus === "resolved" ? formatR(row.shadowR, 1) : row.shadowStatus}</span>
-          {row.reason ? <small>{row.reason}</small> : null}
+          <CorrectionButton
+            row={row}
+            api={correctionApi}
+            handbook={handbook}
+            onChanged={(correction) => setRows((current) => current.map((item) => (item.id === row.id ? { ...item, correction } : item)))}
+          />
+          {row.reason ? <small data-i18n-skip>{row.reason}</small> : null}
+          {row.correction?.text ? <small className="trader-run-decisions__view" data-i18n-skip>{tx("你的意见：", "Your view: ")}{row.correction.text}</small> : null}
         </div>
       ))}
     </div>
@@ -317,6 +419,8 @@ export function TraderRunDecisionLog({ rows }: { rows: TraderDecisionRow[] }) {
 /** 按运行 id 读取决策日志并展示；读不到（预览页、经典运行）时不显示。 */
 export function TraderRunDecisionLoader({ runId }: { runId: string }) {
   const [rows, setRows] = useState<TraderDecisionRow[]>([]);
+  // 这轮用的手册：只为了在纠正弹窗里显示形态的名字和原文规则，读失败就少这一段。
+  const [handbook, setHandbook] = useState<TraderHandbookSnapshot | null>(null);
   useEffect(() => {
     let cancelled = false;
     loadTraderRunDecisions(runId)
@@ -330,5 +434,23 @@ export function TraderRunDecisionLoader({ runId }: { runId: string }) {
       cancelled = true;
     };
   }, [runId]);
-  return <TraderRunDecisionLog rows={rows} />;
+  const handbookId = rows[0]?.handbookId ?? null;
+  useEffect(() => {
+    if (!handbookId) {
+      setHandbook(null);
+      return;
+    }
+    let cancelled = false;
+    loadTraderHandbook(handbookId)
+      .then((detail) => {
+        if (!cancelled) setHandbook(detail ?? null);
+      })
+      .catch(() => {
+        if (!cancelled) setHandbook(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [handbookId]);
+  return <TraderRunDecisionLog rows={rows} handbook={handbook} />;
 }

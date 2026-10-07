@@ -2,6 +2,7 @@ import { useState, type ReactNode } from "react";
 import { useTranslation } from "react-i18next";
 import clsx from "clsx";
 import { ChevronDown, Crosshair, Gauge, Sparkles, Zap } from "lucide-react";
+import { BetaBadge } from "../BetaBadge";
 import { FASTLANE_MODE_ENABLED } from "./fastlaneMode";
 import "./fastlane.css";
 
@@ -134,7 +135,7 @@ export function ProfileTypeCards({
                 )}
               </div>
               <div className="fastlane-card__body">
-                <strong className="fastlane-card__title">{card.title}</strong>
+                <strong className="fastlane-card__title">{card.title}{card.type === "trader" ? <BetaBadge className="fastlane-card__beta" /> : null}</strong>
                 <span className="fastlane-card__subtitle">{card.subtitle}</span>
                 <CardBody points={card.points} />
                 <span className="fastlane-card__fit">{card.fit}</span>

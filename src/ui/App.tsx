@@ -2604,9 +2604,11 @@ function TradingTerminal({
           ? "error"
         : event.type === "runCompleted"
           ? "success"
-          : event.type === "scorecardWarning"
+          : event.type === "scorecardWarning" || event.type === "traderOrderExpired"
             ? "warning"
-            : "info";
+            : event.type === "traderOrderExpiryFailed"
+              ? "error"
+              : "info";
       const title = event.type === "reviewCreated"
         ? uiText("新的交易复盘", "New trade review")
         : event.type === "suggestionCreated"
@@ -2629,6 +2631,10 @@ function TradingTerminal({
                 ? uiText("AI 自动化完成", "AI Automation completed")
               : event.type === "scorecardWarning"
                 ? uiText("交易员成绩单提醒", "Trader scorecard alert")
+              : event.type === "traderOrderExpired"
+                ? uiText("交易员挂单到期已撤单", "Expired trader order cancelled")
+              : event.type === "traderOrderExpiryFailed"
+                ? uiText("交易员挂单到期撤单失败", "Expired trader order not cancelled")
                 : uiText("AI 自动化通知", "AI Automation notification");
       pushNotification({
         kind,

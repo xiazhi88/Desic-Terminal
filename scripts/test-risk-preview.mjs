@@ -1,5 +1,6 @@
-// Profile 配置页「按当前账户换算」的计算口径（src/lib/riskPreview.ts）。
+// Profile 配置页「按当前账户换算」的计算口径（src/lib/riskPreview.ts）与拖动条刻度（src/lib/profileEditorScales.ts）。
 import { computeRiskPreview, floorToLot } from "../src/lib/riskPreview.ts";
+import { PROFILE_SCALES, PROFILE_STEPS, scalePosition, scaleValueAt, stepValue } from "../src/lib/profileEditorScales.ts";
 
 const failures = [];
 const near = (label, actual, expected, eps = 1e-6) => {
@@ -66,6 +67,41 @@ const inputs = { riskPerTradePct: 5, dailyLossLimitPct: 10, maxSingleTradeMargin
 
 equal("floor to lot", floorToLot(0.70588, 0.01), 0.7);
 equal("floor to lot exact", floorToLot(1.75, 0.01), 1.75);
+
+// 拖动条刻度：常用值严格递增、点选的刻度都在常用值里；亏损上限一直走到 100%（不再停在 5% / 20%）。
+for (const [key, scale] of Object.entries(PROFILE_SCALES)) {
+  const ascending = scale.values.every((value, index) => index === 0 || value > scale.values[index - 1]);
+  equal(`${key} ascending`, ascending, true);
+  for (const tick of scale.ticks) equal(`${key} tick ${tick} on scale`, scale.values.includes(tick), true);
+}
+for (const [key, values] of Object.entries(PROFILE_STEPS)) {
+  equal(`${key} steps ascending`, values.every((value, index) => index === 0 || value > values[index - 1]), true);
+}
+equal("risk per trade reaches 100%", PROFILE_SCALES.riskPerTradePct.values.at(-1), 100);
+equal("daily stop reaches 100%", PROFILE_SCALES.dailyLossLimitPct.values.at(-1), 100);
+
+// 位置：常用值落在整数档；常用值以外按相邻两档插值；超出两端贴边。
+{
+  const daily = PROFILE_SCALES.dailyLossLimitPct.values;
+  equal("position of 3%", scalePosition(daily, 3), daily.indexOf(3));
+  near("position of 3.5% between 3 and 4", scalePosition(daily, 3.5), daily.indexOf(3) + 0.5);
+  equal("position below range", scalePosition(daily, 0.1), 0);
+  equal("position above range", scalePosition(daily, 400), daily.length - 1);
+  equal("snap to nearest", scaleValueAt(daily, daily.indexOf(3) + 0.4), 3);
+  equal("snap up", scaleValueAt(daily, daily.indexOf(3) + 0.6), 4);
+  equal("snap clamps", scaleValueAt(daily, 99), 100);
+}
+
+// 步进器：从常用值以外的数也能走到相邻一档；两端不再动。
+{
+  const silence = PROFILE_STEPS.scanIntervalMinutes;
+  equal("step up from 30", stepValue(silence, 30, 1), 45);
+  equal("step down from 30", stepValue(silence, 30, -1), 20);
+  equal("step up from 33", stepValue(silence, 33, 1), 45);
+  equal("step down from 33", stepValue(silence, 33, -1), 30);
+  equal("step at top", stepValue(silence, 1440, 1), 1440);
+  equal("step at bottom", stepValue(silence, 1, -1), 1);
+}
 
 if (failures.length) {
   for (const failure of failures) console.error(failure);

@@ -1,4 +1,5 @@
 import {
+  Fragment,
   memo,
   useCallback,
   useEffect,
@@ -16,13 +17,24 @@ import { WorkspaceFrame } from "./WorkspaceFrame";
 import { WakeConditionList, wakeConditionsOf, useViewText } from "./wakeConditionView";
 import { ModeComparison } from "./automation/ModeComparison";
 import type { TraderDecisionRow, TraderHandbook, TraderScorecardData } from "../lib/ai";
-import { TraderRunDecisionLoader, TraderScorecard } from "./automation/TraderScorecard";
-import { RiskPreviewPanel } from "./automation/RiskPreviewPanel";
+import { TraderRunDecisionLoader } from "./automation/TraderScorecard";
+import { TraderWorkspace, type TraderWorkspaceFocus } from "./automation/TraderWorkspace";
+import { BetaBadge } from "./BetaBadge";
+import { createPreviewHandbookApi, createPreviewInstructionApi, PREVIEW_HANDBOOK_DETAILS, PREVIEW_HANDBOOK_SUGGESTION, PREVIEW_HANDBOOK_LIBRARY, PREVIEW_INSTRUCTIONS, PREVIEW_TRADER_PROFILES, PREVIEW_TRADER_SCORECARD } from "./automation/traderPreviewFixtures";
+import { diffTextLines, TextDiffTable, type TextDiffRow } from "./automation/TextDiff";
+import { AutomationConfirmDialog } from "./automation/AutomationConfirmDialog";
+import { HandbookSuggestionCard } from "./automation/HandbookSuggestionCard";
+import { blockedRiskRows, RiskPreviewPanel, RiskPreviewStrip, useRiskFacts } from "./automation/RiskPreviewPanel";
+import { EditorSegmented, EditorToggle, HelpTip, NumberField, PresetButtons, ScaleSlider, StepperField } from "./automation/ProfileEditorControls";
+import "./automation/profile-editor.css";
+import { PROFILE_PRESETS, PROFILE_SCALES, PROFILE_STEPS } from "../lib/profileEditorScales";
+import { computeRiskPreview, type RiskFacts } from "../lib/riskPreview";
 import {
   Activity,
   AlertTriangle,
   ArrowRightLeft,
   Bell,
+  BookOpen,
   Bot,
   Check,
   CheckCircle2,
@@ -32,6 +44,7 @@ import {
   ClipboardCheck,
   Clock3,
   Crosshair,
+  Eye,
   FileDiff,
   Gauge,
   History,
@@ -39,7 +52,6 @@ import {
   Lightbulb,
   Loader2,
   MoreHorizontal,
-  Eye,
   Pencil,
   Percent,
   Play,
@@ -50,7 +62,9 @@ import {
   Save,
   Search,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
+  Users,
   WalletCards,
   Workflow,
   X
@@ -111,7 +125,7 @@ import { buildProfileSaveInput, checkProfileSaveArgs, DEFAULT_PROFILE_RISK, desc
 import { listAiAgents, loadAgentResponsibilityIndex } from "./agentLibraryCommands";
 import { KlineChart } from "./KlineChart";
 import { TerminalSelect } from "./TerminalSelect";
-import { loadAiAutomationRunsInRange, loadAiConfigSummary, type AiAutomationPulseRange } from "../lib/ai";
+import { cancelTraderEntryOrders, DEFAULT_TRADER_HANDBOOK_ID, listTraderHandbooks, listTraderInstructions, loadAiAutomationRunsInRange, loadAiConfigSummary, loadTraderEntryOrders, loadTraderHandbook, loadTraderScorecard, type AiAutomationPulseRange, type TraderHandbookDetail, type TraderHandbookLibraryEntry, type TraderInstructionRow } from "../lib/ai";
 import { WatchPulse } from "./automation/WatchPulse";
 import { automationRunStub, pulseRunFromAutomationRun, type PulseRun, type WatchPulseProfile } from "./automation/watchPulseModel";
 import { createWatchPulseFixture } from "./automation/watchPulseFixture";
@@ -548,8 +562,11 @@ function normalizeProfile(profile: AiAgentProfile): AiAgentProfile {
   const allowedWakeConditionTypes = Array.isArray(profile.allowedWakeConditionTypes)
     ? profile.allowedWakeConditionTypes.filter(isWakeConditionType)
     : [];
+  // 交易员 Profile 总带手册 id（缺字段 = 默认手册），否则一打开就会显示「未保存」；经典 Profile 不带。
+  const { handbookId, ...rest } = profile;
   return {
-    ...profile,
+    ...rest,
+    ...(profile.contextMode === "briefing" ? { handbookId: handbookId || DEFAULT_TRADER_HANDBOOK_ID } : {}),
     mode: normalizePermissionMode(profile.mode),
     symbols: Array.isArray(profile.symbols) ? profile.symbols : [],
     skillIds: withRequiredProfileSkills(Array.isArray(profile.skillIds) ? profile.skillIds : [], profile.contextMode === "briefing"),
@@ -1009,54 +1026,6 @@ function formatSignedUsdtAmount(value: number): string {
   return `${sign}${Math.abs(value).toFixed(2)} USDT`;
 }
 
-/** In-app confirmation. `window.confirm` is unavailable in the Tauri webview
- *  ("dialog.confirm not allowed"), so destructive actions use this instead of a
- *  native prompt that silently rejects. */
-function AutomationConfirmDialog({
-  title,
-  message,
-  confirmText,
-  danger,
-  onCancel,
-  onConfirm
-}: Readonly<{
-  title: string;
-  message: string;
-  confirmText: string;
-  danger?: boolean;
-  onCancel: () => void;
-  onConfirm: () => void;
-}>) {
-  const { t } = useTranslation(["automation", "common"]);
-  const cancelRef = useRef<HTMLButtonElement | null>(null);
-
-  useEffect(() => {
-    cancelRef.current?.focus();
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        onCancel();
-      }
-    };
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [onCancel]);
-
-  return createPortal(
-    <div className="modal-backdrop compact automation-confirm-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) onCancel(); }}>
-      <section className="modal-shell compact automation-confirm-modal" role="dialog" aria-modal="true" aria-label={title}>
-        <header className="modal-head"><div><strong>{title}</strong></div></header>
-        <p className="automation-confirm-modal__message">{message}</p>
-        <div className="modal-actions">
-          <button type="button" ref={cancelRef} onClick={onCancel}>{t("common:cancel")}</button>
-          <button type="button" className={danger ? "danger-action" : ""} onClick={onConfirm}>{confirmText}</button>
-        </div>
-      </section>
-    </div>,
-    document.body
-  );
-}
-
 /** A Profile at rest. Everything the list view used to truncate is shown here in
  *  full, and the actions that do not need the editor act straight from the card. */
 function ProfileCard({
@@ -1115,6 +1084,7 @@ function ProfileCard({
                 {profile.contextMode === "briefing" ? t("automation:profileContextModeBriefing") : t("automation:profileContextModeTools")}
               </em>
             ) : null}
+            {profile.profileType !== "fastlane" && profile.contextMode === "briefing" ? <BetaBadge /> : null}
             <em>{t(permissionModeI18nKey(profile.mode))}</em>
             <em className={profile.environment === "live" ? "is-live" : "is-demo"}>
               {profile.environment === "live" ? t("common:live") : t("common:demo")}
@@ -1190,13 +1160,14 @@ function ProfileCard({
 
 /** Hosts the existing editor in a draggable dialog. The editor component itself
  *  is unchanged; only its container moved out of the page body. */
+type ProfileEditorDragHandleProps = ReturnType<typeof useDraggableSurface<HTMLElement>>["handleProps"];
+
+/** Profile 配置窗口的外壳：遮罩、Esc 关闭、拖动。头部、导航和底部按钮都在 `ProfileEditor` 里（拖动把手由这里传进去）。 */
 function ProfileEditorDialog({
   title,
-  dirty,
   onClose,
   children
-}: Readonly<{ title: string; dirty: boolean; onClose: () => void; children: ReactNode }>) {
-  const { t } = useTranslation(["automation", "common"]);
+}: Readonly<{ title: string; onClose: () => void; children: (dragHandleProps: ProfileEditorDragHandleProps) => ReactNode }>) {
   const dialogDrag = useDraggableSurface<HTMLElement>();
 
   useEffect(() => {
@@ -1216,14 +1187,7 @@ function ProfileEditorDialog({
       onMouseDown={(event) => { if (event.target === event.currentTarget) onClose(); }}
     >
       <section ref={dialogDrag.surfaceRef} className="modal-shell automation-profile-editor-modal" role="dialog" aria-modal="true" aria-label={title}>
-        <header className="modal-head automation-profile-editor-modal__head" {...dialogDrag.handleProps}>
-          <div>
-            <strong>{title}</strong>
-            {dirty ? <span className="automation-profile-editor-modal__dirty">{t("automation:profileUnsavedTitle")}</span> : null}
-          </div>
-          <button className="window-button" type="button" onClick={onClose} title={t("common:close")}><X size={16} /></button>
-        </header>
-        <div className="automation-profile-editor-modal__body">{children}</div>
+        {children(dialogDrag.handleProps)}
       </section>
     </div>,
     document.body
@@ -1251,6 +1215,21 @@ function ProfileMigrationNotes({ notes }: Readonly<{ notes?: string[] }>) {
   );
 }
 
+type ProfileEditorPage = "basic" | "risk" | "method" | "rhythm" | "advanced";
+
+function formatPercentValue(value: number) {
+  return `${Number(value.toFixed(4))}%`;
+}
+
+function formatTokenCount(value: number) {
+  return value >= 1_000_000 ? `${(value / 1_000_000).toFixed(1)}M` : `${Math.round(value / 1000)}K`;
+}
+
+/**
+ * Profile 配置：左侧分页（基本 / 资金与风险 / 交易方式或分析方式 / 节奏与通知 / 高级），每页是分组的设置行。
+ * 顶部一行概览把关键设置换算成金额；「资金与风险」页把每个百分比按当前账户换算，并能拖动、快选。
+ * 两种 Profile 共用这套外壳和共享页；只有「交易方式 / 分析方式」页按类型不同。
+ */
 function ProfileEditor({
   draft,
   accounts,
@@ -1264,13 +1243,25 @@ function ProfileEditor({
   agentsLoading,
   agentsError,
   busy,
+  dirty,
+  savedAt,
+  recentInputTokens,
+  dragHandleProps,
+  previewFacts,
+  previewTraderSummary,
+  previewHandbooks,
+  previewInstructions,
   onChange,
   onOpenAgentLibrary,
+  onOpenScorecard,
+  onOpenHandbook,
+  onOpenInstructions,
   onReloadAgents,
   onSave,
   onRun,
   onDailyReview,
-  onDelete
+  onDelete,
+  onClose
 }: {
   draft: AiAgentProfile;
   accounts: AccountSummary[];
@@ -1284,15 +1275,35 @@ function ProfileEditor({
   agentsLoading: boolean;
   agentsError: string | null;
   busy: boolean;
+  dirty: boolean;
+  /** 已保存版本的更新时间；从没保存过时为 null。 */
+  savedAt: number | null;
+  /** 这个 Profile 最近完成的运行各自的输入 token（新的在前），用来估算每天的用量。 */
+  recentInputTokens?: number[];
+  dragHandleProps?: ProfileEditorDragHandleProps;
+  /** 仅预览页：浏览器里没有桌面命令，账户与行情事实、交易员成绩单直接给定。 */
+  previewFacts?: RiskFacts;
+  previewTraderSummary?: TraderScorecardData | null;
+  /** 仅预览页：手册库与各本手册的内容。 */
+  previewHandbooks?: { library: TraderHandbookLibraryEntry[]; details: Record<string, TraderHandbookDetail> };
+  /** 仅预览页：生效中的临时指令。 */
+  previewInstructions?: TraderInstructionRow[];
   onChange: (patch: Partial<AiAgentProfile>) => void;
   onOpenAgentLibrary: () => void;
+  onOpenScorecard: () => void;
+  onOpenHandbook: (handbookId: string) => void;
+  onOpenInstructions: () => void;
   onReloadAgents: () => void;
   onSave: () => void;
   onRun: () => void;
   onDailyReview: () => void;
   onDelete: () => void;
+  onClose: () => void;
 }) {
-  const { t } = useTranslation(["automation", "common"]);
+  const { t, i18n: translation } = useTranslation(["automation", "common"]);
+  const chinese = (translation.resolvedLanguage ?? translation.language ?? "").toLowerCase().startsWith("zh");
+  const listSeparator = chinese ? "、" : ", ";
+  const [page, setPage] = useState<ProfileEditorPage>("basic");
   const [symbolQuery, setSymbolQuery] = useState("");
   const [symbolPickerOpen, setSymbolPickerOpen] = useState(false);
   const skillIds = useMemo(() => new Set(draft.skillIds), [draft.skillIds]);
@@ -1330,10 +1341,6 @@ function ProfileEditor({
   const traderProfile = draft.contextMode === "briefing";
   const requiredSkillIds = traderProfile ? TRADER_REQUIRED_SKILL_ID_SET : REQUIRED_PROFILE_SKILL_ID_SET;
   const visibleSkills = useMemo(() => (traderProfile ? skills.filter((skill) => !TRADER_EXCLUDED_SKILL_ID_SET.has(skill.id)) : skills), [skills, traderProfile]);
-  const selectedSkills = useMemo(
-    () => visibleSkills.filter((skill) => skillIds.has(skill.id) && !(traderProfile && skill.id === "desic-core-operations")),
-    [skillIds, traderProfile, visibleSkills]
-  );
   const publishedVersions = useMemo(() => {
     const grouped = new Map<string, AiSkillVersion[]>();
     for (const version of skillVersions) {
@@ -1345,15 +1352,9 @@ function ProfileEditor({
     for (const items of grouped.values()) items.sort((a, b) => b.version - a.version);
     return grouped;
   }, [skillVersions]);
-  const updateNumber = (key: keyof AiAgentProfile, value: string, minimum: number, maximum: number) => {
-    const next = Number(value);
-    onChange({
-      [key]: Number.isFinite(next) ? Math.min(maximum, Math.max(minimum, next)) : minimum
-    } as Partial<AiAgentProfile>);
-  };
   const risk = normalizeProfileRisk(draft.risk);
-  const updateRisk = (key: keyof AiProfileRiskSettings, value: string) => {
-    onChange({ risk: normalizeProfileRisk({ ...risk, [key]: Number(value) }) });
+  const updateRisk = (key: keyof AiProfileRiskSettings, value: number) => {
+    onChange({ risk: normalizeProfileRisk({ ...risk, [key]: value }) });
   };
   const toggleSkill = (id: string, checked: boolean) => {
     if (requiredSkillIds.has(id)) return;
@@ -1379,326 +1380,659 @@ function ProfileEditor({
     onChange({ skillVersions: next, skillVersionModes: nextModes });
   };
 
-  const trader = draft.contextMode === "briefing";
-  return (
-    <div className="automation-profile-editor">
-      <div className="automation-editor-head">
-        <div className="automation-editor-title">
-          <span className={clsx("automation-editor-mark", trader && "is-trader")}>{trader ? <Crosshair size={16} /> : <Bot size={16} />}</span>
-          <div>
-            <strong>
-              {draft.name || t("automation:profileUnnamed")}
-              {/* 类型在创建时决定、不可修改：这里只读展示。 */}
-              <em className={clsx("automation-editor-type", trader && "is-trader")} data-profile-kind={trader ? "trader" : "classic"}>
-                {trader ? t("automation:profileCardTraderTitle") : t("automation:profileCardAiTitle")}
-              </em>
-            </strong>
-            <span>{t(permissionModeHintI18nKey(normalizePermissionMode(draft.mode)))}</span>
-          </div>
-        </div>
-        <div className="automation-editor-toolbar">
-          <label className="automation-check compact">
-            <input type="checkbox" checked={draft.enabled} onChange={(event) => onChange({ enabled: event.target.checked })} />
-            <span>{t("common:enabled")}</span>
-          </label>
-          <button onClick={onRun} disabled={busy || !draft.id} title={t("automation:profileRunNow")}><Play size={14} />{t("common:run")}</button>
-          <button className="automation-danger-button" onClick={onDelete} disabled={busy} title={t("automation:profileDelete")}><Trash2 size={14} />{t("common:delete")}</button>
-          <button className="primary" onClick={() => onSave()} disabled={busy}><Save size={14} />{t("common:save")}</button>
-        </div>
-      </div>
+  // 按当前账户换算：概览条与「资金与风险」页共用同一份事实和计算。
+  const riskFacts = useRiskFacts(draft.accountId, draft.symbols, previewFacts);
+  const riskPreview = useMemo(
+    () => (riskFacts.facts
+      ? computeRiskPreview(riskFacts.facts, {
+        riskPerTradePct: risk.riskPerTradePct,
+        dailyLossLimitPct: risk.dailyLossLimitPct,
+        maxSingleTradeMarginPct: draft.maxSingleTradeMarginPct,
+        targetLeverage: draft.targetLeverage
+      })
+      : null),
+    [draft.maxSingleTradeMarginPct, draft.targetLeverage, risk.dailyLossLimitPct, risk.riskPerTradePct, riskFacts.facts]
+  );
+  const blockedRows = blockedRiskRows(riskPreview);
+  const equity = riskPreview?.equity ?? null;
+  const moneyOfPct = (pct: number) => (equity === null ? "" : `${((equity * pct) / 100).toFixed(2)} U`);
 
-      <div className="automation-form-section automation-basic-section">
-        <strong><Bot size={13} />{t("automation:profileBasicSettings")}</strong>
-        <div className="automation-form-grid">
-        <label className="wide">
-          <span>{t("common:name")}</span>
-          <input value={draft.name} data-onboarding-focus onChange={(event) => onChange({ name: event.target.value })} />
-        </label>
-        <label>
-          <span>{t("automation:profileMode")}</span>
-          <TerminalSelect
-            ariaLabel={t("automation:profileMode")}
-            value={normalizePermissionMode(draft.mode)}
-            options={[
-              { value: "advisor", label: t("automation:profileModeAdvisor") },
-              { value: "copilot", label: t("automation:profileModeCopilot") },
-              { value: "limited_auto", label: t("automation:profileModeLimitedAuto") }
-            ]}
-            onChange={(value) => onChange({ mode: value as AiPermissionMode })}
-          />
-        </label>
-        <label>
-          <span>{t("common:account")}</span>
-          <TerminalSelect
-            ariaLabel={t("common:account")}
-            value={draft.accountId ?? ""}
-            options={[
-              { value: "", label: t("automation:profileNoBoundAccount") },
-              ...accounts.map((account) => ({
-                value: account.id,
-                label: `${account.name} · ${account.environment === "live" ? t("common:live") : t("common:demo")}`
-              }))
-            ]}
-            onChange={(value) => {
-              const selected = accounts.find((account) => account.id === value);
-              onChange({ accountId: value || null, environment: selected?.environment ?? "demo" });
-            }}
-          />
-        </label>
-        <div className="automation-derived-environment">
-          <span>{t("automation:profileTradingEnvironment")}</span>
-          <strong className={boundAccount ? boundEnvironment : "unbound"}>
-            <ShieldCheck size={13} />
-            {boundAccount ? boundEnvironment === "live" ? t("common:live") : t("common:demo") : t("automation:profileNoBoundAccount")}
-          </strong>
-          <small>{t("automation:profileEnvironmentFollowsAccount")}</small>
-        </div>
-        <label>
-          <FieldLabel help={t("automation:profileModelHelp")}>{t("automation:profileModel")}</FieldLabel>
-          <div className="automation-model-field">
-            <TerminalSelect
-              ariaLabel={t("automation:profileModel")}
-              value={draft.model ?? models[0]?.id ?? ""}
-              options={models.length > 0
-                ? models.map((item) => ({ value: item.id, label: `${item.name} · ${item.model}` }))
-                : [{ value: "", label: t("automation:profileNoModels"), disabled: true }]}
-              onChange={(value) => onChange({ model: value || null })}
-            />
-            <button type="button" onClick={() => openSettingsTab("ai")}>{t("automation:profileAddModel")}</button>
-          </div>
-        </label>
-        <label>
-          <FieldLabel help={t("automation:profileReasoningDepthHelp")}>{t("automation:profileReasoningDepth")}</FieldLabel>
-          <TerminalSelect
-            ariaLabel={t("automation:profileReasoningDepthAria")}
-            value={draft.reasoningDepth}
-            options={[
-              { value: "none", label: t("automation:profileReasoningNone") },
-              { value: "minimal", label: t("automation:profileReasoningMinimal") },
-              { value: "low", label: t("automation:profileReasoningLow") },
-              { value: "medium", label: t("automation:profileReasoningMedium") },
-              { value: "high", label: t("automation:profileReasoningHigh") },
-              { value: "xhigh", label: t("automation:profileReasoningXhigh") }
-            ]}
-            onChange={(value) => onChange({ reasoningDepth: value as AiReasoningDepth })}
-          />
-        </label>
-        <div className="automation-symbol-field wide">
-          <span>
-            {t("automation:profileWatchSymbols")}
-            <small>{t("automation:profileWatchSymbolsWatchlistOnly")}</small>
-            <small>{t("automation:profileWatchSymbolsLimit", { count: PROFILE_SYMBOL_LIMIT })} · {draft.symbols.length}/{PROFILE_SYMBOL_LIMIT}</small>
-          </span>
-          <div className="automation-symbol-chips">
-            {draft.symbols.map((symbol) => {
-              const asset = marketAssets?.instruments.find((item) => item.instId === symbol);
-              // A Profile saved before this restriction can still hold a symbol
-              // that is no longer subscribed. Flag it, because the run would
-              // silently read stale candles instead of failing loudly.
-              const unsubscribed = watchlistSymbols.size > 0 && !watchlistSymbols.has(symbol);
-              return (
-                <span
-                  className={clsx("automation-symbol-chip", unsubscribed && "is-unsubscribed")}
-                  key={symbol}
-                  title={unsubscribed ? t("automation:profileSymbolNotInWatchlist", { symbol }) : undefined}
-                >
-                  <SymbolIcon base={asset?.baseCcy || symbolBase(symbol)} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
-                  <b>{symbol}</b>
-                  <button type="button" title={t("automation:profileRemoveSymbol", { symbol })} aria-label={t("automation:profileRemoveSymbol", { symbol })} onClick={() => onChange({ symbols: draft.symbols.filter((item) => item !== symbol) })}><X size={11} /></button>
-                </span>
-              );
-            })}
-            <div className="automation-symbol-add" onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSymbolPickerOpen(false);
-            }}>
-              <Search size={13} />
-              <input
-                value={symbolQuery}
-                disabled={symbolLimitReached}
-                placeholder={symbolLimitReached ? t("automation:profileWatchSymbolsLimitReached", { count: PROFILE_SYMBOL_LIMIT }) : t("automation:profileAddSymbol")}
-                aria-label={t("automation:profileAddWatchedSymbol")}
-                aria-expanded={symbolPickerOpen && !symbolLimitReached}
-                onFocus={() => {
-                  if (!symbolLimitReached) setSymbolPickerOpen(true);
-                }}
-                onChange={(event) => {
-                  setSymbolQuery(event.target.value.toUpperCase());
-                  setSymbolPickerOpen(true);
-                }}
-                onKeyDown={(event) => {
-                  if (event.key === "Escape") setSymbolPickerOpen(false);
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    addProfileSymbol(symbolOptions[0]?.instId || symbolQuery);
-                  }
-                }}
-              />
-              {symbolPickerOpen && (symbolOptions.length > 0 || symbolQuery.trim()) ? (
-                <div className="automation-symbol-options" role="listbox" aria-label={t("automation:profileAvailableSymbols")}>
-                  {symbolOptions.map((item) => (
-                    <button type="button" role="option" key={item.instId} onMouseDown={(event) => event.preventDefault()} onClick={() => addProfileSymbol(item.instId)}>
-                      <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={marketAssets?.cacheDir} />
-                      <span><strong>{item.baseCcy}</strong><small>{item.instId}</small></span>
-                    </button>
-                  ))}
-                  {symbolOptions.length === 0 && symbolQuery.trim() ? <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => addProfileSymbol(symbolQuery)}>{t("automation:profileAddNamedSymbol", { symbol: symbolQuery.trim().toUpperCase() })}</button> : null}
+  // 交易员 Profile：本 Profile 的决策计数（没保存过的 Profile 还没有决策）。
+  const [traderSummary, setTraderSummary] = useState<TraderScorecardData | null>(previewTraderSummary ?? null);
+  useEffect(() => {
+    if (!traderProfile || previewTraderSummary !== undefined || !savedAt) return;
+    let cancelled = false;
+    void loadTraderScorecard(draft.id, 0).then((data) => {
+      if (!cancelled) setTraderSummary(data);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [draft.id, previewTraderSummary, savedAt, traderProfile]);
+  // 交易员 Profile 用的交易手册：手册库里选一本（切换后未保存也显示那本的形态）。
+  const selectedHandbookId = draft.handbookId || DEFAULT_TRADER_HANDBOOK_ID;
+  const [handbookLibrary, setHandbookLibrary] = useState<TraderHandbookLibraryEntry[] | null>(previewHandbooks?.library ?? null);
+  const [handbookDetail, setHandbookDetail] = useState<TraderHandbookDetail | null>(null);
+  const [handbookLoading, setHandbookLoading] = useState(false);
+  useEffect(() => {
+    if (!traderProfile || previewHandbooks) return;
+    let cancelled = false;
+    void listTraderHandbooks(true).then((items) => {
+      if (!cancelled) setHandbookLibrary(items ?? []);
+    }).catch(() => {
+      if (!cancelled) setHandbookLibrary([]);
+    });
+    return () => { cancelled = true; };
+  }, [previewHandbooks, traderProfile]);
+  useEffect(() => {
+    if (!traderProfile) return;
+    if (previewHandbooks) {
+      setHandbookDetail(previewHandbooks.details[selectedHandbookId] ?? null);
+      return;
+    }
+    let cancelled = false;
+    setHandbookLoading(true);
+    void loadTraderHandbook(selectedHandbookId).then((detail) => {
+      if (!cancelled) setHandbookDetail(detail);
+    }).catch(() => {
+      if (!cancelled) setHandbookDetail(null);
+    }).finally(() => {
+      if (!cancelled) setHandbookLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [previewHandbooks, selectedHandbookId, traderProfile]);
+  const handbook = handbookDetail?.content ?? null;
+  // 作用于这个交易员 Profile 的生效中的临时指令（只显示一行摘要，管理在「交易员 → 临时指令」）。
+  const [instructions, setInstructions] = useState<TraderInstructionRow[]>(previewInstructions ?? []);
+  useEffect(() => {
+    if (!traderProfile || previewInstructions) return;
+    let cancelled = false;
+    void listTraderInstructions(false).then((items) => {
+      if (!cancelled) setInstructions(items ?? []);
+    }).catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [previewInstructions, traderProfile]);
+  const profileInstructions = instructions.filter((item) => item.status === "active" && (item.profileId === null || (savedAt !== null && item.profileId === draft.id)));
+  const handbookName = (name: string | null | undefined) => (name && name.trim() ? name : t("automation:handbookDefaultName"));
+  const handbookOptions = useMemo(() => {
+    const items = (handbookLibrary ?? []).filter((item) => !item.archivedAt || item.id === selectedHandbookId);
+    const options = items.map((item) => ({
+      value: item.id,
+      label: [handbookName(item.name), item.revision ? t("automation:handbookRevision", { revision: item.revision }) : null, item.archivedAt ? t("automation:handbookArchivedTag") : null].filter(Boolean).join(" · "),
+      description: [
+        t("automation:handbookSetupCount", { count: item.setupCount }),
+        item.observingCount > 0 ? t("automation:handbookObservingCount", { count: item.observingCount }) : null,
+        item.score90d.resolved > 0 && item.score90d.shrunkAvgR !== null
+          ? t("automation:handbookScore90d", { count: item.score90d.resolved, r: `${item.score90d.shrunkAvgR >= 0 ? "+" : ""}${item.score90d.shrunkAvgR.toFixed(2)}R` })
+          : null
+      ].filter(Boolean).join(" · ")
+    }));
+    if (!options.some((option) => option.value === selectedHandbookId)) {
+      options.unshift({ value: selectedHandbookId, label: handbookDetail ? handbookName(handbookDetail.name) : selectedHandbookId, description: "" });
+    }
+    return options;
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [handbookDetail, handbookLibrary, selectedHandbookId, t]);
+
+  // 每天大约运行几次：没有唤醒条件命中时按最长静默兜底；频繁命中时受每小时上限和最短间隔约束。
+  const runsPerDayMax = Math.min(draft.maxRunsPerHour * 24, Math.floor(86_400 / Math.max(1, draft.minWakeIntervalSeconds)));
+  const runsPerDayMin = Math.min(runsPerDayMax, Math.ceil(1440 / Math.max(1, draft.scanIntervalMinutes)));
+  const tokenMedian = useMemo(() => {
+    const samples = (recentInputTokens ?? []).filter((value) => value > 0).slice(0, 20);
+    if (samples.length === 0) return null;
+    const sorted = [...samples].sort((a, b) => a - b);
+    const middle = Math.floor(sorted.length / 2);
+    return { value: sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2, count: samples.length };
+  }, [recentInputTokens]);
+
+  const modeValue = normalizePermissionMode(draft.mode);
+  const modeLabel = modeValue === "advisor"
+    ? t("automation:profileModeAdvisor")
+    : modeValue === "copilot"
+      ? t("automation:profileModeCopilot")
+      : t("automation:profileModeLimitedAuto");
+  const liveEnvironment = boundEnvironment === "live";
+  const environmentLabel = boundAccount ? (liveEnvironment ? t("common:live") : t("common:demo")) : t("automation:profileNoBoundAccount");
+  const regimeText = (regimes: string[]) => {
+    if (["up", "down", "mixed"].every((regime) => regimes.includes(regime))) return t("automation:profileRegimeAll");
+    return regimes
+      .map((regime) => (regime === "up" ? t("automation:profileRegimeUp") : regime === "down" ? t("automation:profileRegimeDown") : regime === "mixed" ? t("automation:profileRegimeMixed") : regime))
+      .join(" / ");
+  };
+  const pages: Array<{ id: ProfileEditorPage; label: string; icon: typeof Bot }> = [
+    { id: "basic", label: t("automation:profileNavBasic"), icon: SlidersHorizontal },
+    { id: "risk", label: t("automation:profileNavRisk"), icon: ShieldCheck },
+    { id: "method", label: traderProfile ? t("automation:profileNavTrading") : t("automation:profileNavAnalysis"), icon: traderProfile ? BookOpen : Users },
+    { id: "rhythm", label: t("automation:profileNavRhythm"), icon: Clock3 },
+    { id: "advanced", label: t("automation:profileNavAdvanced"), icon: MoreHorizontal }
+  ];
+
+  const skillsGroup = (
+    <div className="pfe-group" data-profile-skills>
+      <div className="pfe-group-head">
+        {t("automation:profileSkillsShort")}
+        <HelpTip text={traderProfile ? t("automation:profileTraderSkillsNote") : t("automation:profileSkillsVersionNote")} />
+        <button type="button" className="pfe-link" onClick={() => openSettingsTab("skills")}>{t("automation:profileSkillsEdit")}</button>
+      </div>
+      {visibleSkills.length === 0 ? (
+        <div className="pfe-row"><span className="pfe-row__weak">{t("automation:profileSkillsEmpty")}</span></div>
+      ) : visibleSkills.map((skill) => {
+        const required = requiredSkillIds.has(skill.id);
+        const traderCore = traderProfile && skill.id === "desic-core-operations";
+        const selected = skillIds.has(skill.id);
+        const versions = publishedVersions.get(skill.id) ?? [];
+        const pinned = draft.skillVersionModes?.[skill.id] === "pinned" ? draft.skillVersions?.[skill.id] : undefined;
+        const pinnedAvailable = pinned ? versions.some((item) => item.version === pinned) : true;
+        const name = traderCore ? t("automation:profileTraderCoreSkill") : skill.name || skill.id;
+        return (
+          <div className="pfe-row" key={skill.id} data-profile-skill={skill.id} title={traderCore ? t("automation:profileTraderCoreSkillNote") : skill.description || undefined}>
+            <span className="pfe-row__label">{name}</span>
+            <div className="pfe-row__control">
+              {selected && !traderCore ? (
+                <div className="pfe-row__version">
+                  <TerminalSelect
+                    ariaLabel={t("automation:profileSkillsPublishedVersionAria", { skill: skill.name || skill.id })}
+                    value={pinned ? String(pinned) : ""}
+                    options={[
+                      { value: "", label: t("automation:profileSkillsLatestAuto") },
+                      ...(pinned && !pinnedAvailable ? [{ value: String(pinned), label: t("automation:profileSkillsUnavailableVersion", { version: pinned }), disabled: true }] : []),
+                      ...versions.map((version) => ({ value: String(version.version), label: `v${version.version}` }))
+                    ]}
+                    onChange={(value) => updateSkillVersion(skill.id, value)}
+                  />
                 </div>
               ) : null}
+              {required ? (
+                <span className="pfe-row__weak">{t("automation:profileSkillsRequired")}</span>
+              ) : (
+                <EditorToggle checked={selected} ariaLabel={name} disabled={busy} onChange={(checked) => toggleSkill(skill.id, checked)} />
+              )}
             </div>
           </div>
-        </div>
-        </div>
-      </div>
+        );
+      })}
+    </div>
+  );
 
-      {/* C20.1（改写版）/ C31：迁移提示的**唯一渲染点**（预览夹具共用同一组件，见 ProfileMigrationNotes）。 */}
-      <ProfileMigrationNotes notes={draft.migrationNotes} />
-
-      {trader ? (
-        <TraderSettingsSection />
-      ) : (
-      <>
-      <ProfileAgentSelector
-        agents={agents}
-        responsibilities={agentResponsibilities}
-        selectedIds={draft.enabledAgentIds}
-        collaborationEnabled={draft.collaborationEnabled}
-        onToggleCollaboration={(collaborationEnabled) => onChange({ collaborationEnabled })}
-        loading={agentsLoading}
-        error={agentsError}
-        disabled={busy}
-        onChange={(enabledAgentIds) => onChange({ enabledAgentIds })}
-        onOpenAgentLibrary={onOpenAgentLibrary}
-        onReload={onReloadAgents}
-        singleAgentMode={draft.singleAgentMode}
-        onChangeSingleAgentMode={(singleAgentMode) => onChange({ singleAgentMode })}
-      />
-
-      <TriageSettings
-        value={draft.triage}
-        disabled={busy}
-        onChange={(triage) => onChange({ triage })}
-      />
-      </>
-      )}
-
-      <div className="automation-form-section">
-        <strong><Gauge size={13} />{t("automation:profileBackgroundLimits")}</strong>
-        <div className="automation-limit-grid">
-          <label><FieldLabel help={t("automation:profileLimitSilenceHelp")}>{t("automation:profileLimitSilence")}</FieldLabel><input type="number" min="1" max="1440" value={draft.scanIntervalMinutes} onChange={(event) => updateNumber("scanIntervalMinutes", event.target.value, 1, 1440)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitHistoryHelp")}>{t("automation:profileLimitHistory")}</FieldLabel><input type="number" min="1" max="365" value={draft.historyLookbackDays} onChange={(event) => updateNumber("historyLookbackDays", event.target.value, 1, 365)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitSimilarityHelp")}>{t("automation:profileLimitSimilarity")}</FieldLabel><input type="number" min="1" max="1440" value={draft.similarityWindowMinutes} onChange={(event) => updateNumber("similarityWindowMinutes", event.target.value, 1, 1440)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitEntryToleranceHelp")}>{t("automation:profileLimitEntryTolerance")}</FieldLabel><input type="number" min="1" max="2000" value={draft.entryToleranceBps} onChange={(event) => updateNumber("entryToleranceBps", event.target.value, 1, 2000)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitLeverageHelp")}>{t("automation:profileLimitLeverage")}</FieldLabel><input type="number" min="1" max="125" value={draft.targetLeverage} onChange={(event) => updateNumber("targetLeverage", event.target.value, 1, 125)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitTradeMarginHelp")}>{t("automation:profileLimitTradeMargin")}</FieldLabel><input type="number" min="1" max="100" value={draft.maxSingleTradeMarginPct} onChange={(event) => updateNumber("maxSingleTradeMarginPct", event.target.value, 1, 100)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitWakeIntervalHelp")}>{t("automation:profileLimitWakeInterval")}</FieldLabel><input type="number" min="30" max="86400" value={draft.minWakeIntervalSeconds} onChange={(event) => updateNumber("minWakeIntervalSeconds", event.target.value, 30, 86400)} /></label>
-          <label><FieldLabel help={t("automation:profileLimitRunsPerHourHelp")}>{t("automation:profileLimitRunsPerHour")}</FieldLabel><input type="number" min="1" max="60" value={draft.maxRunsPerHour} onChange={(event) => updateNumber("maxRunsPerHour", event.target.value, 1, 60)} /></label>
-        </div>
-      </div>
-
-      <div className="automation-form-section">
-        <strong><ShieldCheck size={13} />{t("automation:profileRiskGate")}</strong>
-        <p className="automation-form-note">{t("automation:profileRiskGateNote")}</p>
-        <div className="automation-limit-grid">
-          <label><FieldLabel help={t("automation:profileRiskPerTradeHelp")}>{t("automation:profileRiskPerTrade")}</FieldLabel><input type="number" min="0.05" max="5" step="0.05" value={risk.riskPerTradePct} onChange={(event) => updateRisk("riskPerTradePct", event.target.value)} /></label>
-          <label><FieldLabel help={t("automation:profileRiskRewardHelp")}>{t("automation:profileRiskReward")}</FieldLabel><input type="number" min="0.5" max="5" step="0.1" value={risk.minRewardRisk} onChange={(event) => updateRisk("minRewardRisk", event.target.value)} /></label>
-          <label><FieldLabel help={t("automation:profileRiskDailyLossHelp")}>{t("automation:profileRiskDailyLoss")}</FieldLabel><input type="number" min="0.1" max="20" step="0.5" value={risk.dailyLossLimitPct} onChange={(event) => updateRisk("dailyLossLimitPct", event.target.value)} /></label>
-          <label><FieldLabel help={t("automation:profileRiskMaxPositionsHelp")}>{t("automation:profileRiskMaxPositions")}</FieldLabel><input type="number" min="1" max="10" step="1" value={risk.maxOpenPositions} onChange={(event) => updateRisk("maxOpenPositions", event.target.value)} /></label>
-          <label><FieldLabel help={t("automation:profileRiskDriftHelp")}>{t("automation:profileRiskDrift")}</FieldLabel><input type="number" min="1" max="300" step="1" value={risk.maxEntryDriftBps} onChange={(event) => updateRisk("maxEntryDriftBps", event.target.value)} /></label>
-        </div>
-        <RiskPreviewPanel
-          accountId={draft.accountId}
-          symbols={draft.symbols}
-          riskPerTradePct={risk.riskPerTradePct}
-          dailyLossLimitPct={risk.dailyLossLimitPct}
-          maxSingleTradeMarginPct={draft.maxSingleTradeMarginPct}
-          targetLeverage={draft.targetLeverage}
+  return (
+    <div
+      className={clsx("profile-editor", traderProfile ? "is-trader" : "is-classic", boundAccount ? (liveEnvironment ? "is-live" : "is-demo") : "is-unbound")}
+      data-profile-editor
+      data-profile-kind={traderProfile ? "trader" : "classic"}
+    >
+      <header className="profile-editor__head" {...(dragHandleProps ?? {})}>
+        <span className="profile-editor__mark" aria-hidden="true">{traderProfile ? <Crosshair size={16} /> : <Bot size={16} />}</span>
+        <input
+          className="profile-editor__name"
+          value={draft.name}
+          placeholder={t("automation:profileUnnamed")}
+          aria-label={t("common:name")}
+          data-onboarding-focus
+          onChange={(event) => onChange({ name: event.target.value })}
         />
-      </div>
+        {/* 类型在创建时决定、不可修改：这里只读展示。 */}
+        <em className="profile-editor__kind" title={t("automation:profileKindFixedHint")} data-profile-kind-badge={traderProfile ? "trader" : "classic"}>
+          {traderProfile ? t("automation:profileCardTraderTitle") : t("automation:profileCardAiTitle")}
+        </em>
+        {traderProfile ? <BetaBadge /> : null}
+        <div className="profile-editor__actions">
+          <span className="profile-editor__enabled">
+            {/* 开关旁的文字跟着状态走（已启用 / 已禁用），不会出现「关着却写已启用」。 */}
+            <EditorToggle checked={draft.enabled} ariaLabel={t("automation:profileEnableToggle")} disabled={busy} onChange={(enabled) => onChange({ enabled })} />
+            {draft.enabled ? t("common:enabled") : t("common:disabled")}
+          </span>
+          <button type="button" className="pfe-btn" onClick={onRun} disabled={busy || !draft.id} title={t("automation:profileRunNow")}><Play size={13} />{t("automation:profileRunOnce")}</button>
+          <button type="button" className="pfe-btn is-ghost is-icon is-danger" onClick={onDelete} disabled={busy} title={t("automation:profileDelete")} aria-label={t("automation:profileDelete")}><Trash2 size={15} /></button>
+          <button type="button" className="pfe-btn is-ghost is-icon" onClick={onClose} title={t("common:close")} aria-label={t("common:close")}><X size={16} /></button>
+        </div>
+      </header>
 
-      <div className="automation-form-section">
-        <strong><ShieldCheck size={13} />{t("automation:profileSkillsTitle")}</strong>
-        <div className="automation-section-headline">
-          <p className="automation-field-note">{traderProfile ? t("automation:profileTraderSkillsNote") : t("automation:profileSkillsVersionNote")}</p>
-          <button type="button" onClick={() => openSettingsTab("skills")}><Pencil size={13} />{t("automation:profileSkillsEdit")}</button>
-        </div>
-        <div className="automation-skill-grid">
-          {visibleSkills.length === 0 ? (
-            <span className="automation-inline-empty">{t("automation:profileSkillsEmpty")}</span>
-          ) : visibleSkills.map((skill) => {
-            const required = requiredSkillIds.has(skill.id);
-            const traderCore = traderProfile && skill.id === "desic-core-operations";
-            return (
-              <label
-                className={clsx("automation-skill-option", skillIds.has(skill.id) && "selected", required && "required")}
-                title={required ? t("automation:profileSkillsRequiredHelp") : undefined}
-                key={skill.id}
-              >
-                <input
-                  type="checkbox"
-                  checked={skillIds.has(skill.id)}
-                  disabled={required}
-                  onChange={(event) => toggleSkill(skill.id, event.target.checked)}
-                />
-                <span>
-                  <strong>{traderCore ? t("automation:profileTraderCoreSkill") : skill.name || skill.id}</strong>
-                  <small>{traderCore ? t("automation:profileTraderCoreSkillNote") : skill.description || t("automation:profileSkillsFallbackDescription")}</small>
-                </span>
-                <em>{required ? t("automation:profileSkillsRequired") : skill.builtin ? t("automation:profileSkillsBuiltin") : t("automation:profileSkillsCustom")}</em>
-              </label>
-            );
-          })}
-        </div>
-        {selectedSkills.length > 0 ? (
-          <div className="automation-skill-version-list">
-            {selectedSkills.map((skill) => {
-              const versions = publishedVersions.get(skill.id) ?? [];
-              const pinned = draft.skillVersionModes?.[skill.id] === "pinned" ? draft.skillVersions?.[skill.id] : undefined;
-              const pinnedAvailable = pinned ? versions.some((item) => item.version === pinned) : true;
-              return (
-                <div className="automation-skill-version-row" key={skill.id}>
-                  <span><strong>{skill.name || skill.id}</strong><small>{pinned ? t("automation:profileSkillsPinnedVersion", { version: pinned }) : t("automation:profileSkillsFollowLatest")}</small></span>
-                  <label>
-                    <span>{t("automation:profileSkillsPublishedVersion")}</span>
-                    <TerminalSelect
-                      ariaLabel={t("automation:profileSkillsPublishedVersionAria", { skill: skill.name || skill.id })}
-                      value={pinned ? String(pinned) : ""}
-                      options={[
-                        { value: "", label: t("automation:profileSkillsLatestAuto") },
-                        ...(pinned && !pinnedAvailable ? [{ value: String(pinned), label: t("automation:profileSkillsUnavailableVersion", { version: pinned }), disabled: true }] : []),
-                        ...versions.map((version) => ({ value: String(version.version), label: `v${version.version}` }))
-                      ]}
-                      onChange={(value) => updateSkillVersion(skill.id, value)}
-                    />
-                  </label>
-                </div>
-              );
-            })}
-          </div>
+      <div className="profile-editor__summary" data-profile-summary>
+        <span className="pfe-sum is-env"><i aria-hidden="true" />{environmentLabel}</span>
+        <span className="pfe-sum">{modeLabel}</span>
+        <span className="pfe-sum">{draft.symbols.length > 0 ? draft.symbols.map(symbolBase).join(listSeparator) : t("automation:profileSummaryNoSymbols")}</span>
+        <span className="pfe-sum">{t("automation:profileSummaryRiskLabel")} <b>{moneyOfPct(risk.riskPerTradePct) || formatPercentValue(risk.riskPerTradePct)}</b></span>
+        <span className="pfe-sum">{t("automation:profileSummaryDailyLabel")} <b>{moneyOfPct(risk.dailyLossLimitPct) || formatPercentValue(risk.dailyLossLimitPct)}</b></span>
+        <span className="pfe-sum"><b>{draft.targetLeverage}x</b></span>
+        <span className="pfe-spacer" />
+        {blockedRows.length > 0 ? (
+          <button type="button" className="profile-editor__alert" onClick={() => setPage("risk")} data-profile-summary-alert>
+            <AlertTriangle size={13} aria-hidden="true" />
+            {t("automation:profileSummaryBlocked", { symbols: blockedRows.map((row) => symbolBase(row.instId)).join(listSeparator) })}
+          </button>
         ) : null}
       </div>
 
-      <div className="automation-form-section automation-delivery-section">
-        <strong><Bell size={13} />{t("automation:profileDeliveryTitle")}</strong>
-        <div className="automation-delivery-grid">
-          <label className="automation-setting-row">
-            <span><strong>{t("automation:profileDeliveryDailyReview")}</strong><small>{t("automation:profileDeliveryDailyReviewHelp")}</small></span>
-            <input type="checkbox" checked={draft.dailyReviewEnabled} onChange={(event) => onChange({ dailyReviewEnabled: event.target.checked })} />
-          </label>
-          <label className="automation-setting-row">
-            <span><strong>{t("automation:profileDeliveryFeishu")}</strong><small>{t("automation:profileDeliveryFeishuHelp")}</small></span>
-            <input type="checkbox" checked={draft.feishuEnabled} onChange={(event) => onChange({ feishuEnabled: event.target.checked })} />
-          </label>
-        </div>
-        <div className="automation-section-actions">
-          <button type="button" onClick={onDailyReview} disabled={busy || !draft.enabled}><History size={13} />{t("automation:profileDeliveryRunReview")}</button>
-          <button type="button" onClick={() => openSettingsTab("notifications")}><Bell size={13} />{t("automation:profileDeliveryNotificationSettings")}</button>
+      <div className="profile-editor__body">
+        <nav className="profile-editor__nav" role="tablist" aria-orientation="vertical" aria-label={t("automation:profileNavLabel")}>
+          {pages.map((item) => (
+            <Fragment key={item.id}>
+              {item.id === "advanced" ? <span className="profile-editor__nav-sep" aria-hidden="true" /> : null}
+              <button type="button" role="tab" aria-selected={page === item.id} onClick={() => setPage(item.id)} data-profile-page-tab={item.id}>
+                <item.icon size={15} aria-hidden="true" />
+                {item.label}
+                {item.id === "risk" && blockedRows.length > 0 ? <span className="profile-editor__nav-dot" aria-hidden="true" /> : null}
+              </button>
+            </Fragment>
+          ))}
+        </nav>
+
+        <div className="profile-editor__content" role="tabpanel" data-profile-page={page}>
+          {page === "basic" ? (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavBasic")}</h2>
+              {/* C20.1（改写版）/ C31：迁移提示的**唯一渲染点**（预览夹具共用同一组件，见 ProfileMigrationNotes）。 */}
+              <ProfileMigrationNotes notes={draft.migrationNotes} />
+              <div className="profile-editor__narrow">
+                <div className="pfe-group">
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("common:account")}</span>
+                    <div className="pfe-row__control pfe-row__select" data-profile-account>
+                      <TerminalSelect
+                        ariaLabel={t("common:account")}
+                        value={draft.accountId ?? ""}
+                        options={[
+                          { value: "", label: t("automation:profileNoBoundAccount") },
+                          ...accounts.map((account) => ({
+                            value: account.id,
+                            label: `${account.name} · ${account.environment === "live" ? t("common:live") : t("common:demo")}`
+                          }))
+                        ]}
+                        onChange={(value) => {
+                          const selected = accounts.find((account) => account.id === value);
+                          onChange({ accountId: value || null, environment: selected?.environment ?? "demo" });
+                        }}
+                      />
+                    </div>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profilePermission")}</span>
+                    <div className="pfe-row__stack">
+                      <EditorSegmented<AiPermissionMode>
+                        ariaLabel={t("automation:profilePermission")}
+                        value={modeValue}
+                        disabled={busy}
+                        options={[
+                          { value: "advisor", label: t("automation:profileModeAdvisor"), title: t("automation:profileModeHintAdvisor") },
+                          { value: "copilot", label: t("automation:profileModeCopilot"), title: t("automation:profileModeHintCopilot") },
+                          { value: "limited_auto", label: t("automation:profileModeLimitedAuto"), title: t("automation:profileModeHintLimitedAuto"), danger: liveEnvironment }
+                        ]}
+                        onChange={(mode) => onChange({ mode })}
+                      />
+                      {modeValue === "limited_auto" && liveEnvironment ? (
+                        <span className="pfe-live-hint" data-profile-live-auto>
+                          {t("automation:profileLiveAutoHint")} <HelpTip text={t("automation:profileLiveAutomationRisk")} />
+                        </span>
+                      ) : null}
+                    </div>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">
+                      {t("automation:profileWatchSymbols")}
+                      <HelpTip text={`${t("automation:profileWatchSymbolsWatchlistOnly")} ${t("automation:profileWatchSymbolsLimit", { count: PROFILE_SYMBOL_LIMIT })}`} />
+                    </span>
+                    <div className="pfe-row__control automation-symbol-chips">
+                      {draft.symbols.map((symbol) => {
+                        const asset = marketAssets?.instruments.find((item) => item.instId === symbol);
+                        // A Profile saved before this restriction can still hold a symbol
+                        // that is no longer subscribed. Flag it, because the run would
+                        // silently read stale candles instead of failing loudly.
+                        const unsubscribed = watchlistSymbols.size > 0 && !watchlistSymbols.has(symbol);
+                        return (
+                          <span
+                            className={clsx("automation-symbol-chip", unsubscribed && "is-unsubscribed")}
+                            key={symbol}
+                            title={unsubscribed ? t("automation:profileSymbolNotInWatchlist", { symbol }) : symbol}
+                          >
+                            <SymbolIcon base={asset?.baseCcy || symbolBase(symbol)} iconPath={asset?.iconPath} cached={asset?.iconCached} cacheDir={marketAssets?.cacheDir} />
+                            <b>{symbolBase(symbol)}</b>
+                            <button type="button" title={t("automation:profileRemoveSymbol", { symbol })} aria-label={t("automation:profileRemoveSymbol", { symbol })} onClick={() => onChange({ symbols: draft.symbols.filter((item) => item !== symbol) })}><X size={11} /></button>
+                          </span>
+                        );
+                      })}
+                      {symbolLimitReached ? null : (
+                        <div className="automation-symbol-add" onBlur={(event) => {
+                          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setSymbolPickerOpen(false);
+                        }}>
+                          <Search size={13} />
+                          <input
+                            value={symbolQuery}
+                            placeholder={t("automation:profileAddSymbol")}
+                            aria-label={t("automation:profileAddWatchedSymbol")}
+                            aria-expanded={symbolPickerOpen}
+                            onFocus={() => setSymbolPickerOpen(true)}
+                            onChange={(event) => {
+                              setSymbolQuery(event.target.value.toUpperCase());
+                              setSymbolPickerOpen(true);
+                            }}
+                            onKeyDown={(event) => {
+                              if (event.key === "Escape") setSymbolPickerOpen(false);
+                              if (event.key === "Enter") {
+                                event.preventDefault();
+                                addProfileSymbol(symbolOptions[0]?.instId || symbolQuery);
+                              }
+                            }}
+                          />
+                          {symbolPickerOpen && (symbolOptions.length > 0 || symbolQuery.trim()) ? (
+                            <div className="automation-symbol-options" role="listbox" aria-label={t("automation:profileAvailableSymbols")}>
+                              {symbolOptions.map((item) => (
+                                <button type="button" role="option" key={item.instId} onMouseDown={(event) => event.preventDefault()} onClick={() => addProfileSymbol(item.instId)}>
+                                  <SymbolIcon base={item.baseCcy} iconPath={item.iconPath} cached={item.iconCached} cacheDir={marketAssets?.cacheDir} />
+                                  <span><strong>{item.baseCcy}</strong><small>{item.instId}</small></span>
+                                </button>
+                              ))}
+                              {symbolOptions.length === 0 && symbolQuery.trim() ? <button type="button" onMouseDown={(event) => event.preventDefault()} onClick={() => addProfileSymbol(symbolQuery)}>{t("automation:profileAddNamedSymbol", { symbol: symbolQuery.trim().toUpperCase() })}</button> : null}
+                            </div>
+                          ) : null}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profileModelShort")} <HelpTip text={t("automation:profileModelHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <button type="button" className="pfe-link" onClick={() => openSettingsTab("ai")}>{t("automation:profileAddModel")}</button>
+                      <div className="pfe-row__select">
+                        <TerminalSelect
+                          ariaLabel={t("automation:profileModel")}
+                          value={draft.model ?? models[0]?.id ?? ""}
+                          options={models.length > 0
+                            ? models.map((item) => ({ value: item.id, label: `${item.name} · ${item.model}` }))
+                            : [{ value: "", label: t("automation:profileNoModels"), disabled: true }]}
+                          onChange={(value) => onChange({ model: value || null })}
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profileReasoningDepth")} <HelpTip text={t("automation:profileReasoningDepthHelp")} /></span>
+                    <div className="pfe-row__control pfe-row__select">
+                      <TerminalSelect
+                        ariaLabel={t("automation:profileReasoningDepthAria")}
+                        value={draft.reasoningDepth}
+                        options={[
+                          { value: "none", label: t("automation:profileReasoningNone") },
+                          { value: "minimal", label: t("automation:profileReasoningMinimal") },
+                          { value: "low", label: t("automation:profileReasoningLow") },
+                          { value: "medium", label: t("automation:profileReasoningMedium") },
+                          { value: "high", label: t("automation:profileReasoningHigh") },
+                          { value: "xhigh", label: t("automation:profileReasoningXhigh") }
+                        ]}
+                        onChange={(value) => onChange({ reasoningDepth: value as AiReasoningDepth })}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : page === "risk" ? (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavRisk")}</h2>
+              <RiskPreviewStrip
+                accountId={draft.accountId}
+                facts={riskFacts.facts}
+                preview={riskPreview}
+                loading={riskFacts.loading}
+                failed={riskFacts.failed}
+                maxSingleTradeMarginPct={draft.maxSingleTradeMarginPct}
+                onReload={previewFacts ? undefined : () => void riskFacts.reload()}
+              />
+              <div className="pfe-group">
+                <div className="pfe-group-head">{t("automation:profileGroupPosition")}</div>
+                <div className="pfe-prow" data-profile-field="targetLeverage">
+                  <span className="pfe-row__label">{t("automation:profileLeverageShort")} <HelpTip text={t("automation:profileLeverageTip")} /></span>
+                  <PresetButtons value={draft.targetLeverage} values={PROFILE_PRESETS.targetLeverage} format={(value) => `${value}x`} ariaLabel={t("automation:profileLeverageShort")} disabled={busy} onChange={(targetLeverage) => onChange({ targetLeverage })} />
+                  <NumberField value={draft.targetLeverage} min={1} max={125} integer unit="x" ariaLabel={t("automation:profileLeverageShort")} disabled={busy} onChange={(targetLeverage) => onChange({ targetLeverage })} />
+                  <span className="pfe-prow__equiv" />
+                </div>
+                <div className="pfe-prow" data-profile-field="maxSingleTradeMarginPct">
+                  <span className="pfe-row__label">{t("automation:profileMarginCapShort")} <HelpTip text={t("automation:profileLimitTradeMarginHelp")} /></span>
+                  <ScaleSlider value={draft.maxSingleTradeMarginPct} scale={PROFILE_SCALES.maxSingleTradeMarginPct} format={formatPercentValue} ariaLabel={t("automation:profileMarginCapShort")} disabled={busy} onChange={(maxSingleTradeMarginPct) => onChange({ maxSingleTradeMarginPct })} />
+                  <NumberField value={draft.maxSingleTradeMarginPct} min={1} max={100} unit="%" ariaLabel={t("automation:profileMarginCapShort")} disabled={busy} onChange={(maxSingleTradeMarginPct) => onChange({ maxSingleTradeMarginPct })} />
+                  <span className="pfe-prow__equiv">{moneyOfPct(draft.maxSingleTradeMarginPct)}</span>
+                </div>
+              </div>
+              <div className="pfe-group">
+                <div className="pfe-group-head">{t("automation:profileGroupLossLimits")} <HelpTip text={t("automation:profileRiskGateNote")} /></div>
+                <div className="pfe-prow" data-profile-field="riskPerTradePct">
+                  <span className="pfe-row__label">{t("automation:profileRiskPerTradeShort")} <HelpTip text={t("automation:profileRiskPerTradeHelp")} /></span>
+                  <ScaleSlider value={risk.riskPerTradePct} scale={PROFILE_SCALES.riskPerTradePct} format={formatPercentValue} ariaLabel={t("automation:profileRiskPerTradeShort")} disabled={busy} onChange={(value) => updateRisk("riskPerTradePct", value)} />
+                  <NumberField value={risk.riskPerTradePct} min={0.05} max={100} step={0.05} unit="%" ariaLabel={t("automation:profileRiskPerTradeShort")} disabled={busy} onChange={(value) => updateRisk("riskPerTradePct", value)} />
+                  <span className="pfe-prow__equiv">{moneyOfPct(risk.riskPerTradePct)}</span>
+                </div>
+                <div className="pfe-prow" data-profile-field="dailyLossLimitPct">
+                  <span className="pfe-row__label">{t("automation:profileDailyStopShort")} <HelpTip text={t("automation:profileRiskDailyLossHelp")} /></span>
+                  <ScaleSlider value={risk.dailyLossLimitPct} scale={PROFILE_SCALES.dailyLossLimitPct} format={formatPercentValue} ariaLabel={t("automation:profileDailyStopShort")} disabled={busy} onChange={(value) => updateRisk("dailyLossLimitPct", value)} />
+                  <NumberField value={risk.dailyLossLimitPct} min={0.1} max={100} step={0.5} unit="%" ariaLabel={t("automation:profileDailyStopShort")} disabled={busy} onChange={(value) => updateRisk("dailyLossLimitPct", value)} />
+                  <span className="pfe-prow__equiv">{moneyOfPct(risk.dailyLossLimitPct)}</span>
+                </div>
+              </div>
+              <div className="pfe-group">
+                <div className="pfe-group-head">{t("automation:profileGroupEntryRules")}</div>
+                <div className="pfe-prow" data-profile-field="minRewardRisk">
+                  <span className="pfe-row__label">{t("automation:profileRewardRiskShort")} <HelpTip text={t("automation:profileRiskRewardHelp")} /></span>
+                  <ScaleSlider value={risk.minRewardRisk} scale={PROFILE_SCALES.minRewardRisk} format={(value) => String(value)} ariaLabel={t("automation:profileRewardRiskShort")} disabled={busy} onChange={(value) => updateRisk("minRewardRisk", value)} />
+                  <NumberField value={risk.minRewardRisk} min={0.5} max={5} step={0.1} unit={t("automation:profileUnitRatio")} ariaLabel={t("automation:profileRewardRiskShort")} disabled={busy} onChange={(value) => updateRisk("minRewardRisk", value)} />
+                  <span className="pfe-prow__equiv" />
+                </div>
+                <div className="pfe-prow" data-profile-field="maxOpenPositions">
+                  <span className="pfe-row__label">{t("automation:profileMaxPositionsShort")} <HelpTip text={t("automation:profileRiskMaxPositionsHelp")} /></span>
+                  <PresetButtons value={risk.maxOpenPositions} values={PROFILE_PRESETS.maxOpenPositions} format={(value) => String(value)} ariaLabel={t("automation:profileMaxPositionsShort")} disabled={busy} onChange={(value) => updateRisk("maxOpenPositions", value)} />
+                  <NumberField value={risk.maxOpenPositions} min={1} max={10} integer unit={t("automation:profileUnitPositions")} ariaLabel={t("automation:profileMaxPositionsShort")} disabled={busy} onChange={(value) => updateRisk("maxOpenPositions", value)} />
+                  <span className="pfe-prow__equiv" />
+                </div>
+                <div className="pfe-prow" data-profile-field="maxEntryDriftBps">
+                  <span className="pfe-row__label">{t("automation:profileDriftShort")} <HelpTip text={t("automation:profileRiskDriftHelp")} /></span>
+                  <ScaleSlider value={risk.maxEntryDriftBps} scale={PROFILE_SCALES.maxEntryDriftBps} format={(value) => String(value)} ariaLabel={t("automation:profileDriftShort")} disabled={busy} onChange={(value) => updateRisk("maxEntryDriftBps", value)} />
+                  <NumberField value={risk.maxEntryDriftBps} min={1} max={300} unit="bps" ariaLabel={t("automation:profileDriftShort")} disabled={busy} onChange={(value) => updateRisk("maxEntryDriftBps", value)} />
+                  <span className="pfe-prow__equiv is-dim">{formatPercentValue(risk.maxEntryDriftBps / 100)}</span>
+                </div>
+              </div>
+            </>
+          ) : page === "method" && traderProfile ? (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavTrading")}</h2>
+              <div className="profile-editor__narrow">
+                <div className="pfe-group" data-profile-handbook>
+                  <div className="pfe-group-head">
+                    {t("automation:profileHandbookGroup")}
+                    <button type="button" className="pfe-link" onClick={() => onOpenHandbook(selectedHandbookId)} data-profile-open-handbook>{t("automation:profileHandbookManage")}</button>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profileHandbookSelect")} <HelpTip text={t("automation:profileHandbookSelectHelp")} /></span>
+                    <div className="pfe-row__control pfe-row__select" data-profile-handbook-select>
+                      <TerminalSelect
+                        ariaLabel={t("automation:profileHandbookSelect")}
+                        value={selectedHandbookId}
+                        options={handbookOptions}
+                        menuMinWidth={320}
+                        disabled={busy}
+                        onChange={(handbookId) => onChange({ handbookId })}
+                      />
+                    </div>
+                  </div>
+                  {handbook ? handbook.setups.map((setup, index) => {
+                    const paused = handbook.paused.filter((entry) => entry.setupId === setup.id);
+                    const live = setup.status === "live";
+                    return (
+                      <div className="pfe-row" key={setup.id} data-handbook-setup={setup.id}>
+                        <span className="pfe-row__index">{index + 1}</span>
+                        <span className="pfe-row__label" title={setup.entry} data-i18n-skip>{setup.name}</span>
+                        {!live ? <span className="pfe-observing" data-handbook-setup-observing>{t("automation:setupStatusObserving")}</span> : null}
+                        {paused.length > 0 ? (
+                          <span className="pfe-paused" title={paused.map((entry) => [entry.regime ? regimeText([entry.regime]) : null, entry.side, entry.reason].filter(Boolean).join(" · ")).join("\n")}>
+                            {t("automation:profileHandbookPaused")}
+                          </span>
+                        ) : null}
+                        <span className="pfe-row__control pfe-row__muted" title={setup.sizeNote}>{regimeText(setup.regimes)}</span>
+                      </div>
+                    );
+                  }) : (
+                    <div className="pfe-row"><span className="pfe-row__weak">{handbookLoading || handbookLibrary === null ? t("common:loading") : t("automation:profileHandbookUnavailable")}</span></div>
+                  )}
+                  {handbook && !handbook.setups.some((setup) => setup.status === "live") ? (
+                    <div className="pfe-row"><span className="pfe-live-hint" data-profile-handbook-no-live>{t("automation:handbookNoLiveSetups")}</span></div>
+                  ) : null}
+                </div>
+                <div className="pfe-group" data-profile-instructions>
+                  <div className="pfe-group-head">
+                    {t("automation:profileInstructionsGroup")}
+                    <button type="button" className="pfe-link" onClick={onOpenInstructions} data-profile-open-instructions>{t("automation:profileInstructionsManage")}</button>
+                  </div>
+                  <div className="pfe-row">
+                    {profileInstructions.length === 0 ? (
+                      <span className="pfe-row__weak">{t("automation:profileInstructionsNone")}</span>
+                    ) : (
+                      <span className="pfe-row__muted" data-i18n-skip>
+                        {[
+                          t(`automation:instructionKind_${profileInstructions[0].kind}`, { defaultValue: profileInstructions[0].kind }),
+                          profileInstructions[0].instId ?? t("automation:instructionAllSymbols"),
+                          profileInstructions[0].text || null
+                        ].filter(Boolean).join(" · ")}
+                        {profileInstructions.length > 1 ? t("automation:profileInstructionsMore", { count: profileInstructions.length - 1 }) : ""}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                {savedAt && traderSummary ? (
+                  <div className="pfe-group" data-profile-scorecard-counts>
+                    <div className="pfe-group-head">
+                      {t("automation:profileScorecardGroup")}
+                      <button type="button" className="pfe-link" onClick={onOpenScorecard}>{t("automation:profileOpenScorecard")}</button>
+                    </div>
+                    <div className="pfe-row">
+                      <div className="pfe-stats">
+                        <span>{t("automation:profileScorecardRecorded")}<b>{traderSummary.scorecard.decisions}</b></span>
+                        <span>{t("automation:profileScorecardResolved")}<b>{traderSummary.scorecard.resolved}</b></span>
+                        <span>{t("automation:profileScorecardPending")}<b>{traderSummary.pending}</b></span>
+                      </div>
+                    </div>
+                  </div>
+                ) : null}
+                {skillsGroup}
+              </div>
+            </>
+          ) : page === "method" ? (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavAnalysis")}</h2>
+              <div className="profile-editor__narrow is-wide">
+                <ProfileAgentSelector
+                  agents={agents}
+                  responsibilities={agentResponsibilities}
+                  selectedIds={draft.enabledAgentIds}
+                  collaborationEnabled={draft.collaborationEnabled}
+                  onToggleCollaboration={(collaborationEnabled) => onChange({ collaborationEnabled })}
+                  loading={agentsLoading}
+                  error={agentsError}
+                  disabled={busy}
+                  onChange={(enabledAgentIds) => onChange({ enabledAgentIds })}
+                  onOpenAgentLibrary={onOpenAgentLibrary}
+                  onReload={onReloadAgents}
+                  singleAgentMode={draft.singleAgentMode}
+                  onChangeSingleAgentMode={(singleAgentMode) => onChange({ singleAgentMode })}
+                />
+                <TriageSettings
+                  value={draft.triage}
+                  disabled={busy}
+                  onChange={(triage) => onChange({ triage })}
+                />
+                {skillsGroup}
+              </div>
+            </>
+          ) : page === "rhythm" ? (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavRhythm")}</h2>
+              <div className="profile-editor__narrow">
+                <div className="pfe-group">
+                  <div className="pfe-group-head">{t("automation:profileGroupSchedule")}</div>
+                  <div className="pfe-row" data-profile-field="scanIntervalMinutes">
+                    <span className="pfe-row__label">{t("automation:profileSilenceShort")} <HelpTip text={t("automation:profileLimitSilenceHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <StepperField value={draft.scanIntervalMinutes} values={PROFILE_STEPS.scanIntervalMinutes} min={1} max={1440} unit={t("automation:profileUnitMinutes")} ariaLabel={t("automation:profileSilenceShort")} disabled={busy} onChange={(scanIntervalMinutes) => onChange({ scanIntervalMinutes })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row" data-profile-field="minWakeIntervalSeconds">
+                    <span className="pfe-row__label">{t("automation:profileWakeIntervalShort")} <HelpTip text={t("automation:profileLimitWakeIntervalHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <StepperField value={draft.minWakeIntervalSeconds} values={PROFILE_STEPS.minWakeIntervalSeconds} min={30} max={86_400} unit={t("automation:profileUnitSeconds")} ariaLabel={t("automation:profileWakeIntervalShort")} disabled={busy} onChange={(minWakeIntervalSeconds) => onChange({ minWakeIntervalSeconds })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row" data-profile-field="maxRunsPerHour">
+                    <span className="pfe-row__label">{t("automation:profileRunsPerHourShort")} <HelpTip text={t("automation:profileLimitRunsPerHourHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <StepperField value={draft.maxRunsPerHour} values={PROFILE_STEPS.maxRunsPerHour} min={1} max={60} unit={t("automation:profileUnitRuns")} ariaLabel={t("automation:profileRunsPerHourShort")} disabled={busy} onChange={(maxRunsPerHour) => onChange({ maxRunsPerHour })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row" data-profile-estimate>
+                    <span className="pfe-row__label">
+                      {t("automation:profileEstimateDaily")}
+                      <HelpTip text={tokenMedian
+                        ? t("automation:profileEstimateTip", { count: tokenMedian.count, median: formatTokenCount(tokenMedian.value) })
+                        : t("automation:profileEstimateTipNoRuns")} />
+                    </span>
+                    <span className="pfe-row__control pfe-row__muted">
+                      {t("automation:profileEstimateRuns", { min: runsPerDayMin, max: runsPerDayMax })}
+                      {tokenMedian ? ` · ${t("automation:profileEstimateTokens", { min: formatTokenCount(runsPerDayMin * tokenMedian.value), max: formatTokenCount(runsPerDayMax * tokenMedian.value) })}` : ""}
+                    </span>
+                  </div>
+                </div>
+                <div className="pfe-group">
+                  <div className="pfe-group-head">
+                    {t("automation:profileDeliveryTitle")}
+                    <button type="button" className="pfe-link" onClick={() => openSettingsTab("notifications")}>{t("automation:profileDeliveryNotificationSettings")}</button>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profileDeliveryDailyReview")} <HelpTip text={t("automation:profileDeliveryDailyReviewHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <button type="button" className="pfe-btn is-ghost is-small" onClick={onDailyReview} disabled={busy || !draft.enabled || !draft.id}><History size={13} />{t("automation:profileDeliveryRunReview")}</button>
+                      <EditorToggle checked={draft.dailyReviewEnabled} ariaLabel={t("automation:profileDeliveryDailyReview")} disabled={busy} onChange={(dailyReviewEnabled) => onChange({ dailyReviewEnabled })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row">
+                    <span className="pfe-row__label">{t("automation:profileDeliveryFeishu")} <HelpTip text={t("automation:profileDeliveryFeishuHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <EditorToggle checked={draft.feishuEnabled} ariaLabel={t("automation:profileDeliveryFeishu")} disabled={busy} onChange={(feishuEnabled) => onChange({ feishuEnabled })} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          ) : (
+            <>
+              <h2 className="profile-editor__page-title">{t("automation:profileNavAdvanced")}</h2>
+              <div className="profile-editor__narrow">
+                <div className="pfe-group">
+                  <div className="pfe-row" data-profile-field="historyLookbackDays">
+                    <span className="pfe-row__label">{t("automation:profileHistoryShort")} <HelpTip text={t("automation:profileLimitHistoryHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <StepperField value={draft.historyLookbackDays} values={PROFILE_STEPS.historyLookbackDays} min={1} max={365} unit={t("automation:profileUnitDays")} ariaLabel={t("automation:profileHistoryShort")} disabled={busy} onChange={(historyLookbackDays) => onChange({ historyLookbackDays })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row" data-profile-field="similarityWindowMinutes">
+                    <span className="pfe-row__label">{t("automation:profileSimilarityShort")} <HelpTip text={t("automation:profileLimitSimilarityHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <StepperField value={draft.similarityWindowMinutes} values={PROFILE_STEPS.similarityWindowMinutes} min={1} max={1440} unit={t("automation:profileUnitMinutes")} ariaLabel={t("automation:profileSimilarityShort")} disabled={busy} onChange={(similarityWindowMinutes) => onChange({ similarityWindowMinutes })} />
+                    </div>
+                  </div>
+                  <div className="pfe-row" data-profile-field="entryToleranceBps">
+                    <span className="pfe-row__label">{t("automation:profileEntryToleranceShort")} <HelpTip text={t("automation:profileLimitEntryToleranceHelp")} /></span>
+                    <div className="pfe-row__control">
+                      <span className="pfe-row__weak">{formatPercentValue(draft.entryToleranceBps / 100)}</span>
+                      <StepperField value={draft.entryToleranceBps} values={PROFILE_STEPS.entryToleranceBps} min={1} max={2000} unit="bps" ariaLabel={t("automation:profileEntryToleranceShort")} disabled={busy} onChange={(entryToleranceBps) => onChange({ entryToleranceBps })} />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </>
+          )}
         </div>
       </div>
 
-      {normalizePermissionMode(draft.mode) === "limited_auto" && boundEnvironment === "live" ? (
-        <p className="automation-risk-note">{t("automation:profileLiveAutomationRisk")}</p>
-      ) : null}
-
+      <footer className="profile-editor__footer">
+        <span>{savedAt ? t("automation:profileLastSaved", { time: formatDateTime(savedAt) }) : t("automation:profileNotSavedYet")}</span>
+        {dirty ? <span className="is-dirty" data-profile-dirty>· {t("automation:profileUnsavedShort")}</span> : null}
+        <span className="pfe-spacer" />
+        <button type="button" className="pfe-btn" onClick={onClose}>{t("common:cancel")}</button>
+        <button type="button" className="pfe-btn is-primary" onClick={() => onSave()} disabled={busy} data-profile-save><Save size={14} />{t("common:save")}</button>
+      </footer>
     </div>
   );
 }
@@ -1714,10 +2048,14 @@ function SystematicProfileConflictDialog({
 }) {
   const { t } = useTranslation(["automation", "common"]);
   const closeButtonRef = useRef<HTMLButtonElement>(null);
+  // 聚焦只在打开时做一次；和依赖 onCancel 的 Esc 监听分开，避免父组件重渲染时抢走焦点。
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus();
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onCancel();
     };
@@ -2312,10 +2650,14 @@ function RunDetailDialog({
 }) {
   const closeButtonRef = useRef<HTMLButtonElement>(null);
   const dialogDrag = useDraggableSurface<HTMLElement>();
+  // 聚焦只在打开时做一次；和依赖 onClose 的 Esc 监听分开，避免父组件重渲染时抢走焦点。
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus();
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape") onClose();
     };
@@ -3309,20 +3651,6 @@ function runBriefing(snapshot: unknown): { text: string; chars: number; buildMs:
 }
 
 /** 交易员 Profile 的专属设置区：说明简报内容、可用工具与决策方式（经典 Profile 的专家 / 试判在这里不适用）。 */
-function TraderSettingsSection() {
-  const { t } = useTranslation("automation");
-  return (
-    <div className="automation-form-section automation-trader-settings" data-trader-settings>
-      <strong><Crosshair size={13} />{t("profileTraderSettings")}</strong>
-      <ul>
-        <li><span>{t("profileTraderBriefingTitle")}</span>{t("profileTraderBriefingDetail")}</li>
-        <li><span>{t("profileTraderToolsTitle")}</span>{t("profileTraderToolsDetail")}</li>
-        <li><span>{t("profileTraderDecisionTitle")}</span>{t("profileTraderDecisionDetail")}</li>
-      </ul>
-    </div>
-  );
-}
-
 function runStatusTitle(status: string) {
   const labels: Record<string, string> = {
     completed: automationText("runAnalysisCompleted", "Analysis completed", "分析已完成"),
@@ -4439,14 +4767,6 @@ function ReviewAttribution({ pnl, detail, compact = true }: { pnl: number | null
   );
 }
 
-type SkillDiffRow = {
-  kind: "same" | "removed" | "added";
-  oldLine?: number;
-  newLine?: number;
-  oldText?: string;
-  newText?: string;
-};
-
 function skillDefinitionText(skill: AiSkillDefinition) {
   return [
     `id: ${skill.id}`,
@@ -4464,45 +4784,8 @@ function skillDefinitionText(skill: AiSkillDefinition) {
   ].join("\n");
 }
 
-function buildSkillDiffRows(base: AiSkillDefinition, candidate: AiSkillDefinition): SkillDiffRow[] {
-  const oldLines = skillDefinitionText(base).split("\n");
-  const newLines = skillDefinitionText(candidate).split("\n");
-  if (oldLines.length * newLines.length > 2_000_000) {
-    const count = Math.max(oldLines.length, newLines.length);
-    return Array.from({ length: count }, (_, index) => {
-      const oldText = oldLines[index];
-      const newText = newLines[index];
-      if (oldText === newText) return { kind: "same", oldLine: index + 1, newLine: index + 1, oldText, newText };
-      if (oldText === undefined) return { kind: "added", newLine: index + 1, newText };
-      if (newText === undefined) return { kind: "removed", oldLine: index + 1, oldText };
-      return { kind: "removed", oldLine: index + 1, oldText, newLine: index + 1, newText };
-    });
-  }
-  const matrix = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(newLines.length + 1));
-  for (let oldIndex = oldLines.length - 1; oldIndex >= 0; oldIndex -= 1) {
-    for (let newIndex = newLines.length - 1; newIndex >= 0; newIndex -= 1) {
-      matrix[oldIndex][newIndex] = oldLines[oldIndex] === newLines[newIndex]
-        ? matrix[oldIndex + 1][newIndex + 1] + 1
-        : Math.max(matrix[oldIndex + 1][newIndex], matrix[oldIndex][newIndex + 1]);
-    }
-  }
-  const rows: SkillDiffRow[] = [];
-  let oldIndex = 0;
-  let newIndex = 0;
-  while (oldIndex < oldLines.length || newIndex < newLines.length) {
-    if (oldIndex < oldLines.length && newIndex < newLines.length && oldLines[oldIndex] === newLines[newIndex]) {
-      rows.push({ kind: "same", oldLine: oldIndex + 1, newLine: newIndex + 1, oldText: oldLines[oldIndex], newText: newLines[newIndex] });
-      oldIndex += 1;
-      newIndex += 1;
-    } else if (newIndex >= newLines.length || (oldIndex < oldLines.length && matrix[oldIndex + 1][newIndex] >= matrix[oldIndex][newIndex + 1])) {
-      rows.push({ kind: "removed", oldLine: oldIndex + 1, oldText: oldLines[oldIndex] });
-      oldIndex += 1;
-    } else {
-      rows.push({ kind: "added", newLine: newIndex + 1, newText: newLines[newIndex] });
-      newIndex += 1;
-    }
-  }
-  return rows;
+function buildSkillDiffRows(base: AiSkillDefinition, candidate: AiSkillDefinition): TextDiffRow[] {
+  return diffTextLines(skillDefinitionText(base), skillDefinitionText(candidate));
 }
 
 function SkillDiffDialog({
@@ -4523,10 +4806,14 @@ function SkillDiffDialog({
   const rows = useMemo(() => buildSkillDiffRows(baseline.definition, candidate), [baseline.definition, candidate]);
   const additions = rows.filter((row) => row.kind === "added").length;
   const removals = rows.filter((row) => row.kind === "removed").length;
+  // 聚焦只在打开时做一次；和依赖 busy/onClose 的 Esc 监听分开，避免父组件重渲染时抢走焦点。
+  useEffect(() => {
+    closeButtonRef.current?.focus();
+  }, []);
+
   useEffect(() => {
     const previousOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
-    closeButtonRef.current?.focus();
     const onKeyDown = (event: globalThis.KeyboardEvent) => {
       if (event.key === "Escape" && !busy) onClose();
     };
@@ -4554,20 +4841,12 @@ function SkillDiffDialog({
           <section><span>{automationText("expectedBenefits", "Expected benefits", "预期收益")}</span><p data-i18n-skip>{formatStructured(item.benefits)}</p></section>
           <section><span>{automationText("risks", "Risks", "风险")}</span><p data-i18n-skip>{formatStructured(item.risks)}</p></section>
         </div>
-        <div className="automation-skill-diff-table" role="table" aria-label={automationText("skillDiffAria", "Line-by-line Skill version diff", "Skill 前后版本逐行差异")}>
-          <div className="automation-skill-diff-columns" role="row">
-            <strong role="columnheader">{automationText("originalSkillVersion", "Original Skill · v{{version}}", "原 Skill · v{{version}}", { version: baseline.version })}</strong>
-            <strong role="columnheader">{automationText("candidateSkill", "Candidate Skill", "候选 Skill")}</strong>
-          </div>
-          <div className="automation-skill-diff-scroll">
-            {rows.map((row, index) => (
-              <div className={clsx("automation-skill-diff-row", row.kind)} role="row" key={`${row.kind}-${row.oldLine ?? "x"}-${row.newLine ?? "x"}-${index}`}>
-                <div className="automation-skill-diff-cell old" role="cell"><span>{row.oldLine ?? ""}</span><code>{row.oldText ?? ""}</code></div>
-                <div className="automation-skill-diff-cell next" role="cell"><span>{row.newLine ?? ""}</span><code>{row.newText ?? ""}</code></div>
-              </div>
-            ))}
-          </div>
-        </div>
+        <TextDiffTable
+          rows={rows}
+          ariaLabel={automationText("skillDiffAria", "Line-by-line Skill version diff", "Skill 前后版本逐行差异")}
+          oldLabel={automationText("originalSkillVersion", "Original Skill · v{{version}}", "原 Skill · v{{version}}", { version: baseline.version })}
+          newLabel={automationText("candidateSkill", "Candidate Skill", "候选 Skill")}
+        />
         <footer className="automation-skill-diff-actions">
           <span>{automationText("sampleEvidenceCount", "{{samples}} samples · {{evidence}} evidence items", "{{samples}} 个样本 · {{evidence}} 条证据", { samples: item.sampleSize, evidence: Array.isArray(item.evidence) ? item.evidence.length : 0 })}</span>
           {!["applied", "accepted", "rejected"].includes(item.status) ? (
@@ -4590,19 +4869,21 @@ function SuggestionsView({
   skillVersions,
   focusId,
   busyId,
-  onUpdate
+  onUpdate,
+  onRefresh
 }: {
   items: AiOptimizationSuggestion[];
   skillVersions: AiSkillVersion[];
   focusId?: string | null;
   busyId: string | null;
   onUpdate: (id: string, status: string) => Promise<boolean>;
+  onRefresh?: () => void;
 }) {
   const [previewId, setPreviewId] = useState<string | null>(null);
   const pendingCount = items.filter((item) => ["pending", "pending_review", "validating", "ready"].includes(item.status)).length;
   const appliedCount = items.filter((item) => ["applied", "accepted"].includes(item.status)).length;
   const rejectedCount = items.filter((item) => item.status === "rejected").length;
-  const legacyCount = items.filter((item) => !item.proposedSkill).length;
+  const legacyCount = items.filter((item) => item.kind !== "handbook" && !item.proposedSkill).length;
   const suggestionVersionMap = useMemo(() => {
     const map = new Map<string, AiSkillVersion[]>();
     for (const version of skillVersions) {
@@ -4654,6 +4935,19 @@ function SuggestionsView({
       ) : (
         <div className="automation-suggestion-stack">
           {items.map((item) => {
+            if (item.kind === "handbook") {
+              return (
+                <HandbookSuggestionCard
+                  key={item.id}
+                  item={item}
+                  focused={focusId === item.id}
+                  busy={busyId === item.id}
+                  statusBadge={<StatusBadge status={item.status} />}
+                  onUpdate={onUpdate}
+                  onDrafted={() => onRefresh?.()}
+                />
+              );
+            }
             const relatedVersions = suggestionVersionMap.get(item.id) ?? [];
             const relatedPublished = relatedVersions.find((version) => version.status === "published") ?? null;
             const baseline = baselineFor(item);
@@ -4899,6 +5193,7 @@ function AiAutomationPanelComponent({
   const [summary, setSummary] = useState<AiAutomationSummary | null>(() => automationOverviewCache ? normalizeSummary({ ...EMPTY_AUTOMATION_SUMMARY, ...automationOverviewCache }) : null);
   const [aiConfig, setAiConfig] = useState<AiConfigSummary | null>(() => automationConfigCache);
   const [activeTab, setActiveTab] = useState<AiAutomationTab>(initialTab);
+  const [traderFocus, setTraderFocus] = useState<TraderWorkspaceFocus | null>(null);
   const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
   const [scopeProfileId, setScopeProfileId] = useState("");
   const [profileDraft, setProfileDraft] = useState<AiAgentProfile | null>(null);
@@ -4916,8 +5211,11 @@ function AiAutomationPanelComponent({
   const [pendingConfirm, setPendingConfirm] = useState<{
     title: string;
     message: string;
+    details?: string[];
     confirmText: string;
     danger?: boolean;
+    secondaryText?: string;
+    onSecondary?: () => void;
     onConfirm: () => void;
   } | null>(null);
   const [profileQuery, setProfileQuery] = useState("");
@@ -5132,6 +5430,11 @@ function AiAutomationPanelComponent({
     else if (initialTab !== "profiles") void loadSection(initialTab);
   }, [initialTab, loadAgentLibrary, loadSection]);
 
+  // 通知（成绩单提醒、挂单到期）带着 Profile id 跳到「交易员」工作区的成绩单。
+  useEffect(() => {
+    if (initialTab === "scorecard") setTraderFocus({ view: "scorecard", profileId: focusId ?? null, nonce: Date.now() });
+  }, [focusId, initialTab]);
+
   useEffect(() => {
     const listenerCleanup = createDeferredCleanupSlot();
     void listenOptional<AiAutomationEvent>("ai:automation-event", (event) => {
@@ -5270,6 +5573,56 @@ function AiAutomationPanelComponent({
       });
   }, [onProfileSaved, runCommand, t]);
 
+  // 停用交易员 Profile 时：它挂着的开仓单之后就没人管了，先问用户要不要一起撤。
+  // 只看交易员 Profile、只在「从启用变成停用」时询问；查不到挂单或不在桌面端时直接继续。
+  const confirmTraderDisable = useCallback((profile: AiAgentProfile, proceed: () => void) => {
+    const stored = (summary?.profiles ?? []).find((item) => item.id === profile.id);
+    const disabling = profile.contextMode === "briefing" && !profile.enabled && stored?.enabled === true;
+    if (!disabling || !isTauriRuntime()) {
+      proceed();
+      return;
+    }
+    void loadTraderEntryOrders(profile.id)
+      .catch(() => null)
+      .then((orders) => {
+        if (!orders || orders.length === 0) {
+          proceed();
+          return;
+        }
+        const sideText = (side: string) => side === "sell" ? t("automation:traderOrderSideSell") : t("automation:traderOrderSideBuy");
+        setPendingConfirm({
+          title: t("automation:traderDisableOrdersTitle"),
+          message: t("automation:traderDisableOrdersMessage", { count: orders.length }),
+          details: orders.map((order) => t("automation:traderDisableOrderLine", {
+            instId: order.instId,
+            side: sideText(order.side),
+            size: order.sz ?? "--",
+            price: order.px ?? "--",
+            placedAt: order.placedAt ? formatDateTime(order.placedAt) : "--"
+          })),
+          confirmText: t("automation:traderDisableAndCancel"),
+          danger: true,
+          secondaryText: t("automation:traderDisableOnly"),
+          onSecondary: proceed,
+          onConfirm: () => {
+            proceed();
+            void cancelTraderEntryOrders(profile.id, orders.map((order) => order.ordId))
+              .catch((error: unknown) => {
+                onNotify({ kind: "error", title: t("automation:traderCancelOrdersFailed"), message: error instanceof Error ? error.message : String(error) });
+                return null;
+              })
+              .then((results) => {
+                if (!results) return;
+                const failed = results.filter((item) => !item.ok);
+                onNotify(failed.length === 0
+                  ? { kind: "success", title: t("automation:traderCancelOrdersDone"), message: t("automation:traderCancelOrdersDoneDetail", { count: results.length }) }
+                  : { kind: "error", title: t("automation:traderCancelOrdersFailed"), message: failed.map((item) => `${item.instId}：${item.error ?? ""}`).join("\n") });
+              });
+          }
+        });
+      });
+  }, [onNotify, summary?.profiles, t]);
+
   const saveProfile = useCallback((forceSystematicConflict?: unknown) => {
     if (!profileDraft) return;
     // P0 加固：第一个参数只可能是"是否强制忽略系统性冲突"的布尔量。
@@ -5322,7 +5675,11 @@ function AiAutomationPanelComponent({
       });
       return;
     }
-    if (!profile.enabled || forced || !isTauriRuntime()) {
+    if (!profile.enabled) {
+      confirmTraderDisable(profile, () => persistProfile(profile, forced));
+      return;
+    }
+    if (forced || !isTauriRuntime()) {
       persistProfile(profile, forced);
       return;
     }
@@ -5346,13 +5703,14 @@ function AiAutomationPanelComponent({
         setError(message);
         onNotify({ kind: "error", title: t("automation:profileNotSaved"), message });
       });
-  }, [onNotify, persistProfile, profileDraft, t]);
+  }, [confirmTraderDisable, onNotify, persistProfile, profileDraft, t]);
 
   // Enabling from a card persists just that flag; everything else is kept as
   // stored so a card toggle can never publish an unrelated half-finished edit.
   const toggleProfileEnabled = useCallback((profile: AiAgentProfile) => {
-    persistProfile({ ...profile, enabled: !profile.enabled, updatedAt: Date.now() }, false);
-  }, [persistProfile]);
+    const next = { ...profile, enabled: !profile.enabled, updatedAt: Date.now() };
+    confirmTraderDisable(next, () => persistProfile(next, false));
+  }, [confirmTraderDisable, persistProfile]);
 
   // Card actions operate on a given Profile rather than the open draft, so the
   // grid can act without first loading a Profile into the editor.
@@ -5501,14 +5859,19 @@ function AiAutomationPanelComponent({
   }, [runCommand]);
 
   const updateSuggestion = useCallback(async (id: string, status: string) => {
+    const handbook = (summary?.optimizationSuggestions ?? []).find((item) => item.id === id)?.kind === "handbook";
     const title = status === "rejected"
       ? automationText("suggestionRejected", "Optimization suggestion rejected", "优化建议已拒绝")
-      : automationText("skillChangeAdopted", "Skill change adopted", "Skill 变更已采用");
+      : handbook
+        ? t("automation:handbookSuggestionApplied")
+        : automationText("skillChangeAdopted", "Skill change adopted", "Skill 变更已采用");
     const message = status === "rejected"
-      ? automationText("rejectedCandidateNoChange", "The candidate version will not modify any Skill.", "该候选版本不会修改任何 Skill。")
-      : automationText("candidatePublished", "The candidate Skill is now active as a new published version.", "候选 Skill 已作为新的发布版本生效。");
+      ? handbook ? t("automation:handbookSuggestionRejectedDetail") : automationText("rejectedCandidateNoChange", "The candidate version will not modify any Skill.", "该候选版本不会修改任何 Skill。")
+      : handbook
+        ? t("automation:handbookSuggestionAppliedDetail")
+        : automationText("candidatePublished", "The candidate Skill is now active as a new published version.", "候选 Skill 已作为新的发布版本生效。");
     return runCommand(`suggestion:${id}`, "ai_optimization_suggestion_update", { id, status }, title, message );
-  }, [runCommand]);
+  }, [runCommand, summary?.optimizationSuggestions, t]);
 
   const publishSkillVersion = useCallback((item: AiSkillVersion) => {
     setPendingConfirm({
@@ -5591,6 +5954,26 @@ function AiAutomationPanelComponent({
     });
   }, [profileDraftDirty, t]);
 
+  /** 从 Profile 编辑器跳到「交易员」工作区（成绩单或某本交易手册）。有未保存的修改时先确认放弃。 */
+  const openTraderWorkspace = useCallback((focus: Omit<TraderWorkspaceFocus, "nonce">) => {
+    const go = () => {
+      setProfileEditorOpen(false);
+      setTraderFocus({ ...focus, nonce: Date.now() });
+      handleTabClick("scorecard");
+    };
+    if (!profileDraftDirty) {
+      go();
+      return;
+    }
+    setPendingConfirm({
+      title: t("automation:profileUnsavedTitle"),
+      message: t("automation:profileUnsavedDetail"),
+      confirmText: t("automation:profileUnsavedDiscard"),
+      danger: true,
+      onConfirm: go
+    });
+  }, [handleTabClick, profileDraftDirty, t]);
+
   /** C29：选择卡片 —— ai 走原有编辑器；fastlane 新建快判配置草稿并打开独立配置窗口。 */
   const openProfileTypePicker = useCallback(() => {
     setProfileTypePickerOpen(true);
@@ -5634,6 +6017,7 @@ function AiAutomationPanelComponent({
     const profile = createProfile(accounts, aiConfig?.activeModelId || aiConfig?.models[0]?.id || "");
     profile.contextMode = contextMode;
     profile.skillIds = withRequiredProfileSkills(profile.skillIds, contextMode === "briefing");
+    if (contextMode === "briefing") profile.handbookId = DEFAULT_TRADER_HANDBOOK_ID;
     const desired = onboardingActive ? t("automation:profileOnboardingName") : t("automation:profileDefaultName");
     // Two Profiles sharing a name are indistinguishable in the grid, in run
     // records and in notifications, so the default gets the first free suffix.
@@ -5706,8 +6090,11 @@ function AiAutomationPanelComponent({
   const scopeWakeConditions = scopeProfileId ? (summary?.wakeConditions ?? []).filter((item) => item.profileId === scopeProfileId) : (summary?.wakeConditions ?? []);
   const automationNotificationDeliveries = (summary?.notificationDeliveries ?? []).filter((item) => !["systematic_profile_signal", "strategy_signal"].includes(item.relatedType ?? ""));
   const scopeNotificationDeliveries = scopeProfileId ? automationNotificationDeliveries.filter((item) => item.profileId === scopeProfileId) : automationNotificationDeliveries;
+  // 手册建议按「这个 Profile 是否在用那本手册」过滤；Skill 建议按「是否加载那个 Skill」。
   const scopeOptimizationSuggestions = scopeProfileId && scopeProfile
-    ? (summary?.optimizationSuggestions ?? []).filter((item) => profileUsesSkill(scopeProfile, item.currentSkillId))
+    ? (summary?.optimizationSuggestions ?? []).filter((item) => item.kind === "handbook"
+      ? scopeProfile.contextMode === "briefing" && (scopeProfile.handbookId || DEFAULT_TRADER_HANDBOOK_ID) === item.handbook?.handbookId
+      : profileUsesSkill(scopeProfile, item.currentSkillId))
     : (summary?.optimizationSuggestions ?? []);
   const normalizedProfileQuery = profileQuery.trim().toLowerCase();
   // 两种 Profile 都存在时才显示类型筛选；只剩一种时筛选自动失效，避免列表被一个看不见的条件清空。
@@ -5797,10 +6184,11 @@ function AiAutomationPanelComponent({
       </header>
 
       <nav className="automation-tabs" role="tablist" aria-label={t("automation:workbenchAria")}>
-        {AUTOMATION_TABS.filter(({ id }) => id !== "scorecard" || traderProfiles.length > 0).map(({ id, icon: Icon }) => (
+        {AUTOMATION_TABS.filter(({ id }) => id !== "scorecard" || traderProfiles.length > 0 || activeTab === "scorecard").map(({ id, icon: Icon }) => (
           <button key={id} className={activeTab === id ? "active" : ""} role="tab" aria-selected={activeTab === id} onClick={() => handleTabClick(id)}>
             <Icon size={14} />
             <span>{t(automationTabI18nKey(id))}</span>
+            {id === "scorecard" ? <BetaBadge /> : null}
             <small className={clsx(tabCounts[id] ? "has-items" : undefined)}>{tabCounts[id] ?? 0}</small>
           </button>
         ))}
@@ -5942,30 +6330,41 @@ function AiAutomationPanelComponent({
             ) : profileEditorOpen && profileDraft ? (
               <ProfileEditorDialog
                 title={profileDraft.name || t("automation:profileUnnamed", { defaultValue: profileDraft.id })}
-                dirty={profileDraftDirty}
                 onClose={closeProfileEditor}
               >
-                <ProfileEditor
-                  draft={profileDraft}
-                  accounts={accounts}
-                  marketAssets={marketAssets}
-                  watchlist={watchlist}
-                  skills={skills}
-                  skillVersions={summary.skillVersions}
-                  models={aiConfig?.models ?? []}
-                  agents={agents}
-                  agentResponsibilities={agentResponsibilities}
-                  agentsLoading={agentsLoading}
-                  agentsError={agentsError}
-                  busy={Boolean(busyAction)}
-                  onChange={(patch) => setProfileDraft((current) => current ? { ...current, ...patch } : current)}
-                  onOpenAgentLibrary={() => { closeProfileEditor(); handleTabClick("agents"); }}
-                  onReloadAgents={() => { void loadAgentLibrary().then((next) => loadAgentResponsibilityIndex(next, true).then(setAgentResponsibilities)); }}
-                  onSave={saveProfile}
-                  onRun={runProfileNow}
-                  onDailyReview={runDailyReview}
-                  onDelete={deleteProfile}
-                />
+                {(dragHandleProps) => (
+                  <ProfileEditor
+                    draft={profileDraft}
+                    accounts={accounts}
+                    marketAssets={marketAssets}
+                    watchlist={watchlist}
+                    skills={skills}
+                    skillVersions={summary.skillVersions}
+                    models={aiConfig?.models ?? []}
+                    agents={agents}
+                    agentResponsibilities={agentResponsibilities}
+                    agentsLoading={agentsLoading}
+                    agentsError={agentsError}
+                    busy={Boolean(busyAction)}
+                    dirty={profileDraftDirty}
+                    savedAt={(summary?.profiles ?? []).find((item) => item.id === profileDraft.id)?.updatedAt ?? null}
+                    recentInputTokens={(summary?.runs ?? [])
+                      .filter((run) => run.profileId === profileDraft.id && run.status === "completed")
+                      .map((run) => run.tokenUsage?.usage?.inputTokens ?? 0)}
+                    dragHandleProps={dragHandleProps}
+                    onChange={(patch) => setProfileDraft((current) => current ? { ...current, ...patch } : current)}
+                    onOpenAgentLibrary={() => { closeProfileEditor(); handleTabClick("agents"); }}
+                    onOpenScorecard={() => openTraderWorkspace({ view: "scorecard", profileId: profileDraft.id })}
+                    onOpenHandbook={(handbookId) => openTraderWorkspace({ view: "handbook", handbookId })}
+                    onOpenInstructions={() => openTraderWorkspace({ view: "instructions", profileId: (summary?.profiles ?? []).some((item) => item.id === profileDraft.id) ? profileDraft.id : null })}
+                    onReloadAgents={() => { void loadAgentLibrary().then((next) => loadAgentResponsibilityIndex(next, true).then(setAgentResponsibilities)); }}
+                    onSave={saveProfile}
+                    onRun={runProfileNow}
+                    onDailyReview={runDailyReview}
+                    onDelete={deleteProfile}
+                    onClose={closeProfileEditor}
+                  />
+                )}
               </ProfileEditorDialog>
             ) : null}
           </div>
@@ -5993,7 +6392,7 @@ function AiAutomationPanelComponent({
             loadPulseRange={loadScopedPulseRange}
           />
         ) : activeTab === "scorecard" ? (
-          <TraderScorecard profiles={traderProfiles.map((profile) => ({ id: profile.id, name: profile.name }))} />
+          <TraderWorkspace profiles={traderProfiles.map((profile) => ({ id: profile.id, name: profile.name, symbols: profile.symbols }))} focus={traderFocus} />
         ) : activeTab === "wake_conditions" ? (
           <WakeConditionsView
             items={scopeWakeConditions}
@@ -6011,6 +6410,7 @@ function AiAutomationPanelComponent({
             focusId={focusId}
             busyId={busyAction?.startsWith("suggestion:") ? busyAction.slice("suggestion:".length) : null}
             onUpdate={updateSuggestion}
+            onRefresh={() => void refresh()}
           />
         ) : (
           <NotificationsView deliveries={scopeNotificationDeliveries} profiles={profileMap} focusId={focusId} />
@@ -6032,8 +6432,15 @@ function AiAutomationPanelComponent({
         <AutomationConfirmDialog
           title={pendingConfirm.title}
           message={pendingConfirm.message}
+          details={pendingConfirm.details}
           confirmText={pendingConfirm.confirmText}
           danger={pendingConfirm.danger}
+          secondaryText={pendingConfirm.secondaryText}
+          onSecondary={pendingConfirm.onSecondary ? () => {
+            const pending = pendingConfirm;
+            setPendingConfirm(null);
+            pending.onSecondary?.();
+          } : undefined}
           onCancel={() => setPendingConfirm(null)}
           onConfirm={() => {
             const pending = pendingConfirm;
@@ -6872,77 +7279,6 @@ const AUTOMATION_PREVIEW_MODEL_ERROR_DETAIL: AiAutomationRunDetail = {
   ]
 };
 
-/** 预览：交易员成绩单（数字为示例，结构与 `ai_trader_scorecard` 一致）。 */
-const AUTOMATION_PREVIEW_SCORECARD: TraderScorecardData = (() => {
-  const t0 = Date.UTC(2026, 9, 5, 2, 0);
-  const decision = (index: number, patch: Partial<TraderDecisionRow>): TraderDecisionRow => ({
-    id: `decision-preview-${index}`,
-    runId: `run-preview-${index}`,
-    instId: "BTC-USDT-SWAP",
-    createdAt: t0 - index * 3_600_000,
-    setupId: "trend_pullback",
-    side: "long",
-    action: "limit_order",
-    entry: 84_750,
-    stop: 84_450,
-    target: 85_350,
-    probability: 0.55,
-    validUntil: null,
-    reason: "日线上升，回踩 1h EMA20 出现长下影",
-    regimeDaily: "up",
-    regime4h: "up",
-    againstDirection: false,
-    regimeMismatch: false,
-    shadowStatus: "resolved",
-    shadowNote: null,
-    shadowR: 1.9,
-    exitKind: "target",
-    realR: null,
-    opportunityId: null,
-    handbookVersion: 1,
-    ...patch
-  });
-  const handbook: TraderHandbook = {
-    directionPolicy: "日线上升只做多、日线下降只做空；日线不明时只用 breakout_retest 或 range_edge。",
-    setups: [
-      { id: "trend_pullback", name: "顺势回踩", regimes: ["up", "down"], direction: "with_trend", entry: "回撤到 1h / 4h 结构位或 EMA20 附近并出现拒绝信号后入场。", stop: "结构位之外，至少 1×ATR(1h)。", target: "前高 / 前低，且至少 2R。", invalidation: "收盘有效跌破结构位。" },
-      { id: "range_edge", name: "区间边缘", regimes: ["mixed"], direction: "both", entry: "区间上沿拒绝做空、下沿拒绝做多。", stop: "区间外，至少 1×ATR(1h)。", target: "中轴，再看对侧。", invalidation: "收盘突破区间边缘。" }
-    ],
-    noTradeRules: [{ id: "no_data", text: "简报里的结构、ATR 或行情阶段有任何一项不可用。" }, { id: "mid_range", text: "价格处于区间中部（40%–60%）。" }],
-    managementRules: [{ id: "breakeven", text: "浮盈达到 1R 后，可以把止损移到保本。" }],
-    paused: [{ setupId: "range_edge", regime: "up", side: "short", reason: "在成绩单页手动暂停", pausedAt: t0 }]
-  };
-  return {
-    profileId: null,
-    fromMs: t0 - 30 * 86_400_000,
-    pending: 3,
-    scorecard: {
-      decisions: 48,
-      resolved: 41,
-      executed: 9,
-      groups: [
-        { setupId: "trend_pullback", regime: "up", side: "long", n: 22, wins: 10, avgR: 0.42, shrunkAvgR: 0.29, totalR: 9.2, realN: 6, realAvgR: 0.31, flagged: false },
-        { setupId: "range_edge", regime: "up", side: "short", n: 16, wins: 3, avgR: -0.52, shrunkAvgR: -0.32, totalR: -8.3, realN: 2, realAvgR: -1.0, flagged: true },
-        { setupId: "breakout_retest", regime: "mixed", side: "long", n: 3, wins: 2, avgR: 0.8, shrunkAvgR: 0.18, totalR: 2.4, realN: 1, realAvgR: 1.6, flagged: false }
-      ],
-      calibration: [
-        { lo: 0.45, hi: 0.6, n: 18, predicted: 0.54, realized: 0.44 },
-        { lo: 0.6, hi: 0.75, n: 12, predicted: 0.66, realized: 0.33 }
-      ],
-      waits: { n: 19, missedR: 6.4, avoidedR: 9.1 },
-      compliance: { againstN: 16, againstAvgR: -0.52, alignedN: 25, alignedAvgR: 0.47, regimeMismatchN: 4 },
-      versions: [{ version: 1, n: 41, avgR: 0.04 }]
-    },
-    recent: [
-      decision(0, {}),
-      decision(1, { setupId: "range_edge", side: "short", entry: 85_390, stop: 85_500, target: 85_040, againstDirection: true, shadowR: -1.05, exitKind: "stop", realR: -1.05, opportunityId: "opp-preview" }),
-      decision(2, { action: "no_trade", setupId: "trend_pullback", probability: 0.4, shadowR: 1.95, exitKind: "target", reason: "等待回踩确认，最终没有执行" }),
-      decision(3, { shadowStatus: "pending", shadowR: null, exitKind: null })
-    ],
-    handbook: { version: 2, content: handbook }
-  };
-})();
-
 const AUTOMATION_PREVIEW_SINGLE_RUN_DETAIL: AiAutomationRunDetail = {
   ...AUTOMATION_PREVIEW_RUN_DETAIL,
   // 交易员模式：运行详情里可折叠的简报（与 Rust `render_briefing` 的输出格式一致）。
@@ -7167,6 +7503,14 @@ const AUTOMATION_PREVIEW_SKILLS: AiSkillDefinition[] = [
 
 const AUTOMATION_PREVIEW_ENABLED_SKILL_IDS = ["trading-philosophy", "okx-market-intelligence"];
 
+// Profile 配置窗口夹具用的技能：加上两项系统必选与一个自定义技能，交易员与经典两种 Profile 都有内容可看。
+const AUTOMATION_PREVIEW_EDITOR_SKILLS: AiSkillDefinition[] = [
+  { id: "desic-core-operations", name: "desic-core-operations", description: "经典流程规范。", rules: "", content: "", builtin: true },
+  ...AUTOMATION_PREVIEW_SKILLS,
+  { id: "desic-trade-operations", name: "desic-trade-operations", description: "交易机会的构造与执行流程。", rules: "", content: "", builtin: true },
+  { id: "my-entry-preferences", name: "我的入场偏好", description: "自定义技能。", rules: "", content: "", builtin: false }
+];
+
 const AUTOMATION_PREVIEW_MODELS: AiModelConfigSummary[] = [
   { id: "preview-model", name: "Preview Reasoner", provider: "openai-compatible", model: "preview-reasoner", baseUrl: "https://example.invalid", apiKeyMasked: "sk-***", configured: true, permissionMode: "advisor", reasoningDepth: "medium" },
   { id: "preview-model-fast", name: "Preview Fast", provider: "openai-compatible", model: "preview-fast", baseUrl: "https://example.invalid", apiKeyMasked: "sk-***", configured: true, permissionMode: "advisor", reasoningDepth: "low" },
@@ -7180,11 +7524,63 @@ const AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES: Record<string, string> = {
   "ai-volatility-regime": "识别波动率制度切换，给出制度内外的证据边界。"
 };
 
+// Profile 配置窗口夹具：BTC 与账户数字来自真实的交易员 Profile（权益 9.31 U、可用 0.15 U，BTC 开不了最小仓位）；
+// SOL 是为了同时展示「能开 / 开不了」加的示例品种。凭据只用明显的占位值。
+const AUTOMATION_PREVIEW_ACCOUNTS: AccountSummary[] = [
+  { id: "preview-live", name: "OKX 实盘账号", exchange: "okx", environment: "live", apiKeyMasked: "preview-key-***", permissions: { read: true, trade: true, withdraw: false } },
+  { id: "preview-demo", name: "OKX 模拟盘", exchange: "okx", environment: "demo", apiKeyMasked: "preview-key-***", permissions: { read: true, trade: true, withdraw: false } }
+];
+
+const AUTOMATION_PREVIEW_RISK_SYMBOLS: RiskFacts["symbols"] = [
+  { instId: "BTC-USDT-SWAP", last: 85_300, ctVal: 0.01, ctValCcy: "BTC", minSz: 0.01, lotSz: 0.01, atr1h: 196.4 },
+  { instId: "SOL-USDT-SWAP", last: 118, ctVal: 1, ctValCcy: "SOL", minSz: 0.01, lotSz: 0.01, atr1h: 1.2 }
+];
+
+const AUTOMATION_PREVIEW_LIVE_RISK_FACTS: RiskFacts = {
+  accountId: "preview-live",
+  accountError: null,
+  equityUsdt: 9.31,
+  availableUsdt: 0.15,
+  snapshotAgeSeconds: 3,
+  todayRealizedPnl: 0,
+  assumedTakerFeePct: 0.05,
+  symbols: AUTOMATION_PREVIEW_RISK_SYMBOLS
+};
+
+const AUTOMATION_PREVIEW_DEMO_RISK_FACTS: RiskFacts = {
+  ...AUTOMATION_PREVIEW_LIVE_RISK_FACTS,
+  accountId: "preview-demo",
+  equityUsdt: 1000,
+  availableUsdt: 1000,
+  todayRealizedPnl: -12.4
+};
+
+const AUTOMATION_PREVIEW_EDITOR_PROFILE: AiAgentProfile = {
+  ...createProfile(AUTOMATION_PREVIEW_ACCOUNTS, "preview-model"),
+  id: "profile-preview-editor",
+  name: "新自动化 Profile 2",
+  mode: "limited_auto",
+  accountId: "preview-live",
+  environment: "live",
+  symbols: ["BTC-USDT-SWAP", "SOL-USDT-SWAP"],
+  skillIds: ["desic-core-operations", ...AUTOMATION_PREVIEW_ENABLED_SKILL_IDS, "desic-trade-operations"],
+  targetLeverage: 20,
+  maxSingleTradeMarginPct: 30,
+  risk: { riskPerTradePct: 5, minRewardRisk: 1.2, dailyLossLimitPct: 10, maxOpenPositions: 2, maxEntryDriftBps: 30 },
+  contextMode: "briefing",
+  handbookId: "default",
+  createdAt: Date.UTC(2026, 9, 4, 18, 0),
+  updatedAt: Date.UTC(2026, 9, 4, 18, 41)
+};
+
 export function AutomationPreview() {
   const requestedView = typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("view") : null;
-  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run", "pulse", "scorecard"];
+  const previewViews = ["run", "single-run", "refresh", "model-error", "optimization", "reviews", "agents", "triage", "minimal", "new-profile", "fastlane-config", "fastlane-run", "pulse", "scorecard", "trader-handbook", "trader-instructions", "profile-editor"];
   const initialView = requestedView && previewViews.includes(requestedView) ? requestedView : "config";
   const [view, setView] = useState<string>(initialView);
+  // 交易员工作区预览：手册的读写在内存里模拟（刷新页面还原）。
+  const previewHandbookApi = useMemo(() => createPreviewHandbookApi(), []);
+  const previewInstructionApi = useMemo(() => createPreviewInstructionApi(), []);
   // P0：点击保存时实际传给回调的参数个数（0 = 正确；>=1 说明事件被当参数传进去了）。
   const [fastlaneSaveArgCount, setFastlaneSaveArgCount] = useState<number | null>(null);
   // 真机 P0 预览复现：配置窗口开关状态 + 保存后的 toast（复用真实 .notification-stack 样式与层级）。
@@ -7197,7 +7593,7 @@ export function AutomationPreview() {
     []
   );
   const singleAgentPreview = view === "single-run";
-  const [previewSuggestions, setPreviewSuggestions] = useState<AiOptimizationSuggestion[]>([AUTOMATION_PREVIEW_OPTIMIZATION_SUGGESTION]);
+  const [previewSuggestions, setPreviewSuggestions] = useState<AiOptimizationSuggestion[]>([AUTOMATION_PREVIEW_OPTIMIZATION_SUGGESTION, PREVIEW_HANDBOOK_SUGGESTION]);
   // 预览态的勾选器：直接用假数据渲染真实组件（勾选制，无方案模板）。
   // C20.1（改写版）：夹具反映"迁移后的形态" —— 内置只有一个可选的对手盘（默认已勾选 = 允许咨询），
   // 外加 2 个非内置专家（保留用户自定义 / AI 创建）。
@@ -7208,7 +7604,8 @@ export function AutomationPreview() {
   const [previewTriage, setPreviewTriage] = useState(createDefaultTriage);
   // C24：两个独立夹具状态 —— config 视图默认「标准」（契约默认值），minimal 视图固定演示「极简」。
   const [previewSingleAgentMode, setPreviewSingleAgentMode] = useState<AiSingleAgentMode>("standard");
-  const [previewContextMode, setPreviewContextMode] = useState<"tools" | "briefing">("tools");
+  // 新版 Profile 配置窗口（?view=profile-editor）：真实组件 + 假数据，可切换两种 Profile 与实盘 / 模拟盘账户。
+  const [previewEditorDraft, setPreviewEditorDraft] = useState<AiAgentProfile>(AUTOMATION_PREVIEW_EDITOR_PROFILE);
   const [previewMinimalAgentMode, setPreviewMinimalAgentMode] = useState<AiSingleAgentMode>("minimal");
   // C29：卡片选择页与快判配置窗口的夹具状态。
   // `?view=fastlane-config&legacy=1` → 以历史 `advisor` 快判 Profile 起步，覆盖老数据兜底路径。
@@ -7246,7 +7643,8 @@ export function AutomationPreview() {
             <button type="button" role="tab" aria-selected={view === "agents"} className={view === "agents" ? "active" : ""} onClick={() => setView("agents")}>{automationText("agents", "Agent library", "Agent 库")}</button>
             <button type="button" role="tab" aria-selected={view === "triage"} className={view === "triage" ? "active" : ""} onClick={() => setView("triage")}>{automationText("triageTitle", "Triage", "试判")}</button>
             <button type="button" role="tab" aria-selected={view === "pulse"} className={view === "pulse" ? "active" : ""} onClick={() => setView("pulse")} data-preview-tab="pulse">{automationText("runViewPulse", "Pulse", "心电图")}</button>
-            <button type="button" role="tab" aria-selected={view === "scorecard"} className={view === "scorecard" ? "active" : ""} onClick={() => setView("scorecard")} data-preview-tab="scorecard">{automationText("scorecard", "Scorecard", "成绩单")}</button>
+            <button type="button" role="tab" aria-selected={view === "scorecard" || view.startsWith("trader-")} className={view === "scorecard" || view.startsWith("trader-") ? "active" : ""} onClick={() => setView("scorecard")} data-preview-tab="scorecard">{automationText("scorecard", "Trader", "交易员")}</button>
+            <button type="button" role="tab" aria-selected={view === "profile-editor"} className={view === "profile-editor" ? "active" : ""} onClick={() => setView("profile-editor")} data-preview-tab="profile-editor">{automationText("profileEditorPreview", "Profile editor", "Profile 配置窗口")}</button>
             <button type="button" role="tab" aria-selected={view === "minimal"} className={view === "minimal" ? "active" : ""} onClick={() => setView("minimal")}>{automationText("singleAgentMode", "Single-Agent mode", "单 Agent 模式")}</button>
             <button type="button" role="tab" aria-selected={view === "new-profile"} className={view === "new-profile" ? "active" : ""} onClick={() => setView("new-profile")}>{automationText("profileNewPickerTitle", "New Profile", "新建 Profile")}</button>
             <button type="button" role="tab" aria-selected={view === "fastlane-config"} className={view === "fastlane-config" ? "active" : ""} onClick={() => setView("fastlane-config")}>{automationText("fastlaneConfigTitle", "Fastlane configuration", "快判配置")}</button>
@@ -7320,8 +7718,60 @@ export function AutomationPreview() {
             </div>
           ) : view === "pulse" ? (
             <AutomationPulsePreview />
-          ) : view === "scorecard" ? (
-            <TraderScorecard profiles={[{ id: "profile-trader", name: "BTC 交易员" }]} previewData={AUTOMATION_PREVIEW_SCORECARD} />
+          ) : view === "profile-editor" ? (
+            <div className="automation-preview-profile-editor" data-preview-profile-editor>
+              {/* 预览专用：切换 Profile 类型与绑定账户（真实编辑器里类型创建后不可改）。 */}
+              <div className="automation-segmented compact" role="tablist">
+                {(["briefing", "tools"] as const).map((mode) => (
+                  <button type="button" role="tab" key={mode} aria-selected={(previewEditorDraft.contextMode ?? "tools") === mode} className={(previewEditorDraft.contextMode ?? "tools") === mode ? "active" : ""} onClick={() => setPreviewEditorDraft((current) => ({ ...current, contextMode: mode }))} data-preview-editor-kind={mode}>
+                    {mode === "briefing" ? automationText("profileCardTraderTitle", "Trader Profile", "交易员 Profile") : automationText("profileCardAiTitle", "Classic AI Profile", "经典 AI Profile")}
+                  </button>
+                ))}
+              </div>
+              <section className="modal-shell automation-profile-editor-modal" aria-label="Profile">
+                <ProfileEditor
+                  draft={previewEditorDraft}
+                  accounts={AUTOMATION_PREVIEW_ACCOUNTS}
+                  watchlist={["BTC-USDT-SWAP", "SOL-USDT-SWAP", "ETH-USDT-SWAP"]}
+                  skills={AUTOMATION_PREVIEW_EDITOR_SKILLS}
+                  skillVersions={[AUTOMATION_PREVIEW_SKILL_VERSION]}
+                  models={AUTOMATION_PREVIEW_MODELS}
+                  agents={AUTOMATION_PREVIEW_AGENTS}
+                  agentResponsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}
+                  agentsLoading={false}
+                  agentsError={null}
+                  busy={false}
+                  dirty={previewEditorDraft !== AUTOMATION_PREVIEW_EDITOR_PROFILE}
+                  savedAt={AUTOMATION_PREVIEW_EDITOR_PROFILE.updatedAt}
+                  recentInputTokens={[135_886, 55_548, 237_476, 93_678]}
+                  previewFacts={previewEditorDraft.accountId === "preview-demo" ? AUTOMATION_PREVIEW_DEMO_RISK_FACTS : AUTOMATION_PREVIEW_LIVE_RISK_FACTS}
+                  previewTraderSummary={PREVIEW_TRADER_SCORECARD}
+                  previewHandbooks={{ library: PREVIEW_HANDBOOK_LIBRARY, details: PREVIEW_HANDBOOK_DETAILS }}
+                  previewInstructions={PREVIEW_INSTRUCTIONS}
+                  onChange={(patch) => setPreviewEditorDraft((current) => ({ ...current, ...patch }))}
+                  onOpenAgentLibrary={() => setView("agents")}
+                  onOpenScorecard={() => setView("scorecard")}
+                  onOpenHandbook={() => setView("trader-handbook")}
+                  onOpenInstructions={() => setView("trader-instructions")}
+                  onReloadAgents={() => undefined}
+                  onSave={() => undefined}
+                  onRun={() => undefined}
+                  onDailyReview={() => undefined}
+                  onDelete={() => undefined}
+                  onClose={() => undefined}
+                />
+              </section>
+            </div>
+          ) : view === "scorecard" || view === "trader-handbook" || view === "trader-instructions" ? (
+            <div className="automation-preview-trader" data-preview-trader>
+              <TraderWorkspace
+                profiles={PREVIEW_TRADER_PROFILES}
+                previewScorecard={PREVIEW_TRADER_SCORECARD}
+                handbookApi={previewHandbookApi}
+                instructionApi={previewInstructionApi}
+                focus={view === "trader-handbook" ? { view: "handbook", handbookId: "default", nonce: 1 } : view === "trader-instructions" ? { view: "instructions", nonce: 1 } : null}
+              />
+            </div>
           ) : view === "triage" ? (
             <div className="automation-preview-triage">
               <RunsView
@@ -7469,16 +7919,6 @@ export function AutomationPreview() {
                     渲染走产品同一条路径（`ProfileMigrationNotes`），预览页因此能回归
                     「剔除已删 id → migrationNotes → 可见提示」这条链路，而不是只靠真机数据。 */}
                 <ProfileMigrationNotes notes={AUTOMATION_PREVIEW_PROFILE_MIGRATION_NOTES} />
-                {/* 预览专用：切换两种 Profile 的编辑器差异（真实编辑器里类型创建后不可改）。 */}
-                <div className="automation-segmented compact" role="tablist" data-preview-profile-kind>
-                  {(["tools", "briefing"] as const).map((mode) => (
-                    <button type="button" role="tab" key={mode} aria-selected={previewContextMode === mode} className={previewContextMode === mode ? "active" : ""} onClick={() => setPreviewContextMode(mode)} data-preview-kind={mode}>
-                      {mode === "briefing" ? automationText("profileCardTraderTitle", "Trader Profile", "交易员 Profile") : automationText("profileCardAiTitle", "Classic AI Profile", "经典 AI Profile")}
-                    </button>
-                  ))}
-                </div>
-                {previewContextMode === "briefing" ? <TraderSettingsSection /> : (
-                <>
                 <ProfileAgentSelector
                   agents={AUTOMATION_PREVIEW_AGENTS}
                   responsibilities={AUTOMATION_PREVIEW_AGENT_RESPONSIBILITIES}
@@ -7492,29 +7932,15 @@ export function AutomationPreview() {
                   onReload={() => undefined}
                 />
                 <TriageSettings value={previewTriage} onChange={setPreviewTriage} />
-                </>
-                )}
                 {/* 预览：硬风控「按当前账户换算」（示例账户：权益 9.31 U、可用 0.15 U）。 */}
                 <RiskPreviewPanel
-                  accountId="preview-account"
+                  accountId="preview-live"
                   symbols={["BTC-USDT-SWAP", "SOL-USDT-SWAP"]}
                   riskPerTradePct={5}
                   dailyLossLimitPct={10}
                   maxSingleTradeMarginPct={30}
                   targetLeverage={20}
-                  previewFacts={{
-                    accountId: "preview-account",
-                    accountError: null,
-                    equityUsdt: 9.31,
-                    availableUsdt: 0.15,
-                    snapshotAgeSeconds: 3,
-                    todayRealizedPnl: 0,
-                    assumedTakerFeePct: 0.05,
-                    symbols: [
-                      { instId: "BTC-USDT-SWAP", last: 85_300, ctVal: 0.01, ctValCcy: "BTC", minSz: 0.01, lotSz: 0.01, atr1h: 196.4 },
-                      { instId: "SOL-USDT-SWAP", last: 118, ctVal: 1, ctValCcy: "SOL", minSz: 0.01, lotSz: 0.01, atr1h: 1.2 }
-                    ]
-                  }}
+                  previewFacts={AUTOMATION_PREVIEW_LIVE_RISK_FACTS}
                 />
               </div>
             </div>

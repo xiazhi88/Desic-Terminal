@@ -197,3 +197,6 @@
 }
 .fastlane-run__wake-hint { margin: 0; color: var(--muted); font-size: 10.5px; }
 .fastlane-run__wake-warn { margin: 0; color: var(--warning, #f5a524); font-size: 10px; line-height: 1.5; }
+
+/* 交易员卡片标题旁的「测试版」标签 */
+.fastlane-card__beta { margin-left: 8px; }

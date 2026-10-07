@@ -70,39 +70,39 @@ pub(crate) fn migrate_trader_learning(conn: &Connection) -> Result<(), String> {
          CREATE INDEX IF NOT EXISTS idx_ai_trader_decisions_run ON ai_trader_decisions(run_id);",
     )
     .map_err(|err| err.to_string())?;
-    let existing: i64 = conn
-        .query_row("SELECT COUNT(*) FROM ai_trader_handbooks", [], |row| row.get(0))
-        .map_err(|err| err.to_string())?;
-    if existing == 0 {
-        let now = now_ms();
-        conn.execute(
-            "INSERT INTO ai_trader_handbooks (version,status,content_json,parent_version,source_suggestion_id,note,created_at,published_at)
-             VALUES (1,'published',?1,NULL,NULL,'内置 v1',?2,?2)",
-            params![
-                serde_json::to_string(&desic_agent_automation::default_handbook()).map_err(|err| err.to_string())?,
-                now
-            ],
-        )
-        .map_err(|err| err.to_string())?;
-    }
-    Ok(())
-}
-
-/// 当前生效的手册（最新已发布版本）。库里读不到或内容损坏时退回内置 v1，保证交易员运行不因手册缺失而失败。
-pub(crate) fn current_handbook(conn: &Connection) -> (i64, Handbook) {
-    conn.query_row(
-        "SELECT version,content_json FROM ai_trader_handbooks WHERE status='published' ORDER BY version DESC LIMIT 1",
-        [],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    // 交易员开仓挂单的清理记录：到期自动撤单、停用 Profile 时用户确认撤单。按委托号去重，失败的记次数。
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS ai_trader_order_cleanup (
+           ord_id TEXT PRIMARY KEY,
+           opportunity_id TEXT NOT NULL,
+           profile_id TEXT NOT NULL,
+           inst_id TEXT NOT NULL,
+           source TEXT NOT NULL,
+           valid_until INTEGER,
+           status TEXT NOT NULL,
+           attempts INTEGER NOT NULL DEFAULT 0,
+           last_error TEXT,
+           created_at INTEGER NOT NULL,
+           updated_at INTEGER NOT NULL
+         );",
     )
-    .ok()
-    .and_then(|(version, content)| {
-        serde_json::from_str::<Handbook>(&content)
-            .ok()
-            .filter(|handbook| desic_agent_automation::validate_handbook(handbook).is_ok())
-            .map(|handbook| (version, handbook))
-    })
-    .unwrap_or_else(|| (1, desic_agent_automation::default_handbook()))
+    .map_err(|err| err.to_string())?;
+    // 手册库（多本手册、每本自己的版次）：建表、加列、回填、索引、种子数据。
+    crate::trader_handbooks::migrate_handbook_library(conn)?;
+    // 用户的临时指令、对决策的纠正。
+    crate::trader_instructions::migrate_trader_instructions(conn)?;
+    crate::trader_corrections::migrate_trader_corrections(conn)?;
+    // 决策属于哪本手册（同 id 的形态在不同手册里是不同的打法）、决策时形态的状态（观察中的只有影子结果）。
+    let _ = conn.execute("ALTER TABLE ai_trader_decisions ADD COLUMN handbook_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE ai_trader_decisions ADD COLUMN setup_status TEXT", []);
+    conn.execute(
+        "UPDATE ai_trader_decisions SET handbook_id=COALESCE(
+           (SELECT h.handbook_id FROM ai_trader_handbooks h WHERE h.version=ai_trader_decisions.handbook_version), 'default')
+         WHERE handbook_id IS NULL",
+        [],
+    )
+    .map_err(|err| err.to_string())?;
+    Ok(())
 }
 
 /// 交易员运行的技能载荷：替换固定规范正文、去掉不适用的技能。只在交易员分支调用；经典运行不经过这里。
@@ -122,18 +122,23 @@ pub(crate) fn apply_trader_skills(
     }
 }
 
-/// 交易员运行的开仓候选形态校验：`setupId` 必须存在、属于当前手册，且没有被用户暂停。
+/// 交易员运行的开仓候选形态校验：`setupId` 必须存在、属于本轮的手册、处于实盘状态，且没有被用户暂停。
 /// `regime` 是本轮简报里由代码算出的日线阶段（用于匹配限定了阶段的暂停条目）。只对交易员运行的开仓调用。
 pub(crate) fn trader_setup_reasons(handbook: &Handbook, setup_id: Option<&str>, regime: Option<&str>, side: &str) -> Vec<String> {
-    let available = handbook.setups.iter().map(|setup| setup.id.as_str()).collect::<Vec<_>>().join(", ");
+    let available = handbook.setups.iter().filter(|setup| setup.is_live()).map(|setup| setup.id.as_str()).collect::<Vec<_>>().join(", ");
     let Some(setup_id) = setup_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return vec![format!("setup_required：交易员 Profile 的开仓候选必须带 setupId（交易手册形态之一：{available}）")];
+        return vec![format!("setup_required：交易员 Profile 的开仓候选必须带 setupId（交易手册里实盘的形态之一：{available}）")];
     };
-    if desic_agent_automation::find_setup(handbook, setup_id).is_none() {
+    let Some(setup) = desic_agent_automation::find_setup(handbook, setup_id) else {
         return vec![format!("setup_unknown：{setup_id} 不是交易手册里的形态（可用：{available}）")];
+    };
+    if !setup.is_live() {
+        return vec![format!(
+            "setup_observing：{setup_id} 处于「观察中」，只评估、写进 decisionLog，不能开仓（要开仓需先在交易手册里启用这个形态）"
+        )];
     }
     match desic_agent_automation::paused_entry(handbook, setup_id, regime, side) {
-        Some(entry) => vec![format!("setup_paused：{setup_id} 已被用户暂停（{}）", entry.reason)],
+        Some(entry) => vec![format!("setup_paused：{setup_id} 已被用户暂停（{}；要开仓需先在成绩单或交易手册里恢复）", entry.reason)],
         None => Vec::new(),
     }
 }
@@ -146,28 +151,44 @@ pub(crate) fn run_is_trader(conn: &Connection, run_id: &str) -> bool {
         .is_some_and(|mode| mode == crate::ai_automation::CONTEXT_MODE_BRIEFING)
 }
 
-/// 交易员运行的开仓候选形态校验（读库版）：经典运行或非开仓直接返回空。
-pub(crate) fn trader_open_setup_reasons(conn: &Connection, run_id: &str, inst_id: &str, intent: &str, direction: &str, setup_id: Option<&str>) -> Vec<String> {
+/// 交易员运行的统一开仓守卫：形态（缺失 / 未知 / 观察中 / 已暂停）与用户的临时指令。经典运行或非开仓直接返回空。
+/// 手册按本轮运行用的那本取最新已发布版次，所以运行中途的暂停、改观察立即生效。三处调用：
+/// `market.readDecisionContext`（早拒）、提交交易机会（堵住复核后 60 秒窗口与 revise / reuse）、执行前（自动执行与手动批准）。
+pub(crate) fn trader_open_guard_reasons(
+    conn: &Connection,
+    run_id: &str,
+    inst_id: &str,
+    intent: &str,
+    direction: &str,
+    setup_id: Option<&str>,
+    now: i64,
+) -> Vec<String> {
     if intent != "open" || !run_is_trader(conn, run_id) {
         return Vec::new();
     }
-    let (_, handbook) = current_handbook(conn);
+    let handbook_id = run_handbook_id(conn, run_id);
+    let loaded = crate::trader_handbooks::load_handbook(conn, Some(&handbook_id));
     let regime = run_daily_regime(conn, run_id, inst_id);
-    trader_setup_reasons(&handbook, setup_id, regime.as_deref(), direction)
+    let mut reasons = trader_setup_reasons(&loaded.handbook, setup_id, regime.as_deref(), direction);
+    reasons.extend(crate::trader_instructions::run_instruction_reasons(conn, run_id, inst_id, direction, now));
+    reasons
+}
+
+/// 本轮简报审计里记的手册 id（老运行没有记录时是默认手册）。
+pub(crate) fn run_handbook_id(conn: &Connection, run_id: &str) -> String {
+    run_briefing_audit(conn, run_id)
+        .get("handbookId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(crate::trader_handbooks::DEFAULT_HANDBOOK_ID)
+        .to_string()
 }
 
 /// 本轮简报里由代码算出的某品种日线阶段（写在 `initial_market_snapshot_json.briefing.regimes`）。
 pub(crate) fn run_daily_regime(conn: &Connection, run_id: &str, inst_id: &str) -> Option<String> {
-    let snapshot: String = conn
-        .query_row(
-            "SELECT initial_market_snapshot_json FROM ai_agent_runs WHERE id=?1",
-            params![run_id],
-            |row| row.get(0),
-        )
-        .ok()?;
-    serde_json::from_str::<Value>(&snapshot)
-        .ok()?
-        .pointer(&format!("/briefing/regimes/{}/daily", inst_id.replace('/', "~1")))
+    run_briefing_audit(conn, run_id)
+        .pointer(&format!("/regimes/{}/daily", inst_id.replace('/', "~1")))
         .and_then(Value::as_str)
         .map(str::to_string)
 }
@@ -251,22 +272,28 @@ fn run_briefing_audit(conn: &Connection, run_id: &str) -> Value {
     .unwrap_or(Value::Null)
 }
 
-fn handbook_version_content(conn: &Connection, version: Option<i64>) -> Handbook {
-    version
-        .and_then(|version| {
-            conn.query_row(
-                "SELECT content_json FROM ai_trader_handbooks WHERE version=?1",
-                params![version],
-                |row| row.get::<_, String>(0),
-            )
-            .ok()
-        })
-        .and_then(|text| serde_json::from_str::<Handbook>(&text).ok())
-        .unwrap_or_else(|| current_handbook(conn).1)
+/// 本轮实际用的手册内容（审计里记的版次）；读不到时用这本手册的最新版次。
+fn run_handbook_content(conn: &Connection, audit: &Value) -> (String, Handbook) {
+    let handbook_id = audit
+        .get("handbookId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(crate::trader_handbooks::DEFAULT_HANDBOOK_ID)
+        .to_string();
+    let handbook = audit
+        .get("handbookVersion")
+        .and_then(Value::as_i64)
+        .and_then(|version| crate::trader_handbooks::handbook_at_version(conn, version))
+        .unwrap_or_else(|| crate::trader_handbooks::load_handbook(conn, Some(&handbook_id)).handbook);
+    (handbook_id, handbook)
 }
 
-/// 把交易员运行的决策日志写库（在 finishRun 的同一个事务里）。每个品种最多一条；
-/// 行情阶段与手册版本取本轮简报审计（代码计算），开仓机会从本轮持久化记录关联。
+/// 决策日志的条数规则：每个品种最多一条主决策（用实盘形态或不做），每个观察中的形态另外最多一条，合计不超过 6 条。
+const MAX_DECISION_LOG_ENTRIES: usize = 6;
+
+/// 把交易员运行的决策日志写库（在 finishRun 的同一个事务里）。每个品种最多一条主决策，观察中的形态另记；
+/// 行情阶段与手册版本取本轮简报审计（代码计算），开仓机会按品种和形态从本轮持久化记录关联。
 pub(crate) fn record_run_decisions(
     conn: &Connection,
     run_id: &str,
@@ -277,7 +304,7 @@ pub(crate) fn record_run_decisions(
 ) -> Result<usize, String> {
     let audit = run_briefing_audit(conn, run_id);
     let handbook_version = audit.get("handbookVersion").and_then(Value::as_i64);
-    let handbook = handbook_version_content(conn, handbook_version);
+    let (handbook_id, handbook) = run_handbook_content(conn, &audit);
     let decision = final_decision_json.and_then(|text| serde_json::from_str::<Value>(text).ok()).unwrap_or(Value::Null);
     let opportunity_ids = ["createdOpportunityIds", "reusedOpportunityIds"]
         .iter()
@@ -288,12 +315,23 @@ pub(crate) fn record_run_decisions(
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
     let mut written = 0;
-    for (index, raw) in log.iter().take(3).enumerate() {
+    for (index, raw) in log.iter().enumerate() {
+        if written >= MAX_DECISION_LOG_ENTRIES {
+            break;
+        }
         let Ok(entry) = serde_json::from_value::<DecisionLogEntry>(raw.clone()) else {
             continue;
         };
         let inst_id = entry.inst_id.trim().to_ascii_uppercase();
-        if inst_id.is_empty() || !seen.insert(inst_id.clone()) {
+        if inst_id.is_empty() {
+            continue;
+        }
+        let setup_id = entry.setup_id.as_deref().map(str::trim).filter(|value| !value.is_empty() && *value != "none").map(str::to_string);
+        let setup = setup_id.as_deref().and_then(|id| desic_agent_automation::find_setup(&handbook, id));
+        let observing = setup.is_some_and(|setup| !setup.is_live());
+        // 主决策按品种去重；观察中的形态按「品种 + 形态」去重。
+        let key = if observing { format!("{inst_id}|{}", setup_id.as_deref().unwrap_or_default()) } else { inst_id.clone() };
+        if !seen.insert(key) {
             continue;
         }
         let regimes = audit.pointer(&format!("/regimes/{}", inst_id.replace('/', "~1"))).cloned().unwrap_or(Value::Null);
@@ -308,8 +346,6 @@ pub(crate) fn record_run_decisions(
                 _ => None,
             },
         };
-        let setup_id = entry.setup_id.as_deref().map(str::trim).filter(|value| !value.is_empty() && *value != "none").map(str::to_string);
-        let setup = setup_id.as_deref().and_then(|id| desic_agent_automation::find_setup(&handbook, id));
         let action = entry.action.trim().to_ascii_lowercase();
         // 方向纪律只评估新的开仓决定；管理已有持仓（可能是更早开的仓）不计入。
         let (against, mismatch) = match side.filter(|_| action != "manage_position") {
@@ -322,10 +358,41 @@ pub(crate) fn record_run_decisions(
         };
         // 影子结算：有完整价位、且不是纯持仓管理的决策都结算（包括「不做 / 等条件」时考虑过的候选）。
         let settleable = action != "manage_position" && side.is_some() && entry_px.is_some() && stop_px.is_some() && target_px.is_some();
-        let opportunity_id = if matches!(action.as_str(), "enter_now" | "limit_order") && !opportunity_ids.is_empty() {
+        // 同一个 Profile 已经有一条品种、形态、方向、入场、止损、目标都相同、还在影子结算中的决策时，这条只记录、
+        // 不重复结算：否则同一个计划（比如每轮都把同一笔挂单再记一遍）会在成绩单里被算成很多次。
+        let duplicate_of: Option<i64> = if settleable {
+            conn.query_row(
+                "SELECT created_at FROM ai_trader_decisions
+                 WHERE profile_id=?1 AND inst_id=?2 AND COALESCE(setup_id,'')=COALESCE(?3,'') AND side=?4 AND shadow_status='pending'
+                   AND ABS(entry-?5)<=ABS(?5)*1e-9 AND ABS(stop-?6)<=ABS(?6)*1e-9 AND ABS(target-?7)<=ABS(?7)*1e-9
+                 ORDER BY created_at LIMIT 1",
+                params![profile_id, inst_id, setup_id, side, entry_px, stop_px, target_px],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|err| err.to_string())?
+        } else {
+            None
+        };
+        let (shadow_status, shadow_note) = match (settleable, duplicate_of) {
+            (true, Some(earlier)) => (
+                "duplicate",
+                Some(format!("与 {} 记下的同一计划相同，那条还在影子结算中，这条不重复结算", crate::ai_briefing::shanghai_label(earlier, false))),
+            ),
+            (true, None) => ("pending", None),
+            (false, _) => (
+                "skipped",
+                Some((if action == "manage_position" { "持仓管理不做影子结算" } else { "没有完整的方向与价位，不做影子结算" }).to_string()),
+            ),
+        };
+        // 观察中的条目永远不关联真实机会；其余按品种 + 形态关联（决策没写形态时只按品种）。
+        let opportunity_id = if !observing && matches!(action.as_str(), "enter_now" | "limit_order") && !opportunity_ids.is_empty() {
             let placeholders = opportunity_ids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
-            let sql = format!("SELECT id FROM trade_opportunities WHERE inst_id=? AND intent='open' AND id IN ({placeholders}) ORDER BY created_at DESC LIMIT 1");
-            let mut values: Vec<&dyn rusqlite::ToSql> = vec![&inst_id];
+            let sql = format!(
+                "SELECT id FROM trade_opportunities WHERE inst_id=? AND intent='open' AND (? IS NULL OR setup_id=?) AND id IN ({placeholders})
+                 ORDER BY created_at DESC LIMIT 1"
+            );
+            let mut values: Vec<&dyn rusqlite::ToSql> = vec![&inst_id, &setup_id, &setup_id];
             for id in &opportunity_ids {
                 values.push(id);
             }
@@ -342,8 +409,8 @@ pub(crate) fn record_run_decisions(
             "INSERT OR REPLACE INTO ai_trader_decisions (
                id,run_id,profile_id,inst_id,created_at,handbook_version,regime_daily,regime_4h,volatility,
                setup_id,side,action,entry,stop,target,probability,valid_until,reason,considered,opportunity_id,
-               against_direction,regime_mismatch,shadow_status,shadow_note
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)",
+               against_direction,regime_mismatch,shadow_status,shadow_note,handbook_id,setup_status
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26)",
             params![
                 format!("decision:{run_id}:{index}"),
                 run_id,
@@ -367,8 +434,10 @@ pub(crate) fn record_run_decisions(
                 opportunity_id,
                 i64::from(against),
                 i64::from(mismatch),
-                if settleable { "pending" } else { "skipped" },
-                (!settleable).then_some(if action == "manage_position" { "持仓管理不做影子结算" } else { "没有完整的方向与价位，不做影子结算" }),
+                shadow_status,
+                shadow_note,
+                handbook_id,
+                setup.map(|setup| if setup.is_live() { desic_agent_automation::SETUP_STATUS_LIVE } else { desic_agent_automation::SETUP_STATUS_OBSERVING }),
             ],
         )
         .map_err(|err| err.to_string())?;
@@ -536,18 +605,28 @@ fn link_real_results(conn: &Connection, limit: usize) -> Result<usize, String> {
     Ok(linked)
 }
 
-/// 成绩单的数据：某个 Profile（或全部交易员 Profile）在 `since` 之后的决策，最新的在前。
-pub(crate) fn load_decision_outcomes(conn: &Connection, profile_id: Option<&str>, since: i64) -> Vec<desic_agent_automation::DecisionOutcome> {
+/// 成绩单的数据：某个 Profile（或全部交易员 Profile）、某本手册（或全部手册）在 `since` 之后的决策，最新的在前。
+pub(crate) fn load_decision_outcomes(
+    conn: &Connection,
+    profile_id: Option<&str>,
+    handbook_id: Option<&str>,
+    since: i64,
+) -> Vec<desic_agent_automation::DecisionOutcome> {
     let sql = "SELECT d.id,d.created_at,d.inst_id,d.setup_id,d.regime_daily,d.side,d.action,d.probability,
                       d.shadow_r,d.real_r,d.against_direction,d.regime_mismatch,d.handbook_version,
-                      (SELECT o.status FROM trade_opportunities o WHERE o.id=d.opportunity_id)
+                      (SELECT o.status FROM trade_opportunities o WHERE o.id=d.opportunity_id),
+                      COALESCE(d.handbook_id,'default'),d.setup_status
                FROM ai_trader_decisions d
-               WHERE (?1 IS NULL OR d.profile_id=?1) AND d.created_at>=?2
+               WHERE (?1 IS NULL OR d.profile_id=?1) AND (?2 IS NULL OR COALESCE(d.handbook_id,'default')=?2) AND d.created_at>=?3
                ORDER BY d.created_at DESC LIMIT 2000";
-    let Ok(mut stmt) = conn.prepare(sql) else {
-        return Vec::new();
+    let mut stmt = match conn.prepare(sql) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            crate::boot_log(&format!("trader decision outcomes query failed: {error}"));
+            return Vec::new();
+        }
     };
-    let rows = stmt.query_map(params![profile_id, since], |row| {
+    let rows = stmt.query_map(params![profile_id, handbook_id, since], |row| {
         Ok(desic_agent_automation::DecisionOutcome {
             id: row.get(0)?,
             created_at: row.get(1)?,
@@ -563,18 +642,28 @@ pub(crate) fn load_decision_outcomes(conn: &Connection, profile_id: Option<&str>
             regime_mismatch: row.get::<_, i64>(11)? != 0,
             handbook_version: row.get(12)?,
             executed: row.get::<_, Option<String>>(13)?.as_deref() == Some("executed"),
+            handbook_id: row.get(14)?,
+            observing: row.get::<_, Option<String>>(15)?.as_deref() == Some(desic_agent_automation::SETUP_STATUS_OBSERVING),
         })
     });
     rows.map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default()
 }
 
-/// 写进简报的成绩单：本 Profile 已结算的样本少于 10 条时改用所有交易员 Profile 的合计。
-pub(crate) fn scorecard_brief(conn: &Connection, profile_id: &str, current_regime: Option<&str>, now: i64, chinese: bool) -> String {
+/// 写进简报的成绩单（只算本轮这本手册下的决策）：本 Profile 已结算的样本少于 10 条时，
+/// 改用同一本手册下所有交易员 Profile 的合计。
+pub(crate) fn scorecard_brief(
+    conn: &Connection,
+    profile_id: &str,
+    handbook: &crate::trader_handbooks::LoadedHandbook,
+    current_regime: Option<&str>,
+    now: i64,
+    chinese: bool,
+) -> String {
     let since = now - 90 * 24 * 60 * 60_000;
-    let own = load_decision_outcomes(conn, Some(profile_id), since);
+    let own = load_decision_outcomes(conn, Some(profile_id), Some(&handbook.id), since);
     let own_card = desic_agent_automation::build_scorecard(&own);
     let (rows, card, pooled) = if own_card.resolved < 10 {
-        let all = load_decision_outcomes(conn, None, since);
+        let all = load_decision_outcomes(conn, None, Some(&handbook.id), since);
         let card = desic_agent_automation::build_scorecard(&all);
         if card.resolved > own_card.resolved {
             (all, card, true)
@@ -585,7 +674,7 @@ pub(crate) fn scorecard_brief(conn: &Connection, profile_id: &str, current_regim
         (own, own_card, false)
     };
     let recent = rows.iter().filter(|row| row.effective_r().is_some()).take(5).cloned().collect::<Vec<_>>();
-    desic_agent_automation::render_scorecard_brief(&card, &recent, current_regime, pooled, chinese)
+    desic_agent_automation::render_scorecard_brief(&card, &recent, current_regime, pooled, &handbook.observing_setup_ids(), chinese)
 }
 
 /// 新出现的「建议暂停」分组发一次通知（同一分组只发一次，记在自动化设置里）。
@@ -596,9 +685,21 @@ pub(crate) fn notify_new_flags(app: &tauri::AppHandle, conn: &Connection, profil
         .unwrap_or_default();
     let mut changed = false;
     for profile_id in profile_ids {
-        let rows = load_decision_outcomes(conn, Some(profile_id), now - 90 * 24 * 60 * 60_000);
-        for group in desic_agent_automation::build_scorecard(&rows).groups.into_iter().filter(|group| group.flagged) {
-            let key = format!("{profile_id}|{}|{}|{}", group.setup_id, group.regime, group.side);
+        // 只看这个 Profile 现在用的手册；观察中的形态本来就不能开仓，不发「建议暂停」。
+        let handbook = crate::trader_handbooks::load_handbook(conn, Some(&crate::trader_handbooks::profile_handbook_id(conn, profile_id)));
+        let observing = handbook.observing_setup_ids();
+        let rows = load_decision_outcomes(conn, Some(profile_id), Some(&handbook.id), now - 90 * 24 * 60 * 60_000);
+        for group in desic_agent_automation::build_scorecard(&rows)
+            .groups
+            .into_iter()
+            .filter(|group| group.flagged && !observing.contains(&group.setup_id))
+        {
+            // 默认手册沿用原来的键，升级前已经提醒过的分组不再重复提醒。
+            let key = if handbook.id == crate::trader_handbooks::DEFAULT_HANDBOOK_ID {
+                format!("{profile_id}|{}|{}|{}", group.setup_id, group.regime, group.side)
+            } else {
+                format!("{profile_id}|{}|{}|{}|{}", handbook.id, group.setup_id, group.regime, group.side)
+            };
             if notified.contains(&key) {
                 continue;
             }
@@ -609,9 +710,9 @@ pub(crate) fn notify_new_flags(app: &tauri::AppHandle, conn: &Connection, profil
                 json!({
                     "type": "scorecardWarning",
                     "message": format!(
-                        "交易员成绩单：{} 在 {} 时{}已有 {} 条决策，收缩后平均 {:+.2}R，建议考虑暂停（由你决定）。",
+                        "交易员成绩单：{} 在日线{}时{}已有 {} 条决策，收缩后平均 {:+.2}R，建议考虑暂停（由你决定）。",
                         group.setup_id,
-                        group.regime,
+                        desic_agent_automation::regime_label(&group.regime, true),
                         if group.side == "long" { "做多" } else { "做空" },
                         group.n,
                         group.shrunk_avg_r
@@ -627,17 +728,24 @@ pub(crate) fn notify_new_flags(app: &tauri::AppHandle, conn: &Connection, profil
 }
 
 /// 界面展示用的一条决策（成绩单页的最近决策、运行详情里的决策日志）。
-fn decision_rows(conn: &Connection, filter_sql: &str, value: &dyn rusqlite::ToSql, limit: i64) -> Vec<Value> {
+fn decision_rows(conn: &Connection, filter_sql: &str, values: &[&dyn rusqlite::ToSql], limit: i64) -> Vec<Value> {
     let sql = format!(
-        "SELECT id,run_id,inst_id,created_at,setup_id,side,action,entry,stop,target,probability,valid_until,reason,
-                regime_daily,regime_4h,against_direction,regime_mismatch,shadow_status,shadow_note,shadow_r,exit_kind,
-                real_r,opportunity_id,handbook_version
-         FROM ai_trader_decisions WHERE {filter_sql} ORDER BY created_at DESC LIMIT {limit}"
+        "SELECT d.id,d.run_id,d.inst_id,d.created_at,d.setup_id,d.side,d.action,d.entry,d.stop,d.target,d.probability,d.valid_until,d.reason,
+                d.regime_daily,d.regime_4h,d.against_direction,d.regime_mismatch,d.shadow_status,d.shadow_note,d.shadow_r,d.exit_kind,
+                d.real_r,d.opportunity_id,d.handbook_version,COALESCE(d.handbook_id,'default'),d.setup_status,
+                c.category,c.text,c.updated_at
+         FROM ai_trader_decisions d
+         LEFT JOIN ai_trader_corrections c ON c.decision_id=d.id AND c.deleted_at IS NULL
+         WHERE {filter_sql} ORDER BY d.created_at DESC LIMIT {limit}"
     );
-    let Ok(mut stmt) = conn.prepare(&sql) else {
-        return Vec::new();
+    let mut stmt = match conn.prepare(&sql) {
+        Ok(stmt) => stmt,
+        Err(error) => {
+            crate::boot_log(&format!("trader decision rows query failed: {error}"));
+            return Vec::new();
+        }
     };
-    let rows = stmt.query_map([value], |row| {
+    let rows = stmt.query_map(values, |row| {
         Ok(json!({
             "id": row.get::<_, String>(0)?,
             "runId": row.get::<_, String>(1)?,
@@ -663,38 +771,58 @@ fn decision_rows(conn: &Connection, filter_sql: &str, value: &dyn rusqlite::ToSq
             "realR": row.get::<_, Option<f64>>(21)?,
             "opportunityId": row.get::<_, Option<String>>(22)?,
             "handbookVersion": row.get::<_, Option<i64>>(23)?,
+            "handbookId": row.get::<_, String>(24)?,
+            "setupStatus": row.get::<_, Option<String>>(25)?,
+            "correction": match row.get::<_, Option<String>>(26)? {
+                Some(category) => json!({ "category": category, "text": row.get::<_, String>(27)?, "updatedAt": row.get::<_, i64>(28)? }),
+                None => Value::Null,
+            },
         }))
     });
     rows.map(|rows| rows.filter_map(Result::ok).collect()).unwrap_or_default()
 }
 
-/// 成绩单页：某个交易员 Profile（不传则全部）在 `from_ms` 之后的成绩、最近决策与当前手册。
+/// 成绩单页：某个交易员 Profile（不传则全部）、某本手册（不传则全部）在 `from_ms` 之后的成绩、最近决策，
+/// 以及要显示的手册（传了就是那本，否则是这个 Profile 用的那本，再否则是默认手册）。
 #[tauri::command]
-pub(crate) async fn ai_trader_scorecard(app: tauri::AppHandle, profile_id: Option<String>, from_ms: i64) -> Result<Value, String> {
+pub(crate) async fn ai_trader_scorecard(
+    app: tauri::AppHandle,
+    profile_id: Option<String>,
+    handbook_id: Option<String>,
+    from_ms: i64,
+) -> Result<Value, String> {
     crate::blocking_work::run_blocking(move || {
         let conn = open_read_database(&app)?;
         let profile = profile_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
-        let rows = load_decision_outcomes(&conn, profile, from_ms);
+        let handbook_filter = handbook_id.as_deref().map(str::trim).filter(|value| !value.is_empty());
+        let rows = load_decision_outcomes(&conn, profile, handbook_filter, from_ms);
         let card = desic_agent_automation::build_scorecard(&rows);
         let pending: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM ai_trader_decisions WHERE shadow_status='pending' AND (?1 IS NULL OR profile_id=?1) AND created_at>=?2",
-                params![profile, from_ms],
+                "SELECT COUNT(*) FROM ai_trader_decisions WHERE shadow_status='pending' AND (?1 IS NULL OR profile_id=?1)
+                   AND (?2 IS NULL OR COALESCE(handbook_id,'default')=?2) AND created_at>=?3",
+                params![profile, handbook_filter, from_ms],
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        let recent = match profile {
-            Some(profile) => decision_rows(&conn, "profile_id=?1", &profile, 40),
-            None => decision_rows(&conn, "?1=?1", &1_i64, 40),
-        };
-        let (version, handbook) = current_handbook(&conn);
+        let recent = decision_rows(
+            &conn,
+            "(?1 IS NULL OR d.profile_id=?1) AND (?2 IS NULL OR COALESCE(d.handbook_id,'default')=?2)",
+            &[&profile, &handbook_filter],
+            40,
+        );
+        let shown = handbook_filter
+            .map(str::to_string)
+            .or_else(|| profile.map(|profile| crate::trader_handbooks::profile_handbook_id(&conn, profile)));
+        let handbook = crate::trader_handbooks::load_handbook(&conn, shown.as_deref());
         Ok(json!({
             "profileId": profile,
+            "handbookId": handbook_filter,
             "fromMs": from_ms,
             "scorecard": card,
             "pending": pending,
             "recent": recent,
-            "handbook": { "version": version, "content": handbook },
+            "handbook": handbook.summary_json(),
         }))
     })
     .await
@@ -705,66 +833,7 @@ pub(crate) async fn ai_trader_scorecard(app: tauri::AppHandle, profile_id: Optio
 pub(crate) async fn ai_trader_run_decisions(app: tauri::AppHandle, run_id: String) -> Result<Vec<Value>, String> {
     crate::blocking_work::run_blocking(move || {
         let conn = open_read_database(&app)?;
-        Ok(decision_rows(&conn, "run_id=?1", &run_id, 10))
-    })
-    .await
-}
-
-/// 用户手动暂停 / 恢复某个形态（可限定日线阶段与方向）：生成新的手册版本。暂停期间这个形态的开仓由后端拒绝。
-pub(crate) fn set_setup_pause(
-    conn: &Connection,
-    setup_id: &str,
-    regime: Option<&str>,
-    side: Option<&str>,
-    paused: bool,
-    reason: Option<&str>,
-    now: i64,
-) -> Result<(i64, Handbook), String> {
-    let (version, mut handbook) = current_handbook(conn);
-    if desic_agent_automation::find_setup(&handbook, setup_id).is_none() {
-        return Err(format!("交易手册里没有形态 {setup_id}"));
-    }
-    let regime = regime.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
-    let side = side.map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
-    let same_scope = |entry: &desic_agent_automation::PausedSetup| entry.setup_id == setup_id && entry.regime == regime && entry.side == side;
-    if paused {
-        if !handbook.paused.iter().any(same_scope) {
-            handbook.paused.push(desic_agent_automation::PausedSetup {
-                setup_id: setup_id.to_string(),
-                regime: regime.clone(),
-                side: side.clone(),
-                reason: reason.map(str::trim).filter(|value| !value.is_empty()).unwrap_or("用户手动暂停").chars().take(200).collect(),
-                paused_at: now,
-            });
-        }
-    } else {
-        handbook.paused.retain(|entry| !same_scope(entry));
-    }
-    desic_agent_automation::validate_handbook(&handbook)?;
-    let next = version + 1;
-    let note = format!("{}{}", if paused { "手动暂停 " } else { "手动恢复 " }, setup_id);
-    conn.execute(
-        "INSERT INTO ai_trader_handbooks (version,status,content_json,parent_version,source_suggestion_id,note,created_at,published_at)
-         VALUES (?1,'published',?2,?3,NULL,?4,?5,?5)",
-        params![next, serde_json::to_string(&handbook).map_err(|err| err.to_string())?, version, note, now],
-    )
-    .map_err(|err| err.to_string())?;
-    Ok((next, handbook))
-}
-
-#[tauri::command]
-pub(crate) async fn ai_trader_set_setup_pause(
-    app: tauri::AppHandle,
-    setup_id: String,
-    regime: Option<String>,
-    side: Option<String>,
-    paused: bool,
-    reason: Option<String>,
-) -> Result<Value, String> {
-    crate::blocking_work::run_blocking(move || {
-        let conn = crate::ai_automation::open_automation_database(&app)?;
-        let (version, handbook) = set_setup_pause(&conn, setup_id.trim(), regime.as_deref(), side.as_deref(), paused, reason.as_deref(), now_ms())?;
-        Ok(json!({ "version": version, "content": handbook }))
+        Ok(decision_rows(&conn, "d.run_id=?1", &[&run_id], MAX_DECISION_LOG_ENTRIES as i64))
     })
     .await
 }
@@ -801,6 +870,305 @@ pub(crate) fn spawn_shadow_settlement(app: &tauri::AppHandle) {
     });
 }
 
+// ===================== 开仓挂单的有效期（只管交易员 Profile 的开仓限价单） =====================
+
+/// 交易员没写 expiresAt 时，开仓限价单默认挂 24 小时。
+pub(crate) const ENTRY_ORDER_DEFAULT_VALIDITY_MS: i64 = 24 * 60 * 60_000;
+const ENTRY_ORDER_SWEEP_INTERVAL_MS: i64 = 60_000;
+/// 自动撤单失败后至少隔这么久再试；试满次数后通知一次，交给用户处理。
+const ENTRY_ORDER_RETRY_MS: i64 = 5 * 60_000;
+const ENTRY_ORDER_MAX_ATTEMPTS: i64 = 6;
+const ENTRY_ORDER_EXPIRED_REASON: &str = "交易员开仓挂单超过有效期仍未成交，按规则自动撤单";
+const ENTRY_ORDER_DISABLED_REASON: &str = "停用交易员 Profile 时由用户确认撤单";
+
+/// 交易员开仓限价单的有效期：候选里写了将来的 expiresAt 就用它，否则挂出后 24 小时。
+pub(crate) fn entry_order_valid_until(explicit_expires_at: Option<i64>, now: i64) -> i64 {
+    explicit_expires_at
+        .filter(|value| *value > now)
+        .unwrap_or(now + ENTRY_ORDER_DEFAULT_VALIDITY_MS)
+}
+
+pub(crate) fn set_entry_order_validity(conn: &Connection, opportunity_id: &str, valid_until: i64) -> Result<(), String> {
+    conn.execute(
+        "UPDATE trade_opportunities SET order_valid_until=?2 WHERE id=?1 AND intent='open' AND order_type='limit'",
+        params![opportunity_id, valid_until],
+    )
+    .map(|_| ())
+    .map_err(|err| err.to_string())
+}
+
+/// 交易员 Profile 挂着的一笔开仓限价单（本地委托记录 + 对应的交易机会）。
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct TraderEntryOrder {
+    pub opportunity_id: String,
+    pub profile_id: String,
+    pub agent_run_id: Option<String>,
+    pub account_id: Option<String>,
+    pub environment: String,
+    pub inst_id: String,
+    pub ord_id: String,
+    pub cl_ord_id: Option<String>,
+    pub side: String,
+    pub px: Option<f64>,
+    pub sz: Option<f64>,
+    pub placed_at: Option<i64>,
+    pub valid_until: Option<i64>,
+}
+
+/// 只认交易员运行建的开仓限价单（带 setupId），本地记录里仍在挂着，且还没被清理过。
+const ENTRY_ORDER_SELECT: &str = "SELECT o.id,o.agent_profile_id,o.agent_run_id,o.account_id,o.environment,o.inst_id,
+        r.ord_id,r.cl_ord_id,r.side,CAST(r.px AS REAL),CAST(r.sz AS REAL),r.okx_ctime,o.order_valid_until
+   FROM trade_opportunities o
+   JOIN okx_orders r ON r.opportunity_id=o.id
+  WHERE o.intent='open' AND o.order_type='limit' AND o.setup_id IS NOT NULL AND o.setup_id<>''
+    AND o.agent_profile_id IS NOT NULL
+    AND r.operator='ai' AND r.ord_id<>'' AND r.state IN ('live','partially_filled')
+    AND NOT EXISTS (SELECT 1 FROM ai_trader_order_cleanup c WHERE c.ord_id=r.ord_id AND c.status IN ('cancelled','gone'))";
+
+fn entry_order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TraderEntryOrder> {
+    Ok(TraderEntryOrder {
+        opportunity_id: row.get(0)?,
+        profile_id: row.get(1)?,
+        agent_run_id: row.get(2)?,
+        account_id: row.get(3)?,
+        environment: row.get(4)?,
+        inst_id: row.get(5)?,
+        ord_id: row.get(6)?,
+        cl_ord_id: row.get::<_, Option<String>>(7)?.filter(|value| !value.is_empty()),
+        side: row.get(8)?,
+        px: row.get(9)?,
+        sz: row.get(10)?,
+        placed_at: row.get(11)?,
+        valid_until: row.get(12)?,
+    })
+}
+
+fn query_entry_orders(conn: &Connection, sql: &str, params: impl rusqlite::Params) -> Result<Vec<TraderEntryOrder>, String> {
+    let mut stmt = conn.prepare(sql).map_err(|err| err.to_string())?;
+    let rows = stmt
+        .query_map(params, entry_order_from_row)
+        .map_err(|err| err.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string());
+    rows
+}
+
+/// 已过有效期、仍完全没成交的交易员开仓挂单。撤过的、撤单失败后还在冷却或已试满次数的跳过。
+pub(crate) fn expired_entry_orders(conn: &Connection, now: i64) -> Result<Vec<TraderEntryOrder>, String> {
+    let sql = format!(
+        "{ENTRY_ORDER_SELECT}
+           AND o.order_valid_until IS NOT NULL AND o.order_valid_until<=?1
+           AND r.state='live' AND COALESCE(CAST(r.acc_fill_sz AS REAL),0)=0
+           AND NOT EXISTS (SELECT 1 FROM ai_trader_order_cleanup c WHERE c.ord_id=r.ord_id
+                 AND (c.attempts>=?2 OR c.updated_at>?1-?3))
+         ORDER BY o.order_valid_until LIMIT 20"
+    );
+    query_entry_orders(conn, &sql, params![now, ENTRY_ORDER_MAX_ATTEMPTS, ENTRY_ORDER_RETRY_MS])
+}
+
+/// 某个交易员 Profile 现在挂着的开仓单（停用前询问用户要不要一起撤）。
+pub(crate) fn profile_entry_orders(conn: &Connection, profile_id: &str) -> Result<Vec<TraderEntryOrder>, String> {
+    let sql = format!("{ENTRY_ORDER_SELECT} AND o.agent_profile_id=?1 ORDER BY r.okx_ctime");
+    query_entry_orders(conn, &sql, params![profile_id])
+}
+
+/// 某个范围（Profile 为空 = 全部交易员；品种为空 = 全部品种）内挂着的交易员开仓单，只要 `sides` 方向的
+/// （`buy` 开多、`sell` 开空）。新建临时指令时列给用户确认要不要一起撤。
+pub(crate) fn scoped_entry_orders(conn: &Connection, profile_id: Option<&str>, inst_id: Option<&str>, sides: &[&str]) -> Result<Vec<TraderEntryOrder>, String> {
+    let sql = format!("{ENTRY_ORDER_SELECT} AND (?1 IS NULL OR o.agent_profile_id=?1) AND (?2 IS NULL OR o.inst_id=?2) ORDER BY r.okx_ctime");
+    Ok(query_entry_orders(conn, &sql, params![profile_id, inst_id])?
+        .into_iter()
+        .filter(|order| sides.contains(&order.side.as_str()))
+        .collect())
+}
+
+/// 记一次清理结果，返回这笔挂单累计尝试的次数。
+fn record_entry_order_cleanup(conn: &Connection, order: &TraderEntryOrder, source: &str, status: &str, error: Option<&str>, now: i64) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO ai_trader_order_cleanup (ord_id,opportunity_id,profile_id,inst_id,source,valid_until,status,attempts,last_error,created_at,updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,1,?8,?9,?9)
+         ON CONFLICT(ord_id) DO UPDATE SET source=excluded.source,status=excluded.status,
+           attempts=ai_trader_order_cleanup.attempts+1,last_error=excluded.last_error,updated_at=excluded.updated_at",
+        params![order.ord_id, order.opportunity_id, order.profile_id, order.inst_id, source, order.valid_until, status, error, now],
+    )
+    .map_err(|err| err.to_string())?;
+    conn.query_row("SELECT attempts FROM ai_trader_order_cleanup WHERE ord_id=?1", params![order.ord_id], |row| row.get(0))
+        .map_err(|err| err.to_string())
+}
+
+/// 撤单时交易所回「已成交 / 已撤 / 不存在」：这笔挂单已经不在了，不再重试。
+fn order_already_closed(error: &str) -> bool {
+    serde_json::from_str::<Value>(error)
+        .ok()
+        .and_then(|value| value.get("code").and_then(Value::as_str).map(str::to_string))
+        .is_some_and(|code| matches!(code.as_str(), "51400" | "51401" | "51402"))
+}
+
+fn entry_order_text(order: &TraderEntryOrder) -> String {
+    let side = if order.side == "sell" { "卖" } else { "买" };
+    let number = |value: Option<f64>| value.map(|value| value.to_string()).unwrap_or_else(|| "--".to_string());
+    format!("{} 限价{} {} 张 @ {}", order.inst_id, side, number(order.sz), number(order.px))
+}
+
+/// 走与界面撤单相同的链路（审计、账户互斥、WS 优先 REST 兜底）。
+async fn cancel_entry_order(app: &tauri::AppHandle, order: &TraderEntryOrder, operator: &str, reason: &str) -> Result<(), String> {
+    let runtime = app.state::<MarketRuntime>();
+    okx_cancel_order(
+        runtime,
+        app.clone(),
+        CancelOrderRequest {
+            account_id: order.account_id.clone(),
+            environment: order.environment.clone(),
+            inst_id: order.inst_id.clone(),
+            confirmed_live: Some(true),
+            ord_id: Some(order.ord_id.clone()),
+            cl_ord_id: order.cl_ord_id.clone(),
+            is_algo: Some(false),
+            algo_id: None,
+            algo_cl_ord_id: None,
+            operator: Some(operator.to_string()),
+            opportunity_id: Some(order.opportunity_id.clone()),
+            agent_run_id: order.agent_run_id.clone(),
+            reason: Some(reason.to_string()),
+        },
+    )
+    .await
+    .map(|_| ())
+}
+
+/// 自动化节拍里每分钟最多扫一次：到期仍未成交的交易员开仓挂单由代码撤掉并通知。
+/// 不受 AI 自动化总开关影响——挂单的有效期在下单时已经定好，停用的 Profile 留下的挂单同样会被清理。
+pub(crate) fn spawn_entry_order_sweep(app: &tauri::AppHandle) {
+    use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+    static LAST_RUN: AtomicI64 = AtomicI64::new(0);
+    static RUNNING: AtomicBool = AtomicBool::new(false);
+    let now = now_ms();
+    if now.saturating_sub(LAST_RUN.load(Ordering::Relaxed)) < ENTRY_ORDER_SWEEP_INTERVAL_MS {
+        return;
+    }
+    if RUNNING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    LAST_RUN.store(now, Ordering::Relaxed);
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        if let Err(error) = sweep_expired_entry_orders(&app, now).await {
+            crate::boot_log(&format!("trader entry order sweep failed: {error}"));
+        }
+        RUNNING.store(false, Ordering::Release);
+    });
+}
+
+async fn sweep_expired_entry_orders(app: &tauri::AppHandle, now: i64) -> Result<(), String> {
+    let worker_app = app.clone();
+    let due = crate::blocking_work::run_blocking(move || {
+        let conn = crate::ai_automation::open_automation_database(&worker_app)?;
+        expired_entry_orders(&conn, now)
+    })
+    .await?;
+    for order in due {
+        let outcome = cancel_entry_order(app, &order, "system", ENTRY_ORDER_EXPIRED_REASON).await;
+        let (status, error) = match &outcome {
+            Ok(()) => ("cancelled", None),
+            Err(error) if order_already_closed(error) => ("gone", None),
+            Err(error) => ("failed", Some(error.clone())),
+        };
+        let worker_app = app.clone();
+        let stored = order.clone();
+        let stored_error = error.clone();
+        let attempts = crate::blocking_work::run_blocking(move || {
+            let conn = crate::ai_automation::open_automation_database(&worker_app)?;
+            record_entry_order_cleanup(&conn, &stored, "expired", status, stored_error.as_deref(), now_ms())
+        })
+        .await?;
+        let valid_until = order
+            .valid_until
+            .map(|ms| crate::ai_briefing::shanghai_label(ms, false))
+            .unwrap_or_else(|| "--".to_string());
+        let event = match status {
+            "cancelled" => Some(json!({
+                "type": "traderOrderExpired",
+                "message": format!("交易员挂单到期仍未成交，已自动撤单：{}（有效至 {valid_until}）。", entry_order_text(&order)),
+                "action": { "tab": "scorecard", "id": order.profile_id },
+            })),
+            "failed" if attempts >= ENTRY_ORDER_MAX_ATTEMPTS => Some(json!({
+                "type": "traderOrderExpiryFailed",
+                "message": format!(
+                    "交易员挂单到期自动撤单失败（已试 {attempts} 次），请手动撤单：{}。原因：{}",
+                    entry_order_text(&order),
+                    error.as_deref().unwrap_or("--")
+                ),
+                "action": { "tab": "scorecard", "id": order.profile_id },
+            })),
+            _ => None,
+        };
+        if let Some(event) = event {
+            let _ = app.emit(crate::ai_automation::AUTOMATION_EVENT, event);
+        }
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct EntryOrderCancelResult {
+    ord_id: String,
+    inst_id: String,
+    ok: bool,
+    error: Option<String>,
+}
+
+/// 交易员 Profile 现在挂着的开仓单（停用前给用户看）。
+#[tauri::command]
+pub(crate) async fn ai_trader_entry_orders(app: tauri::AppHandle, profile_id: String) -> Result<Vec<TraderEntryOrder>, String> {
+    crate::blocking_work::run_blocking(move || {
+        let conn = open_read_database(&app)?;
+        profile_entry_orders(&conn, &profile_id)
+    })
+    .await
+}
+
+/// 停用交易员 Profile 时，用户确认后撤掉它挂着的开仓单。只撤属于这个 Profile 的开仓单，其它委托号一律忽略。
+#[tauri::command]
+pub(crate) async fn ai_trader_cancel_entry_orders(app: tauri::AppHandle, profile_id: String, ord_ids: Vec<String>) -> Result<Vec<EntryOrderCancelResult>, String> {
+    let worker_app = app.clone();
+    let orders = crate::blocking_work::run_blocking(move || {
+        let conn = open_read_database(&worker_app)?;
+        profile_entry_orders(&conn, &profile_id)
+    })
+    .await?;
+    cancel_selected_entry_orders(&app, orders, &ord_ids, "profile_disabled", ENTRY_ORDER_DISABLED_REASON).await
+}
+
+/// 撤掉用户勾选的那几笔（只从 `orders` 里挑，别的委托号一律忽略），逐笔记清理结果。撤单不持有数据库连接。
+pub(crate) async fn cancel_selected_entry_orders(
+    app: &tauri::AppHandle,
+    orders: Vec<TraderEntryOrder>,
+    ord_ids: &[String],
+    source: &'static str,
+    reason: &str,
+) -> Result<Vec<EntryOrderCancelResult>, String> {
+    let wanted = ord_ids.iter().cloned().collect::<std::collections::HashSet<_>>();
+    let mut results = Vec::new();
+    for order in orders.into_iter().filter(|order| wanted.contains(&order.ord_id)) {
+        let outcome = cancel_entry_order(app, &order, "user", reason).await;
+        let gone = outcome.as_ref().err().is_some_and(|error| order_already_closed(error));
+        let status = if outcome.is_ok() { "cancelled" } else if gone { "gone" } else { "failed" };
+        let error = outcome.err().filter(|_| !gone);
+        let worker_app = app.clone();
+        let stored = order.clone();
+        let stored_error = error.clone();
+        crate::blocking_work::run_blocking(move || {
+            let conn = crate::ai_automation::open_automation_database(&worker_app)?;
+            record_entry_order_cleanup(&conn, &stored, source, status, stored_error.as_deref(), now_ms())
+        })
+        .await?;
+        results.push(EntryOrderCancelResult { ord_id: order.ord_id, inst_id: order.inst_id, ok: status != "failed", error });
+    }
+    Ok(results)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -823,7 +1191,7 @@ mod tests {
         migrate_trader_learning(&conn).expect("migrate");
         conn.execute_batch(
             "CREATE TABLE ai_agent_runs (id TEXT PRIMARY KEY, context_mode TEXT, initial_market_snapshot_json TEXT);
-             CREATE TABLE trade_opportunities (id TEXT PRIMARY KEY, inst_id TEXT, intent TEXT, status TEXT, created_at INTEGER);
+             CREATE TABLE trade_opportunities (id TEXT PRIMARY KEY, inst_id TEXT, intent TEXT, status TEXT, created_at INTEGER, setup_id TEXT);
              CREATE TABLE position_episodes (id TEXT PRIMARY KEY, status TEXT, avg_open_px TEXT, avg_close_px TEXT);
              CREATE TABLE position_episode_opportunities (episode_id TEXT, opportunity_id TEXT);
              CREATE TABLE candles (symbol TEXT, interval TEXT, open_time INTEGER, close_time INTEGER, open TEXT, high TEXT, low TEXT, close TEXT,
@@ -860,7 +1228,7 @@ mod tests {
     fn decisions_are_recorded_settled_and_linked_to_real_results() {
         let conn = learning_db();
         let t0 = 1_791_200_000_000_i64;
-        conn.execute("INSERT INTO trade_opportunities VALUES ('opp-1','BTC-USDT-SWAP','open','executed',?1)", params![t0]).unwrap();
+        conn.execute("INSERT INTO trade_opportunities VALUES ('opp-1','BTC-USDT-SWAP','open','executed',?1,'trend_pullback')", params![t0]).unwrap();
         let log = vec![
             json!({ "instId": "BTC-USDT-SWAP", "setupId": "trend_pullback", "side": "short", "action": "limit_order",
                     "entry": 100.0, "stop": 102.0, "target": 96.0, "probability": 0.6, "reason": "逆势试空" }),
@@ -910,50 +1278,124 @@ mod tests {
         assert!((real_r - (1.0 - 0.05)).abs() < 1e-9, "{real_r}");
 
         // 成绩单：真实结果优先；违反方向纪律的统计出现在合规里。
-        let rows = load_decision_outcomes(&conn, Some("p1"), 0);
+        let rows = load_decision_outcomes(&conn, Some("p1"), None, 0);
         let card = desic_agent_automation::build_scorecard(&rows);
         assert_eq!((card.decisions, card.resolved, card.executed), (2, 1, 1));
         assert_eq!(card.compliance.against_n, 1);
-        let brief = scorecard_brief(&conn, "p1", Some("up"), t0 + 30 * 60_000, true);
+        assert!(rows.iter().all(|row| row.handbook_id.as_deref() == Some("default")));
+        let handbook = crate::trader_handbooks::load_handbook(&conn, None);
+        let brief = scorecard_brief(&conn, "p1", &handbook, Some("up"), t0 + 30 * 60_000, true);
         assert!(brief.contains("已结算 1 条决策"), "{brief}");
+        // 另一本手册下没有这些决策。
+        assert!(load_decision_outcomes(&conn, Some("p1"), Some("handbook-other"), 0).is_empty());
     }
 
     #[test]
-    fn manual_pause_publishes_a_new_handbook_version_and_blocks_that_scope() {
+    fn decision_log_keeps_one_main_entry_per_instrument_plus_observing_setups() {
         let conn = learning_db();
-        let (version, handbook) = set_setup_pause(&conn, "range_edge", Some("mixed"), Some("short"), true, Some("连续亏损"), 5).expect("pause");
-        assert_eq!(version, 2);
-        assert_eq!(current_handbook(&conn).0, 2);
-        assert!(trader_setup_reasons(&handbook, Some("range_edge"), Some("mixed"), "short")[0].starts_with("setup_paused"));
-        assert!(trader_setup_reasons(&handbook, Some("range_edge"), Some("mixed"), "long").is_empty());
-        let (version, handbook) = set_setup_pause(&conn, "range_edge", Some("mixed"), Some("short"), false, None, 6).expect("resume");
-        assert_eq!(version, 3);
-        assert!(handbook.paused.is_empty());
-        assert!(set_setup_pause(&conn, "yolo", None, None, true, None, 7).is_err());
+        let observing = crate::trader_handbooks::set_setup_status(&conn, "default", "range_edge", "observing", 2).expect("observe");
+        let t0 = 1_791_200_000_000_i64;
+        conn.execute(
+            "INSERT INTO ai_agent_runs VALUES ('run-2','briefing',?1)",
+            params![json!({ "briefing": { "handbookId": "default", "handbookVersion": observing.version, "regimes": {} } }).to_string()],
+        )
+        .unwrap();
+        conn.execute_batch(
+            "INSERT INTO trade_opportunities VALUES ('opp-main','BTC-USDT-SWAP','open','executed',1,'trend_pullback');
+             INSERT INTO trade_opportunities VALUES ('opp-newer','BTC-USDT-SWAP','open','executed',2,'breakout_retest');",
+        )
+        .unwrap();
+        let entry = |inst: &str, setup: &str, action: &str| {
+            json!({ "instId": inst, "setupId": setup, "side": "long", "action": action, "entry": 100.0, "stop": 98.0, "target": 104.0 })
+        };
+        let log = vec![
+            entry("BTC-USDT-SWAP", "trend_pullback", "limit_order"),
+            entry("BTC-USDT-SWAP", "range_edge", "limit_order"),
+            entry("BTC-USDT-SWAP", "range_edge", "limit_order"),
+            entry("BTC-USDT-SWAP", "none", "no_trade"),
+            entry("ETH-USDT-SWAP", "none", "no_trade"),
+            entry("SOL-USDT-SWAP", "none", "no_trade"),
+            entry("XRP-USDT-SWAP", "none", "no_trade"),
+            entry("DOGE-USDT-SWAP", "none", "no_trade"),
+            entry("ADA-USDT-SWAP", "none", "no_trade"),
+        ];
+        let decision = json!({ "createdOpportunityIds": ["opp-main", "opp-newer"] }).to_string();
+        let written = record_run_decisions(&conn, "run-2", "p1", &log, Some(&decision), t0).expect("record");
+        assert_eq!(written, 6, "at most six entries");
+        let (main_opp, main_status): (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT opportunity_id,setup_status FROM ai_trader_decisions WHERE run_id='run-2' AND setup_id='trend_pullback'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((main_opp.as_deref(), main_status.as_deref()), (Some("opp-main"), Some("live")), "linked by setup, not just the newest");
+        let observing_rows: Vec<(Option<String>, Option<String>)> = conn
+            .prepare("SELECT opportunity_id,setup_status FROM ai_trader_decisions WHERE run_id='run-2' AND setup_id='range_edge'")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(observing_rows, vec![(None, Some("observing".to_string()))], "one observing entry, never linked to a real order");
+        let shown = decision_rows(&conn, "d.run_id=?1", &[&"run-2"], MAX_DECISION_LOG_ENTRIES as i64);
+        assert_eq!(shown.len(), 6);
+        assert!(shown.iter().any(|row| row["setupStatus"] == "observing"));
+        let outcomes = load_decision_outcomes(&conn, Some("p1"), Some("default"), 0);
+        assert_eq!(outcomes.iter().filter(|row| row.observing).count(), 1);
     }
 
     #[test]
-    fn handbook_table_seeds_v1_once_and_loads_latest_published() {
+    fn the_same_plan_is_not_shadow_settled_twice_while_the_first_is_open() {
+        let conn = learning_db();
+        let t0 = 1_791_200_000_000_i64;
+        for run in ["run-a", "run-b", "run-c", "run-d"] {
+            conn.execute("INSERT INTO ai_agent_runs VALUES (?1,'briefing','{\"briefing\":{\"handbookVersion\":1}}')", params![run]).unwrap();
+        }
+        let plan = |action: &str| vec![json!({ "instId": "BTC-USDT-SWAP", "setupId": "trend_pullback", "side": "long", "action": action,
+            "entry": 85150.0, "stop": 84670.0, "target": 86680.0 })];
+        record_run_decisions(&conn, "run-a", "p1", &plan("limit_order"), None, t0).unwrap();
+        record_run_decisions(&conn, "run-b", "p1", &plan("wait_condition"), None, t0 + 1_800_000).unwrap();
+        // 另一个 Profile 的同一计划是另一份样本。
+        record_run_decisions(&conn, "run-c", "p2", &plan("limit_order"), None, t0 + 1_800_000).unwrap();
+        let status = |run: &str| conn.query_row("SELECT shadow_status,shadow_note FROM ai_trader_decisions WHERE run_id=?1", params![run], |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))).unwrap();
+        assert_eq!(status("run-a").0, "pending");
+        let (dup, note) = status("run-b");
+        assert_eq!(dup, "duplicate");
+        assert!(note.unwrap().contains("不重复结算"));
+        assert_eq!(status("run-c").0, "pending");
+        // 第一条结束（未成交）以后，再提同一计划就是新的样本。
+        conn.execute("UPDATE ai_trader_decisions SET shadow_status='unfilled' WHERE run_id='run-a'", []).unwrap();
+        record_run_decisions(&conn, "run-d", "p1", &plan("limit_order"), None, t0 + 3_600_000).unwrap();
+        assert_eq!(status("run-d").0, "pending");
+        // 重复的那条不进成绩单的结果，只算决策数。
+        let card = desic_agent_automation::build_scorecard(&load_decision_outcomes(&conn, Some("p1"), None, 0));
+        assert_eq!((card.decisions, card.resolved), (3, 0));
+    }
+
+    #[test]
+    fn handbook_table_seeds_once_and_drafts_never_load() {
         let conn = Connection::open_in_memory().expect("open");
         migrate_trader_learning(&conn).expect("migrate");
         migrate_trader_learning(&conn).expect("migrate twice");
-        let (version, handbook) = current_handbook(&conn);
-        assert_eq!(version, 1);
-        assert_eq!(handbook, desic_agent_automation::default_handbook());
-        let mut next = handbook.clone();
+        let loaded = crate::trader_handbooks::load_handbook(&conn, None);
+        assert_eq!((loaded.version, loaded.revision), (1, 1));
+        assert_eq!(loaded.handbook, desic_agent_automation::default_handbook());
+        let mut next = loaded.handbook.clone();
         next.direction_policy = "测试".to_string();
         conn.execute(
-            "INSERT INTO ai_trader_handbooks (version,status,content_json,created_at,published_at) VALUES (2,'published',?1,2,2)",
+            "INSERT INTO ai_trader_handbooks (version,status,content_json,created_at,published_at,handbook_id,revision,source)
+             VALUES (2,'published',?1,2,2,'default',2,'edit')",
             params![serde_json::to_string(&next).unwrap()],
         )
         .unwrap();
         conn.execute(
-            "INSERT INTO ai_trader_handbooks (version,status,content_json,created_at) VALUES (3,'draft','{}',3)",
+            "INSERT INTO ai_trader_handbooks (version,status,content_json,created_at,handbook_id,revision) VALUES (3,'draft','{}',3,'default',3)",
             [],
         )
         .unwrap();
-        let (version, loaded) = current_handbook(&conn);
-        assert_eq!((version, loaded.direction_policy.as_str()), (2, "测试"), "草稿不生效");
+        let loaded = crate::trader_handbooks::load_handbook(&conn, None);
+        assert_eq!((loaded.version, loaded.handbook.direction_policy.as_str()), (2, "测试"), "草稿不生效");
     }
 
     #[test]
@@ -974,7 +1416,7 @@ mod tests {
     }
 
     #[test]
-    fn open_setup_check_only_applies_to_trader_runs() {
+    fn open_guard_only_applies_to_trader_runs_and_uses_the_runs_handbook() {
         let conn = Connection::open_in_memory().expect("open");
         migrate_trader_learning(&conn).expect("migrate");
         conn.execute_batch(
@@ -983,14 +1425,40 @@ mod tests {
              INSERT INTO ai_agent_runs VALUES ('trader','briefing','{\"briefing\":{\"regimes\":{\"BTC-USDT-SWAP\":{\"daily\":\"up\"}}}}');",
         )
         .unwrap();
+        let guard = |run: &str, intent: &str, setup: Option<&str>| trader_open_guard_reasons(&conn, run, "BTC-USDT-SWAP", intent, "long", setup, 10);
         // 经典运行：不要求 setupId（行为不变）。
-        assert!(trader_open_setup_reasons(&conn, "classic", "BTC-USDT-SWAP", "open", "long", None).is_empty());
-        // 交易员运行：开仓必须带手册形态；平仓 / 撤单不受影响。
-        assert!(trader_open_setup_reasons(&conn, "trader", "BTC-USDT-SWAP", "open", "long", None)[0].starts_with("setup_required"));
-        assert!(trader_open_setup_reasons(&conn, "trader", "BTC-USDT-SWAP", "close", "long", None).is_empty());
-        assert!(trader_open_setup_reasons(&conn, "trader", "BTC-USDT-SWAP", "open", "long", Some("trend_pullback")).is_empty());
+        assert!(guard("classic", "open", None).is_empty());
+        assert!(guard("classic", "open", Some("whatever")).is_empty());
+        // 交易员运行：开仓必须带手册形态；平仓 / 撤单不受影响。老快照没有 handbookId，用默认手册。
+        assert!(guard("trader", "open", None)[0].starts_with("setup_required"));
+        assert!(guard("trader", "close", None).is_empty());
+        assert!(guard("trader", "open", Some("trend_pullback")).is_empty());
         assert_eq!(run_daily_regime(&conn, "trader", "BTC-USDT-SWAP").as_deref(), Some("up"));
         assert_eq!(run_daily_regime(&conn, "classic", "BTC-USDT-SWAP"), None);
+        assert_eq!(run_handbook_id(&conn, "trader"), "default");
+        // 复核之后、提交之前把形态改成观察中或暂停：守卫按最新版次立即拒绝。
+        crate::trader_handbooks::set_setup_status(&conn, "default", "trend_pullback", "observing", 11).unwrap();
+        assert!(guard("trader", "open", Some("trend_pullback"))[0].starts_with("setup_observing"));
+        crate::trader_handbooks::set_setup_pause(&conn, "default", "breakout_retest", Some("up"), None, true, None, 12).unwrap();
+        assert!(guard("trader", "open", Some("breakout_retest"))[0].starts_with("setup_paused"));
+        // 用另一本手册的运行：只认那本手册里的形态。
+        let mut custom = desic_agent_automation::default_handbook();
+        custom.setups.truncate(1);
+        custom.setups[0].id = "my_setup".into();
+        let other = crate::trader_handbooks::create_handbook(
+            &conn,
+            "我的打法",
+            crate::trader_handbooks::HandbookSeed::Import { handbook: custom, note: "测试".into() },
+            13,
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO ai_agent_runs VALUES ('trader-b','briefing',?1)",
+            params![json!({ "briefing": { "handbookId": other, "regimes": {} } }).to_string()],
+        )
+        .unwrap();
+        assert!(guard("trader-b", "open", Some("my_setup")).is_empty());
+        assert!(guard("trader-b", "open", Some("breakout_retest"))[0].starts_with("setup_unknown"));
     }
 
     #[test]
@@ -1011,5 +1479,110 @@ mod tests {
         });
         assert!(trader_setup_reasons(&handbook, Some("trend_pullback"), Some("up"), "long")[0].starts_with("setup_paused"));
         assert!(trader_setup_reasons(&handbook, Some("trend_pullback"), Some("down"), "short").is_empty());
+        // 「阶段不可用」分组的暂停：只命中本轮日线阶段算不出来的情况。
+        handbook.paused.push(desic_agent_automation::PausedSetup {
+            setup_id: "range_edge".into(),
+            regime: Some("unknown".into()),
+            side: None,
+            reason: "阶段不可用时别做".into(),
+            paused_at: 2,
+        });
+        assert!(trader_setup_reasons(&handbook, Some("range_edge"), None, "long")[0].starts_with("setup_paused"));
+        assert!(trader_setup_reasons(&handbook, Some("range_edge"), Some("mixed"), "long").is_empty());
+        // 观察中的形态：拒绝开仓，也不出现在可用列表里。
+        handbook.setups[0].status = desic_agent_automation::SETUP_STATUS_OBSERVING.into();
+        let observing_id = handbook.setups[0].id.clone();
+        let reasons = trader_setup_reasons(&handbook, Some(&observing_id), Some("up"), "long");
+        assert!(reasons[0].starts_with("setup_observing"), "{reasons:?}");
+        assert!(!trader_setup_reasons(&handbook, None, Some("up"), "long")[0].contains(&observing_id));
+    }
+
+    fn orders_db() -> Connection {
+        let conn = Connection::open_in_memory().expect("open");
+        migrate_trader_learning(&conn).expect("migrate");
+        conn.execute_batch(
+            "CREATE TABLE trade_opportunities (id TEXT PRIMARY KEY, agent_profile_id TEXT, agent_run_id TEXT, account_id TEXT, environment TEXT,
+               inst_id TEXT, intent TEXT, order_type TEXT, setup_id TEXT, status TEXT, expires_at INTEGER, order_valid_until INTEGER, created_at INTEGER);
+             CREATE TABLE okx_orders (ord_id TEXT, cl_ord_id TEXT, opportunity_id TEXT, inst_id TEXT, side TEXT, ord_type TEXT, state TEXT,
+               px TEXT, sz TEXT, acc_fill_sz TEXT, operator TEXT, okx_ctime INTEGER);",
+        )
+        .unwrap();
+        conn
+    }
+
+    /// 插一笔开仓限价单：`setup` 为空表示经典 Profile 或 AI 研究（没有挂单有效期）。
+    #[allow(clippy::too_many_arguments)]
+    fn entry(conn: &Connection, id: &str, profile: &str, setup: Option<&str>, valid_until: Option<i64>, state: &str, filled: &str, operator: &str) {
+        conn.execute(
+            "INSERT INTO trade_opportunities VALUES (?1,?2,'run-1','acc','live','BTC-USDT-SWAP','open','limit',?3,'executed',NULL,?4,1000)",
+            params![id, profile, setup, valid_until],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO okx_orders VALUES (?1,'',?2,'BTC-USDT-SWAP','buy','limit',?3,'84900','0.01',?4,?5,2000)",
+            params![format!("ord-{id}"), id, state, filled, operator],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn entry_order_validity_uses_explicit_future_expiry_or_24_hours() {
+        let now = 1_791_142_000_000_i64;
+        assert_eq!(entry_order_valid_until(Some(now + 8 * 3_600_000), now), now + 8 * 3_600_000);
+        assert_eq!(entry_order_valid_until(None, now), now + ENTRY_ORDER_DEFAULT_VALIDITY_MS);
+        assert_eq!(entry_order_valid_until(Some(now - 1), now), now + ENTRY_ORDER_DEFAULT_VALIDITY_MS);
+    }
+
+    #[test]
+    fn only_expired_unfilled_trader_entry_orders_are_swept() {
+        let conn = orders_db();
+        let now = 1_791_200_000_000_i64;
+        entry(&conn, "due", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "0", "ai");
+        entry(&conn, "fresh", "p1", Some("trend_pullback"), Some(now + 60_000), "live", "0", "ai");
+        entry(&conn, "classic", "classic", None, None, "live", "0", "ai");
+        entry(&conn, "partial", "p1", Some("trend_pullback"), Some(now - 60_000), "partially_filled", "0.005", "ai");
+        entry(&conn, "filled", "p1", Some("trend_pullback"), Some(now - 60_000), "filled", "0.01", "ai");
+        entry(&conn, "manual", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "0", "user");
+        entry(&conn, "done", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "0", "ai");
+        entry(&conn, "cooling", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "0", "ai");
+        entry(&conn, "retry", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "", "ai");
+        entry(&conn, "exhausted", "p1", Some("trend_pullback"), Some(now - 60_000), "live", "0", "ai");
+        let order = |id: &str| profile_entry_orders(&conn, "p1").unwrap().into_iter().find(|order| order.opportunity_id == id).unwrap();
+        // 已撤掉的、刚失败还在冷却的、失败次数已满的都不再撤；冷却过了的失败单重试。
+        record_entry_order_cleanup(&conn, &order("done"), "expired", "cancelled", None, now - 30_000).unwrap();
+        record_entry_order_cleanup(&conn, &order("cooling"), "expired", "failed", Some("timeout"), now - 60_000).unwrap();
+        record_entry_order_cleanup(&conn, &order("retry"), "expired", "failed", Some("timeout"), now - ENTRY_ORDER_RETRY_MS - 1).unwrap();
+        let exhausted = order("exhausted");
+        for _ in 0..ENTRY_ORDER_MAX_ATTEMPTS {
+            record_entry_order_cleanup(&conn, &exhausted, "expired", "failed", Some("timeout"), now - ENTRY_ORDER_RETRY_MS - 1).unwrap();
+        }
+        let due = expired_entry_orders(&conn, now).unwrap().into_iter().map(|order| order.opportunity_id).collect::<Vec<_>>();
+        assert_eq!(due, vec!["due".to_string(), "retry".to_string()]);
+        let picked = expired_entry_orders(&conn, now).unwrap().remove(0);
+        assert_eq!((picked.ord_id.as_str(), picked.px, picked.sz, picked.placed_at), ("ord-due", Some(84_900.0), Some(0.01), Some(2000)));
+    }
+
+    #[test]
+    fn profile_entry_orders_list_only_this_trader_profiles_resting_orders() {
+        let conn = orders_db();
+        let now = 1_791_200_000_000_i64;
+        entry(&conn, "a", "p1", Some("trend_pullback"), Some(now + 60_000), "live", "0", "ai");
+        entry(&conn, "b", "p1", Some("range_edge"), Some(now - 60_000), "partially_filled", "0.005", "ai");
+        entry(&conn, "gone", "p1", Some("range_edge"), Some(now - 60_000), "live", "0", "ai");
+        entry(&conn, "other", "p2", Some("trend_pullback"), Some(now + 60_000), "live", "0", "ai");
+        entry(&conn, "classic", "p1", None, None, "live", "0", "ai");
+        let gone = profile_entry_orders(&conn, "p1").unwrap().into_iter().find(|order| order.opportunity_id == "gone").unwrap();
+        assert_eq!(record_entry_order_cleanup(&conn, &gone, "profile_disabled", "gone", None, now).unwrap(), 1);
+        let ids = profile_entry_orders(&conn, "p1").unwrap().into_iter().map(|order| order.opportunity_id).collect::<Vec<_>>();
+        assert_eq!(ids, vec!["a".to_string(), "b".to_string()]);
+    }
+
+    #[test]
+    fn cancel_errors_for_filled_or_missing_orders_are_not_retried() {
+        let classified = |code: &str| json!({ "desicTerminalError": true, "code": code, "message": "x" }).to_string();
+        assert!(order_already_closed(&classified("51400")));
+        assert!(order_already_closed(&classified("51402")));
+        assert!(!order_already_closed(&classified("50001")));
+        assert!(!order_already_closed("network timeout"));
     }
 }

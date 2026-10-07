@@ -1,0 +1,315 @@
+/*
+ * Profile 配置窗口：左侧分页导航 + 分组行，不用卡片；说明文字收进「?」提示。
+ * 交易员 Profile 用琥珀色，经典 AI Profile 用紫色；顶边一条细线标出实盘（红）/ 模拟盘（绿）。
+ */
+.profile-editor {
+  --pfe-accent: #955cff;
+  --pfe-accent-soft: rgba(149, 92, 255, 0.13);
+  --pfe-accent-line: rgba(149, 92, 255, 0.45);
+  --pfe-accent-ink: #c9b0ff;
+  --pfe-on-accent: #fff;
+  --pfe-env: var(--weak);
+  --pfe-ink: #d8dbe3;
+  --pfe-mono: "SF Mono", "JetBrains Mono", ui-monospace, monospace;
+  position: relative;
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr) auto;
+  height: 100%;
+  min-height: 0;
+  color: var(--pfe-ink);
+  font-size: 13px;
+}
+.profile-editor.is-trader {
+  --pfe-accent: #e8b04a;
+  --pfe-accent-soft: rgba(232, 176, 74, 0.12);
+  --pfe-accent-line: rgba(232, 176, 74, 0.45);
+  --pfe-accent-ink: #f1cf8a;
+  --pfe-on-accent: #17120a;
+}
+.profile-editor.is-live { --pfe-env: #f28a98; }
+.profile-editor.is-demo { --pfe-env: #73d4af; }
+.profile-editor::before {
+  content: "";
+  position: absolute;
+  inset: 0 0 auto;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, var(--pfe-env) 30%, var(--pfe-env) 70%, transparent);
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* 头部：名称 + 类型 + 操作（空白处可拖动窗口） */
+.profile-editor__head { display: flex; align-items: center; gap: 12px; min-width: 0; padding: 16px 16px 10px 22px; cursor: grab; }
+.profile-editor__mark { display: grid; flex: none; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: var(--pfe-accent-soft); color: var(--pfe-accent); }
+.profile-editor__name {
+  width: 260px;
+  min-width: 120px;
+  max-width: 34%;
+  margin-left: -6px;
+  padding: 2px 6px;
+  border: 0;
+  border-radius: 6px;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 650;
+}
+.profile-editor__name:hover { background: rgba(255, 255, 255, 0.04); }
+.profile-editor__name:focus { background: rgba(255, 255, 255, 0.06); }
+.profile-editor__kind { flex: none; padding: 1px 8px; border-radius: 999px; background: var(--pfe-accent-soft); color: var(--pfe-accent-ink); font-size: 11px; font-style: normal; font-weight: 600; white-space: nowrap; }
+.profile-editor__actions { display: flex; align-items: center; gap: 6px; margin-left: auto; }
+.profile-editor__enabled { display: inline-flex; align-items: center; gap: 8px; margin-right: 6px; color: var(--muted); font-size: 12px; }
+
+.pfe-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding: 0 11px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--pfe-ink);
+  font-size: 12.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.pfe-btn:hover:not(:disabled) { background: rgba(255, 255, 255, 0.05); }
+.pfe-btn:disabled { cursor: not-allowed; opacity: 0.45; }
+.pfe-btn.is-ghost { border-color: transparent; color: var(--muted); }
+.pfe-btn.is-ghost:hover:not(:disabled) { color: var(--text); }
+.pfe-btn.is-icon { justify-content: center; width: 30px; padding: 0; }
+.pfe-btn.is-danger:hover:not(:disabled) { color: #ffb4b8; }
+.pfe-btn.is-small { height: 26px; padding: 0 9px; font-size: 12px; }
+.pfe-btn.is-primary { border-color: var(--pfe-accent); background: var(--pfe-accent); color: var(--pfe-on-accent); font-weight: 650; }
+.pfe-btn.is-primary:hover:not(:disabled) { background: var(--pfe-accent); filter: brightness(1.08); }
+
+/* 概览：一行纯文字，只有「开不了」的提醒带颜色 */
+.profile-editor__summary {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 22px 14px;
+  overflow: hidden;
+  border-bottom: 1px solid var(--line-soft);
+  color: var(--muted);
+  font-size: 12.5px;
+  white-space: nowrap;
+}
+.profile-editor__summary > .pfe-sum + .pfe-sum::before { content: ""; display: inline-block; width: 3px; height: 3px; margin: 0 10px 3px; border-radius: 50%; background: var(--weak); }
+.profile-editor__summary b { color: var(--text); font-family: var(--pfe-mono); font-size: 12px; font-weight: 600; }
+.pfe-sum.is-env { display: inline-flex; align-items: center; gap: 6px; color: var(--pfe-env); font-weight: 600; }
+.pfe-sum.is-env i { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.pfe-spacer { flex: 1 1 auto; min-width: 12px; }
+.profile-editor__alert {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  height: 24px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(245, 165, 36, 0.1);
+  color: #ffd59a;
+  font-size: 12px;
+  cursor: pointer;
+}
+.profile-editor__alert svg { color: var(--warn); }
+
+/* 主体：左侧导航 + 内容 */
+.profile-editor__body { display: grid; grid-template-columns: 184px minmax(0, 1fr); min-height: 0; }
+.profile-editor__nav { display: grid; align-content: start; gap: 2px; padding: 14px 10px; border-right: 1px solid var(--line-soft); }
+.profile-editor__nav button {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 36px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.profile-editor__nav button svg { flex: none; color: var(--weak); }
+.profile-editor__nav button:hover { background: rgba(255, 255, 255, 0.03); color: var(--pfe-ink); }
+.profile-editor__nav button[aria-selected="true"] { background: rgba(255, 255, 255, 0.055); color: var(--text); }
+.profile-editor__nav button[aria-selected="true"] svg { color: var(--pfe-accent); }
+.profile-editor__nav-dot { width: 7px; height: 7px; margin-left: auto; border-radius: 50%; background: var(--warn); }
+.profile-editor__nav-sep { height: 1px; margin: 6px 10px; background: var(--line-soft); }
+.profile-editor__content { min-width: 0; min-height: 0; padding: 20px 30px 28px; overflow: auto; scrollbar-width: thin; }
+.profile-editor__page-title { margin: 0 0 6px; color: var(--text); font-size: 15px; font-weight: 650; }
+.profile-editor__narrow { max-width: 640px; }
+
+/* 分组 + 行 */
+.pfe-group { margin-top: 18px; }
+.pfe-group-head { display: flex; align-items: center; gap: 6px; padding-bottom: 6px; color: var(--weak); font-size: 11.5px; letter-spacing: 0.03em; }
+.pfe-group-head .pfe-link { margin-left: auto; letter-spacing: 0; }
+.pfe-link { display: inline-flex; align-items: center; gap: 4px; padding: 0; border: 0; background: transparent; color: var(--pfe-accent-ink); font-size: 12px; cursor: pointer; }
+.pfe-link:hover { text-decoration: underline; }
+.pfe-row,
+.pfe-prow { border-top: 1px solid var(--line-soft); }
+.pfe-group > .pfe-row:last-child,
+.pfe-group > .pfe-prow:last-child { border-bottom: 1px solid var(--line-soft); }
+.pfe-row { display: flex; align-items: center; gap: 16px; min-height: 46px; padding: 6px 0; }
+.pfe-row__label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--pfe-ink); white-space: nowrap; }
+.pfe-row__label.is-mono { font-family: var(--pfe-mono); font-size: 12.5px; }
+.pfe-row__index { width: 18px; color: var(--weak); font-family: var(--pfe-mono); font-size: 12px; }
+.pfe-row__control { display: flex; align-items: center; gap: 10px; min-width: 0; margin-left: auto; }
+.pfe-row__stack { display: grid; justify-items: end; gap: 4px; margin-left: auto; }
+.pfe-row__muted { color: var(--muted); font-size: 12px; }
+.pfe-row__weak { color: var(--weak); font-size: 11.5px; }
+.pfe-row__select { width: 240px; }
+.pfe-live-hint { color: #f28a98; font-size: 11.5px; }
+.pfe-paused { padding: 0 6px; border-radius: 5px; background: rgba(245, 165, 36, 0.09); color: #ffd59a; font-size: 11px; line-height: 18px; }
+.pfe-observing { padding: 0 6px; border-radius: 5px; background: rgba(120, 170, 255, 0.12); color: #a9c4ff; font-size: 11px; line-height: 18px; white-space: nowrap; }
+.pfe-stats { display: flex; gap: 16px; color: var(--muted); font-size: 12.5px; }
+.pfe-stats b { margin-left: 4px; color: var(--text); font-family: var(--pfe-mono); font-weight: 600; }
+
+/* 资金与风险：名称 | 快选或拖动 | 精确值 | 换算 */
+.pfe-prow { display: grid; grid-template-columns: 150px minmax(0, 1fr) 96px 74px; align-items: center; column-gap: 20px; min-height: 56px; padding: 6px 0; }
+.pfe-prow > .pfe-number { justify-self: end; width: 100%; }
+.pfe-prow__equiv { justify-self: end; color: var(--pfe-accent-ink); font-family: var(--pfe-mono); font-size: 12.5px; white-space: nowrap; }
+.pfe-prow__equiv.is-dim { color: var(--weak); }
+
+/* 控件 */
+.pfe-toggle { position: relative; flex: none; width: 32px; height: 18px; padding: 0; border: 0; border-radius: 999px; background: rgba(255, 255, 255, 0.13); cursor: pointer; }
+.pfe-toggle::after { content: ""; position: absolute; top: 2px; left: 2px; width: 14px; height: 14px; border-radius: 50%; background: #fff; transition: left 0.15s; }
+.pfe-toggle.is-on { background: var(--pfe-accent); }
+.pfe-toggle.is-on::after { left: 16px; }
+.pfe-toggle:disabled { cursor: not-allowed; opacity: 0.45; }
+.pfe-toggle:focus-visible { outline: 2px solid var(--pfe-accent-line); outline-offset: 2px; }
+
+.pfe-segmented { display: inline-flex; gap: 2px; padding: 2px; border-radius: 8px; background: rgba(255, 255, 255, 0.04); }
+.pfe-segmented button { height: 26px; padding: 0 12px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); font-size: 12.5px; white-space: nowrap; cursor: pointer; }
+.pfe-segmented button:hover:not(:disabled) { color: var(--text); }
+.pfe-segmented button.is-active { background: rgba(255, 255, 255, 0.1); color: var(--text); }
+.pfe-segmented button.is-active.is-danger { background: rgba(246, 70, 93, 0.16); color: #ffc0c8; }
+
+.pfe-number { display: inline-flex; align-items: center; height: 30px; padding-right: 9px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+.pfe-number:focus-within { border-color: var(--pfe-accent-line); }
+.pfe-number.is-disabled { opacity: 0.5; }
+.pfe-number input {
+  flex: 1 1 auto;
+  width: 56px;
+  min-width: 0;
+  height: 28px;
+  padding: 0 4px 0 8px;
+  border: 0;
+  outline: none;
+  background: transparent;
+  color: var(--text);
+  font: 12.5px var(--pfe-mono);
+  text-align: right;
+  appearance: textfield;
+}
+.pfe-number input::-webkit-outer-spin-button,
+.pfe-number input::-webkit-inner-spin-button { margin: 0; -webkit-appearance: none; }
+.pfe-number > span { color: var(--weak); font-size: 12px; white-space: nowrap; }
+
+.pfe-slider { position: relative; height: 36px; min-width: 0; }
+.pfe-slider input[type="range"] { position: absolute; top: 2px; left: 0; width: 100%; height: 18px; margin: 0; background: transparent; cursor: pointer; -webkit-appearance: none; appearance: none; }
+.pfe-slider input[type="range"]:focus { outline: none; }
+.pfe-slider input[type="range"]::-webkit-slider-runnable-track { height: 4px; border-radius: 999px; background: linear-gradient(90deg, var(--pfe-accent) var(--pfe-fill, 0%), rgba(255, 255, 255, 0.09) var(--pfe-fill, 0%)); }
+.pfe-slider input[type="range"]::-webkit-slider-thumb { width: 14px; height: 14px; margin-top: -5px; border: 3px solid var(--pfe-accent); border-radius: 50%; background: #fff; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5); -webkit-appearance: none; }
+.pfe-slider input[type="range"]:focus-visible::-webkit-slider-thumb { box-shadow: 0 0 0 4px var(--pfe-accent-soft); }
+.pfe-slider input[type="range"]::-moz-range-track { height: 4px; border-radius: 999px; background: rgba(255, 255, 255, 0.09); }
+.pfe-slider input[type="range"]::-moz-range-progress { height: 4px; border-radius: 999px; background: var(--pfe-accent); }
+.pfe-slider input[type="range"]::-moz-range-thumb { width: 10px; height: 10px; border: 3px solid var(--pfe-accent); border-radius: 50%; background: #fff; }
+.pfe-slider.is-disabled { opacity: 0.5; }
+.pfe-slider__ticks { position: absolute; top: 21px; right: 0; left: 0; height: 14px; }
+.pfe-slider__ticks button { position: absolute; padding: 0 3px; border: 0; background: transparent; color: var(--weak); font: 10.5px/14px var(--pfe-mono); white-space: nowrap; transform: translateX(-50%); cursor: pointer; }
+.pfe-slider__ticks button:hover:not(:disabled) { color: var(--pfe-ink); }
+.pfe-slider__ticks button.is-active { color: var(--pfe-accent-ink); }
+
+.pfe-presets { display: inline-flex; flex-wrap: wrap; gap: 4px; }
+.pfe-presets button { min-width: 42px; height: 26px; padding: 0 9px; border: 1px solid var(--line-soft); border-radius: 6px; background: transparent; color: var(--muted); font: 12px var(--pfe-mono); cursor: pointer; }
+.pfe-presets button:hover:not(:disabled) { border-color: var(--line); color: var(--text); }
+.pfe-presets button.is-active { border-color: var(--pfe-accent-line); background: var(--pfe-accent-soft); color: var(--pfe-accent-ink); }
+
+.pfe-stepper { display: inline-flex; align-items: center; height: 30px; border: 1px solid var(--line); border-radius: 7px; background: var(--panel-2); }
+.pfe-stepper:focus-within { border-color: var(--pfe-accent-line); }
+.pfe-stepper > button { display: grid; place-items: center; width: 26px; height: 28px; padding: 0; border: 0; background: transparent; color: var(--muted); cursor: pointer; }
+.pfe-stepper > button:hover:not(:disabled) { color: var(--text); }
+.pfe-stepper > button:disabled { cursor: not-allowed; opacity: 0.35; }
+.pfe-stepper .pfe-number { height: 28px; padding-right: 2px; border: 0; background: transparent; }
+.pfe-stepper .pfe-number input { width: 50px; padding: 0 3px; text-align: center; }
+
+.pfe-help {
+  position: relative;
+  display: inline-grid;
+  flex: none;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  color: var(--weak);
+  font-size: 9.5px;
+  line-height: 1;
+  cursor: help;
+}
+.pfe-help:hover,
+.pfe-help:focus-visible { border-color: var(--muted); color: var(--muted); outline: none; }
+.pfe-help:hover::after,
+.pfe-help:focus-visible::after {
+  content: attr(data-tip);
+  position: absolute;
+  z-index: 20;
+  top: calc(100% + 6px);
+  left: -6px;
+  width: max-content;
+  max-width: 280px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #171a22;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  color: var(--pfe-ink);
+  font-size: 11.5px;
+  font-weight: 400;
+  letter-spacing: 0;
+  line-height: 1.55;
+  text-align: left;
+  white-space: normal;
+}
+
+/* 底部：保存状态 + 取消 / 保存 */
+.profile-editor__footer { display: flex; align-items: center; gap: 8px; padding: 11px 16px 11px 22px; border-top: 1px solid var(--line-soft); color: var(--weak); font-size: 11.5px; }
+.profile-editor__footer .is-dirty { color: var(--warn); }
+
+/* 经典 Profile 的专家勾选与试判沿用原组件，这里只把卡片间距并进分组节奏 */
+.profile-editor .automation-form-section { margin-top: 18px; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+.profile-editor .automation-form-section > strong { color: var(--weak); font-size: 11.5px; font-weight: 400; letter-spacing: 0.03em; }
+.profile-editor .automation-form-section > strong svg { color: var(--weak); }
+
+/* 迁移提示放在「基本」页最上方 */
+.profile-editor [data-profile-migration-notes] { margin: 10px 0 0; padding: 10px 12px; border: 1px solid rgba(245, 165, 36, 0.3); border-radius: 9px; background: rgba(245, 165, 36, 0.06); }
+
+@media (max-width: 900px) {
+  .profile-editor__body { grid-template-columns: 148px minmax(0, 1fr); }
+  .profile-editor__content { padding: 16px 18px 22px; }
+  .pfe-prow { grid-template-columns: 120px minmax(0, 1fr) 88px 64px; column-gap: 14px; }
+}
+
+.pfe-row__version { width: 168px; }
+.profile-editor__narrow.is-wide { max-width: 760px; }
+
+/* 关注品种沿用原来的选择器，只去掉外框，让它和别的行一样平 */
+.profile-editor .automation-symbol-chips { min-height: 0; justify-content: flex-end; padding: 0; border: 0; background: transparent; }
+.profile-editor .automation-symbol-chip { min-height: 28px; padding: 2px 4px 2px 8px; border-color: transparent; border-radius: 7px; background: rgba(255, 255, 255, 0.05); color: var(--text); }
+.profile-editor .automation-symbol-chip b { font-size: 12.5px; }
+.profile-editor .automation-symbol-add { flex: 0 1 170px; min-width: 140px; height: 30px; padding: 0 8px; border: 1px dashed var(--line); border-radius: 7px; }
+.profile-editor .automation-symbol-options { right: -8px; left: auto; }
+
+/* 交易员 Profile 的窗口边框带一点琥珀色 */
+.automation-profile-editor-modal:has(.profile-editor.is-trader) { border-color: rgba(232, 176, 74, 0.26); }
+
+/* 预览页（?view=profile-editor）把窗口直接画在页面里 */
+.automation-preview-profile-editor { display: grid; justify-items: center; gap: 12px; padding: 12px 0 24px; }
+.automation-preview-profile-editor > .automation-profile-editor-modal { width: min(1080px, 100%); }

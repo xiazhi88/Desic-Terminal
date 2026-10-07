@@ -1519,9 +1519,13 @@ function StrategyView({
     setDocumentationOpen(false);
     window.requestAnimationFrame(() => documentationTriggerRef.current?.focus());
   }, []);
+  // 聚焦只在打开时做一次；和 Esc 监听分开，避免重渲染时抢走焦点。
+  useEffect(() => {
+    if (documentationOpen) documentationCloseRef.current?.focus();
+  }, [documentationOpen]);
+
   useEffect(() => {
     if (!documentationOpen) return;
-    documentationCloseRef.current?.focus();
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeDocumentation();
     };
@@ -4892,8 +4896,12 @@ function SystematicPythonTemplateDialog({ text, options, onCancel, onChoose }: R
   onChoose: (template: PythonStrategyTemplateOption) => void;
 }>) {
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  // 聚焦只在打开时做一次；和依赖 onCancel 的 Esc 监听分开，避免重渲染时抢走焦点。
   useEffect(() => {
     closeButtonRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const closeOnEscape = (event: KeyboardEvent) => {
       if (event.key === "Escape") onCancel();
     };

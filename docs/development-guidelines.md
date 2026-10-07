@@ -313,8 +313,20 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 - Profile 配置页的「按当前账户换算」：
   - **数据来源**：`ai_profile_risk_facts` 只读取事实：绑定账户的权益、可用余额、今日已实现盈亏，以及品种的价格、面值、最小张数、张数步长、1h ATR。张数与金额由 `src/lib/riskPreview.ts` 按正在编辑的参数实时计算（测试：`npm run test:risk-preview`）。
   - **口径必须与下单风控一致**：单笔风险 = 止损亏损 + 来回手续费，按权益封顶；保证金 ≤ 权益 × 最大单笔开仓占比，且不超过可用余额；杠杆只影响保证金。
-  - **估算假设要写清楚**：止损按 1×ATR(1h) 估算，手续费按吃单 0.05% 估算，并在界面上注明。这块只用于展示，判定仍以下单前的预检为准。
-  - **开不了最小仓位要说清原因**：按最先卡住的那一条（可用余额 → 保证金上限 → 风险预算）给出原因。
+  - **估算假设要写清楚**：止损按 1×ATR(1h) 估算，手续费按吃单 0.05% 估算，写在换算条标题旁的「?」提示里。这块只用于展示，判定仍以下单前的预检为准。
+  - **开不了最小仓位要说清原因**：按最先卡住的那一条（可用余额 → 保证金上限 → 风险预算）给出原因。概览条、导航圆点和换算条底部一行共用同一份计算（`useRiskFacts` + `computeRiskPreview`），不要各算各的。
+- Profile 配置窗口（`ProfileEditor`）：
+  - **结构**：外壳 `ProfileEditorDialog` 只管遮罩、Esc 和拖动；头部、一行概览、左侧五个分页（基本 / 资金与风险 / 交易方式或分析方式 / 节奏与通知 / 高级）和底部保存都在 `ProfileEditor` 里。两种 Profile 只有「方式」页不同；经典 Profile 的专家勾选与试判继续用原组件，保存载荷与以前逐字段相同。
+  - **少字、不用卡片**：设置一律是「分组标题 + 细线分隔的行」，说明文字放进 `HelpTip`（「?」悬停才显示），常驻提示只留实盘 + 自动执行那一行。新增设置先想清楚放在哪一页，不要再加说明段落。
+  - **拖动与快选**：百分比和基点用 `ScaleSlider`，按 `src/lib/profileEditorScales.ts` 的「常用值」一档一档走（小数值分得更细），刻度数字就是快选；离散值（杠杆、同时持仓）用 `PresetButtons`；输入框始终可以填常用值以外的数。刻度规则由 `npm run test:risk-preview` 锁定。
+  - **类名前缀是 `pfe-`**：数据面板的 `performance-explorer.css` 已经用了 `.pe-*`（出现过 `.pe-row` 撞名，把配置页的行整体往左挤了 8px）。新样式加前缀前先全局搜一遍。
+  - **亏损上限只按权益封顶**：单笔最多亏、当日亏损停止线的合法范围是 0.05%–100% / 0.1%–100%（Rust `AiProfileRiskSettings::normalized` 与前端 `normalizeProfileRisk` 一致），不再另设 5% / 20% 上限。
+  - **预览**：`/automation-preview?view=profile-editor` 用真实组件 + 假数据渲染整个窗口（可切换两种 Profile、实盘 / 模拟盘），`smoke:automation-preview` 的 `verifyProfileEditor` 会点刻度、快选、手动输入和拖动。
+- 交易员 Profile 的开仓挂单（只管交易员，经典 Profile、AI 研究、保护单和手动单都不碰）：
+  - **有效期**：`trade_opportunities.order_valid_until`，在交易员运行创建开仓限价机会时写入（`trade_commands::trader_entry_order_validity`：候选写了将来的 `expiresAt` 就用它，否则挂出后 24 小时；后端给机会的默认 15 分钟 `expires_at` 只是审批窗口，不是挂单有效期）。老数据在第一次加列时回填一次。
+  - **到期撤单**：`trader_learning::spawn_entry_order_sweep` 挂在自动化节拍最前面（在总开关判断之前），每分钟最多扫一次；只撤本地记录仍是 `live`、成交量为 0 的单，走与界面相同的 `okx_cancel_order`（操作人 `system`，写审计）。结果记在 `ai_trader_order_cleanup`：撤成 `cancelled`、交易所回 51400/51401/51402 记 `gone`，其余失败 5 分钟后重试，试满 6 次只通知一次，交给用户。
+  - **简报**：本 Profile 自己的挂单给委托号（撤单必须用委托号）、已挂时长、当初的形态与止损止盈、有效期；别人的挂单不给委托号，所属 Profile 停用时标「已停用」。交易员规范第 8 条说明了怎么撤单、`expiresAt` 就是挂单有效期。
+  - **停用时询问**：界面停用交易员 Profile（卡片开关或编辑器保存）前先查 `ai_trader_entry_orders`；有挂单就让用户选「停用并撤单 / 只停用 / 取消」。`ai_trader_cancel_entry_orders` 只撤属于该 Profile 的开仓单，其它委托号一律忽略。
 
 ### AI 自动化的两种运行模式（经典 / 交易员）
 
@@ -329,18 +341,31 @@ invalid args `entry` for command `frontend_log`: missing field `timestamp`
 
   只有**有意**修改经典模式时，才更新哈希（`node scripts/classic-tool-schema-snapshot.mjs --write`）。交易员专用的工具字段一律通过运行载荷里的 `traderMode` 开关：Rust 只在交易员运行里插入这个键，经典运行和交互会话**不带这个键**，否则会话配置指纹会变，旧会话会报「配置已变化」。
 - 交易员运行的技能载荷由 `trader_learning::apply_trader_skills` 处理：把 `desic-core-operations` 的正文换成 `trader_core_operations`（侧车按这个 id 注入固定规范，所以不用改侧车），并去掉 `trading-philosophy`、情报、雷达、调度这 4 个技能。
-- 交易手册存在 `ai_trader_handbooks` 表，只读最新已发布版本；表里读不到时回退内置 v1，交易员运行不会因为手册缺失而失败。手册的纯逻辑在 `crates/agent-automation/src/handbook.rs`。方向纪律是软规则，代码不拦；只有用户手动暂停的形态才由后端拒绝。
-- `trade_opportunities.setup_id` **不进指纹**，否则所有旧机会都无法复用。形态校验在 `read_decision_context` 里，只对交易员运行的开仓生效（`trader_open_setup_reasons` 用入队时冻结的 `ai_agent_runs.context_mode` 判断）。手写 `trade_opportunities` 建表语句的测试夹具也要带上这一列。
+- 交易手册是手册库（`trader_handbooks.rs`）：`ai_trader_handbook_library` 记手册本身，`ai_trader_handbooks` 每行是某本手册的一个版次（`version` 全局递增，`revision` 是手册内第几版，`source` 记来源）。升级前的版本链整体归入 `default`，版次沿用原版本号。纯逻辑（校验、清理、渲染、导入导出、起草解析）在 `crates/agent-automation/src/`。
+  - **加载**：按 Profile 选的手册取最新已发布版次，读不到时依次退回 `default`、内置模板，并把原因写进运行审计（`handbookFallback`）；交易员运行不会因为手册缺失而失败。加载用宽松校验；发布（编辑、回退、导入、采用建议）一律走 `publish_handbook_revision`：IMMEDIATE 事务里分配 `MAX+1`、核对 `base_revision`、清理文本、按 `validate_handbook_for_publish` 校验。
+  - **不能降级**：用上手册库以后，旧版本应用只认全局最新一行，会读到别的手册，不要拿新库去跑旧版本。
+  - **迁移顺序**：`migrate_trader_learning` 在 `migrate_ai_automation` 最前面运行，这时 Profile 表还没建，所以 `ai_agent_profiles.handbook_id` 放在 Profile 的那批加列语句里；手册库自己按「建表 → 加列 → 回填 → 索引 → 种子数据」，唯一索引建不出来只记日志。
+  - **Profile 字段**：`handbookId` 只属于交易员 Profile，经典 Profile 恒为空且不序列化（运行快照逐字不变）；保存时没带这个字段就保留库中值，换了手册才校验存在且没归档。前端 `normalizeProfile` 必须总给交易员 Profile 补上 `handbookId`，否则一打开就显示「未保存」。
+  - **形态 id 首次发布后不可改**（决策、暂停、纠正、建议都按它关联），只能改名称；删掉形态时它的暂停项一并去掉。
+  - **用户写的文本不可信**（手册、指令、纠正，导入的手册还可能来自别人）：单行字段清掉换行、控制字符和零宽字符，「【】」换成方括号，渲染进提示词时放在分隔块里并注明不能改变规则和权限，各字段都有长度上限。
+  - **状态**：形态是 `live` 或 `observing`；缺字段按 `live`（老数据），认不出的值按观察中。观察中的形态照常评估、写进决策日志、做影子结算，但不能开仓；新写的、AI 起草的、导入的形态一律先观察中。
+- 交易员开仓的统一守卫 `trader_learning::trader_open_guard_reasons`：缺形态、未知形态、观察中、已暂停、违反临时指令。手册取本轮运行审计里记的 `handbookId` 的最新已发布版次（暂停、改状态立即生效），指令的范围按运行所属的 Profile 判断。它在三处调用，缺一处就有空子：`read_decision_context`（早拒，给 AI 清楚的原因）、`materialize_trade_opportunity_commit_with_conn`（堵住复核后 60 秒窗口和 revise / reuse）、`ai_execution_guard_reasons`（自动执行和用户手动批准 AI 机会都拦）。只对交易员运行的开仓生效（`run_is_trader` 用入队时冻结的 `ai_agent_runs.context_mode` 判断），经典运行完全不经过。方向纪律是软规则，代码不拦。
+- `trade_opportunities.setup_id` **不进指纹**，否则所有旧机会都无法复用。手写 `trade_opportunities` 建表语句的测试夹具也要带上这一列。
+- 临时指令（`trader_instructions.rs`，纯逻辑在 `instructions.rs`）：`no_entry` / `long_only` / `short_only` 由守卫强制，`note` 只进简报。指令段落在简报里与账户同为不可丢弃，最多 8 行。新建强制类指令时，范围内还没执行的 AI 开仓机会直接作废（只改本地记录）；范围内已挂的 AI 开仓单由前端列给用户勾选，后端只从范围内挑勾选的撤（走 `cancel_selected_entry_orders`，清理来源记 `instruction`），撤单时不持有数据库连接。
+- 纠正与手册建议：纠正每条决策最多一条（upsert，删除是软删除），最近 14 天、同一本手册的 5 条进简报（附当时的结果）。同一手册同一形态 30 天内攒够 3 条还没被用过的纠正，且没有待处理的同类建议，才生成一条 `kind = handbook` 的优化建议。`ai_optimization_suggestion_update` 先按 `kind` 分流：手册建议的采用 = 核对基础版次仍是最新，直接替换原形态（id、状态、暂停不变）并发布新版次；Skill 建议的流程不变。
+- AI 起草（新形态、手册建议）复用 Agent 草稿的侧车通道 `generateAgentDraft`：提示词与成对示例随请求下发（示例不能为空，否则侧车会退回 Agent 的示例），取消走 `ai_agent_generate_cancel`。`build_agent_draft_payload` 的输出必须逐字不变。
+- 简报取数是并行的：库里的事实（阻塞线程）、账户快照、每个品种的六项行情（合约、1m K 线、ticker、1h / 4h / 1D 聚合、盘口、资金费率）同时开始，各自受同一个 8 秒截止约束，拿不到的那一项标「不可用」。审计里的 `timings` 记每一项的用时和超时项。不要改回逐项串行：真机上前面一项慢（账户快照走私有接口时）会把后面全部拖过截止，整段行情都成了「不可用」，交易员因此按不做清单一直不开仓。简报写「不可用」时，交易员规范要求先用钻取工具补读，补不到才按缺数据的不做规则处理。
 - 简报的 1h / 4h / 1D 一律用 `local_candles_aggregated` 从本地 1m 聚合（10 / 30 / 200 天）。拼接 1m 窗口的方式只覆盖约 3.5 天，4h EMA50 和日线阶段会一直不可用。历史不够时 `request_history_backfill` 会在后台静默补最近 30 天，同一品种 6 小时内只补一次。日线阶段（上升 / 下降 / 不明）由代码计算并写进审计的 `regimes`，供形态校验和成绩单分组使用。
 - 决策日志：
-  - **存储与开关**：侧车只在 `traderMode` 下给 `background.finishRun` 加 `decisionLog`。Rust 侧缺日志时打回一次（`FinishGateState.decision_log_pushbacks`，在任何写入之前），之后照常收尾。日志在 finishRun 的同一事务里写进 `ai_trader_decisions`；写失败只记日志，不让整轮失败。
-  - **行情阶段与手册版本**：一律取本轮简报审计（代码计算），不取模型自报。开仓机会从 `createdOpportunityIds` / `reusedOpportunityIds` 关联。
+  - **存储与开关**：侧车只在 `traderMode` 下给 `background.finishRun` 加 `decisionLog`（最多 6 条：每个品种一条主决策，每个观察中的形态另外一条）。Rust 侧缺日志时打回一次（`FinishGateState.decision_log_pushbacks`，在任何写入之前），之后照常收尾。日志在 finishRun 的同一事务里写进 `ai_trader_decisions`；写失败只记日志，不让整轮失败。改侧车的 schema 或描述后要 `npm run prepare:sidecar` 并重启应用。
+  - **行情阶段、手册与形态状态**：一律取本轮简报审计（代码计算），不取模型自报；`setup_status` 记决策时形态是实盘还是观察中。开仓机会按「品种 + 形态」从 `createdOpportunityIds` / `reusedOpportunityIds` 关联，观察中的条目永远不关联真实机会。
+  - **同一计划不重复结算**：同一个 Profile 已有一条品种、形态、方向、入场、止损、目标都相同、还在影子结算中（`pending`）的决策时，新的一条记成 `duplicate`，只计入决策数、不做影子结算。真机出现过一笔挂单被每轮重新记一遍、一天记了 24 次。
 - 影子记账：
   - **纯规则**：在 `trade-domain/src/outcome.rs`，全部取保守口径：成交那根 K 线只认止损、同一根 K 线同时碰到止损和目标按止损算、跳空越过止损按开盘价成交、72 小时超时。往返手续费按 0.1% 换算成 R，真实 R 用同一口径（由仓位记录的开 / 平均价换算；这两列存的是文本，要先解析）。
   - **运行时机**：由 `spawn_shadow_settlement` 挂在自动化 worker 节拍上，每 5 分钟一批，最多 50 条。本地 K 线缺失时请求补数，下一轮再试。只有自动化总开关打开时才会运行。
 - 成绩单：
-  - **统计口径**：纯统计在 `agent-automation/src/scorecard.rs`。平均 R 乘 n/(n+10) 向 0 收缩。n ≥ 15 且收缩后 ≤ −0.25 才标「建议暂停」，同一分组只通知一次（记在 `ai_automation_settings`）。
-  - **暂停是用户动作**：暂停只能由用户在成绩单页手动操作，操作后生成新的手册版本；后端随后拒绝该范围的开仓，影子记账照常进行。
+  - **统计口径**：纯统计在 `agent-automation/src/scorecard.rs`。分组键是「手册 × 形态 × 日线阶段 × 方向」，不同手册里同 id 的形态不能混在一起；样本不足时的合计也只在同一本手册内合计。平均 R 乘 n/(n+10) 向 0 收缩。n ≥ 15 且收缩后 ≤ −0.25 才标「建议暂停」，同一分组只通知一次（记在 `ai_automation_settings`），观察中的形态不提醒；观察中的影子结果不算「错过的盈利」。
+  - **暂停是用户动作**：暂停只能由用户手动操作，操作后生成新的手册版次；后端随后拒绝该范围的开仓，影子记账照常进行。`regime = "unknown"` 的暂停只命中「本轮日线阶段不可用」的运行。
 - 经典模式的运行详情接口不变：交易员的决策日志走独立命令 `ai_trader_run_decisions`，只在运行带简报时才请求。
 - 同一账户可能被多个 Profile 共用（真机出现过：经典 Profile 的挂单占住保证金，交易员还把它当成「自己已有同方向挂单」而放弃开仓）。所以简报里每个持仓和挂单都要标归属：
   - 标签分四种：本 Profile / 其他 Profile / AI 研究 / 手动或其他来源。

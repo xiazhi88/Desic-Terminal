@@ -706,6 +706,7 @@ if (!copilotTrade.blocked || copilotTrade.policy !== "disabled:ai-direct-trade-r
   expectTrue("classic runs never see setupId", !decisionSchema(background).setupId);
   const finishSchema = (config) => createDesicTools("policy-test", config).find((item) => item?.name === "background_finishRun")?.inputSchema?.properties ?? {};
   expectTrue("trader runs log decisions in finishRun", Boolean(finishSchema({ ...background, traderMode: true }).decisionLog));
+  expectTrue("trader decisionLog allows one main entry per instrument plus observing setups (six)", finishSchema({ ...background, traderMode: true }).decisionLog?.maxItems === 6);
   expectTrue("classic finishRun has no decisionLog", !finishSchema(background).decisionLog);
 }
 

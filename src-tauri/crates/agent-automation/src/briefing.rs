@@ -104,6 +104,14 @@ pub struct BriefingOrder {
     pub reduce_only: bool,
     /// 归属，同 `BriefingPosition::owner`；附挂的保护单通常没有。
     pub owner: Option<String>,
+    /// 委托号：只给本 Profile 自己的挂单（撤单要用），别人的挂单不给。
+    pub ord_id: Option<String>,
+    /// 已经挂了多少分钟；读不到下单时间时为空。
+    pub age_minutes: Option<i64>,
+    /// 本 Profile 挂单当初的计划（已本地化），例如「trend_pullback，止损 84690 / 止盈 85500」。
+    pub plan: Option<String>,
+    /// 本 Profile 开仓挂单的有效期（已格式化的时间）；到期仍未成交由代码撤单。
+    pub valid_until: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -160,6 +168,10 @@ pub struct BriefingDoc {
     pub events: Vec<BriefingNote>,
     /// 交易员成绩单（已渲染好的几行，见 `scorecard::render_scorecard_brief`）。
     pub scorecard: Option<String>,
+    /// 用户的临时指令（已渲染好的几行，见 `instructions::render_instructions`）。永不丢弃。
+    pub instructions: Option<String>,
+    /// 用户对之前决策的纠正（已渲染好的几行，见 `corrections::render_corrections`）。
+    pub corrections: Option<String>,
 }
 
 /// 简报默认的字符上限（3 个品种的完整简报约 3–4 千字符，留出余量）。
@@ -283,6 +295,20 @@ fn format_contracts(value: f64) -> String {
 }
 
 /// 相对标记价的距离（%），用于止损 / 止盈 / 强平。
+/// 挂了多久：不到 1 小时写分钟，不到 1 天写小时和分钟，再长写天和小时。
+fn format_age(minutes: i64, zh: bool) -> String {
+    let minutes = minutes.max(0);
+    let (days, hours, mins) = (minutes / 1440, minutes % 1440 / 60, minutes % 60);
+    match (days, hours, zh) {
+        (0, 0, true) => format!("{mins} 分钟"),
+        (0, 0, false) => format!("{mins}m"),
+        (0, _, true) => format!("{hours} 小时 {mins} 分"),
+        (0, _, false) => format!("{hours}h {mins}m"),
+        (_, _, true) => format!("{days} 天 {hours} 小时"),
+        (_, _, false) => format!("{days}d {hours}h"),
+    }
+}
+
 fn distance_pct(level: Option<f64>, mark: Option<f64>) -> Option<f64> {
     match (level, mark) {
         (Some(level), Some(mark)) if mark > 0.0 && level.is_finite() => Some((level - mark) / mark * 100.0),
@@ -379,8 +405,37 @@ fn render_account(doc: &BriefingDoc, tx: &Text) -> String {
             ));
         }
         for order in &account.open_orders {
+            // 挂单离现价多远、挂了多久；本 Profile 自己的挂单再给委托号、当初的计划与有效期（撤单要用委托号）。
+            let last = doc.symbols.iter().find(|symbol| symbol.inst_id == order.inst_id).and_then(|symbol| symbol.last);
+            let mut details = Vec::new();
+            if let Some(distance) = distance_pct(order.px, last) {
+                details.push(format!("{} {distance:+.2}%", tx.t("距现价", "vs last")));
+            }
+            if let Some(minutes) = order.age_minutes {
+                details.push(format!("{} {}", tx.t("已挂", "resting"), format_age(minutes, tx.zh)));
+            }
+            if let Some(ord_id) = order.ord_id.as_deref() {
+                details.push(format!("ordId {ord_id}"));
+            }
+            if let Some(plan) = order.plan.as_deref() {
+                details.push(plan.to_string());
+            }
+            if let Some(valid_until) = order.valid_until.as_deref() {
+                details.push(if tx.zh {
+                    format!("有效至 {valid_until}，到期仍未成交由代码撤单")
+                } else {
+                    format!("valid until {valid_until}; code cancels it if still unfilled then")
+                });
+            }
+            let details = if details.is_empty() {
+                String::new()
+            } else if tx.zh {
+                format!("（{}）", details.join("；"))
+            } else {
+                format!(" ({})", details.join("; "))
+            };
             out.push_str(&format!(
-                "- {}{} {} {} {} {} @ {}{}\n",
+                "- {}{} {} {} {} {} @ {}{}{}\n",
                 tx.t("挂单", "Order"),
                 order.owner.as_deref().map(|owner| format!("（{owner}）")).unwrap_or_default(),
                 order.inst_id,
@@ -388,7 +443,8 @@ fn render_account(doc: &BriefingDoc, tx: &Text) -> String {
                 order.contracts.map(format_contracts).unwrap_or_else(|| tx.na().to_string()),
                 tx.t("张", "contracts"),
                 tx.px(order.px),
-                if order.reduce_only { tx.t("（只减仓）", " (reduce-only)") } else { "" }
+                if order.reduce_only { tx.t("（只减仓）", " (reduce-only)") } else { "" },
+                details
             ));
         }
         if account.omitted_orders > 0 {
@@ -623,6 +679,13 @@ pub fn render_briefing(doc: &BriefingDoc, chinese: bool, max_chars: usize) -> St
     let tx = Text { zh: chinese };
     let mut sections: Vec<Section> = Vec::new();
     sections.push(Section { priority: 0, name: "account", body: render_account(doc, &tx) });
+    if let Some(instructions) = doc.instructions.as_deref().filter(|text| !text.trim().is_empty()) {
+        sections.push(Section {
+            priority: 0,
+            name: "instructions",
+            body: format!("## {}\n{}\n", tx.t("用户的临时指令", "User instructions"), instructions.trim_end()),
+        });
+    }
     if let Some(scorecard) = doc.scorecard.as_deref().filter(|text| !text.trim().is_empty()) {
         sections.push(Section {
             priority: 1,
@@ -637,6 +700,14 @@ pub fn render_briefing(doc: &BriefingDoc, chinese: bool, max_chars: usize) -> St
             priority: if index == 0 { 3 } else { 4 },
             name: "symbol-extras",
             body: render_symbol_extras(symbol, &tx),
+        });
+    }
+    // 纠正与第一个品种的细节同一优先级、排在后面：超长时先丢纠正，再丢品种细节。
+    if let Some(corrections) = doc.corrections.as_deref().filter(|text| !text.trim().is_empty()) {
+        sections.push(Section {
+            priority: 3,
+            name: "corrections",
+            body: format!("## {}\n{}\n", tx.t("你的纠正", "Your corrections"), corrections.trim_end()),
         });
     }
     if !doc.opportunities.is_empty() {
@@ -792,14 +863,30 @@ mod tests {
                     liq_px: Some(70_100.0),
                     owner: Some("本 Profile".into()),
                 }],
-                open_orders: vec![BriefingOrder {
-                    inst_id: "BTC-USDT-SWAP".into(),
-                    kind_label: "限价 买".into(),
-                    px: Some(84_750.0),
-                    contracts: Some(0.02),
-                    reduce_only: false,
-                    owner: Some("其他 Profile：经典".into()),
-                }],
+                open_orders: vec![
+                    BriefingOrder {
+                        inst_id: "BTC-USDT-SWAP".into(),
+                        kind_label: "限价 买".into(),
+                        px: Some(84_750.0),
+                        contracts: Some(0.02),
+                        reduce_only: false,
+                        owner: Some("其他 Profile：经典（已停用）".into()),
+                        age_minutes: Some(545),
+                        ..Default::default()
+                    },
+                    BriefingOrder {
+                        inst_id: "BTC-USDT-SWAP".into(),
+                        kind_label: "限价 买".into(),
+                        px: Some(84_900.0),
+                        contracts: Some(0.01),
+                        reduce_only: false,
+                        owner: Some("本 Profile".into()),
+                        ord_id: Some("3980897442971439104".into()),
+                        age_minutes: Some(128),
+                        plan: Some("trend_pullback，止损 84690 / 止盈 85500".into()),
+                        valid_until: Some("10-05 11:31".into()),
+                    },
+                ],
                 omitted_orders: 0,
             }),
             budget: Some(BriefingBudget {
@@ -826,7 +913,10 @@ mod tests {
         assert!(text.contains("止损 83500（-1.49%）"), "{text}");
         assert!(text.contains("止盈 未挂"), "{text}");
         assert!(text.contains("- 持仓（本 Profile） BTC-USDT-SWAP 多 3 张"), "{text}");
-        assert!(text.contains("- 挂单（其他 Profile：经典） BTC-USDT-SWAP 限价 买 0.02 张 @ 84750"), "{text}");
+        assert!(text.contains("- 挂单（其他 Profile：经典（已停用）） BTC-USDT-SWAP 限价 买 0.02 张 @ 84750（距现价 -0.02%；已挂 9 小时 5 分）"), "{text}");
+        // 本 Profile 的挂单给委托号、计划和有效期；别人的挂单不给委托号。
+        assert!(text.contains("- 挂单（本 Profile） BTC-USDT-SWAP 限价 买 0.01 张 @ 84900（距现价 +0.16%；已挂 2 小时 8 分；ordId 3980897442971439104；trend_pullback，止损 84690 / 止盈 85500；有效至 10-05 11:31，到期仍未成交由代码撤单）"), "{text}");
+        assert_eq!(text.matches("ordId").count(), 1, "{text}");
         assert!(text.contains("1h 上升，区间 83800–85500，位于 56%"), "{text}");
         // 4h 不可用、ATR 5m 缺失、盘口缺失：写「不可用」，绝不写 0。
         assert!(text.contains("4h 不可用"), "{text}");
@@ -870,9 +960,24 @@ mod tests {
         doc.recent_runs = vec![BriefingNote { at_label: "21:00".into(), text: "等待".into() }];
         let full = render_briefing(&doc, true, 100_000);
         assert!(full.contains("事件 39"));
+        doc.instructions = Some("- [代码强制] 不开新仓（全部交易员 · 全部品种，到 10-05 18:00）".into());
         let text = render_briefing(&doc, true, 1_500);
         assert!(text.chars().count() <= 1_500 + 40, "{}", text.chars().count());
         assert!(text.contains("账户与风险预算"));
+        // 用户的临时指令和账户一样永不丢弃，紧跟在账户后面。
+        assert!(text.contains("## 用户的临时指令\n- [代码强制] 不开新仓"), "{text}");
+        assert!(text.find("## 用户的临时指令").unwrap() > text.find("账户与风险预算").unwrap());
+        // 纠正比第一个品种的细节先丢。
+        doc.corrections = Some("- 10-04 21:30 BTC-USDT-SWAP range_edge｜方向错".into());
+        assert!(render_briefing(&doc, true, 100_000).contains("## 你的纠正\n- 10-04 21:30"));
+        let mut base = doc.clone();
+        base.events.clear();
+        base.recent_runs.clear();
+        base.corrections = None;
+        let budget = render_briefing(&base, true, 100_000).chars().count() + 40;
+        let tight = render_briefing(&doc, true, budget);
+        assert!(!tight.contains("## 你的纠正") && tight.contains("corrections"), "{tight}");
+        assert!(!tight.contains("symbol-extras"), "the first instrument's details outlive the corrections: {tight}");
         assert!(text.contains("## BTC-USDT-SWAP"));
         assert!(!text.contains("事件 39"));
         assert!(text.contains("已省略：events"), "{text}");

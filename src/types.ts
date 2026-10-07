@@ -2185,6 +2185,8 @@ export type AiAgentProfile = {
   singleAgentMode: AiSingleAgentMode;
   /** 运行模式：`tools` = 经典模式（AI 自己查数据）；`briefing` = 交易员模式（代码先算好简报，AI 只做判断）。 */
   contextMode?: AiProfileContextMode;
+  /** 交易员 Profile 用的交易手册（手册库 id，`default` = 默认手册）；经典 Profile 没有这个字段。 */
+  handbookId?: string;
   /** 勾选的 Agent 库 id（顺序即勾选顺序；重复/不存在的 id 由 Rust 侧丢弃）。 */
   enabledAgentIds: string[];
   /**
@@ -2613,6 +2615,21 @@ export type AiOptimizationSuggestion = {
   status: string;
   createdAt: number;
   updatedAt: number;
+  /** `skill`（复盘生成的 Skill 建议）或 `handbook`（由纠正生成的交易手册建议）；旧数据缺字段按 skill。 */
+  kind?: "skill" | "handbook" | string;
+  /** 交易手册建议的目标、原形态与起草结果。 */
+  handbook?: AiHandbookSuggestionDetail | null;
+};
+
+export type AiHandbookSuggestionDetail = {
+  handbookId: string | null;
+  handbookName: string | null;
+  handbookRevision: number | null;
+  setupId: string | null;
+  baselineSetup: Record<string, unknown> | null;
+  proposedSetup: Record<string, unknown> | null;
+  draftError: string | null;
+  usedBy: Array<{ id: string; name: string }>;
 };
 
 export type AiNotificationDelivery = {

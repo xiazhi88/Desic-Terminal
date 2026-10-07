@@ -30,6 +30,12 @@ pub struct DecisionOutcome {
     pub against_direction: bool,
     pub regime_mismatch: bool,
     pub handbook_version: Option<i64>,
+    /// 这条决策所属的手册（不同手册里同 id 的形态是不同的打法，不能混在一起统计）。
+    #[serde(default)]
+    pub handbook_id: Option<String>,
+    /// 决策时形态处于「观察中」：只有影子结果，不计入「没执行的候选」。
+    #[serde(default)]
+    pub observing: bool,
 }
 
 impl DecisionOutcome {
@@ -42,6 +48,8 @@ impl DecisionOutcome {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GroupStat {
+    #[serde(default)]
+    pub handbook_id: String,
     pub setup_id: String,
     pub regime: String,
     pub side: String,
@@ -53,6 +61,9 @@ pub struct GroupStat {
     /// 其中真实成交的条数与平均 R。
     pub real_n: usize,
     pub real_avg_r: Option<f64>,
+    /// 其中形态处于「观察中」时记下的条数（只有影子结果）。
+    #[serde(default)]
+    pub observing_n: usize,
     pub flagged: bool,
 }
 
@@ -116,16 +127,26 @@ pub fn shrink(avg_r: f64, n: usize) -> f64 {
     avg_r * n as f64 / (n as f64 + SHRINK_K)
 }
 
+/// 决策所属的手册；老数据没有记录时归到默认手册。
+fn handbook_of(row: &DecisionOutcome) -> &str {
+    row.handbook_id.as_deref().filter(|value| !value.is_empty()).unwrap_or("default")
+}
+
 pub fn build_scorecard(rows: &[DecisionOutcome]) -> Scorecard {
     let resolved = rows.iter().filter(|row| row.effective_r().is_some()).collect::<Vec<_>>();
-    // 分组：只统计有形态、有方向、有结果的决策。
-    let mut keys: Vec<(String, String, String)> = Vec::new();
+    // 分组：只统计有形态、有方向、有结果的决策；不同手册分开。
+    let mut keys: Vec<(String, String, String, String)> = Vec::new();
     for row in &resolved {
         if let (Some(setup), Some(side)) = (row.setup_id.as_deref(), row.side.as_deref()) {
             if setup == "none" || !matches!(side, "long" | "short") {
                 continue;
             }
-            let key = (setup.to_string(), row.regime_daily.clone().unwrap_or_else(|| "unknown".to_string()), side.to_string());
+            let key = (
+                handbook_of(row).to_string(),
+                setup.to_string(),
+                row.regime_daily.clone().unwrap_or_else(|| "unknown".to_string()),
+                side.to_string(),
+            );
             if !keys.contains(&key) {
                 keys.push(key);
             }
@@ -133,11 +154,12 @@ pub fn build_scorecard(rows: &[DecisionOutcome]) -> Scorecard {
     }
     let mut groups = keys
         .into_iter()
-        .map(|(setup_id, regime, side)| {
+        .map(|(handbook_id, setup_id, regime, side)| {
             let members = resolved
                 .iter()
                 .filter(|row| {
-                    row.setup_id.as_deref() == Some(setup_id.as_str())
+                    handbook_of(row) == handbook_id
+                        && row.setup_id.as_deref() == Some(setup_id.as_str())
                         && row.regime_daily.as_deref().unwrap_or("unknown") == regime
                         && row.side.as_deref() == Some(side.as_str())
                 })
@@ -148,6 +170,7 @@ pub fn build_scorecard(rows: &[DecisionOutcome]) -> Scorecard {
             let avg_r = mean(&values).unwrap_or(0.0);
             let shrunk_avg_r = shrink(avg_r, n);
             GroupStat {
+                handbook_id,
                 setup_id,
                 regime,
                 side,
@@ -158,6 +181,7 @@ pub fn build_scorecard(rows: &[DecisionOutcome]) -> Scorecard {
                 total_r: values.iter().sum(),
                 real_n: real.len(),
                 real_avg_r: mean(&real),
+                observing_n: members.iter().filter(|row| row.observing).count(),
                 flagged: n >= FLAG_MIN_SAMPLES && shrunk_avg_r <= FLAG_MAX_SHRUNK_R,
             }
         })
@@ -182,9 +206,9 @@ pub fn build_scorecard(rows: &[DecisionOutcome]) -> Scorecard {
         })
         .collect::<Vec<_>>();
 
-    // 「不做」的打分：没执行、但有可结算候选（影子结果）的决策。
+    // 「不做」的打分：没执行、但有可结算候选（影子结果）的决策。观察中的形态本来就不能执行，不算「错过」。
     let mut waits = WaitStats::default();
-    for row in rows.iter().filter(|row| !row.executed) {
+    for row in rows.iter().filter(|row| !row.executed && !row.observing) {
         if let Some(r) = row.shadow_r.filter(|value| value.is_finite()) {
             waits.n += 1;
             if r > 0.0 {
@@ -237,7 +261,7 @@ fn regime_label(value: &str, chinese: bool) -> &str {
         ("up", false) => "daily up",
         ("down", false) => "daily down",
         ("mixed", false) => "daily mixed",
-        (_, true) => "阶段不明",
+        (_, true) => "阶段不可用",
         (_, false) => "regime n/a",
     }
 }
@@ -251,8 +275,16 @@ fn side_label(value: &str, chinese: bool) -> &str {
 }
 
 /// 写进简报的「你的成绩单」（不超过约 700 字符）。`current_regime` 用来挑与当前行情相关的分组；
-/// `pooled` 为 true 表示样本不足、用的是所有交易员 Profile 的合计。
-pub fn render_scorecard_brief(card: &Scorecard, recent: &[DecisionOutcome], current_regime: Option<&str>, pooled: bool, chinese: bool) -> String {
+/// `pooled` 为 true 表示样本不足、用的是同一本手册下所有交易员 Profile 的合计；
+/// `observing_setups` 是当前处于「观察中」的形态 id（分组后标「观察中」）。
+pub fn render_scorecard_brief(
+    card: &Scorecard,
+    recent: &[DecisionOutcome],
+    current_regime: Option<&str>,
+    pooled: bool,
+    observing_setups: &[String],
+    chinese: bool,
+) -> String {
     let mut lines: Vec<String> = Vec::new();
     if card.resolved == 0 {
         lines.push(if chinese {
@@ -265,14 +297,14 @@ pub fn render_scorecard_brief(card: &Scorecard, recent: &[DecisionOutcome], curr
     lines.push(if chinese {
         format!(
             "{}已结算 {} 条决策（真实成交 {} 条）。平均 R 已向 0 收缩（×n/(n+10)），样本少时别当真。",
-            if pooled { "（样本不足，以下为所有交易员 Profile 的合计）" } else { "" },
+            if pooled { "（样本不足，以下为使用同一本手册的交易员 Profile 合计）" } else { "" },
             card.resolved,
             card.executed
         )
     } else {
         format!(
             "{}{} settled decisions ({} real fills). Average R is shrunk toward 0 (×n/(n+10)); small samples mean little.",
-            if pooled { "(Small sample: totals across all trader Profiles.) " } else { "" },
+            if pooled { "(Small sample: totals across trader Profiles using this handbook.) " } else { "" },
             card.resolved,
             card.executed
         )
@@ -289,6 +321,7 @@ pub fn render_scorecard_brief(card: &Scorecard, recent: &[DecisionOutcome], curr
         }
     }
     for group in relevant {
+        let observing = observing_setups.iter().any(|id| id == &group.setup_id);
         lines.push(format!(
             "- {} · {} · {}：n={}，胜 {}，平均 {:+.2}R（收缩后 {:+.2}R）{}",
             group.setup_id,
@@ -298,7 +331,13 @@ pub fn render_scorecard_brief(card: &Scorecard, recent: &[DecisionOutcome], curr
             group.wins,
             group.avg_r,
             group.shrunk_avg_r,
-            if group.flagged { if chinese { "【建议暂停】" } else { " [suggest pause]" } } else { "" }
+            if observing {
+                if chinese { "【观察中】" } else { " [observing]" }
+            } else if group.flagged {
+                if chinese { "【建议暂停】" } else { " [suggest pause]" }
+            } else {
+                ""
+            }
         ));
     }
     if let Some(bucket) = card.calibration.iter().filter(|bucket| bucket.n >= 5).max_by_key(|bucket| bucket.n) {
@@ -366,6 +405,8 @@ mod tests {
             against_direction: regime == "up" && side == "short",
             regime_mismatch: false,
             handbook_version: Some(1),
+            handbook_id: None,
+            observing: false,
         }
     }
 
@@ -421,13 +462,33 @@ mod tests {
     fn brief_mentions_flags_calibration_and_pooling() {
         let rows = (0..16).map(|index| row(index, "range_edge", "mixed", "short", Some(-1.0), Some(0.7))).collect::<Vec<_>>();
         let card = build_scorecard(&rows);
-        let text = render_scorecard_brief(&card, &rows, Some("up"), true, true);
-        assert!(text.contains("所有交易员 Profile 的合计"));
+        let text = render_scorecard_brief(&card, &rows, Some("up"), true, &[], true);
+        assert!(text.contains("同一本手册的交易员 Profile 合计"));
         assert!(text.contains("range_edge · 日线不明 · 做空"), "{text}");
         assert!(text.contains("【建议暂停】"));
         assert!(text.contains("信心校准"));
         assert!(text.chars().count() < 700, "{}", text.chars().count());
-        let empty = render_scorecard_brief(&build_scorecard(&[]), &[], None, false, true);
+        let empty = render_scorecard_brief(&build_scorecard(&[]), &[], None, false, &[], true);
         assert!(empty.contains("还没有已结算的决策"));
+        let observing = render_scorecard_brief(&card, &rows, Some("up"), false, &["range_edge".to_string()], true);
+        assert!(observing.contains("【观察中】") && !observing.contains("【建议暂停】"), "{observing}");
+    }
+
+    #[test]
+    fn handbooks_are_kept_apart_and_observing_rows_are_not_missed_profit() {
+        let mut mine = row(1, "trend_pullback", "up", "long", Some(1.0), Some(0.6));
+        mine.handbook_id = Some("mine".into());
+        let default_book = row(2, "trend_pullback", "up", "long", Some(-1.0), Some(0.6));
+        let mut observing = row(3, "trend_pullback", "up", "long", Some(3.0), Some(0.6));
+        observing.handbook_id = Some("mine".into());
+        observing.observing = true;
+        let card = build_scorecard(&[mine, default_book, observing]);
+        assert_eq!(card.groups.len(), 2, "same setup id in two handbooks makes two groups");
+        let mine_group = card.groups.iter().find(|group| group.handbook_id == "mine").unwrap();
+        assert_eq!((mine_group.n, mine_group.observing_n), (2, 1));
+        assert_eq!(card.groups.iter().find(|group| group.handbook_id == "default").unwrap().n, 1);
+        // 观察中的影子结果不算「错过的盈利」。
+        assert_eq!(card.waits.n, 2);
+        assert!((card.waits.missed_r - 1.0).abs() < 1e-9);
     }
 }

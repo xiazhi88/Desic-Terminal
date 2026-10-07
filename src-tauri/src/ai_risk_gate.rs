@@ -61,11 +61,12 @@ fn clamp_or(value: f64, min: f64, max: f64, fallback: f64) -> f64 {
 
 impl AiProfileRiskSettings {
     /// 夹取到合法范围；非数字回落默认值（不报错，与其它 Profile 字段一致）。
+    /// 单笔风险与日亏停止线只按权益封顶（100%），不再另设 5% / 20% 的上限：额度由用户自己定。
     pub(crate) fn normalized(self) -> Self {
         Self {
-            risk_per_trade_pct: clamp_or(self.risk_per_trade_pct, 0.05, 5.0, default_risk_per_trade_pct()),
+            risk_per_trade_pct: clamp_or(self.risk_per_trade_pct, 0.05, 100.0, default_risk_per_trade_pct()),
             min_reward_risk: clamp_or(self.min_reward_risk, 0.5, 5.0, default_min_reward_risk()),
-            daily_loss_limit_pct: clamp_or(self.daily_loss_limit_pct, 0.1, 20.0, default_daily_loss_limit_pct()),
+            daily_loss_limit_pct: clamp_or(self.daily_loss_limit_pct, 0.1, 100.0, default_daily_loss_limit_pct()),
             max_open_positions: self.max_open_positions.clamp(1, 10),
             max_entry_drift_bps: clamp_or(self.max_entry_drift_bps, 1.0, 300.0, default_max_entry_drift_bps()),
         }
@@ -225,12 +226,17 @@ mod tests {
         assert_eq!(parsed, AiProfileRiskSettings::default());
         assert_eq!(parsed.risk_per_trade_pct, 1.0);
         assert_eq!(parsed.max_open_positions, 2);
-        let wild = AiProfileRiskSettings { risk_per_trade_pct: 50.0, min_reward_risk: f64::NAN, daily_loss_limit_pct: 0.0, max_open_positions: 0, max_entry_drift_bps: 9999.0 }.normalized();
-        assert_eq!(wild.risk_per_trade_pct, 5.0);
+        let wild = AiProfileRiskSettings { risk_per_trade_pct: 250.0, min_reward_risk: f64::NAN, daily_loss_limit_pct: 0.0, max_open_positions: 0, max_entry_drift_bps: 9999.0 }.normalized();
+        assert_eq!(wild.risk_per_trade_pct, 100.0);
         assert_eq!(wild.min_reward_risk, 1.2);
         assert_eq!(wild.daily_loss_limit_pct, 0.1);
         assert_eq!(wild.max_open_positions, 1);
         assert_eq!(wild.max_entry_drift_bps, 300.0);
+        let generous = AiProfileRiskSettings { risk_per_trade_pct: 12.5, daily_loss_limit_pct: 45.0, ..AiProfileRiskSettings::default() }.normalized();
+        assert_eq!(generous.risk_per_trade_pct, 12.5);
+        assert_eq!(generous.daily_loss_limit_pct, 45.0);
+        let capped = AiProfileRiskSettings { daily_loss_limit_pct: 180.0, ..AiProfileRiskSettings::default() }.normalized();
+        assert_eq!(capped.daily_loss_limit_pct, 100.0);
     }
 
     #[test]

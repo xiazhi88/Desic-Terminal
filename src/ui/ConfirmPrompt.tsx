@@ -27,8 +27,12 @@ export function ConfirmPrompt({
   const { t } = useTranslation("common");
   const cancelRef = useRef<HTMLButtonElement | null>(null);
 
+  // 聚焦只在打开时做一次；和依赖 onClose 的 Esc 监听分开，避免父组件重渲染时抢走焦点。
   useEffect(() => {
     cancelRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === "Escape") {
         event.preventDefault();

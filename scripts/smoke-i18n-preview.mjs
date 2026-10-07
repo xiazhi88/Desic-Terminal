@@ -408,6 +408,9 @@ async function main() {
     await automationContext.close();
 
     await expectNoHanSystemText(browser, `${automationUrl}?view=optimization`, ".automation-optimization-view", "English optimization suggestions");
+    await expectNoHanSystemText(browser, `${automationUrl}?view=scorecard`, "[data-trader-workspace]:has([data-scorecard-groups])", "English trader scorecard", { minScanned: 20 });
+    await expectNoHanSystemText(browser, `${automationUrl}?view=trader-handbook`, "[data-trader-workspace]:has([data-handbook-setup-row])", "English trader handbook", { minScanned: 10 });
+    await expectNoHanSystemText(browser, `${automationUrl}?view=trader-instructions`, "[data-trader-workspace]:has([data-instruction-row])", "English trader instructions", { minScanned: 5 });
     await expectNoHanAutomationReviewText(browser);
     await expectNoHanTerminalAuxiliaryText(browser);
     await expectNoHanSystemText(browser, chartUrl, ".chart-wrap", "English chart preview");

@@ -1,9 +1,13 @@
 mod agent_draft;
 mod agents;
 mod briefing;
+mod corrections;
 mod handbook;
+mod handbook_io;
+mod instructions;
 mod regime;
 mod scorecard;
+mod setup_draft;
 mod trader_spec;
 mod builtin_bodies;
 mod draft_content;
@@ -12,7 +16,7 @@ mod usage;
 pub use agent_draft::{
     agent_draft_few_shot_messages, agent_draft_from_role_json, agent_draft_system_prompt,
     build_agent_draft_user_prompt, draft_agent_id, draft_summary, normalize_agent_create_role,
-    parse_agent_role_json, validate_agent_source_for_save, AiAgentDraftOutcome,
+    extract_json_object, parse_agent_role_json, validate_agent_source_for_save, AiAgentDraftOutcome,
     AGENT_DRAFT_DESCRIPTION_PLACEHOLDER, AGENT_DRAFT_KNOWN_SKILLS,
     AGENT_DRAFT_NAME_LINE_PLACEHOLDER, AI_AGENT_DRAFT_FALLBACK_SKELETON,
     AI_AGENT_DRAFT_FEW_SHOT_A, AI_AGENT_DRAFT_FEW_SHOT_B, AI_AGENT_DRAFT_FEW_SHOTS,
@@ -52,14 +56,32 @@ pub use briefing::{
     BriefingOpportunity, BriefingOrder, BriefingPosition, BriefingSizing, BriefingSymbol,
     BriefingTimeframe, BRIEFING_MAX_CHARS,
 };
+pub use corrections::{
+    correction_category_label, render_corrections, valid_correction_category, CorrectionNote, CORRECTION_CATEGORIES,
+    MAX_CORRECTION_TEXT_CHARS,
+};
 pub use handbook::{
-    default_handbook, direction_policy_flags, find_setup, paused_entry, render_handbook, validate_handbook,
-    Handbook, HandbookRule, HandbookSetup, PausedSetup,
+    default_handbook, direction_policy_flags, find_setup, paused_entry, regime_label, render_handbook, sanitize_handbook,
+    sanitize_handbook_text, valid_identifier, validate_handbook, validate_handbook_for_publish, Handbook, HandbookRule,
+    HandbookSetup, PausedSetup, MAX_RULES, MAX_SETUPS, SETUP_STATUS_LIVE, SETUP_STATUS_OBSERVING,
+};
+pub use handbook_io::{
+    export_handbook_document, parse_handbook_import, ImportedHandbook, HANDBOOK_EXPORT_FORMAT, HANDBOOK_EXPORT_VERSION,
+    MAX_HANDBOOK_IMPORT_BYTES,
+};
+pub use instructions::{
+    instruction_open_reasons, render_instructions, valid_instruction_kind, validate_instruction, TraderInstruction, INSTRUCTION_LONG_ONLY,
+    INSTRUCTION_NOTE, INSTRUCTION_NO_ENTRY, INSTRUCTION_SHORT_ONLY, MAX_ACTIVE_INSTRUCTIONS, MAX_INSTRUCTION_DURATION_MS,
+    MAX_INSTRUCTION_TEXT_CHARS,
 };
 pub use regime::{change_pct, daily_regime, ema_last, DailyRegime};
 pub use scorecard::{
     build_scorecard, render_scorecard_brief, shrink, CalibrationBucket, ComplianceStats, DecisionOutcome, GroupStat, Scorecard,
     VersionStat, WaitStats, FLAG_MAX_SHRUNK_R, FLAG_MIN_SAMPLES,
+};
+pub use setup_draft::{
+    parse_setup_draft, parse_setup_revision, setup_draft_messages, setup_revision_messages, SetupDraft, SetupRevisionDraft,
+    SETUP_DRAFT_SYSTEM_PROMPT, SETUP_DRAFT_USER_PROMPT, SETUP_REVISION_SYSTEM_PROMPT, SETUP_REVISION_USER_PROMPT,
 };
 pub use trader_spec::{trader_core_operations, TRADER_CORE_NAME, TRADER_CORE_RULES};
 pub use usage::{

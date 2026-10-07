@@ -69,6 +69,11 @@ pub fn agent_draft_few_shot_messages() -> Vec<(&'static str, &'static str)> {
 /// 原始文本 → 代码围栏内文本 → 首个 `{` 到末个 `}` 的切片；
 /// **只有一个**可解析对象才接受，多个候选视为失败。
 pub fn parse_agent_role_json(raw: &str) -> Option<Value> {
+    extract_json_object(raw)
+}
+
+/// 从模型输出里取出唯一的 JSON 对象（Agent 草稿、交易手册形态草稿共用）。
+pub fn extract_json_object(raw: &str) -> Option<Value> {
     let mut candidates = agent_role_json_candidates(raw);
     candidates.dedup();
     let mut parsed = Vec::new();

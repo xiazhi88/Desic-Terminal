@@ -15939,6 +15939,9 @@ button {
 .confirm-prompt { width: min(420px, 92vw); display: grid; gap: 12px; }
 .automation-confirm-modal__message,
 .confirm-prompt__message { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.automation-confirm-modal__details { display: grid; gap: 4px; margin: 0; padding: 8px 10px; border: 1px solid var(--line-soft); border-radius: 8px; list-style: none; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; }
+/* 正文与标题、按钮左右对齐（标题左 20px，按钮右 16px） */
+.automation-confirm-modal > :not(.modal-head):not(.modal-actions) { margin-inline: 20px 16px; }
 
 .automation-profile-card__actions {
   min-width: 0;
@@ -15990,31 +15993,15 @@ button {
 
 .automation-profile-card__buttons button:disabled { cursor: not-allowed; opacity: 0.45; }
 
-/* Editor dialog: tall content, so it is draggable and scrolls internally. */
+/* Profile 配置窗口：头部、分页导航和底部按钮都在 ProfileEditor 里；外壳固定高度，切换分页时窗口不跳。 */
 .automation-profile-editor-modal {
   width: min(1080px, 94vw);
-  max-height: 92vh;
+  height: min(780px, 92vh);
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
   padding: 0;
   overflow: hidden;
 }
-
-.automation-profile-editor-modal__head { cursor: grab; }
-.automation-profile-editor-modal__head > div { min-width: 0; display: flex; align-items: baseline; gap: 10px; }
-
-.automation-profile-editor-modal__dirty {
-  flex: 0 0 auto;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: color-mix(in srgb, var(--warn) 20%, transparent);
-  color: #ffdfa6;
-  font-size: 10px;
-  font-weight: 650;
-}
-
-.automation-profile-editor-modal__body { min-height: 0; overflow: auto; }
-.automation-profile-editor-modal__body .automation-profile-editor { border: 0; border-radius: 0; }
 
 @media (max-width: 720px) {
   .automation-profiles-board__head { grid-template-columns: minmax(0, 1fr); }
@@ -27846,30 +27833,27 @@ button {
   line-height: 1.6;
 }
 
-/* AI 自动化 Profile：类型（经典 / 交易员）在创建时决定，编辑器标题旁只读展示 */
-.automation-editor-type {
-  margin-left: 8px;
-  padding: 2px 7px;
-  border-radius: 999px;
-  background: rgba(139, 92, 246, 0.14);
-  color: #d6c9ff;
-  font-size: 10.5px;
-  font-style: normal;
-  font-weight: 600;
-  vertical-align: 2px;
-}
-
-.automation-editor-type.is-trader { background: rgba(232, 176, 74, 0.14); color: #f1cf8a; }
-.automation-editor-mark.is-trader { color: #f1cf8a; }
-
-/* 交易员 Profile 的专属设置区 */
-.automation-trader-settings > strong svg { color: #e8b04a; }
-.automation-trader-settings ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 8px; }
-.automation-trader-settings li { display: grid; gap: 2px; color: var(--muted); font-size: 11px; line-height: 1.55; }
-.automation-trader-settings li span { color: #d8d8dc; font-size: 11.5px; font-weight: 600; }
-
 .automation-profile-card__tags em.is-classic { color: #d6c9ff; background: rgba(139, 92, 246, 0.14); }
 .automation-profile-card__tags em.is-trader { color: #f1cf8a; background: rgba(232, 176, 74, 0.14); }
+
+/* 「测试版」标签（BetaBadge）：描边小胶囊，和交易员（琥珀）、经典（紫）两种类型标签区分开 */
+.beta-badge {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  padding: 0 6px;
+  border: 1px solid rgba(91, 199, 207, 0.45);
+  border-radius: 999px;
+  color: var(--data-fresh);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 600;
+  line-height: 16px;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  vertical-align: middle;
+  cursor: help;
+}
 
 /* 运行详情：交易员简报（默认折叠） */
 .automation-run-briefing {

@@ -39,6 +39,11 @@ mod ai_automation;
 mod ai_research_ledger;
 mod ai_briefing;
 mod trader_learning;
+mod trader_handbooks;
+mod trader_instructions;
+mod trader_corrections;
+mod trader_drafts;
+mod trader_suggestions;
 mod ai_risk_gate;
 mod ai_stream_checkpoint;
 mod ai_tool_gate;
@@ -18598,9 +18603,19 @@ async fn execute_ai_tool(
             {
                 request.source_session_id = Some(session_id.to_string());
             }
+            // 交易员 Profile 的开仓限价单：先算好挂单有效期，建好机会后写进去（到期未成交由代码撤单）。
+            let trader_entry_validity = trade_commands::trader_entry_order_validity(&request, now_ms());
             let state_app = app.clone();
             let market_runtime = state_app.state::<MarketRuntime>();
             let mut result = trade_opportunity_create(app.clone(), market_runtime, request).await?;
+            if let Some(valid_until) = trader_entry_validity {
+                let created = serde_json::to_value(&result).map_err(|err| err.to_string())?;
+                let reused = created.get("duplicateResolution").and_then(Value::as_str) == Some("reuse");
+                if let Some(id) = created.get("id").and_then(Value::as_str).filter(|_| !reused) {
+                    let conn = open_database(&app)?;
+                    crate::trader_learning::set_entry_order_validity(&conn, id, valid_until)?;
+                }
+            }
             if desic_agent_automation::normalize_permission_mode(Some(&context.permission_mode))
                 == "limited_auto"
             {
@@ -21838,6 +21853,26 @@ fn ensure_trade_opportunity_exit_columns(conn: &Connection) -> Result<(), String
         "ALTER TABLE trade_opportunities ADD COLUMN setup_id TEXT",
         [],
     );
+    // 交易员 Profile 开仓限价单的有效期：到期未成交由代码撤单；经典 Profile 的行为空。
+    let validity_added = conn
+        .execute(
+            "ALTER TABLE trade_opportunities ADD COLUMN order_valid_until INTEGER",
+            [],
+        )
+        .is_ok();
+    if validity_added {
+        // 一次性回填已有的交易员开仓限价单：AI 写了有效期就用它；没写（后端默认 15 分钟）按挂出后 24 小时。
+        let _ = conn.execute(
+            "UPDATE trade_opportunities
+             SET order_valid_until = CASE
+                   WHEN expires_at IS NOT NULL AND expires_at - created_at > 901000 THEN expires_at
+                   ELSE created_at + 86400000
+                 END
+             WHERE setup_id IS NOT NULL AND setup_id <> '' AND intent='open' AND order_type='limit'
+               AND order_valid_until IS NULL",
+            [],
+        );
+    }
     Ok(())
 }
 
@@ -22075,6 +22110,7 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
            exit_kind TEXT,
            close_fraction TEXT,
            setup_id TEXT,
+           order_valid_until INTEGER,
           direction TEXT NOT NULL,
           ticket_mode TEXT NOT NULL,
           action TEXT NOT NULL,
@@ -22604,6 +22640,10 @@ fn migrate_database(conn: &Connection) -> Result<(), String> {
     );
     let _ = conn.execute(
         "ALTER TABLE trade_opportunities ADD COLUMN setup_id TEXT",
+        [],
+    );
+    let _ = conn.execute(
+        "ALTER TABLE trade_opportunities ADD COLUMN order_valid_until INTEGER",
         [],
     );
     conn.execute_batch(
@@ -26377,7 +26417,28 @@ pub fn run() {
             crate::ai_briefing::ai_profile_risk_facts,
             crate::trader_learning::ai_trader_scorecard,
             crate::trader_learning::ai_trader_run_decisions,
-            crate::trader_learning::ai_trader_set_setup_pause,
+            crate::trader_handbooks::ai_trader_set_setup_pause,
+            crate::trader_handbooks::ai_trader_set_setup_status,
+            crate::trader_handbooks::ai_trader_handbooks,
+            crate::trader_handbooks::ai_trader_handbook_detail,
+            crate::trader_handbooks::ai_trader_handbook_revisions,
+            crate::trader_handbooks::ai_trader_handbook_create,
+            crate::trader_handbooks::ai_trader_handbook_rename,
+            crate::trader_handbooks::ai_trader_handbook_archive,
+            crate::trader_handbooks::ai_trader_handbook_publish,
+            crate::trader_handbooks::ai_trader_handbook_rollback,
+            crate::trader_handbooks::ai_trader_handbook_export,
+            crate::trader_handbooks::ai_trader_handbook_import,
+            crate::trader_instructions::ai_trader_instructions,
+            crate::trader_instructions::ai_trader_instruction_scope_orders,
+            crate::trader_instructions::ai_trader_instruction_create,
+            crate::trader_instructions::ai_trader_instruction_cancel,
+            crate::trader_corrections::ai_trader_correction_save,
+            crate::trader_corrections::ai_trader_correction_delete,
+            crate::trader_drafts::ai_trader_setup_draft,
+            crate::trader_suggestions::ai_handbook_suggestion_draft,
+            crate::trader_learning::ai_trader_entry_orders,
+            crate::trader_learning::ai_trader_cancel_entry_orders,
             ai_automation_save_master_enabled,
             ai_agent_profile_save,
             ai_agent_profile_systematic_conflicts,
@@ -26648,6 +26709,43 @@ pub fn run() {
 mod tests {
     use super::*;
     use rusqlite::params;
+
+    #[test]
+    fn trader_entry_order_validity_is_backfilled_once_for_trader_limit_entries() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE trade_opportunities (id TEXT PRIMARY KEY, intent TEXT, order_type TEXT, setup_id TEXT, expires_at INTEGER, created_at INTEGER);",
+        )
+        .unwrap();
+        let created = 1_791_142_387_000_i64;
+        for (id, intent, order_type, setup, expires) in [
+            ("explicit", "open", "limit", Some("trend_pullback"), Some(created + 8 * 3_600_000)),
+            ("defaulted", "open", "limit", Some("range_edge"), Some(created + 15 * 60_000)),
+            ("classic", "open", "limit", None, Some(created + 14 * 3_600_000)),
+            ("market", "open", "market", Some("trend_pullback"), Some(created + 3_600_000)),
+            ("cancel", "cancel", "cancel", Some("trend_pullback"), None),
+        ] {
+            conn.execute(
+                "INSERT INTO trade_opportunities VALUES (?1,?2,?3,?4,?5,?6)",
+                params![id, intent, order_type, setup, expires, created],
+            )
+            .unwrap();
+        }
+        ensure_trade_opportunity_exit_columns(&conn).unwrap();
+        let valid = |id: &str| -> Option<i64> {
+            conn.query_row("SELECT order_valid_until FROM trade_opportunities WHERE id=?1", params![id], |row| row.get(0)).unwrap()
+        };
+        // AI 写了有效期就用它；只有后端默认的 15 分钟按挂出后 24 小时；经典、市价、撤单都不设。
+        assert_eq!(valid("explicit"), Some(created + 8 * 3_600_000));
+        assert_eq!(valid("defaulted"), Some(created + 86_400_000));
+        assert_eq!(valid("classic"), None);
+        assert_eq!(valid("market"), None);
+        assert_eq!(valid("cancel"), None);
+        // 第二次打开数据库不再回填（列已存在）。
+        conn.execute("UPDATE trade_opportunities SET order_valid_until=NULL WHERE id='explicit'", []).unwrap();
+        ensure_trade_opportunity_exit_columns(&conn).unwrap();
+        assert_eq!(valid("explicit"), None);
+    }
 
     struct TemporarySqlitePath {
         path: PathBuf,

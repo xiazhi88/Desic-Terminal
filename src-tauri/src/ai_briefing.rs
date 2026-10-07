@@ -71,7 +71,7 @@ fn value_number(value: &Value, key: &str) -> Option<f64> {
         .filter(|value| value.is_finite())
 }
 
-fn shanghai_label(ms: i64, with_date: bool) -> String {
+pub(crate) fn shanghai_label(ms: i64, with_date: bool) -> String {
     let offset = chrono::FixedOffset::east_opt(8 * 60 * 60).expect("UTC+8 offset");
     chrono::DateTime::from_timestamp_millis(ms)
         .map(|time| {
@@ -102,6 +102,38 @@ struct Owners {
     orders: HashMap<String, (Option<String>, Option<String>)>,
     positions: HashMap<(String, String), String>,
     names: HashMap<String, String>,
+    /// 已停用的 Profile：它们留下的挂单没人管，简报里要标出来。
+    disabled: std::collections::HashSet<String>,
+    /// 委托号 → 当初的计划（形态、止损止盈、挂单有效期），给本 Profile 自己的挂单用。
+    plans: HashMap<String, OrderPlan>,
+}
+
+#[derive(Default, Clone)]
+struct OrderPlan {
+    setup_id: Option<String>,
+    stop: Option<f64>,
+    target: Option<f64>,
+    valid_until: Option<i64>,
+}
+
+impl OrderPlan {
+    fn describe(&self, chinese: bool) -> Option<String> {
+        let level = |zh: &str, en: &str, value: Option<f64>| {
+            value.map(|value| format!("{} {}", if chinese { zh } else { en }, desic_agent_automation::format_price(value)))
+        };
+        let levels = [level("止损", "stop", self.stop), level("止盈", "target", self.target)]
+            .into_iter()
+            .flatten()
+            .collect::<Vec<_>>();
+        let mut parts = Vec::new();
+        if let Some(setup) = self.setup_id.as_deref().filter(|value| !value.is_empty()) {
+            parts.push(setup.to_string());
+        }
+        if !levels.is_empty() {
+            parts.push(levels.join(" / "));
+        }
+        (!parts.is_empty()).then(|| parts.join(if chinese { "，" } else { ", " }))
+    }
 }
 
 impl Owners {
@@ -114,11 +146,21 @@ impl Owners {
             Some(profile_id) if profile_id == current_profile => (if chinese { "本 Profile" } else { "this Profile" }).to_string(),
             Some(profile_id) => {
                 let name = self.names.get(profile_id).cloned().unwrap_or_else(|| profile_id.clone());
-                if chinese { format!("其他 Profile：{name}") } else { format!("another Profile: {name}") }
+                let disabled = self.disabled.contains(profile_id);
+                match (chinese, disabled) {
+                    (true, true) => format!("其他 Profile：{name}（已停用）"),
+                    (true, false) => format!("其他 Profile：{name}"),
+                    (false, true) => format!("another Profile: {name} (disabled)"),
+                    (false, false) => format!("another Profile: {name}"),
+                }
             }
             None if operator == Some("ai") => (if chinese { "AI 研究" } else { "AI Research" }).to_string(),
             None => (if chinese { "手动或其他来源" } else { "manual or other source" }).to_string(),
         }
+    }
+
+    fn owner_of(&self, ord_id: &str, algo_id: &str) -> Option<&str> {
+        self.orders.get(ord_id).or_else(|| self.orders.get(algo_id)).and_then(|(profile, _)| profile.as_deref())
     }
 
     /// 挂单的归属；附挂的只减仓保护单对不上 Profile 时不单独标（它跟着持仓走）。
@@ -184,6 +226,35 @@ fn read_owners(conn: &Connection, now: i64) -> Owners {
     if let Ok(mut stmt) = conn.prepare("SELECT id,name FROM ai_agent_profiles") {
         if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
             owners.names.extend(rows.filter_map(Result::ok));
+        }
+    }
+    if let Ok(mut stmt) = conn.prepare("SELECT id FROM ai_agent_profiles WHERE enabled=0") {
+        if let Ok(rows) = stmt.query_map([], |row| row.get::<_, String>(0)) {
+            owners.disabled.extend(rows.filter_map(Result::ok));
+        }
+    }
+    // 挂单当初的计划：形态、止损止盈、挂单有效期（交易员开仓限价单才有有效期）。
+    if let Ok(mut stmt) = conn.prepare(
+        "SELECT r.ord_id,o.setup_id,o.stop_loss_json,o.take_profit_json,o.order_valid_until FROM okx_orders r
+         JOIN trade_opportunities o ON o.id=r.opportunity_id
+         WHERE r.state IN ('live','partially_filled') AND r.ord_id<>''",
+    ) {
+        let trigger = |raw: Option<String>| -> Option<f64> {
+            raw.and_then(|text| serde_json::from_str::<Value>(&text).ok())
+                .and_then(|value| value_number(&value, "triggerPx"))
+        };
+        if let Ok(rows) = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+            ))
+        }) {
+            for (ord_id, setup_id, stop, target, valid_until) in rows.filter_map(Result::ok) {
+                owners.plans.insert(ord_id, OrderPlan { setup_id, stop: trigger(stop), target: trigger(target), valid_until });
+            }
         }
     }
     owners
@@ -570,16 +641,31 @@ fn account_block(snapshot: &PrivateAccountSnapshot, now: i64, chinese: bool, own
     let orders = snapshot
         .orders
         .iter()
-        .map(|order| BriefingOrder {
-            inst_id: order.inst_id.clone(),
-            kind_label: order_kind(order),
-            px: number(&order.px)
-                .or_else(|| number(&order.trigger_px))
-                .or_else(|| number(&order.sl_trigger_px))
-                .or_else(|| number(&order.tp_trigger_px)),
-            contracts: number(&order.sz),
-            reduce_only: order.reduce_only == "true",
-            owner: owners.order_label(&order.ord_id, &order.algo_id, order.reduce_only == "true", profile_id, chinese),
+        .map(|order| {
+            // 本 Profile 自己的挂单才给委托号、计划与有效期（撤单要用委托号）；别人的挂单不归它管。
+            let own = owners.owner_of(&order.ord_id, &order.algo_id) == Some(profile_id);
+            let plan = if own { owners.plans.get(&order.ord_id) } else { None };
+            BriefingOrder {
+                inst_id: order.inst_id.clone(),
+                kind_label: order_kind(order),
+                px: number(&order.px)
+                    .or_else(|| number(&order.trigger_px))
+                    .or_else(|| number(&order.sl_trigger_px))
+                    .or_else(|| number(&order.tp_trigger_px)),
+                contracts: number(&order.sz),
+                reduce_only: order.reduce_only == "true",
+                owner: owners.order_label(&order.ord_id, &order.algo_id, order.reduce_only == "true", profile_id, chinese),
+                ord_id: (own && !order.ord_id.is_empty()).then(|| order.ord_id.clone()),
+                age_minutes: order
+                    .c_time
+                    .trim()
+                    .parse::<i64>()
+                    .ok()
+                    .filter(|created| *created > 0)
+                    .map(|created| now.saturating_sub(created).max(0) / 60_000),
+                plan: plan.and_then(|plan| plan.describe(chinese)),
+                valid_until: plan.and_then(|plan| plan.valid_until).map(|ms| shanghai_label(ms, false)),
+            }
         })
         .collect::<Vec<_>>();
     let omitted_orders = orders.len().saturating_sub(BRIEFING_MAX_ORDERS);
@@ -684,19 +770,82 @@ fn last_value(series: Vec<Option<f64>>) -> Option<f64> {
     series.into_iter().last().flatten().filter(|value| value.is_finite())
 }
 
-/// 单个品种的行情部分（价格、结构、波动、RSI、盘口、资金费率、仓位参考）。
-async fn symbol_block(
+/// 每一项取数用了多久、是否超时（写进简报审计，用来查哪一项慢）。
+#[derive(Default)]
+struct StepTimings {
+    steps: serde_json::Map<String, Value>,
+    timed_out: Vec<&'static str>,
+}
+
+impl StepTimings {
+    fn record<T>(&mut self, name: &'static str, (value, elapsed_ms): (Option<T>, i64)) -> Option<T> {
+        self.steps.insert(format!("{name}Ms"), json!(elapsed_ms));
+        if value.is_none() {
+            self.timed_out.push(name);
+        }
+        value
+    }
+
+    fn to_json(&self) -> Value {
+        let mut value = Value::Object(self.steps.clone());
+        value["timedOut"] = json!(self.timed_out);
+        value
+    }
+}
+
+/// 在截止时间内取一项数据，同时记下用时。
+async fn timed<T>(deadline: i64, future: impl Future<Output = T>) -> (Option<T>, i64) {
+    let started = now_ms();
+    let value = within(deadline, future).await;
+    (value, now_ms().saturating_sub(started))
+}
+
+/// 一个品种的原始数据。六项同时取、各自受截止时间约束：一项慢只影响它自己
+///（以前逐项串行，前面一项慢会把后面全部拖过截止时间，整段行情都成了「不可用」）。
+struct SymbolFetch {
+    instrument: Option<Result<OkxInstrument, String>>,
+    candles: Option<Vec<Value>>,
+    ticker: Option<Result<Value, String>>,
+    higher: Option<HigherTimeframes>,
+    orderbook: Option<Result<Value, String>>,
+    funding: Option<Result<Value, String>>,
+    timings: StepTimings,
+}
+
+async fn fetch_symbol(app: &tauri::AppHandle, market: &MarketRuntime, inst_id: &str, now: i64, deadline: i64) -> SymbolFetch {
+    let (instrument, candles, ticker, higher, orderbook, funding) = tokio::join!(
+        timed(deadline, crate::trade_support::fetch_instrument(app, inst_id)),
+        timed(deadline, crate::ai_automation::read_fastlane_candle_values(app, market, inst_id, now)),
+        timed(deadline, ai_read_ticker(market, inst_id)),
+        timed(deadline, read_higher_timeframes(app, inst_id, now)),
+        timed(deadline, ai_read_orderbook(market, inst_id, crate::ai_automation::FASTLANE_ORDERBOOK_DEPTH)),
+        timed(deadline, ai_read_funding_rate(market, inst_id)),
+    );
+    let mut timings = StepTimings::default();
+    SymbolFetch {
+        instrument: timings.record("instrument", instrument),
+        candles: timings.record("candles", candles),
+        ticker: timings.record("ticker", ticker),
+        higher: timings.record("history", higher),
+        orderbook: timings.record("orderbook", orderbook),
+        funding: timings.record("funding", funding),
+        timings,
+    }
+}
+
+/// 单个品种的行情部分（价格、结构、波动、RSI、盘口、资金费率、仓位参考），由已经取好的数据计算。
+#[allow(clippy::too_many_arguments)]
+fn symbol_block(
     app: &tauri::AppHandle,
-    market: &MarketRuntime,
     inst_id: &str,
+    fetched: SymbolFetch,
     db: SymbolDbFacts,
     equity: Option<f64>,
     risk_pct: f64,
-    deadline: i64,
+    now: i64,
     chinese: bool,
     missing: &mut Vec<String>,
 ) -> BriefingSymbol {
-    let now = now_ms();
     let mut block = BriefingSymbol {
         inst_id: inst_id.to_string(),
         oi_change_1h_pct: db.oi_change_1h_pct,
@@ -706,8 +855,8 @@ async fn symbol_block(
         radar_line: db.radar_line,
         ..BriefingSymbol::default()
     };
-    // 合约规格先取：盘口深度要用面值把「张」换算成币，仓位参考也要用。
-    let instrument = match within(deadline, crate::trade_support::fetch_instrument(app, inst_id)).await {
+    // 合约规格：盘口深度要用面值把「张」换算成币，仓位参考也要用。
+    let instrument = match fetched.instrument {
         Some(Ok(instrument)) => Some(instrument),
         _ => {
             missing.push(format!("{inst_id}:instrument"));
@@ -715,14 +864,11 @@ async fn symbol_block(
         }
     };
     let ct_val = instrument.as_ref().and_then(|instrument| number(&instrument.ct_val)).filter(|value| *value > 0.0);
-    let bars = match within(deadline, crate::ai_automation::read_fastlane_candle_values(app, market, inst_id, now)).await {
-        Some(values) => crate::fastlane::bars_from_values(&values),
-        None => Vec::new(),
-    };
+    let bars = fetched.candles.map(|values| crate::fastlane::bars_from_values(&values)).unwrap_or_default();
     if bars.is_empty() {
         missing.push(format!("{inst_id}:candles"));
     }
-    match within(deadline, ai_read_ticker(market, inst_id)).await {
+    match fetched.ticker {
         Some(Ok(ticker)) => match crate::fastlane::normalize_ticker_block(&ticker, &bars) {
             Some((price, _)) => {
                 block.last = value_number(&price, "last");
@@ -739,7 +885,7 @@ async fn symbol_block(
     // 15m 结构与 5m ATR 用最近的 1m K 线；1h / 4h / 1D 改用本地 1m 按 UTC 对齐聚合的长窗口
     //（1m 窗口拼接只覆盖约 3.5 天，4h EMA50 与日线阶段会一直不可用）。口径与快判一致：
     // 15m 60 根、1h 48 根、4h 24 根做结构；ATR14。
-    let higher = within(deadline, read_higher_timeframes(app, inst_id, now)).await.unwrap_or_default();
+    let higher = fetched.higher.unwrap_or_default();
     if higher.h4.len() < 50 || higher.d1.len() < 50 {
         missing.push(format!("{inst_id}:history"));
         request_history_backfill(app, inst_id, now);
@@ -796,7 +942,7 @@ async fn symbol_block(
         (Some(upper), Some(lower), Some(close)) if upper > lower => Some((close - lower) / (upper - lower)),
         _ => None,
     };
-    match within(deadline, ai_read_orderbook(market, inst_id, crate::ai_automation::FASTLANE_ORDERBOOK_DEPTH)).await {
+    match fetched.orderbook {
         // 主动买卖比在简报里改用本地 1h 口径（见 `read_symbol_db_facts`），这里只取盘口三项；
         // 传入占位值只是为了让快判的盘口函数给出结果，它不会被使用。
         Some(Ok(book)) => match book_levels_in_coin(&book, ct_val).and_then(|book| crate::fastlane::micro_from_orderbook(&book, Some(0.0))) {
@@ -809,7 +955,7 @@ async fn symbol_block(
         },
         _ => missing.push(format!("{inst_id}:orderbook")),
     }
-    match within(deadline, ai_read_funding_rate(market, inst_id)).await {
+    match fetched.funding {
         Some(Ok(funding)) => match crate::fastlane::normalize_derivatives_block(&funding, now) {
             Some((derivatives, _)) => {
                 block.funding_rate = value_number(&derivatives, "fundingRate");
@@ -855,16 +1001,38 @@ async fn symbol_block(
     block
 }
 
-/// 生成交易员简报。任何一块拿不到都不会报错，只在简报里标「不可用」并记进审计。
-pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiAgentProfileSummary, chinese: bool) -> ProfileBriefing {
+/// 生成交易员简报。任何一块拿不到都不会报错，只在简报里标「不可用」并记进审计（含每一项的用时）。
+/// `handbook` 是本轮用的交易手册（成绩单只统计这本手册下的决策）。
+pub(crate) async fn build_profile_briefing(
+    app: &tauri::AppHandle,
+    profile: &AiAgentProfileSummary,
+    handbook: &crate::trader_handbooks::LoadedHandbook,
+    chinese: bool,
+) -> ProfileBriefing {
     let started = now_ms();
     let deadline = started + BRIEFING_DEADLINE_MS;
     let market = app.state::<MarketRuntime>().inner().clone();
     let symbols = profile.symbols.iter().take(BRIEFING_MAX_SYMBOLS).cloned().collect::<Vec<_>>();
     let mut missing: Vec<String> = Vec::new();
 
-    let db = read_db_facts(app, profile, &symbols, started, chinese);
-    let account = match within(deadline, read_account_snapshot(app, &market, profile.account_id.as_deref())).await.flatten() {
+    // 库里的事实、账户快照、各品种行情同时取。库查询放到阻塞线程，不占异步线程。
+    let db_task = {
+        let (app, profile, symbols) = (app.clone(), profile.clone(), symbols.clone());
+        async move {
+            let begun = now_ms();
+            let facts = crate::blocking_work::run_blocking(move || Ok::<_, String>(read_db_facts(&app, &profile, &symbols, started, chinese)))
+                .await
+                .unwrap_or_default();
+            (facts, now_ms().saturating_sub(begun))
+        }
+    };
+    let account_task = timed(deadline, read_account_snapshot(app, &market, profile.account_id.as_deref()));
+    let symbols_task = futures_util::future::join_all(symbols.iter().map(|inst_id| fetch_symbol(app, &market, inst_id, started, deadline)));
+    let ((db, db_ms), (account_snapshot, account_ms), fetched) = tokio::join!(db_task, account_task, symbols_task);
+
+    // 外层 None = 到截止时间还没拿到；Some(None) = 拿到了但没有账户或读取失败。
+    let account_timed_out = account_snapshot.is_none();
+    let account = match account_snapshot.flatten() {
         Some(snapshot) => Some(account_block(&snapshot, now_ms(), chinese, &db.owners, &profile.id)),
         None => {
             missing.push("account".to_string());
@@ -888,17 +1056,24 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
         max_open_positions: limits.max_open_positions,
     };
     let mut symbol_blocks = Vec::new();
-    for inst_id in &symbols {
+    let mut symbol_timings = serde_json::Map::new();
+    for (inst_id, fetch) in symbols.iter().zip(fetched) {
+        symbol_timings.insert(inst_id.clone(), fetch.timings.to_json());
         let facts = db.per_symbol.get(inst_id).cloned().unwrap_or_default();
-        symbol_blocks.push(
-            symbol_block(app, &market, inst_id, facts, equity, limits.risk_per_trade_pct, deadline, chinese, &mut missing).await,
-        );
+        symbol_blocks.push(symbol_block(app, inst_id, fetch, facts, equity, limits.risk_per_trade_pct, started, chinese, &mut missing));
     }
     // 成绩单（交易员决策的历史结果）：按第一个关注品种当前的日线阶段挑相关分组。
+    let post_started = now_ms();
     let current_regime = symbol_blocks.first().and_then(|symbol| symbol.regime_daily.clone());
-    let scorecard = crate::ai_automation::open_automation_database(app)
-        .ok()
-        .map(|conn| crate::trader_learning::scorecard_brief(&conn, &profile.id, current_regime.as_deref(), now_ms(), chinese));
+    let (scorecard, instructions, corrections) = match crate::ai_automation::open_automation_database(app) {
+        Ok(conn) => (
+            Some(crate::trader_learning::scorecard_brief(&conn, &profile.id, handbook, current_regime.as_deref(), now_ms(), chinese)),
+            crate::trader_instructions::instructions_brief(&conn, &profile.id, now_ms(), chinese),
+            crate::trader_corrections::corrections_brief(&conn, &profile.id, &handbook.id, now_ms(), chinese),
+        ),
+        Err(_) => (None, None, None),
+    };
+    let post_ms = now_ms().saturating_sub(post_started);
     let doc = BriefingDoc {
         generated_at_label: shanghai_label(started, true),
         account,
@@ -909,6 +1084,8 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
         wake_conditions: db.wake_conditions,
         events: db.events,
         scorecard,
+        instructions,
+        corrections,
     };
     // 行情阶段标签（代码计算）随审计存档：决策日志与开仓形态校验都按它分组 / 匹配。
     let regimes = doc
@@ -921,13 +1098,23 @@ pub(crate) async fn build_profile_briefing(app: &tauri::AppHandle, profile: &AiA
         .collect::<serde_json::Map<String, Value>>();
     let text = desic_agent_automation::render_briefing(&doc, chinese, desic_agent_automation::BRIEFING_MAX_CHARS);
     let build_ms = now_ms().saturating_sub(started);
+    let timed_out = account_timed_out
+        || symbol_timings.values().any(|value| value["timedOut"].as_array().is_some_and(|items| !items.is_empty()));
     ProfileBriefing {
         audit: json!({
             "chars": text.chars().count(),
             "buildMs": build_ms,
             "missing": missing,
-            "timedOut": now_ms() >= deadline,
+            "timedOut": timed_out,
             "regimes": regimes,
+            // 每一项的用时：库查询、账户、各品种的六项行情、成绩单 / 指令 / 纠正。
+            "timings": {
+                "dbFactsMs": db_ms,
+                "accountMs": account_ms,
+                "accountTimedOut": account_timed_out,
+                "symbols": symbol_timings,
+                "postMs": post_ms,
+            },
         }),
         text,
     }
@@ -1380,6 +1567,40 @@ mod tests {
         // 附挂的只减仓保护单对不上 Profile 时不标（跟着持仓走）；对得上就照常标。
         assert_eq!(owners.order_label("o-manual", "", true, "trader", true), None);
         assert_eq!(owners.order_label("x", "o-mine", true, "trader", true).as_deref(), Some("本 Profile"));
+        // 停用的 Profile 留下的挂单要标出来：没人管了。
+        owners.disabled.insert("classic".into());
+        assert_eq!(owners.order_label("o-classic", "", false, "trader", true).as_deref(), Some("其他 Profile：经典（已停用）"));
+        assert_eq!(owners.owner_of("o-mine", ""), Some("trader"));
+        assert_eq!(owners.owner_of("o-research", ""), None);
+    }
+
+    #[test]
+    fn order_plans_come_from_the_linked_opportunity() {
+        let conn = Connection::open_in_memory().expect("open");
+        conn.execute_batch(
+            "CREATE TABLE trade_opportunities (id TEXT, agent_profile_id TEXT, order_id TEXT, algo_id TEXT, created_at INTEGER,
+               setup_id TEXT, stop_loss_json TEXT, take_profit_json TEXT, order_valid_until INTEGER);
+             CREATE TABLE okx_orders (ord_id TEXT, opportunity_id TEXT, operator TEXT, state TEXT);
+             CREATE TABLE position_episodes (id TEXT, inst_id TEXT, episode_side TEXT, status TEXT);
+             CREATE TABLE position_episode_opportunities (episode_id TEXT, opportunity_id TEXT);
+             CREATE TABLE ai_agent_profiles (id TEXT, name TEXT, enabled INTEGER);",
+        )
+        .unwrap();
+        let now = 1_791_200_000_000_i64;
+        conn.execute(
+            "INSERT INTO trade_opportunities VALUES ('opp1','trader','ord-1',NULL,?1,'trend_pullback',
+               '{\"triggerPx\":\"84690\"}','{\"triggerPx\":\"85500\"}',?2)",
+            params![now - 3_600_000, now + 3_600_000],
+        )
+        .unwrap();
+        conn.execute("INSERT INTO okx_orders VALUES ('ord-1','opp1','ai','live')", []).unwrap();
+        conn.execute("INSERT INTO ai_agent_profiles VALUES ('trader','交易员',1),('classic','经典',0)", []).unwrap();
+        let owners = read_owners(&conn, now);
+        let plan = owners.plans.get("ord-1").expect("plan");
+        assert_eq!(plan.describe(true).as_deref(), Some("trend_pullback，止损 84690 / 止盈 85500"));
+        assert_eq!(plan.valid_until, Some(now + 3_600_000));
+        assert!(owners.disabled.contains("classic") && !owners.disabled.contains("trader"));
+        assert_eq!(owners.owner_of("ord-1", ""), Some("trader"));
     }
 
     #[test]

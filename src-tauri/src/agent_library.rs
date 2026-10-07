@@ -674,6 +674,28 @@ pub(crate) fn build_agent_draft_payload(
     name: Option<&str>,
     config: &desic_storage_config::AiConfig,
 ) -> Value {
+    build_draft_payload(
+        request_id,
+        description,
+        name,
+        config,
+        agent_draft_system_prompt(),
+        &build_agent_draft_user_prompt(description, name),
+        agent_draft_few_shot_messages(),
+    )
+}
+
+/// 一次性草稿请求的通用载荷（Agent 草稿、交易手册形态草稿共用侧车的 `generateAgentDraft` 通道）。
+/// 提示词由调用方给出：system、user（侧车会替换 `{{description}}` / `{{name_line}}`）与成对的示例。
+pub(crate) fn build_draft_payload(
+    request_id: &str,
+    description: &str,
+    name: Option<&str>,
+    config: &desic_storage_config::AiConfig,
+    system: &str,
+    user: &str,
+    examples: Vec<(&str, &str)>,
+) -> Value {
     json!({
         "type": "generateAgentDraft",
         "requestId": request_id,
@@ -691,9 +713,9 @@ pub(crate) fn build_agent_draft_payload(
             "reasoningDepth": "none",
         })),
         "prompts": {
-            "system": agent_draft_system_prompt(),
-            "user": build_agent_draft_user_prompt(description, name),
-            "messages": agent_draft_few_shot_messages()
+            "system": system,
+            "user": user,
+            "messages": examples
                 .into_iter()
                 .map(|(role, content)| json!({ "role": role, "content": content }))
                 .collect::<Vec<_>>(),
@@ -802,13 +824,25 @@ pub(crate) async fn request_agent_draft_from_sidecar(
             crate::ai_automation::unique_suffix()
         ),
     );
+    let payload = build_agent_draft_payload(&request_id, description, name, config);
+    request_sidecar_draft(app, runtime, &request_id, payload).await
+}
+
+/// 发出一次草稿请求并等结果（模型输出原文）。请求 id 已经过 `resolve_agent_draft_request_id`；
+/// 取消走 `ai_agent_generate_cancel`，流式增量走同一个 `agentDraftDelta` 事件。
+pub(crate) async fn request_sidecar_draft(
+    app: &tauri::AppHandle,
+    runtime: &AiRuntime,
+    request_id: &str,
+    payload: Value,
+) -> Result<String, String> {
+    let request_id = request_id.to_string();
     let (result_tx, result_rx) = oneshot::channel();
     runtime
         .pending_agent_draft_commands
         .lock()
         .map_err(|error| error.to_string())?
         .insert(request_id.clone(), result_tx);
-    let payload = build_agent_draft_payload(&request_id, description, name, config);
     let result = async {
         send_ai_sidecar_command(app, runtime, payload).await?;
         timeout(Duration::from_secs(AI_AGENT_DRAFT_TIMEOUT_SECS), result_rx)

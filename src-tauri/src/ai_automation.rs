@@ -197,6 +197,10 @@ pub(crate) struct AiAgentProfileSummary {
     /// AI 只做判断；单个交易员、无试判、工具白名单）。缺字段 = `tools`。
     #[serde(default = "default_context_mode")]
     pub context_mode: String,
+    /// 交易员 Profile 用的交易手册（手册库里的 id）。经典 Profile 恒为空且不序列化（运行快照逐字不变）；
+    /// 老的交易员快照没有这个字段时用默认手册。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handbook_id: Option<String>,
     /// C19 试判配置（缺字段 = C19.1 默认，`mode=enforce`）。
     #[serde(default)]
     pub triage: crate::ai_triage::AiAgentTriageConfig,
@@ -306,6 +310,9 @@ pub(crate) struct AiAgentProfileInput {
     /// 运行模式（`tools` | `briefing`）。与 `single_agent_mode` 同一处理：`None` = 保留库中现值。
     #[serde(default)]
     pub context_mode: Option<String>,
+    /// 交易员 Profile 用的交易手册。`None` = 保留库中现值（新交易员 Profile 用默认手册）；经典 Profile 一律为空。
+    #[serde(default)]
+    pub handbook_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -510,6 +517,11 @@ pub(crate) struct AiOptimizationSuggestionSummary {
     pub status: String,
     pub created_at: i64,
     pub updated_at: i64,
+    /// `skill`（复盘生成的 Skill 建议）或 `handbook`（由纠正生成的交易手册建议）。
+    pub kind: String,
+    /// 交易手册建议的目标、原形态与起草结果（见 `trader_suggestions::handbook_suggestion_extras`）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub handbook: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1478,6 +1490,8 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE ai_optimization_suggestions ADD COLUMN proposed_skill_json TEXT",
         [],
     );
+    // 交易手册建议（由纠正生成）：kind 与目标手册 / 形态 / 起草结果。Skill 建议的行这些列为空，kind 默认 skill。
+    crate::trader_suggestions::migrate_handbook_suggestions(conn);
     let _ = conn.execute(
         "ALTER TABLE ai_notification_deliveries ADD COLUMN profile_id TEXT",
         [],
@@ -1598,6 +1612,8 @@ pub(crate) fn migrate_ai_automation(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE ai_agent_profiles ADD COLUMN reasoning_depth TEXT NOT NULL DEFAULT 'medium'",
         [],
     );
+    // 交易员 Profile 选的交易手册（空 = 默认手册；经典 Profile 恒为空）。
+    let _ = conn.execute("ALTER TABLE ai_agent_profiles ADD COLUMN handbook_id TEXT", []);
     let _ = conn.execute(
         "ALTER TABLE ai_agent_schemes ADD COLUMN instructions TEXT NOT NULL DEFAULT ''",
         [],
@@ -2317,6 +2333,7 @@ pub(crate) async fn ai_agent_profile_save(
     if profile.context_mode.as_deref() == Some(CONTEXT_MODE_BRIEFING) {
         profile.skill_ids = with_trader_profile_skills(std::mem::take(&mut profile.skill_ids));
     }
+    apply_handbook_default(&conn, &mut profile, &id)?;
     apply_profile_type_default(&conn, &mut profile, &id);
     // C14：旧行（auto/custom/scheme）保存时补上"协作开启"，避免把迁移出来的
     // 协作在首次保存时静默关掉。
@@ -2382,8 +2399,8 @@ fn upsert_profile_row(
           multi_agent_mode,multi_agent_max_agents,multi_agents_json,multi_agent_scheme_id,
           multi_agent_orchestrator,multi_agent_expert_source,enabled_agent_ids_json,
           collaboration_enabled,triage_json,single_agent_mode,profile_type,fastlane_json,
-          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct,risk_json,context_mode
-        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,NULL,?37,?38,?39,?40)
+          created_at,updated_at,deleted_at,target_leverage,max_single_trade_margin_pct,risk_json,context_mode,handbook_id
+        ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29,?30,?31,?32,?33,?34,?35,?36,NULL,?37,?38,?39,?40,?41)
         ON CONFLICT(id) DO UPDATE SET
           name=excluded.name,enabled=excluded.enabled,mode=excluded.mode,account_id=excluded.account_id,
           environment=excluded.environment,symbols_json=excluded.symbols_json,
@@ -2413,6 +2430,7 @@ fn upsert_profile_row(
           max_single_trade_margin_pct=excluded.max_single_trade_margin_pct,
           risk_json=excluded.risk_json,
           context_mode=excluded.context_mode,
+          handbook_id=excluded.handbook_id,
           updated_at=excluded.updated_at,deleted_at=NULL",
         params![
             id,
@@ -2467,6 +2485,7 @@ fn upsert_profile_row(
                 .context_mode
                 .clone()
                 .unwrap_or_else(default_context_mode),
+            profile.handbook_id,
         ],
     )
     .map_err(|err| err.to_string())?;
@@ -3094,6 +3113,22 @@ pub(crate) fn ai_optimization_suggestion_update_blocking(
     status: String,
 ) -> Result<AiOptimizationSuggestionSummary, String> {
     let status = normalize_suggestion_status(&status)?;
+    // 交易手册建议先分流：采用 = 替换手册里的形态并发布新版次；Skill 建议的流程不变。
+    {
+        let conn = open_automation_database(&app)?;
+        if crate::trader_suggestions::is_handbook_suggestion(&conn, &id) {
+            if status == "applied" {
+                crate::trader_suggestions::apply_handbook_suggestion(&conn, &id, now_ms())?;
+            } else {
+                conn.execute(
+                    "UPDATE ai_optimization_suggestions SET status=?2, updated_at=?3 WHERE id=?1",
+                    params![id, status, now_ms()],
+                )
+                .map_err(|err| err.to_string())?;
+            }
+            return load_optimization_suggestion(&conn, &id);
+        }
+    }
     if status == "applied" {
         return apply_optimization_suggestion(&app, &id);
     }
@@ -3775,6 +3810,28 @@ fn apply_single_agent_mode_default(
     );
 }
 
+/// 交易员 Profile 的手册：调用方给了就校验（存在且没归档），没给就沿用库中现值，新 Profile 用默认手册。
+/// 经典 Profile 一律清空。要在 `apply_context_mode_default` 之后调用。
+fn apply_handbook_default(conn: &Connection, profile: &mut AiAgentProfileInput, profile_id: &str) -> Result<(), String> {
+    if profile.context_mode.as_deref() != Some(CONTEXT_MODE_BRIEFING) {
+        profile.handbook_id = None;
+        return Ok(());
+    }
+    let requested = profile.handbook_id.as_deref().map(str::trim).filter(|value| !value.is_empty()).map(str::to_string);
+    profile.handbook_id = Some(match requested {
+        Some(requested) => {
+            let stored = crate::trader_handbooks::profile_handbook_id(conn, profile_id);
+            // 没换手册时不重新校验：已经在用的手册即使后来归档了，也不妨碍改别的设置。
+            if requested != stored {
+                crate::trader_handbooks::handbook_selectable(conn, &requested)?;
+            }
+            requested
+        }
+        None => crate::trader_handbooks::profile_handbook_id(conn, profile_id),
+    });
+    Ok(())
+}
+
 /// 运行模式在创建时决定、之后不可修改（两种 Profile 的运行记录各自独立，才能对比）：
 /// 已存在的 Profile 一律沿用库中的模式，忽略调用方传入的值；新 Profile 取传入值，缺省为经典模式。
 fn apply_context_mode_default(conn: &Connection, profile: &mut AiAgentProfileInput, profile_id: &str) {
@@ -4311,7 +4368,7 @@ fn load_profiles(conn: &Connection) -> Result<Vec<AiAgentProfileSummary>, String
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,profile_type,fastlane_json,risk_json,context_mode
+             single_agent_mode,profile_type,fastlane_json,risk_json,context_mode,handbook_id
              FROM ai_agent_profiles WHERE deleted_at IS NULL ORDER BY enabled DESC, updated_at DESC",
         )
         .map_err(|err| err.to_string())?;
@@ -4337,7 +4394,7 @@ fn load_profile(conn: &Connection, id: &str) -> Result<AiAgentProfileSummary, St
              created_at,updated_at,target_leverage,skill_version_modes_json,reasoning_depth,max_single_trade_margin_pct,
              multi_agent_mode,multi_agents_json,multi_agent_scheme_id,
              enabled_agent_ids_json,collaboration_enabled,triage_json,triage_skip_streak,triage_last_deep_at,
-             single_agent_mode,profile_type,fastlane_json,risk_json,context_mode
+             single_agent_mode,profile_type,fastlane_json,risk_json,context_mode,handbook_id
              FROM ai_agent_profiles WHERE id=?1 AND deleted_at IS NULL",
             params![id],
             profile_from_row,
@@ -4575,6 +4632,8 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
     let fastlane_json: Option<String> = row.get(35)?;
     let risk_json: Option<String> = row.get(36)?;
     let context_mode: Option<String> = row.get(37)?;
+    let trader = context_mode.as_deref().map(normalize_context_mode).as_deref() == Some(CONTEXT_MODE_BRIEFING);
+    let handbook_id: Option<String> = row.get(38)?;
     Ok(AiAgentProfileSummary {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -4631,6 +4690,13 @@ fn profile_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiAgentProfileS
             .as_deref()
             .map(normalize_context_mode)
             .unwrap_or_else(default_context_mode),
+        // 交易员 Profile 总带手册 id（空 = 默认手册）；经典 Profile 恒为空。
+        handbook_id: trader.then(|| {
+            handbook_id
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+                .unwrap_or_else(|| crate::trader_handbooks::DEFAULT_HANDBOOK_ID.to_string())
+        }),
         // C29：类型列默认 `ai`（旧 Profile 行为不变）；快判配置宽容解析（坏 JSON → 默认值）。
         profile_type: profile_type
             .as_deref()
@@ -5774,34 +5840,48 @@ fn load_optimization_suggestions(
                WHERE v.skill_id=ai_optimization_suggestions.current_skill_id
                  AND v.version=ai_optimization_suggestions.current_skill_version
                  AND v.status='published' LIMIT 1),
-             proposed_skill_json,benefits,risks,status,created_at,updated_at
+             proposed_skill_json,benefits,risks,status,created_at,updated_at,kind
              FROM ai_optimization_suggestions ORDER BY created_at DESC LIMIT ?1",
         )
         .map_err(|err| err.to_string())?;
     let rows = stmt
         .query_map(params![limit], optimization_suggestion_from_row)
         .map_err(|err| err.to_string())?;
-    rows.collect::<Result<Vec<_>, _>>()
-        .map_err(|err| err.to_string())
+    let mut items = rows
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| err.to_string())?;
+    for item in items.iter_mut() {
+        attach_handbook_suggestion(conn, item);
+    }
+    Ok(items)
 }
 
-fn load_optimization_suggestion(
+pub(crate) fn load_optimization_suggestion(
     conn: &Connection,
     id: &str,
 ) -> Result<AiOptimizationSuggestionSummary, String> {
-    conn.query_row(
-        "SELECT id,review_id,title,problem,evidence_json,sample_size,current_skill_id,current_skill_version,
-         proposed_changes,
-         (SELECT content FROM ai_skill_versions v
-           WHERE v.skill_id=ai_optimization_suggestions.current_skill_id
-             AND v.version=ai_optimization_suggestions.current_skill_version
-             AND v.status='published' LIMIT 1),
-         proposed_skill_json,benefits,risks,status,created_at,updated_at
-         FROM ai_optimization_suggestions WHERE id=?1",
-        params![id],
-        optimization_suggestion_from_row,
-    )
-    .map_err(|err| err.to_string())
+    let mut item = conn
+        .query_row(
+            "SELECT id,review_id,title,problem,evidence_json,sample_size,current_skill_id,current_skill_version,
+             proposed_changes,
+             (SELECT content FROM ai_skill_versions v
+               WHERE v.skill_id=ai_optimization_suggestions.current_skill_id
+                 AND v.version=ai_optimization_suggestions.current_skill_version
+                 AND v.status='published' LIMIT 1),
+             proposed_skill_json,benefits,risks,status,created_at,updated_at,kind
+             FROM ai_optimization_suggestions WHERE id=?1",
+            params![id],
+            optimization_suggestion_from_row,
+        )
+        .map_err(|err| err.to_string())?;
+    attach_handbook_suggestion(conn, &mut item);
+    Ok(item)
+}
+
+fn attach_handbook_suggestion(conn: &Connection, item: &mut AiOptimizationSuggestionSummary) {
+    if item.kind == crate::trader_suggestions::SUGGESTION_KIND_HANDBOOK {
+        item.handbook = Some(crate::trader_suggestions::handbook_suggestion_extras(conn, &item.id));
+    }
 }
 
 fn optimization_suggestion_from_row(
@@ -5829,6 +5909,8 @@ fn optimization_suggestion_from_row(
         status: row.get(13)?,
         created_at: row.get(14)?,
         updated_at: row.get(15)?,
+        kind: row.get::<_, Option<String>>(16)?.unwrap_or_else(|| "skill".to_string()),
+        handbook: None,
     })
 }
 
@@ -11930,6 +12012,9 @@ async fn automation_tick(
     app: tauri::AppHandle,
     runtime: AiAutomationRuntime,
 ) -> Result<(), String> {
+    // 交易员 Profile 的开仓限价单过了有效期仍未成交就撤掉（每分钟最多扫一次）。
+    // 放在总开关之前：挂单的有效期在下单时已经定好，自动化关掉或 Profile 停用后留下的挂单同样要清理。
+    crate::trader_learning::spawn_entry_order_sweep(&app);
     let conn = open_automation_database(&app)?;
     if !automation_master_enabled_with_conn(&conn) {
         return Ok(());
@@ -12990,19 +13075,18 @@ async fn execute_profile_run(
             )
         })
         .collect::<serde_json::Map<String, Value>>();
-    let briefing = if briefing_mode {
-        Some(crate::ai_briefing::build_profile_briefing(&app, &profile, chinese_prompt).await)
-    } else {
-        None
-    };
-    // 交易员 Profile 的交易手册（当前发布版本）；经典运行不读。
+    // 交易员 Profile 的交易手册（Profile 选的那本的最新版次）；经典运行不读。先于简报加载：简报里的成绩单按手册统计。
     let handbook = if briefing_mode {
         Some(match open_automation_database(&app) {
-            Ok(conn) => crate::trader_learning::current_handbook(&conn),
-            Err(_) => (1, desic_agent_automation::default_handbook()),
+            Ok(conn) => crate::trader_handbooks::load_handbook(&conn, profile.handbook_id.as_deref()),
+            Err(error) => crate::trader_handbooks::builtin_handbook(format!("打不开数据库（{error}），改用内置模板")),
         })
     } else {
         None
+    };
+    let briefing = match handbook.as_ref() {
+        Some(handbook) => Some(crate::ai_briefing::build_profile_briefing(&app, &profile, handbook, chinese_prompt).await),
+        None => None,
     };
     if let Ok(conn) = open_automation_database(&app) {
         let mut baseline = json!({
@@ -13014,7 +13098,13 @@ async fn execute_profile_run(
         if let Some(briefing) = briefing.as_ref() {
             let mut audit = briefing.audit.clone();
             audit["text"] = json!(briefing.text);
-            audit["handbookVersion"] = json!(handbook.as_ref().map(|(version, _)| *version));
+            if let Some(handbook) = handbook.as_ref() {
+                audit["handbookId"] = json!(handbook.id);
+                audit["handbookVersion"] = json!(handbook.version);
+                audit["handbookRevision"] = json!(handbook.revision);
+                audit["handbookName"] = json!(handbook.name);
+                audit["handbookFallback"] = json!(handbook.fallback);
+            }
             baseline["briefing"] = audit;
         }
         let _ = conn.execute(
@@ -13159,7 +13249,7 @@ async fn execute_profile_run(
             briefing.text.trim_end(),
             handbook
                 .as_ref()
-                .map(|(version, handbook)| desic_agent_automation::render_handbook(handbook, *version))
+                .map(|loaded| desic_agent_automation::render_handbook(&loaded.handbook, &loaded.label(chinese_prompt), chinese_prompt))
                 .unwrap_or_default()
                 .trim_end(),
             if chinese_prompt { BRIEFING_MODE_RULES } else { BRIEFING_MODE_RULES_EN },
@@ -16208,10 +16298,10 @@ mod tests {
         assert_eq!(defaults.risk.risk_per_trade_pct, 1.0);
         assert_eq!(defaults.risk.daily_loss_limit_pct, 3.0);
         // 自定义值保存后读回；越界值被夹取
-        let custom = save("risk-custom", json!({ "riskPerTradePct": 0.5, "minRewardRisk": 2, "dailyLossLimitPct": 99, "maxOpenPositions": 0, "maxEntryDriftBps": 15 }));
+        let custom = save("risk-custom", json!({ "riskPerTradePct": 0.5, "minRewardRisk": 2, "dailyLossLimitPct": 140, "maxOpenPositions": 0, "maxEntryDriftBps": 15 }));
         assert_eq!(custom.risk.risk_per_trade_pct, 0.5);
         assert_eq!(custom.risk.min_reward_risk, 2.0);
-        assert_eq!(custom.risk.daily_loss_limit_pct, 20.0);
+        assert_eq!(custom.risk.daily_loss_limit_pct, 100.0);
         assert_eq!(custom.risk.max_open_positions, 1);
         assert_eq!(custom.risk.max_entry_drift_bps, 15.0);
         // 老快照（没有 risk 字段）照样能解析成默认值
@@ -16330,6 +16420,47 @@ mod tests {
         snapshot.as_object_mut().unwrap().remove("contextMode");
         let parsed = serde_json::from_value::<AiAgentProfileSummary>(snapshot).expect("old snapshot parses");
         assert_eq!(parsed.context_mode, CONTEXT_MODE_TOOLS);
+    }
+
+    #[test]
+    fn trader_profiles_choose_a_handbook_and_classic_profiles_never_carry_one() {
+        let conn = Connection::open_in_memory().expect("open in-memory database");
+        migrate_ai_automation(&conn).expect("migrate automation schema");
+        migrate_ai_automation(&conn).expect("migrate twice");
+        let save = |id: &str, input: Value| -> Result<AiAgentProfileSummary, String> {
+            let mut profile = normalize_profile(serde_json::from_value::<AiAgentProfileInput>(input).expect("deserialize"))?;
+            apply_context_mode_default(&conn, &mut profile, id);
+            apply_handbook_default(&conn, &mut profile, id)?;
+            upsert_profile_row(&conn, &profile, id, 1_000, 2_000)?;
+            load_profile(&conn, id)
+        };
+        let trader = save("hb-trader", json!({ "name": "t", "symbols": ["BTC-USDT-SWAP"], "contextMode": "briefing" })).unwrap();
+        assert_eq!(trader.handbook_id.as_deref(), Some("default"), "新交易员 Profile 用默认手册");
+        let mine = crate::trader_handbooks::create_handbook(&conn, "我的打法", crate::trader_handbooks::HandbookSeed::Template, 3).unwrap();
+        let switched = save("hb-trader", json!({ "name": "t", "symbols": ["BTC-USDT-SWAP"], "handbookId": mine })).unwrap();
+        assert_eq!(switched.handbook_id.as_deref(), Some(mine.as_str()));
+        // 没带 handbookId（旧前端）：保留库中现值。
+        let kept = save("hb-trader", json!({ "name": "t2", "symbols": ["BTC-USDT-SWAP"] })).unwrap();
+        assert_eq!(kept.handbook_id.as_deref(), Some(mine.as_str()));
+        // 不存在、已归档的手册不能选。
+        assert!(save("hb-trader", json!({ "name": "t", "symbols": ["BTC-USDT-SWAP"], "handbookId": "handbook-missing" })).is_err());
+        let archived = crate::trader_handbooks::create_handbook(&conn, "旧打法", crate::trader_handbooks::HandbookSeed::Template, 4).unwrap();
+        crate::trader_handbooks::archive_handbook(&conn, &archived, true, 5).unwrap();
+        assert!(save("hb-trader", json!({ "name": "t", "symbols": ["BTC-USDT-SWAP"], "handbookId": archived })).is_err());
+        assert_eq!(load_profile(&conn, "hb-trader").unwrap().handbook_id.as_deref(), Some(mine.as_str()), "拒绝时不改库");
+        // 正在用的手册归档之后，Profile 照样能改别的设置。
+        conn.execute("UPDATE ai_trader_handbook_library SET archived_at=6 WHERE id=?1", params![mine]).unwrap();
+        assert!(save("hb-trader", json!({ "name": "t3", "symbols": ["BTC-USDT-SWAP"], "handbookId": mine })).is_ok());
+        // 经典 Profile：传了也清空，摘要 JSON 里没有这个字段（运行快照逐字不变）。
+        let classic = save("hb-classic", json!({ "name": "c", "symbols": ["BTC-USDT-SWAP"], "handbookId": mine })).unwrap();
+        assert_eq!(classic.handbook_id, None);
+        assert!(serde_json::to_value(&classic).unwrap().get("handbookId").is_none());
+        let stored: Option<String> = conn.query_row("SELECT handbook_id FROM ai_agent_profiles WHERE id='hb-classic'", [], |row| row.get(0)).unwrap();
+        assert_eq!(stored, None);
+        // 老的交易员快照没有 handbookId：解析为空，运行时用默认手册。
+        let mut snapshot = serde_json::to_value(&switched).unwrap();
+        snapshot.as_object_mut().unwrap().remove("handbookId");
+        assert_eq!(serde_json::from_value::<AiAgentProfileSummary>(snapshot).unwrap().handbook_id, None);
     }
 
     #[test]

@@ -1,5 +1,4 @@
 /* Agent 库（agents tab）与 Profile 勾选器样式。
-   视觉规格：docs/agent-library-visual-spec.md（§3 令牌 / §4 逐区域 / §4.7 响应式）。
    列宽机制沿用 systematic-lab：CSS 变量 + localStorage，拖拽条贴被调整面板的边缘。
    令牌全部局部化（别名全局变量），硬编码只允许出现在本文件的令牌定义处。 */
 

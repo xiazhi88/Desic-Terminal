@@ -1846,6 +1846,14 @@ async function verifyOptimizationDiff(page, scenario) {
   if (!(await page.getByText("已采用", { exact: true }).count())) {
     throw new Error(`${scenario.label}/optimization: direct apply did not update the suggestion state`);
   }
+  // 交易手册建议：卡片内对比（不弹全局窗口），替换原形态。
+  const handbookCard = page.locator("[data-handbook-suggestion]");
+  if (await handbookCard.count() !== 1) throw new Error(`${scenario.label}/optimization: 缺少交易手册建议卡片`);
+  await handbookCard.locator("[data-handbook-suggestion-diff]").click();
+  await handbookCard.locator("[data-handbook-suggestion-diff-view] .automation-skill-diff-row.added").first().waitFor({ timeout: 5_000 });
+  await handbookCard.locator("[data-handbook-suggestion-apply]").click();
+  await waitUntil(() => handbookCard.locator("[data-handbook-suggestion-apply]").count(), (count) => count === 0, `${scenario.label}/optimization: 采用后手册建议应变成已处理`);
+  assertNoGlobalOverflow(await readPageState(page), `${scenario.label}/optimization handbook card`);
 }
 
 /**
@@ -1866,6 +1874,95 @@ async function verifyRiskPreview(page, scenario) {
   if (!/0\.47 U/.test(text) || !/0\.93 U/.test(text)) throw new Error(`${scenario.label}/risk-preview: 缺少单笔 / 日亏金额`);
 }
 
+// 等到条件成立（React 渲染在点击之后才落地），超时报出最后一次看到的值。
+async function waitUntil(read, ok, message) {
+  const deadline = Date.now() + 5_000;
+  let last;
+  while (Date.now() < deadline) {
+    last = await read();
+    if (ok(last)) return last;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error(`${message}（实际 ${JSON.stringify(last)}）`);
+}
+
+// Profile 配置窗口（新版）：分页导航、一行概览、拖动与快选、亏损上限放开到 100%、两种 Profile 的方式页。
+async function verifyProfileEditor(page, scenario) {
+  const label = `${scenario.label}/profile-editor`;
+  await page.goto(`${baseUrl}?view=profile-editor&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-profile-editor]", { timeout: 20_000 });
+  const tabs = await page.locator("[data-profile-page-tab]").count();
+  if (tabs !== 5) throw new Error(`${label}: 应有 5 个分页（实际 ${tabs}）`);
+  const summary = () => page.locator("[data-profile-summary]").first().innerText();
+  const text = await summary();
+  if (!/0\.47 U/.test(text) || !/0\.93 U/.test(text)) throw new Error(`${label}: 概览缺少单笔 / 日亏金额（${text}）`);
+  if (await page.locator("[data-profile-summary-alert]").count() !== 1) throw new Error(`${label}: 概览缺少「开不了最小仓位」提醒`);
+  if (await page.locator("[data-profile-live-auto]").count() !== 1) throw new Error(`${label}: 实盘 + 自动执行时缺少提示`);
+
+  // 点概览里的提醒直接跳到「资金与风险」页。
+  await page.locator("[data-profile-summary-alert]").click();
+  await page.waitForSelector('[data-profile-page="risk"] [data-risk-preview] table', { timeout: 10_000 });
+  const statuses = await page.locator("[data-risk-preview-row]").evaluateAll((rows) => rows.map((row) => row.getAttribute("data-risk-preview-row")));
+  if (JSON.stringify(statuses) !== JSON.stringify(["available_too_low", "ok"])) throw new Error(`${label}: 换算状态应为 [available_too_low, ok]（实际 ${JSON.stringify(statuses)}）`);
+
+  // 刻度快选：单笔最多亏点 1% → 0.09 U；当日亏损停止线点 100%（不再停在 20%）。
+  await page.locator('[data-profile-field="riskPerTradePct"] [data-scale-tick="1"]').click();
+  await waitUntil(() => page.locator('[data-profile-field="riskPerTradePct"] .pfe-number input').inputValue(), (value) => value === "1", `${label}: 点 1% 刻度后输入框应为 1`);
+  await waitUntil(summary, (value) => /0\.09 U/.test(value), `${label}: 单笔改成 1% 后概览应为 0.09 U`);
+  await page.locator('[data-profile-field="dailyLossLimitPct"] [data-scale-tick="100"]').click();
+  await waitUntil(() => page.locator('[data-profile-field="dailyLossLimitPct"] .pfe-number input').inputValue(), (value) => value === "100", `${label}: 当日亏损停止线应能设到 100%`);
+
+  // 手动输入常用值以外的数：12.5% → 1.16 U，拖动条停在 10% 与 15% 之间。
+  const riskInput = page.locator('[data-profile-field="riskPerTradePct"] .pfe-number input');
+  await riskInput.fill("12.5");
+  await riskInput.blur();
+  await waitUntil(summary, (value) => /1\.16 U/.test(value), `${label}: 单笔 12.5% 后概览应为 1.16 U`);
+
+  // 杠杆快选：10x 时 BTC 最小仓位保证金翻倍到 0.85 U。
+  await page.locator('[data-profile-field="targetLeverage"] [data-preset="10"]').click();
+  await waitUntil(() => page.locator('[data-profile-field="targetLeverage"] .pfe-number input').inputValue(), (value) => value === "10", `${label}: 杠杆快选 10x 后输入框应为 10`);
+  await waitUntil(() => page.locator("[data-risk-preview-row]").first().innerText(), (value) => /0\.85 U/.test(value), `${label}: 10x 时 BTC 最小仓位保证金应为 0.85 U`);
+
+  // 拖动：单笔保证金上限拖到中间附近，值必须落在常用值上。
+  const slider = page.locator('[data-profile-field="maxSingleTradeMarginPct"] input[type="range"]');
+  const box = await slider.boundingBox();
+  if (!box) throw new Error(`${label}: 找不到保证金上限拖动条`);
+  await page.mouse.move(box.x + box.width * 0.2, box.y + box.height / 2);
+  await page.mouse.down();
+  await page.mouse.move(box.x + box.width * 0.55, box.y + box.height / 2, { steps: 8 });
+  await page.mouse.up();
+  await waitUntil(
+    async () => Number(await page.locator('[data-profile-field="maxSingleTradeMarginPct"] .pfe-number input').inputValue()),
+    (value) => value !== 30 && [1, 2, 3, 5, 8, 10, 15, 20, 25, 30, 40, 50, 60, 75, 100].includes(value),
+    `${label}: 拖动后保证金上限应变化并吸附到常用值`
+  );
+
+  // 交易员的「交易方式」：手册形态 + 决策计数 + 技能。
+  await page.locator('[data-profile-page-tab="method"]').click();
+  await page.waitForSelector("[data-profile-handbook] [data-handbook-setup]", { timeout: 10_000 });
+  if (await page.locator("[data-profile-handbook-select]").count() !== 1) throw new Error(`${label}: 交易员 Profile 要能选手册`);
+  if (await page.locator("[data-handbook-setup-observing]").count() !== 1) throw new Error(`${label}: 观察中的形态要标出来`);
+  if (await page.locator("[data-profile-instructions]").count() !== 1) throw new Error(`${label}: 缺少临时指令摘要`);
+  if (await page.locator("[data-profile-scorecard-counts]").count() !== 1) throw new Error(`${label}: 缺少成绩单计数`);
+  if (await page.locator("[data-profile-skills] [data-profile-skill]").count() < 2) throw new Error(`${label}: 技能行太少`);
+
+  // 节奏页：每天大约运行次数。
+  await page.locator('[data-profile-page-tab="rhythm"]').click();
+  const estimate = await page.locator("[data-profile-estimate]").innerText();
+  if (!/48–288/.test(estimate)) throw new Error(`${label}: 预计每天应为 48–288 次（${estimate}）`);
+
+  // 经典 Profile 的「分析方式」：沿用专家勾选与试判组件。
+  await page.locator('[data-preview-editor-kind="tools"]').click();
+  await page.locator('[data-profile-page-tab="method"]').click();
+  await page.waitForSelector('[data-profile-page="method"] [data-agent-selector]', { timeout: 10_000 });
+  if (await page.locator('[data-profile-page="method"] [data-triage-settings]').count() !== 1) throw new Error(`${label}: 经典 Profile 缺少试判设置`);
+
+  const editorBox = await page.locator("[data-profile-editor]").first().boundingBox();
+  const viewport = page.viewportSize();
+  if (!editorBox || !viewport || editorBox.width > viewport.width + 1) throw new Error(`${label}: 配置窗口横向溢出`);
+  await page.screenshot({ path: path.join(artifactDir, `profile-editor-${scenario.label}.png`) });
+}
+
 // 交易员成绩单：分组表（含「建议暂停」与暂停 / 恢复按钮）、最近决策、交易手册。
 async function verifyTraderScorecard(page, scenario) {
   await page.goto(`${baseUrl}?view=scorecard&slow=6`, { waitUntil: "networkidle", timeout: 60_000 });
@@ -1878,9 +1975,74 @@ async function verifyTraderScorecard(page, scenario) {
   const recent = await page.locator("[data-scorecard-recent] tbody tr").count();
   if (recent !== 4) throw new Error(`${scenario.label}/scorecard: 最近决策应为 4（实际 ${recent}）`);
   if (await page.locator("[data-scorecard-handbook]").count() !== 1) throw new Error(`${scenario.label}/scorecard: 缺少交易手册查看区`);
+  // 观察中的形态单独标出来（不标「建议暂停」）；每条决策都能纠正，已纠正的显示类别。
+  if (await page.locator("[data-scorecard-observing]").count() !== 1) throw new Error(`${scenario.label}/scorecard: 观察中的分组要标出来`);
+  if (await page.locator("[data-scorecard-recent] [data-correction-open]").count() !== 4) throw new Error(`${scenario.label}/scorecard: 每条最近决策都要有纠正入口`);
+  if (await page.locator("[data-scorecard-recent] [data-corrected]").count() !== 1) throw new Error(`${scenario.label}/scorecard: 已纠正的决策要显示你的意见`);
+  await page.locator("[data-scorecard-recent] [data-correction-open]").first().click();
+  await page.waitForSelector("[data-correction-popover]", { timeout: 5_000 });
+  assertInsideViewport(await page.locator("[data-correction-popover]").boundingBox(), scenario, `${scenario.label}/scorecard correction popover`);
+  await page.locator('[data-correction-category="bad_location"]').click();
+  await page.locator("[data-correction-text]").fill("刚碰到均线就挂单，没等拒绝");
+  await page.locator("[data-correction-save]").click();
+  await waitUntil(() => page.locator("[data-scorecard-recent] [data-corrected]").count(), (count) => count === 2, `${scenario.label}/scorecard: 保存纠正后应显示两条意见`);
   const box = await page.locator("[data-trader-scorecard]").first().boundingBox();
   const viewport = page.viewportSize();
   if (!box || !viewport || box.width > viewport.width + 1) throw new Error(`${scenario.label}/scorecard: 成绩单横向溢出`);
+}
+
+// 交易手册编辑器：形态行与状态、编辑抽屉、AI 起草新形态（一律观察中）、发布新版次、版次对比与回退。
+async function verifyTraderHandbook(page, scenario) {
+  const label = `${scenario.label}/trader-handbook`;
+  await page.goto(`${baseUrl}?view=trader-handbook`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-handbook-editor] [data-handbook-setup-row]", { timeout: 20_000 });
+  if (await page.locator("[data-handbook-setup-row]").count() !== 4) throw new Error(`${label}: 应有 4 个形态`);
+  if (await page.locator('[data-handbook-setup-row] [data-setup-status="observing"]').count() !== 1) throw new Error(`${label}: 应有 1 个观察中的形态`);
+  if (await page.locator("[data-handbook-publish]").isEnabled()) throw new Error(`${label}: 没改动时保存按钮应不可用`);
+  // 新形态：大白话 → 假起草器 → 表单填好、状态观察中。
+  await page.locator("[data-handbook-add-setup]").click();
+  await page.waitForSelector("[data-setup-drawer] [data-setup-assist]", { timeout: 5_000 });
+  assertInsideViewport(await page.locator("[data-setup-drawer]").boundingBox(), scenario, `${label} drawer`);
+  await page.locator("[data-setup-assist-input]").fill("持仓量 4 小时涨了 8% 以上但价格横盘的时候，顺着日线方向等 15 分钟收盘突破再进。");
+  await page.locator("[data-setup-assist-run]").click();
+  await page.waitForSelector("[data-setup-assist-progress]", { timeout: 5_000 });
+  await page.waitForSelector("[data-setup-assist-notes]", { timeout: 10_000 });
+  await waitUntil(() => page.locator('[data-setup-field="name"]').inputValue(), (value) => value === "持仓量挤压", `${label}: 起草结果应填进名称`);
+  await page.locator("[data-setup-done]").click();
+  await page.waitForSelector("[data-setup-drawer]", { state: "detached", timeout: 5_000 });
+  await waitUntil(() => page.locator("[data-handbook-setup-row]").count(), (count) => count === 5, `${label}: 完成后应多一个形态`);
+  if (await page.locator('[data-handbook-setup-row="oi_squeeze"] [data-setup-status="observing"]').count() !== 1) throw new Error(`${label}: AI 起草的新形态必须是观察中`);
+  await page.locator("[data-handbook-publish]").click();
+  await waitUntil(() => page.locator(".hbe-foot__notice").count(), (count) => count === 1, `${label}: 发布后应提示新版次`);
+  // 版次：对比只显示改动附近，回退生成新版次。
+  await page.locator("[data-handbook-versions-open]").click();
+  await page.waitForSelector("[data-handbook-versions] [data-handbook-revision]", { timeout: 5_000 });
+  assertInsideViewport(await page.locator("[data-handbook-versions]").boundingBox(), scenario, `${label} versions`);
+  if (!(await page.locator("[data-handbook-versions] .automation-skill-diff-row.added").count())) throw new Error(`${label}: 版次对比应显示新增的行`);
+  await page.locator("[data-handbook-rollback]").click();
+  await page.locator(".automation-confirm-modal .modal-actions button").last().click();
+  await page.waitForSelector("[data-handbook-versions]", { state: "detached", timeout: 5_000 });
+  await waitUntil(() => page.locator("[data-handbook-setup-row]").count(), (count) => count === 4, `${label}: 回退到上一版后应回到 4 个形态`);
+  assertNoGlobalOverflow(await readPageState(page), label);
+  await page.screenshot({ path: path.join(artifactDir, `trader-handbook-${scenario.label}.png`) });
+}
+
+// 临时指令：列表、新建（列出范围内已挂的 AI 开仓单，默认勾选一起撤）、取消。
+async function verifyTraderInstructions(page, scenario) {
+  const label = `${scenario.label}/trader-instructions`;
+  await page.goto(`${baseUrl}?view=trader-instructions`, { waitUntil: "networkidle", timeout: 60_000 });
+  await page.waitForSelector("[data-trader-instructions] [data-instruction-row]", { timeout: 20_000 });
+  if (await page.locator("[data-instruction-active] [data-instruction-row]").count() !== 2) throw new Error(`${label}: 应有 2 条生效中的指令`);
+  await page.locator("[data-instruction-new]").click();
+  await page.locator('[data-instruction-form] .pfe-segmented button[data-value="long_only"]').click();
+  await page.locator("[data-instruction-submit]").click();
+  await page.waitForSelector("[data-instruction-orders]", { timeout: 5_000 });
+  if (!(await page.locator("[data-instruction-orders] input[type=checkbox]").first().isChecked())) throw new Error(`${label}: 范围内的挂单应默认勾选`);
+  await page.locator("[data-instruction-orders-confirm]").click();
+  await waitUntil(() => page.locator("[data-instruction-active] [data-instruction-row]").count(), (count) => count === 3, `${label}: 新建后应有 3 条指令`);
+  await page.locator("[data-instruction-active] [data-instruction-cancel]").first().click();
+  await waitUntil(() => page.locator("[data-instruction-active] [data-instruction-row]").count(), (count) => count === 2, `${label}: 取消后应剩 2 条`);
+  assertNoGlobalOverflow(await readPageState(page), label);
 }
 
 async function verifyRunsListLayout(page, scenario) {
@@ -2040,7 +2202,10 @@ async function verifyScenario(browser, scenario) {
   await verifyWatchPulse(page, scenario);
   await verifyRunsListLayout(page, scenario);
   await verifyTraderScorecard(page, scenario);
+  await verifyTraderHandbook(page, scenario);
+  await verifyTraderInstructions(page, scenario);
   await verifyRiskPreview(page, scenario);
+  await verifyProfileEditor(page, scenario);
 
   // 浏览器预览没有 Tauri 命令通道：Agent 库的正文读取按设计抛 AGENT_LIBRARY_DESKTOP_ONLY，
   // 编辑器于是渲染错误态（预览的既定行为，不是缺陷）。这类日志与网络噪声一起排除。
