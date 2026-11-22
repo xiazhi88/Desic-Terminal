@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 
+use fin_primitives::signals::float::EmaF64;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -801,8 +802,9 @@ fn macd_series(
 ) -> Result<Vec<f64>, SystematicError> {
     let fast = ema_series(closes, fast_period)?;
     let slow = ema_series(closes, slow_period)?;
-    Ok(fast
-        .into_iter()
+    // Both EMAs end on the latest bar; the fast one seeds earlier, so align on the tail.
+    Ok(fast[fast.len() - slow.len()..]
+        .iter()
         .zip(slow)
         .map(|(fast, slow)| fast - slow)
         .collect())
@@ -815,16 +817,19 @@ fn ema_series(values: &[f64], period: usize) -> Result<Vec<f64>, SystematicError
             "EMA requires at least one value",
         ));
     }
-    let alpha = 2.0 / (period as f64 + 1.0);
+    // SMA-seeded EMA (TA-Lib convention): no output until `period` values are seen.
+    let mut ema = EmaF64::new(period)
+        .map_err(|_| SystematicError::invalid_argument("period", "must be at least 1"))?;
     let mut result = Vec::with_capacity(values.len());
-    let mut current = values[0];
     for value in values {
         // Prices are validated by ClosedBar, but derived indicator series such
         // as MACD legitimately start at zero and can be negative.
         if !value.is_finite() {
             return Err(SystematicError::data_contract("EMA values must be finite"));
         }
-        current = alpha * value + (1.0 - alpha) * current;
+        let Some(current) = ema.update(*value) else {
+            continue;
+        };
         if !current.is_finite() {
             return Err(SystematicError::data_contract(
                 "EMA calculation produced a non-finite value",
@@ -996,6 +1001,20 @@ mod tests {
             take_profit_pct: 0.02,
         })
         .is_err());
+    }
+
+    #[test]
+    fn ema_is_seeded_with_the_sma_like_ta_lib() {
+        // TA-Lib EMA(3) of 1..=5: seed SMA(1, 2, 3) = 2, then 3, 4.
+        assert_eq!(
+            ema_series(&[1.0, 2.0, 3.0, 4.0, 5.0], 3).unwrap(),
+            vec![2.0, 3.0, 4.0]
+        );
+        // MACD(2, 3) on 1..=5: EMA2 = [1.5, 2.5, 3.5, 4.5], EMA3 = [2, 3, 4].
+        assert_eq!(
+            macd_series(&[1.0, 2.0, 3.0, 4.0, 5.0], 2, 3).unwrap(),
+            vec![0.5, 0.5, 0.5]
+        );
     }
 
     #[test]
